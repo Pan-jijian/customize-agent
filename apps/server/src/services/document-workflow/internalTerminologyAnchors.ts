@@ -170,27 +170,44 @@ export async function stripInternalTerminologySentences(markdown: string): Promi
 }
 
 /**
- * 标题行内部术语确定性替换（丰乐镇第五轮 F4 实测）：stripInternalTerminologySentences 的
- * protectedLine 保护标题行（标题整行删除会破坏结构），而检测器 L1 精确词通道是全 markdown 召回——
- * 标题行内的「落位」（如「#### 10.3.2 分区管理与责任落位」）照样报 error blocker，
- * 修复链却无人触碰标题行 → blocker 永不收敛。「落位」是生成系统任务术语，正式标题零合法用途，
- * 「落实」是语义安全替换（责任落位→责任落实、专项落位→专项落实）；其余 L1 精确词
- * （工作包/事实卡/事实主表/后台数据库/峰值口径/控制口径/数据口径）无安全词面替换，
+ * 标题行/表格行内部术语确定性替换（丰乐镇第五轮 F4 实测）：stripInternalTerminologySentences 的
+ * protectedLine 保护标题行与表格行（整行删除会破坏结构），而检测器 L1 精确词通道是全 markdown 召回——
+ * 标题行/表格行内的「落位」（如「#### 10.3.2 分区管理与责任落位」「| 施工分组 | 主要作业面落位 |」）
+ * 照样报 error blocker，修复链却无人触碰 → blocker 永不收敛。「落位」是生成系统任务术语，正式正文
+ * 零合法用途，词面安全替换确定性收敛（职责/管理类→落实，作业面/空间类→布置，兜底→落实）；
+ * 其余 L1 精确词（工作包/事实卡/事实主表/后台数据库/峰值口径/控制口径/数据口径）无安全词面替换，
  * 保留原样由检测器报 blocker 交 Repairer 按上下文语义改写。
  */
 export function fixInternalTermHeadingPhrases(markdown: string): { markdown: string; fixedCount: number } {
   let fixedCount = 0;
+  /** 「落位」词面安全替换：先匹配职责/管理类复合词→落实，再匹配空间布置类→布置，剩余裸词兜底→落实 */
+  const replacePhrase = (text: string): string => text
+    .replace(/(职责|责任|分工|任务|措施|要求|管理|控制|工作|专项|标准|管控|验收|培训|教育|巡检|检查)落位/gu, '$1落实')
+    .replace(/(作业面|平面|现场|位置|点位|布局|空间|场地|工序|区域|临时设施|堆场|通道|道路|设备|设施|材料|构件|管线|照明|灯具|站房|楼层|部位)落位/gu, '$1布置')
+    .replace(/落位/gu, '落实');
   const next = markdown
     .split(/\r?\n/u)
     .map(line => {
       const heading = /^(#{1,6}\s+)(.*)$/u.exec(line);
-      if (!heading) return line;
-      const title = heading[2];
-      if (!INTERNAL_TERM_EXACT_TEST_RE.test(title)) return line;
-      const replaced = title.replace(/落位/gu, '落实');
-      if (replaced === title) return line;
-      fixedCount += 1;
-      return `${heading[1]}${replaced}`;
+      if (heading) {
+        const title = heading[2];
+        if (!INTERNAL_TERM_EXACT_TEST_RE.test(title)) return line;
+        const replaced = replacePhrase(title);
+        if (replaced === title) return line;
+        fixedCount += 1;
+        return `${heading[1]}${replaced}`;
+      }
+      // 4.31 表格行兜底（丰乐镇 v6 #66/#88 实测）：`| 施工分组 | 主要作业面落位 | 平面管控要点 |`
+      // 中「落位」位于表格单元格——stripInternalTerminologySentences 保护表格行不删、标题替换不碰表格，
+      // blocker 永不收敛；表格行内「落位」按同一词面安全替换确定性收敛
+      if (line.includes('|') && line.includes('落位')) {
+        const replaced = replacePhrase(line);
+        if (replaced !== line) {
+          fixedCount += 1;
+          return replaced;
+        }
+      }
+      return line;
     })
     .join('\n');
   return { markdown: next, fixedCount };

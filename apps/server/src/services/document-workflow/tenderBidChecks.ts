@@ -330,43 +330,64 @@ export function extractKeyDifficultySection(markdown: string): string {
   return tableLines.join('\n');
 }
 
-/** 重难点对策模板化检测：按条目（空行分段）统计"归因＋量化目标"双达标占比 */
-export async function difficultyCountermeasureReport(
-  markdown: string,
-  embedDocuments?: (texts: string[]) => Promise<number[][]>,
-): Promise<DifficultyCountermeasureReport> {
-  const section = extractKeyDifficultySection(markdown);
-  // 表格载体形式（重难点识别表）：每个表格数据行即一条重难点条目（表头/分隔行除外）——
-  // 与标题小节形式（空行分段）的条目口径对齐，修复闭环的条目锚点同源
+/** 重难点条目切分（单源）：表格载体（重难点识别表，每数据行一条）与段落载体（空行分段 ≥20 字）
+ * 两种形式——写作时执行器（blockQualityExecutors 归因量化）与终检报告共用，条目口径一致 */
+export function splitDifficultyEntries(section: string): string[] {
   const isTableForm = section.trim().startsWith('|');
-  const entries = isTableForm
+  return isTableForm
     ? section.split(/\n/u).filter(line => {
       const trimmed = line.trim();
       return trimmed.startsWith('|') && !/^\|\s*-+\s*\|/u.test(trimmed) && !/重难点/u.test(trimmed.split('|')[1] || '');
     }).filter(line => line.trim().length >= 20)
     : section.split(/\n{2,}/u).filter(block => block.trim().length >= 20);
+}
+
+/** 重难点条目评估（归因 bge 语义 + 量化目标结构判定）：写作时执行器与终检报告同源共享 */
+export interface DifficultyEntryAssessment {
+  entries: string[];
+  attributed: number;
+  quantified: number;
+  bothCount: number;
+  ratio: number;
+  details: Array<{ text: string; attributed: boolean; quantified: boolean }>;
+}
+
+export async function assessDifficultyEntries(
+  entries: string[],
+  embedDocuments?: (texts: string[]) => Promise<number[][]>,
+): Promise<DifficultyEntryAssessment> {
   const attributionSimilarity = await buildSemanticSimilarity(entries, [ATTRIBUTION_SEMANTIC_QUERY], embedDocuments);
   let attributed = 0;
   let quantified = 0;
   let bothCount = 0;
-  const entryDetails: Array<{ text: string; attributed: boolean; quantified: boolean }> = [];
+  const details: Array<{ text: string; attributed: boolean; quantified: boolean }> = [];
   for (const entry of entries) {
     const hasAttribution = attributionSimilarity(entry, ATTRIBUTION_SEMANTIC_QUERY) >= SEMANTIC_COVERAGE_THRESHOLD;
     const hasTarget = QUANTIFIED_TARGET_RE.test(entry);
     if (hasAttribution) attributed += 1;
     if (hasTarget) quantified += 1;
     if (hasAttribution && hasTarget) bothCount += 1;
-    entryDetails.push({ text: entry, attributed: hasAttribution, quantified: hasTarget });
+    details.push({ text: entry, attributed: hasAttribution, quantified: hasTarget });
   }
-  const ratio = entries.length ? bothCount / entries.length : 0;
+  return { entries, attributed, quantified, bothCount, ratio: entries.length ? bothCount / entries.length : 0, details };
+}
+
+/** 重难点对策模板化检测：按条目（空行分段）统计"归因＋量化目标"双达标占比 */
+export async function difficultyCountermeasureReport(
+  markdown: string,
+  embedDocuments?: (texts: string[]) => Promise<number[][]>,
+): Promise<DifficultyCountermeasureReport> {
+  const section = extractKeyDifficultySection(markdown);
+  const entries = splitDifficultyEntries(section);
+  const assessment = await assessDifficultyEntries(entries, embedDocuments);
   return {
     countermeasures: entries.length,
-    attributed,
-    quantified,
-    bothCount,
-    ratio,
-    heavyTemplated: entries.length > 0 && ratio < 0.5,
-    entries: entryDetails.slice(0, 24),
+    attributed: assessment.attributed,
+    quantified: assessment.quantified,
+    bothCount: assessment.bothCount,
+    ratio: assessment.ratio,
+    heavyTemplated: entries.length > 0 && assessment.ratio < 0.5,
+    entries: assessment.details.slice(0, 24),
   };
 }
 

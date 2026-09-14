@@ -98,8 +98,11 @@ export const WHITESPACE_RE = /\s+/gu;
 /** 结构化精确事实来源识别规则。 */
 export const PRECISE_FACT_SOURCE_RE = /drawing|table|bill|boq|draw|data|sheet|spec|standard|record|report|表格|数据|规格|参数|标准|记录|报告/u;
 
-/** 结构化资料中的精确参数 token 抽取规则。 */
-export const PRECISE_FACT_TOKEN_RE = /(?:[A-Z]{1,8}[\w.-]*\d[\w.-]*|\d+(?:\.\d+)?\s*(?:mm|cm|m|km|㎡|m²|m3|kg|g|t|L|ml|MPa|kPa|℃|%|台|套|个|项|批|次|页|份|人|小时|分钟|天|周|月|年|万元|元)|\d+\s*[×xX]\s*\d+(?:\s*[×xX]\s*\d+)?|\b(?:GB|GB\/T|ISO|IEC|IEEE|RFC|API|DB\d*|T\/[A-Z]+)\s*[\w.-]+\b)/giu;
+/** 结构化资料中的精确参数 token 抽取规则。
+ * 4.31 左边界（丰乐镇 v6 #83）：token 不得从多级编号/小数中间起切——
+ * 编号「7.1.1.4天然花岗石面材」曾被切出假 token「1.4天」（“1.4”+“天”），
+ * 负向后视阻挡前导数字/点号，从编号中间开始的候选一律不成立。 */
+export const PRECISE_FACT_TOKEN_RE = /(?<![\d.．])(?:[A-Z]{1,8}[\w.-]*\d[\w.-]*|\d+(?:\.\d+)?\s*(?:mm|cm|m|km|㎡|m²|m3|kg|g|t|L|ml|MPa|kPa|℃|%|台|套|个|项|批|次|页|份|人|小时|分钟|天|周|月|年|万元|元)|\d+\s*[×xX]\s*\d+(?:\s*[×xX]\s*\d+)?|\b(?:GB|GB\/T|ISO|IEC|IEEE|RFC|API|DB\d*|T\/[A-Z]+)\s*[\w.-]+\b)/giu;
 
 /** 触发精确参数覆盖率校验的最小 token 数。 */
 export const PRECISE_FACT_MIN_TOKEN_COUNT = 20;

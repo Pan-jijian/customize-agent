@@ -52,6 +52,19 @@ describe('callDocumentLlmJsonWithRetry（F1 JSON/Schema 失败重试）', () => 
     expect(invoke.mock.calls[2][1]).toContain('JSON Schema 校验失败');
   });
 
+  it('schema 失败按 prefixKey 归因到分量桶（重试 3 次累计 3）；无 prefixKey 归入 (none) 桶', async () => {
+    const invoke = vi.fn().mockResolvedValue('{"patches": []}');
+    const attributed = bareDiagnostics();
+    const result = await callDocumentLlmJsonWithRetry<{ patches: unknown[] }>('system', 'prompt', { schema, diagnostics: attributed, prefixKey: 'plan-block:c1' }, invoke);
+    expect(result).toBeUndefined();
+    expect(attributed.llm.schemaFailures).toBe(3);
+    expect(attributed.llm.callBreakdown?.['plan-block:c1']?.schemaFailures).toBe(3);
+
+    const unattributed = bareDiagnostics();
+    await callDocumentLlmJsonWithRetry<{ patches: unknown[] }>('system', 'prompt', { schema, diagnostics: unattributed }, invoke);
+    expect(unattributed.llm.callBreakdown?.['(none)']?.schemaFailures).toBe(3);
+  });
+
   it('schema 校验失败 → 重试成功返回结果', async () => {
     const invoke = vi.fn()
       .mockResolvedValueOnce('{"patches": []}')

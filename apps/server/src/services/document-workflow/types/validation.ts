@@ -161,7 +161,7 @@ export interface ValidationIssue {
   suggestion?: string;
   severity?: 'blocker' | 'warning' | 'suggestion';
   repairability?: 'local_deterministic' | 'llm_repairable' | 'manual_review' | 'not_repair_needed';
-  category?: 'structure' | 'table' | 'fact_consistency' | 'evidence_coverage' | 'professional_chain' | 'control_loop' | 'format' | 'style' | 'scope' | 'qingtian_review';
+  category?: 'structure' | 'table' | 'fact_consistency' | 'evidence_coverage' | 'professional_chain' | 'control_loop' | 'format' | 'style' | 'scope';
   owner?: 'system' | 'llm' | 'user';
   /** 章节锚点（F2）：校验器已知缺陷所在章节时附带，修复循环定位优先直连，不再依赖消息关键字反查 */
   chapterId?: string;

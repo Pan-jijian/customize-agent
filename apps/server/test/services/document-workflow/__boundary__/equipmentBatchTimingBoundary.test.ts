@@ -5,9 +5,9 @@
  * - equipmentBatchConflicts（M1-M6）——首批+剩余并存组合成立放行/不成立阻断、维持句豁免
  *   （保持/控制类存量表述非分批投入口径）、负向声明行豁免、表格行豁免、多名称列举归属、
  *   多值组合「任一成立即放行」、非法台数条目静默跳过；
- * - preliminaryActionTimingIssues（N1-N7）——开工后第 N 日且 N ≥ 总工期命中、N < 总工期放行、
+ * - preliminaryActionTimingIssues（N1-N8）——开工后第 N 日且 N ≥ 总工期命中、N < 总工期放行、
  *   无前期动作词放行、总工期未知不判、表格行/负向声明豁免、「第 N 个日历日」变体、
- *   动作词位于数字之后的 ±40 字窗口、上限 5 条；
+ *   动作词位于数字之后的 ±40 字窗口、「第 N 日内」范围表述豁免（4.32.0 丰乐镇复测 #77）、上限 5 条；
  * - fixPhaseLaborValues（P1-P6）——权威值硬替换（基础通道/枚举列举通道同源）、多值降序替换
  *   互不位移、值相符零动作、无权威原样返回、阶段名拼接歧义不进确定性修复、表格行不触碰。
  * 全部用例为确定性判定，无语义/网络依赖。
@@ -72,7 +72,9 @@ describe('equipmentBatchTimingBoundary · M 组：机械分批台数矛盾', () 
 
 describe('equipmentBatchTimingBoundary · N 组：前期动作时限矛盾', () => {
   it('N1 前期动作时限 = 总工期（开工后第 90 日 / 总工期 90 日）→ blocker', () => {
-    const issues = preliminaryActionTimingIssues('制度交底安排在开工令下发后第90日内完成。', 90);
+    // 4.32.0：原用例尾部「内」使句子成为范围承诺（「90 日内完成」），按丰乐镇复测 #77 甄别豁免
+    // （见 N8）；本用例去「内」保留「第 90 日完成」的竣工日动作形态，核心契约不变
+    const issues = preliminaryActionTimingIssues('制度交底安排在开工令下发后第90日完成。', 90);
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('前期动作时限矛盾');
     expect(issues[0].message).toContain('第 90 日');
@@ -101,10 +103,15 @@ describe('equipmentBatchTimingBoundary · N 组：前期动作时限矛盾', () 
   });
 
   it('N6 「第 N 个日历日」变体与动作词位于数字之后（±40 字窗口）→ blocker', () => {
-    const variant = preliminaryActionTimingIssues('开工令下发后第90个日历日内完成技术交底。', 90);
+    const variant = preliminaryActionTimingIssues('开工令下发后第90个日历日组织技术交底。', 90);
     expect(variant).toHaveLength(1);
     const afterNumber = preliminaryActionTimingIssues('开工令下发后第90日组织安全技术交底。', 90);
     expect(afterNumber).toHaveLength(1);
+  });
+
+  it('N8 「第 N 日内」范围表述豁免（丰乐镇复测 #77：时限承诺「90 日内」非竣工日动作）→ 0 条', () => {
+    expect(preliminaryActionTimingIssues('消防培训与应急演练同步落实。开工后第90日内，由安全员组织全体作业人员进行1次消防器材使用培训。', 90)).toHaveLength(0);
+    expect(preliminaryActionTimingIssues('开工令下发后第90个日历日内完成技术交底。', 90)).toHaveLength(0);
   });
 
   it('N7 上限 5 条（6 处命中截断）', () => {

@@ -453,6 +453,25 @@ export class IndexStateStore {
     return chunks;
   }
 
+  // 4.35 内容关键短语定向查询（LIKE 全表扫描）：
+  // listChunksByContentBudget 按 relative_path 顺序读取并在预算耗尽时截断——大库（如舒城 6433 切片、
+  // 招标文件正文数百页）中位于路径序末尾的关键内容（如「招标文件.pdf 第 212 页 附表清单」，
+  // 舒城实测 80 万字符预算永远读不到）会稳定漏失；本方法按内容短语定向命中，与读取顺序无关。
+  listChunksByContentHints(hints: string[], options: { limit?: number } = {}): StoredChunk[] {
+    const cleaned = hints.map(hint => String(hint || '').trim()).filter(Boolean);
+    if (cleaned.length === 0) return [];
+    const limit = Math.max(1, Math.min(500, Number(options.limit) || 60));
+    const clauses = cleaned.map(() => "content LIKE ? ESCAPE '\\'");
+    const params = cleaned.map(hint => `%${hint.replace(/[\\%_]/gu, match => `\\${match}`)}%`);
+    const rows = this.db.prepare(`
+      SELECT rowid, * FROM kb_chunks
+      WHERE ${clauses.join(' OR ')}
+      ORDER BY relative_path, chunk_index
+      LIMIT ?
+    `).all(...params, limit) as Array<Record<string, unknown>>;
+    return rows.map(row => this.rowToChunk(row, 0));
+  }
+
   getChunkByRowid(rowid: number): StoredChunk | undefined {
     const row = this.db.prepare('SELECT rowid, * FROM kb_chunks WHERE rowid = ?').get(rowid) as Record<string, unknown> | undefined;
     return row ? this.rowToChunk(row, 0) : undefined;

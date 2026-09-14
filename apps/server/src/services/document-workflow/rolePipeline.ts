@@ -32,7 +32,7 @@ function recordPatchGuardHit(diagnostics: DocumentGenerationDiagnostics | undefi
 }
 
 /**
- * 修复轮 patchGuard 统一构造（P11 全链 8 调用点共用）：
+ * 修复轮 patchGuard 统一构造（P11 全链 7 调用点共用）：
  * DOCUMENT_QINGTIAN_PATCH_GUARD 语义扩展为全局 patchGuard 模式开关——
  * '0' 完全关闭（不传 patchGuard）、'enforce' 拒绝坏 patch、其他（默认 observe）只计数。
  * 渐进策略：先全链 observe 采集 patchGuardStats 按轮次分布，零误伤类别再切 enforce。

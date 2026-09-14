@@ -151,9 +151,9 @@ describe('buildRuntimePromptRules', () => {
     const r = buildRuntimePromptRules(...[{"promptTexts":"必须生成不少于1.5万字"}]);
     expect(r.minWords).toEqual(15000);
   });
-  it('minWords 不低于不提取', () => {
+  it('minWords 不低于识别（4.33 宽正则与预算同源）', () => {
     const r = buildRuntimePromptRules(...[{"promptTexts":"全文不低于3万字"}]);
-    expect(r.minWords).toEqual(undefined);
+    expect(r.minWords).toEqual(30000);
   });
   it('minWords 负数不提取', () => {
     const r = buildRuntimePromptRules(...[{"promptTexts":"不少于0字"}]);
@@ -240,7 +240,7 @@ describe('buildRuntimePromptRules', () => {
   });
   it('executionSummary 组合', () => {
     const r = buildRuntimePromptRules(...[{"promptTexts":"必须输出封面；全文不少于1万字；必须包含以下关键词：BIM"}]);
-    expect(r.executionSummary).toEqual(["已识别封面规则：要求生成","已识别禁用词 11 个","已识别必含关键词：BIM","已识别最低字数要求：10000 字"]);
+    expect(r.executionSummary).toEqual(["已识别封面规则：要求生成","已识别禁用词 11 个","已识别必含关键词：BIM","已识别目标字数要求：10000 字"]);
   });
   it('sourceHash 稳定', () => {
     const r = buildRuntimePromptRules(...[{"promptTexts":"必须输出封面"}]);

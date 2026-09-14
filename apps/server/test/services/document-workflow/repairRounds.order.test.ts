@@ -1,7 +1,7 @@
 /**
  * P22 第 2 项 / P6 修复轮单源声明防回归：
  * 1. finalizeGeneration 执行侧的 stage 调用序列锁定（顺序变更必须显式改本测试）；
- * 2. FINALIZE_REPAIR_ROUNDS 声明表 12 轮顺序与执行侧注释映射逐一对应（单源声明不漂移）；
+ * 2. FINALIZE_REPAIR_ROUNDS 声明表 13 轮顺序与执行侧注释映射逐一对应（单源声明不漂移）；
  * 3. 每轮"修复落地后必触发 recompute"——含修复逻辑的轮文件必须调用
  *    session.recomputeFinalValidationBundle()（纯检测轮 semanticChoice 无修复落地，豁免）。
  */
@@ -22,7 +22,6 @@ const EXECUTION_STAGE_ORDER = [
   'stageTableRepair',
   'stageSemanticChoice',
   'stageDeterministicStage5',
-  'stageQingtianReview',
   'stageNumericVerification',
   'stageRequirementVerification',
   'stagePostReviewSurface',
@@ -37,7 +36,6 @@ const REPAIR_ROUND_FILES = {
   'finalize/repairRounds/tableRepair.ts': ['table-repair-round'],
   'finalize/repairRounds/semanticChoice.ts': ['semantic-choice-conflict'],
   'finalize/repairRounds/deterministicStage5.ts': ['deterministic-stage5', 'formal-source-clean'],
-  'finalize/repairRounds/qingtianReview.ts': ['qingtian-full-review'],
   'finalize/repairRounds/postReviewSurface.ts': ['planned-section-final', 'commercial-strip', 'table-deterministic-repair', 'post-review-surface', 'terminology-strip', 'toc-consistency'],
   'finalize/repairRounds/numericVerification.ts': ['numeric-verification'],
   'finalize/repairRounds/requirementVerification.ts': ['requirement-verification'],
@@ -59,11 +57,11 @@ describe('finalize 修复轮调度（P6 单源声明防回归）', () => {
     expect(stages).toEqual(EXECUTION_STAGE_ORDER.filter(stage => stage !== 'stageComposeFinal'));
   });
 
-  it('FINALIZE_REPAIR_ROUNDS 14 轮顺序与执行侧注释映射逐一对应（顺序无漂移）', () => {
+  it('FINALIZE_REPAIR_ROUNDS 13 轮顺序与执行侧注释映射逐一对应（顺序无漂移）', () => {
     const source = readFileSync(path.join(SRC_DIR, 'documentPipeline.ts'), 'utf8');
     // 提取执行侧注释块（P6 注释按声明顺序逐一罗列轮 id）
-    const commentBlock = source.match(/P6：修复轮顺序[^\n]*\n(?:\s*\/\/[^\n]*\n){0,6}/u)?.[0] ?? '';
-    expect(FINALIZE_REPAIR_ROUNDS).toHaveLength(14);
+    const commentBlock = source.match(/P6：修复轮顺序[^\u{A}]*\u{A}(?:\s*\/\/[^\u{A}]*\u{A}){0,6}/u)?.[0] ?? '';
+    expect(FINALIZE_REPAIR_ROUNDS).toHaveLength(13);
     let lastIndex = -1;
     for (const round of FINALIZE_REPAIR_ROUNDS) {
       const index = commentBlock.indexOf(round);
@@ -86,7 +84,7 @@ describe('finalize 修复轮调度（P6 单源声明防回归）', () => {
     }
   });
 
-  it('修复轮文件与声明表轮 id 完整覆盖（14 轮均有落点，无哑火轮）', () => {
+  it('修复轮文件与声明表轮 id 完整覆盖（13 轮均有落点，无哑火轮）', () => {
     const mapped = Object.values(REPAIR_ROUND_FILES).flat();
     expect(mapped.sort()).toEqual([...FINALIZE_REPAIR_ROUNDS].sort());
   });

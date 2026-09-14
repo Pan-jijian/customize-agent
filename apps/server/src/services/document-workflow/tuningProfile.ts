@@ -31,6 +31,10 @@ export interface TuningProfile {
   persistEvidenceMaxItems?: number;
   persistEvidenceItemChars?: number;
   repairEvidenceChars?: number;
+  // 蓝图块级聚焦族（s1-slim 单块输入瘦身：quantity/material 条目级筛选封顶 + 块级切片封顶）
+  blueprintBlockQuantityCap?: number;
+  blueprintBlockMaterialCap?: number;
+  blueprintBlockSliceCap?: number;
 }
 
 /** DOCUMENT_TUNING_PROFILE 可覆盖的全部字段（与 TuningProfile 键一一对应，防拼写错误静默失效） */
@@ -41,6 +45,7 @@ const TUNING_PROFILE_KEYS: readonly (keyof TuningProfile)[] = [
   'chapterPoolChars', 'evidenceBudgetRatio', 'evidenceBudgetCeiling', 'evidenceCatalogMaxLines',
   'factCoverageCap', 'factExtractionMaxChars', 'factExtractionMaxItems', 'outlineEvidenceChars',
   'persistEvidenceMaxItems', 'persistEvidenceItemChars', 'repairEvidenceChars',
+  'blueprintBlockQuantityCap', 'blueprintBlockMaterialCap', 'blueprintBlockSliceCap',
 ];
 
 let profileCache: { raw: string | undefined; parsed: TuningProfile } | undefined;

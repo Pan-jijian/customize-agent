@@ -1,7 +1,6 @@
 /**
  * withPatchRollback 接入覆盖防回归（P12）：
- * 源码 grep 式断言——8 个 LLM patch 轮中 7 轮必须接入 withPatchRollback（修复后同源复检 + 变差回滚），
- * qingtian-review-repair 声明保留（块级 LLM 复评已构成轮级变差防线，章级接入将倍增复评调用成本）。
+ * 源码 grep 式断言——7 个 LLM patch 轮全部必须接入 withPatchRollback（修复后同源复检 + 变差回滚）。
  * 新增修复轮若未接入回滚保护，本测试直接失败。
  */
 import { readFileSync } from 'node:fs';
@@ -37,7 +36,7 @@ function rollbackCallBlocks(source: string): string[] {
 }
 
 describe('withPatchRollback 全链接入防回归（P12）', () => {
-  it('7 个修复轮全部接入 withPatchRollback（qingtian-review-repair 声明保留除外）', () => {
+  it('7 个修复轮全部接入 withPatchRollback（全链接入，无声明保留轮）', () => {
     const allBlocks = ROLLBACK_FILES.flatMap(file => rollbackCallBlocks(readFileSync(path.join(SRC_DIR, file), 'utf8')));
     // 7 个调用点：fact-landing / table-repair（finalize/repairRounds）+ 5 处（globalQualityGates）
     expect(allBlocks).toHaveLength(7);
@@ -59,12 +58,5 @@ describe('withPatchRollback 全链接入防回归（P12）', () => {
       'templating-repair',
       'workpackage-skeleton-repair',
     ]);
-  });
-
-  it('fullDimensionReview（qingtian-review-repair）声明保留：不接入 withPatchRollback', () => {
-    const source = readFileSync(path.join(SRC_DIR, 'fullDimensionReview.ts'), 'utf8');
-    expect(source).not.toMatch(/withPatchRollback\s*\(/u); // 无 withPatchRollback 调用
-    expect(source).not.toContain("from './patchRollback'"); // 无模块 import
-    expect(source).toContain('qingtian-review-repair 不接入 withPatchRollback');
   });
 });

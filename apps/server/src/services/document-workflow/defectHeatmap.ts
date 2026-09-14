@@ -46,7 +46,6 @@ export const REPAIR_ROUND_LABELS: Record<string, string> = {
   'semantic-choice-conflict': '语义矛盾数值冲突',
   'deterministic-stage5': '确定性缺陷（来源罗列/内部术语/编造日期）',
   'formal-source-clean': '资料来源罗列话术',
-  'qingtian-full-review': '全维度评审缺陷',
   'planned-section-final': '规划小节内容缺失',
   'commercial-strip': '商务数据泄漏',
   'table-deterministic-repair': '表格数据不一致',

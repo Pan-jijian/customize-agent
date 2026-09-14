@@ -244,6 +244,48 @@ describe('buildDocumentBudget', () => {
     expect(budget.minChars).toBe(50000);
     expect(budget.longformStrict).toBe(true);
   });
+
+  it('预算契约（S1）：Σ章预算 = T 精确守恒（14 万字 11 章，需求归一化分配）', () => {
+    const chapters = [
+      ...Array.from({ length: 3 }, (_, index) => makeChapter({ id: `m${index}`, title: `第${index + 1}章 主要施工方法`, sections: ['s1', 's2', 's3', 's4', 's5'] })),
+      ...Array.from({ length: 5 }, (_, index) => makeChapter({ id: `q${index}`, title: `第${index + 4}章 质量保证措施`, sections: ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8'] })),
+      makeChapter({ id: 'o1', title: '工程概况', sections: ['s1', 's2'] }),
+      makeChapter({ id: 'x1', title: '其他说明', sections: ['s1', 's2', 's3', 's4'] }),
+      makeChapter({ id: 'e1', title: '结语', sections: ['s1'] }),
+    ];
+    const budget = buildDocumentBudget({ requirement: '不少于14万字', promptTexts: '', template: makeTemplate(), chapters });
+    const sum = [...budget.chapterTargets.values()].reduce((acc, value) => acc + value, 0);
+    expect(budget.targetChars).toBe(140000);
+    expect(sum).toBe(140000);
+    // 详写章（方法/质量 × 小节多）预算大于概述章（结语），相对差异保留
+    expect(budget.chapterTargets.get('q0')!).toBeGreaterThan(budget.chapterTargets.get('e1')!);
+    expect(budget.chapterTargets.get('m0')!).toBeGreaterThan(budget.chapterTargets.get('o1')!);
+  });
+
+  it('预算契约（S1）：目标与 spec 下限冲突时以 T 为准（Σ=T，消除基准放大）', () => {
+    const spec = {
+      chapterRules: Array.from({ length: 8 }, (_, index) => ({ id: `c${index}`, minWords: 20000 })),
+      dynamicChapterRule: { minWordsPerChapter: 0 },
+    } as unknown as AutoDocumentSpecPackage;
+    const chapters = Array.from({ length: 8 }, (_, index) => makeChapter({ id: `c${index}`, title: `第${index + 1}章 施工方案`, sections: ['s1'] }));
+    const budget = buildDocumentBudget({ requirement: '不少于14万字', promptTexts: '', template: makeTemplate(), chapters, spec });
+    const sum = [...budget.chapterTargets.values()].reduce((acc, value) => acc + value, 0);
+    // spec 下限合计 16 万 > 目标 14 万：按下限比例压缩到 T（显式告警不放大），不得产出 17.8 万级预算合计
+    expect(sum).toBe(140000);
+    expect([...budget.chapterTargets.values()].every(value => value === 17500)).toBe(true);
+  });
+
+  it('预算契约（S1）：极小章水填到最低可写预算（800），不挤掉其他章份额', () => {
+    const chapters = [
+      makeChapter({ id: 'tiny', title: '第一章', sections: [] }),
+      ...Array.from({ length: 4 }, (_, index) => makeChapter({ id: `big${index}`, title: `第${index + 2}章 主要施工方法`, sections: ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8'] })),
+    ];
+    const budget = buildDocumentBudget({ requirement: '不少于3万字', promptTexts: '', template: makeTemplate(), chapters });
+    const sum = [...budget.chapterTargets.values()].reduce((acc, value) => acc + value, 0);
+    expect(sum).toBe(30000);
+    expect(budget.chapterTargets.get('tiny')).toBe(800);
+    expect([...budget.chapterTargets.values()].every(value => value >= 800)).toBe(true);
+  });
 });
 
 describe('pageTargetIssues', () => {

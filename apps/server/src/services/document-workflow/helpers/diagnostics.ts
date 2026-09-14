@@ -180,11 +180,11 @@ function callBreakdownTop(breakdown: DocumentGenerationDiagnostics['llm']['callB
     .slice(0, topN);
 }
 
-/** 4.1 per-调用分量 Top 摘要：进度页后台诊断 message 压缩展示（prefixKey 次数/输入万字） */
+/** 4.1 per-调用分量 Top 摘要：进度页后台诊断 message 压缩展示（prefixKey 次数/输入万字；s1-slim 追加 schema 失败归因） */
 
 export function callBreakdownTopSummary(breakdown: DocumentGenerationDiagnostics['llm']['callBreakdown'], topN = 5) {
   return callBreakdownTop(breakdown, topN)
-    .map(([key, item]) => `${key} ${item.calls}次/${(item.inputChars / 10000).toFixed(1)}万字`)
+    .map(([key, item]) => `${key} ${item.calls}次/${(item.inputChars / 10000).toFixed(1)}万字${item.schemaFailures ? `（schema失败${item.schemaFailures}）` : ''}`)
     .join('，');
 }
 
@@ -197,14 +197,15 @@ export function phaseWaterfallDetails(metrics: DocumentGenerationDiagnostics['me
     .map(metric => `${metric.name}：${(metric.durationMs / 1000).toFixed(1)} 秒`);
 }
 
-/** 4.1 per-调用分量 Top 详情：五维度完整行（details 逐行展示 次数/输入字符/L3 字符/缓存命中 token） */
+/** 4.1 per-调用分量 Top 详情：五维度完整行（details 逐行展示 次数/输入字符/L3 字符/缓存命中 token；s1-slim 追加 schema 失败次数归因） */
 
 export function callBreakdownTopDetails(breakdown: DocumentGenerationDiagnostics['llm']['callBreakdown'], topN = 5) {
   return callBreakdownTop(breakdown, topN)
     .map(([key, item]) => {
       const total = item.cacheHitTokens + item.cacheMissTokens;
       const cacheText = total > 0 ? `，缓存命中 ${Math.round((item.cacheHitTokens / total) * 100)}%（${item.cacheHitTokens}/${total} token）` : '';
-      return `${key}：${item.calls} 次，输入 ${(item.inputChars / 10000).toFixed(1)} 万字（L3 ${(item.l3Chars / 10000).toFixed(1)} 万字）${cacheText}`;
+      const schemaText = item.schemaFailures ? `，schema 失败 ${item.schemaFailures} 次` : '';
+      return `${key}：${item.calls} 次，输入 ${(item.inputChars / 10000).toFixed(1)} 万字（L3 ${(item.l3Chars / 10000).toFixed(1)} 万字）${cacheText}${schemaText}`;
     });
 }
 

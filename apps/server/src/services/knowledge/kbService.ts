@@ -154,6 +154,45 @@ function fileMatchesQuery(file: KnowledgeFileDiscoveryItem, query: string) {
   return text.includes(query.toLowerCase());
 }
 
+/**
+ * 4.33 读取项目知识库全部切片文本（内容预算内、同步只读）：供附表清单等材料级全局规则提取使用。
+ * 与检索链路无关，不影响索引状态（只读 kb.db，不存在时返回空数组）。
+ */
+export function readProjectKbChunkTexts(projectRoot: string, options: { maxContentChars?: number } = {}): string[] {
+  try {
+    const dbPath = path.join(os.homedir(), '.customize-agent', 'projects', computeProjectId(path.resolve(projectRoot)), 'kb.db');
+    if (!fs.existsSync(dbPath)) return [];
+    const store = new IndexStateStore(dbPath);
+    try {
+      return store.listChunksByContentBudget({ maxContentChars: options.maxContentChars ?? 800_000 }).map(chunk => chunk.content || '').filter(Boolean);
+    } finally {
+      store.close();
+    }
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 4.35 按内容关键短语定向读取项目知识库切片（与读取顺序无关）：
+ * 供「招标文件附表清单」等特定短语的全局提取使用——预算式全量读取在大库中
+ * （舒城实测：6433 切片、80 万字符预算，「招标文件.pdf 第 212 页」恒不在预算内）会稳定漏失。
+ */
+export function readProjectKbChunkTextsByHints(projectRoot: string, hints: string[], options: { limit?: number } = {}): string[] {
+  try {
+    const dbPath = path.join(os.homedir(), '.customize-agent', 'projects', computeProjectId(path.resolve(projectRoot)), 'kb.db');
+    if (!fs.existsSync(dbPath)) return [];
+    const store = new IndexStateStore(dbPath);
+    try {
+      return store.listChunksByContentHints(hints, options).map(chunk => chunk.content || '').filter(Boolean);
+    } finally {
+      store.close();
+    }
+  } catch {
+    return [];
+  }
+}
+
 export function listKnowledgeFiles(projectRoot: string, options: { category?: string } = {}): KnowledgeFileDiscoveryItem[] {
   const byPath = new Map<string, KnowledgeFileDiscoveryItem>();
   for (const file of readIndexedKnowledgeFiles(projectRoot)) byPath.set(file.relativePath, file);

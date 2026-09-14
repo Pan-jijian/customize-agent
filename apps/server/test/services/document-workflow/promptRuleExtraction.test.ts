@@ -1,7 +1,8 @@
 /**
  * LLM 小节规划单测（Step 3：LLM 规划常态化）：
  * - planChapterSectionsWithLlm：项目专业图谱摘要显式注入断言。
- * - 多样性治理接入：directive/avoidSections 注入、指纹撞名核验-反馈重规划、二次核验不阻断。
+ * - 多样性治理接入：directive/avoidSections 注入、撞名局部候选名替换（方案 2.3：无整章重规划）、
+ *   首章概况确定性置首、剩余撞名不阻断。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { planChapterSectionsWithLlm } from '@/services/document-workflow/promptRuleExtraction';
@@ -19,7 +20,7 @@ const llmState = vi.hoisted(() => {
   return {
     setResult: (value: unknown) => { result = value; error = undefined; },
     setError: (value: unknown) => { error = value; result = undefined; },
-    /** 多轮调用结果序列：按调用顺序消耗（核验-反馈重规划场景） */
+    /** 多轮调用结果序列：按调用顺序消耗（规划+局部改名场景） */
     pushResult: (value: unknown) => { results.push(value); },
     calls,
     systems,
@@ -95,39 +96,39 @@ describe('planChapterSectionsWithLlm 多样性治理接入', () => {
     expect((llmState.options[0] as { temperature?: number }).temperature).toBe(DIVERSITY_PLANNING_TEMPERATURE);
   });
 
-  it('指纹撞名触发一轮核验反馈重规划，重命名后清零', async () => {
+  it('指纹撞名触发一次局部候选名替换调用（不重规划整章），替换后清零', async () => {
     llmState.pushResult({ sections: ['施工劳动力动态调配'] });
-    llmState.pushResult({ sections: ['劳动力班组梯队配置'] });
+    llmState.pushResult({ renames: { '施工劳动力动态调配': '劳动力班组梯队配置' } });
     const result = await planChapterSectionsWithLlm(baseInput({
       diversity: {
         directive: '本章按“总承包管理视角”组织小节。',
-        overlapCheck: titles => titles.includes('施工劳动力动态调配') ? ['「施工劳动力动态调配」↔历史「劳动力动态调配」'] : [],
+        overlapCheck: titles => titles.includes('施工劳动力动态调配') ? [{ title: '施工劳动力动态调配', collidedWith: '劳动力动态调配' }] : [],
       },
     }));
     expect(llmState.calls.length).toBe(2);
-    expect(llmState.calls[1]).toContain('上一轮规划存在以下必须修正的问题');
-    expect(llmState.calls[1]).toContain('施工劳动力动态调配');
+    // 第二次调用是局部改名映射（只含撞名标题），不是整章重规划
+    expect(llmState.calls[1]).toContain('只包含需要改名的标题');
+    expect(llmState.calls[1]).not.toContain('上一轮规划存在以下必须修正的问题');
     expect(result.sections).toContain('劳动力班组梯队配置');
+    expect(result.sections).not.toContain('施工劳动力动态调配');
     expect(result.diversity).toEqual({ retried: true, remainingCollisions: 0 });
   });
 
-  it('二次核验仍撞名时接受结果不阻断（remainingCollisions 上报）', async () => {
+  it('候选名仍撞名时拒绝替换、保留原名不阻断（remainingCollisions 上报）', async () => {
     llmState.pushResult({ sections: ['施工劳动力动态调配'] });
-    llmState.pushResult({ sections: ['施工劳动力动态调配'] });
+    llmState.pushResult({ renames: { '施工劳动力动态调配': '劳动力动态调配' } });
     const result = await planChapterSectionsWithLlm(baseInput({
-      diversity: { directive: '本章按“总承包管理视角”组织小节。', overlapCheck: () => ['「施工劳动力动态调配」↔历史「劳动力动态调配」'] },
+      diversity: { directive: '本章按“总承包管理视角”组织小节。', overlapCheck: () => [{ title: '施工劳动力动态调配', collidedWith: '劳动力动态调配' }] },
     }));
     expect(llmState.calls.length).toBe(2);
     expect(result.sections).toContain('施工劳动力动态调配');
     expect(result.diversity).toEqual({ retried: true, remainingCollisions: 1 });
   });
 
-  it('首章概况小节“存在但未置首”触发重规划；完全未规划则不触发', async () => {
+  it('首章概况小节“存在但未置首”确定性置首（零重规划调用）；完全未规划则不调序', async () => {
     llmState.pushResult({ sections: ['施工总体部署', '工程概况与编制说明'] });
-    llmState.pushResult({ sections: ['工程概况与编制说明', '施工总体部署'] });
     const first = await planChapterSectionsWithLlm(baseInput({ chapter: chapter({ title: '编制说明', sections: [] }), chapterIndex: 0 }));
-    expect(llmState.calls.length).toBe(2);
-    expect(llmState.calls[1]).toContain('必须置于小节清单第一位');
+    expect(llmState.calls.length).toBe(1);
     expect(first.sections[0]).toBe('工程概况与编制说明');
 
     llmState.clear();

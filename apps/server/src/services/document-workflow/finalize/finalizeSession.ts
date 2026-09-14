@@ -188,7 +188,6 @@ export interface FinalizeSession {
   baseValidationIssues: ValidationIssue[];
   executionStages: DocumentExecutionStage[];
   finalGateRepairStages: DocumentExecutionStage[];
-  qingtianReviewBlockingIssues: ValidationIssue[];
   sources: Array<{ filePath: string; count: number }>;
   qualityBundle: FinalizeQualityBundle;
   // ── 权威口径（rebuildFacts 抽取，确定性修复轮消费） ──
@@ -278,7 +277,6 @@ export function createFinalizeSession(input: FinalizeGenerationInput): FinalizeS
     baseValidationIssues: [],
     executionStages: [],
     finalGateRepairStages: [],
-    qingtianReviewBlockingIssues: [],
     sources: [],
     qualityBundle: undefined as unknown as FinalizeQualityBundle,
     scheduleAuthority: undefined as unknown as FinalizeSession['scheduleAuthority'],

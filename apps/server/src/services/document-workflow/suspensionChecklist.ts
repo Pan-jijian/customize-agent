@@ -24,7 +24,6 @@ const CATEGORY_LABELS: Record<NonNullable<ValidationIssue['category']>, string> 
   format: '格式规范',
   style: '文风与模板化',
   scope: '范围与商务边界',
-  qingtian_review: '全维度评审',
 };
 
 /** 修复路径追溯文案（repairability → 该类缺陷的自动修复路径与当前状态） */

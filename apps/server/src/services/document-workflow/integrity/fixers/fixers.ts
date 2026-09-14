@@ -4,13 +4,13 @@
  */
 import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel, SpecAuthorityMap, TenderRequirementModel, ValidationIssue } from '../../types';
 import { normalizeSubsectionTitleForDedup, workPackageThemeLabel } from '../../utils';
-import { MARKDOWN_TABLE_ROW_RE } from '../../../constants';
+import { MARKDOWN_TABLE_DIVIDER_RE, MARKDOWN_TABLE_ROW_RE } from '../../../constants';
 import { DANGEROUS_APPLICABLE_ITEMS, extractDangerZone } from '../../dangerousApplicability';
 import { PEAK_LABOR_RE, PILE_SUPPORT_LITERAL_RE, SLOPE_SUPPORT_LITERAL_RE, cnNumberToArabic, flexNamePattern, laborPeakStageOf, quantityUnitVariants, tablePeakLabor } from '../authorities/authorities';
 import type { SupportSystemAuthorityKind } from '../authorities/authorities';
-import { COMMERCIAL_RATE_RE, COMMERCIAL_TERM_RE, CROSS_SECTION_ANCHORS, CROSS_SECTION_ANCHOR_ENTITY_RE, ENUMERATION_VALUE_RE, FINISH_THICKNESS_CONTEXT_WORD, LABOR_COUNT_RE, META_DECLARATION_RE, NEGATIVE_DECLARATION_RE, PARAGRAPH_START_RE, REPEATED_WORD_RE, SCHEDULE_NODE_ANCHORS, SIX_HUNDRED_PERCENT_ITEMS, ambiguousEitherOrIssues, cellCoverage, extractMarkdownTables, isSanctionedResponseSentence, jaccard, judgeQueryCoverage, laborGroupOf, locationGroupForMatch, PARAGRAPH_TAIL_REPEAT_MIN_CHARS, paragraphFingerprint, scanCollisionNumberedHeadings, scanInvertedDateRanges, scanParagraphTailRepeats, scanPhaseLaborClaims, sixHundredPercentLexicalHit, textCellsOf } from '../detectors/detectors';
+import { extractBasisRegulations } from '../../integratedBlueprint';
+import { COMMERCIAL_RATE_RE, COMMERCIAL_TERM_RE, CROSS_SECTION_ANCHORS, CROSS_SECTION_ANCHOR_ENTITY_RE, ENUMERATION_VALUE_RE, FINISH_THICKNESS_CONTEXT_WORD, LABOR_COUNT_RE, META_DECLARATION_RE, NEGATIVE_DECLARATION_RE, PARAGRAPH_START_RE, REPEATED_WORD_RE, SCHEDULE_NODE_ANCHORS, SIX_HUNDRED_PERCENT_ITEMS, ambiguousEitherOrIssues, cellCoverage, extractMarkdownTables, isSanctionedResponseSentence, jaccard, judgeQueryCoverage, laborGroupOf, locationGroupForMatch, PARAGRAPH_TAIL_REPEAT_MIN_CHARS, paragraphFingerprint, scanCollisionNumberedHeadings, scanInvertedDateRanges, scanParagraphTailRepeats, scanPhaseLaborClaims, scanUncoveredEngineeringHeadings, sixHundredPercentLexicalHit, splitConcatenatedPhaseName, textCellsOf } from '../detectors/detectors';
 import type { AuthorityDomain, AuthorityIndex } from '../../authorityIndex';
-import type { PhaseLaborClaim } from '../detectors/detectors';
 
 const PILE_WORD_TO_SLOPE: Array<[RegExp, string]> = [
   [/高压旋喷桩/gu, '土钉墙'],
@@ -132,6 +132,14 @@ export function fixTruncatedSentenceArtifacts(markdown: string): { markdown: str
     [/；。/gu, '。'],
     [/。，/gu, '。'],
     [/，。/gu, '。'],
+    // 4.32 扩围（丰乐镇复测 #54/55 标点叠用残留）：「提升泵参数为H=5.5m、。沟渠系统」
+    // 「型号H=5.5m、，进场时核验」——顿号后接句读标点是括号补注删除后的拼接残留，
+    // 确定性收敛：保留后一标点（顿号语义被后续句读覆盖）
+    [/、。/gu, '。'],
+    [/、；/gu, '；'],
+    [/、，/gu, '，'],
+    [/，、/gu, '，'],
+    [/；、/gu, '；'],
     [/。{2,}/gu, '……'],
   ];
   let result = markdown;
@@ -445,29 +453,310 @@ export function fixLaborPeakConflict(markdown: string, laborPeakAuthority?: numb
 }
 
 /** 阶段劳动力确定性修复（V5 P4b-2，与检测器同源单源）：scanPhaseLaborClaims 定位（双通道）
- * → 权威值硬替换 → 复检（复检仍残留即整体回滚，返回原文本）。阶段名拼接歧义不在确定性
- * 修复范围内（无法确定性拆分，留 LLM 修复轮改述）；调用方在章节写时就绪后立即对齐，
- * 把跨章漂移消灭在写时。 */
+ * → 权威值硬替换 → 复检（复检仍残留即整体回滚，返回原文本）。
+ * 4.31 丰乐镇 v6 #63/64 扩展：阶段名拼接歧义（「景观与绿化亮化与收尾工程」= 两阶段名连写）
+ * 由 LLM 修复轮改述的历史实现实测无效（评审轮未改述直接进终检 blocker）——现按
+ * splitConcatenatedPhaseName（与检测器同一 ambiguity 单源）确定性拆分重写为
+ * 「leading阶段X人，trailing阶段Y人」（各取权威值）；拆分不可判定（命中 <4 字）仍留 LLM。
+ * 调用方在章节写时就绪后立即对齐，把跨章漂移消灭在写时。 */
 export function fixPhaseLaborValues(
   markdown: string,
   phaseAuthorities?: Array<{ phase: string; value: number; trace?: string }>,
 ): { markdown: string; fixedCount: number; details: string[]; residualCount: number } {
   if (!phaseAuthorities || phaseAuthorities.length === 0) return { markdown, fixedCount: 0, details: [], residualCount: 0 };
-  const { claims } = scanPhaseLaborClaims(markdown, phaseAuthorities);
-  if (claims.length === 0) return { markdown, fixedCount: 0, details: [], residualCount: 0 };
-  const sorted = [...claims].sort((left, right) => right.start - left.start);
+  const { claims, ambiguities } = scanPhaseLaborClaims(markdown, phaseAuthorities);
+  if (claims.length === 0 && ambiguities.length === 0) return { markdown, fixedCount: 0, details: [], residualCount: 0 };
+  const replacements: Array<{ start: number; end: number; replacement: string; detail: string }> = [];
+  for (const claim of claims) {
+    replacements.push({
+      start: claim.start,
+      end: claim.end,
+      replacement: String(claim.expected),
+      detail: `阶段劳动力 ${claim.phase} ${claim.actual}人→${claim.expected}人`,
+    });
+  }
+  for (const ambiguity of ambiguities) {
+    const split = splitConcatenatedPhaseName(ambiguity);
+    if (!split) continue;
+    // 短语起始定位：连写短语在正文中可能带「阶段」后缀（枚举通道）；短语与数值之间仅允许
+    // 「约/为/达/共/计」+空白（与扫描侧归属窗口同源，防跨短语错位定位）
+    let phraseStart = -1;
+    for (const candidate of [`${ambiguity.phrase}阶段`, ambiguity.phrase]) {
+      const found = markdown.lastIndexOf(candidate, ambiguity.start);
+      if (found === -1 || found + candidate.length > ambiguity.start) continue;
+      if (!/^(?:约|为|达|共|计)?\s*$/u.test(markdown.slice(found + candidate.length, ambiguity.start))) continue;
+      phraseStart = found;
+      break;
+    }
+    if (phraseStart === -1) continue;
+    const rawEnd = ambiguity.start + ambiguity.raw.length;
+    if (markdown.slice(rawEnd, rawEnd + 1) !== '人') continue;
+    replacements.push({
+      start: phraseStart,
+      end: rawEnd + 1,
+      replacement: `${split.leading.phase}阶段${split.leading.value}人，${split.trailing.phase}阶段${split.trailing.value}人`,
+      detail: `阶段名拼接拆分：${ambiguity.phrase} → ${split.leading.phase}（${split.leading.value}人）＋${split.trailing.phase}（${split.trailing.value}人）`,
+    });
+  }
+  if (replacements.length === 0) return { markdown, fixedCount: 0, details: [], residualCount: 0 };
+  const sorted = [...replacements].sort((left, right) => right.start - left.start);
   let result = markdown;
-  const applied: PhaseLaborClaim[] = [];
+  const applied: Array<{ detail: string }> = [];
   let boundary = Number.POSITIVE_INFINITY;
-  for (const claim of sorted) {
-    if (claim.end > boundary) continue; // 区间重叠防护（理论不发生；保守跳过）
-    result = `${result.slice(0, claim.start)}${claim.expected}${result.slice(claim.end)}`;
-    applied.push(claim);
-    boundary = claim.start;
+  for (const replacement of sorted) {
+    if (replacement.end > boundary) continue; // 区间重叠防护（理论不发生；保守跳过）
+    result = `${result.slice(0, replacement.start)}${replacement.replacement}${result.slice(replacement.end)}`;
+    applied.push(replacement);
+    boundary = replacement.start;
   }
   const residual = scanPhaseLaborClaims(result, phaseAuthorities);
   if (residual.claims.length > 0) return { markdown, fixedCount: 0, details: [], residualCount: residual.claims.length };
-  return { markdown: result, fixedCount: applied.length, details: applied.map(claim => `阶段劳动力 ${claim.phase} ${claim.actual}人→${claim.expected}人`), residualCount: 0 };
+  return { markdown: result, fixedCount: applied.length, details: applied.map(item => item.detail), residualCount: 0 };
+}
+
+/** 基础信息表重复合并修复（4.31 丰乐镇 v6 #70，与检测器 markdownTableQualityIssues 同源）：
+ * 正文多处「| 信息项 | 内容 |」基础信息表（内容含项目名称/招标人/建设地点/工期/质量等
+ * 字段词）时，保留第一张，后续表独有的字段行按原样并入第一张表尾，并删除后续表块
+ * （表头/分隔线/数据行/前导空行）与紧邻引导句（「…汇总成表」类，防悬空引用）。
+ * 值格为兜底话术（资料未明确类，#86/87）的字段行跳过不并入——随重复块一并消失，
+ * 主表不携带兜底值；孤立兜底行由 fixFallbackPlaceholderRows 继续兜底。 */
+export function fixDuplicateBasicInfoTables(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+  const lines = markdown.split(/\r?\n/u);
+  const isBasicInfoHeader = (line: string): boolean => /^\|\s*信息项\s*\|\s*内容\s*\|\s*$/u.test(line.trim());
+  interface BasicInfoBlock { header: number; end: number; rows: Array<{ name: string; value: string; index: number }> }
+  const blocks: BasicInfoBlock[] = [];
+  let cursor = 0;
+  while (cursor < lines.length) {
+    if (!isBasicInfoHeader(lines[cursor]!)) { cursor += 1; continue; }
+    const rows: BasicInfoBlock['rows'] = [];
+    let probe = cursor + 1;
+    if (probe < lines.length && MARKDOWN_TABLE_DIVIDER_RE.test(lines[probe]!)) probe += 1;
+    while (probe < lines.length && MARKDOWN_TABLE_ROW_RE.test(lines[probe]!) && !MARKDOWN_TABLE_DIVIDER_RE.test(lines[probe]!)) {
+      const cells = lines[probe]!.split('|').map(cell => cell.trim());
+      const name = cells[1] ?? '';
+      if (cells.length >= 4 && name) rows.push({ name, value: cells[2] ?? '', index: probe });
+      probe += 1;
+    }
+    blocks.push({ header: cursor, end: probe - 1, rows });
+    cursor = Math.max(probe, cursor + 1);
+  }
+  const BASIC_INFO_FIELD_RE = /项目名称|招标人|建设单位|发包人|建设地点|招标范围|计划工期|合同估算价|质量标准/u;
+  const FALLBACK_VALUE_RE = /资料未明确|暂未明确|待资料复核|未检索到|资料不足|无法确认|建议补充|不适用|可核验信息|系统暂未|项目资料暂未|待确认|待系统|通用兜底|兜底(?:占位|模板|内容)|以本项目招标文件明确内容为准/u;
+  const fieldBlocks = blocks.filter(block => block.rows.some(row => BASIC_INFO_FIELD_RE.test(row.name)));
+  if (fieldBlocks.length <= 1) return { markdown, fixedCount: 0, details: [] };
+  const primary = fieldBlocks[0]!;
+  const remove = new Set<number>();
+  const additions: string[] = [];
+  const details: string[] = [];
+  const existingNames = new Set(primary.rows.map(row => row.name));
+  for (const block of fieldBlocks.slice(1)) {
+    const intaken: string[] = [];
+    for (const row of block.rows) {
+      if (existingNames.has(row.name)) continue;
+      if (FALLBACK_VALUE_RE.test(row.value) && row.value.trim().length <= 24) continue;
+      existingNames.add(row.name);
+      additions.push(lines[row.index]!);
+      intaken.push(row.name);
+    }
+    for (let q = block.header; q <= block.end; q += 1) remove.add(q);
+    for (let q = block.header - 1; q >= 0 && lines[q]!.trim() === ''; q -= 1) remove.add(q);
+    // 块后首个空行随块删除（块前引导句区域已释放间隔空行，防连续空行）
+    if (block.end + 1 < lines.length && lines[block.end + 1]!.trim() === '') remove.add(block.end + 1);
+    // 紧邻上方的「…汇总成表」引导句一并删除（防「汇总成表」悬空引用）
+    let lead = block.header - 1;
+    while (lead >= 0 && lines[lead]!.trim() === '') lead -= 1;
+    if (lead >= 0 && !/^[|#]/u.test(lines[lead]!.trim()) && /汇总(?:成表|为表|如下|列出)|如下表|见下表|形成(?:如下)?表|汇总表/u.test(lines[lead]!)) remove.add(lead);
+    details.push(`基础信息表重复合并：删除第 ${fieldBlocks.indexOf(block) + 1} 处重复表${intaken.length > 0 ? `，并入字段 ${intaken.join('、')}` : ''}`);
+  }
+  const output: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!remove.has(index)) output.push(lines[index]!);
+    if (index === primary.end) output.push(...additions);
+  }
+  return { markdown: output.join('\n'), fixedCount: fieldBlocks.length - 1, details };
+}
+
+/** 表格兜底话术行确定性删除（4.31 丰乐镇 v6 #86/87，与门禁 formalTextGateIssues 行级扫描同口径）：
+ * 表格数据行的单元格出现「资料未明确/暂未明确/待资料复核/…」类后台话术时整行删除
+ * （正式交付表格不得出现资料缺失兜底话术）。表头行与分隔线不动；块内数据行全命中时
+ * 保守放弃（防删空表），残留转门禁。 */
+export function fixFallbackPlaceholderRows(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+  const lines = markdown.split(/\r?\n/u);
+  const FALLBACK_CELL_RE = /资料未明确|暂未明确|待资料复核|未检索到|资料不足|无法确认|建议补充|不适用|可核验信息|系统暂未|项目资料暂未|待确认|待系统|通用兜底|兜底(?:占位|模板|内容)|以本项目招标文件明确内容为准/u;
+  const remove = new Set<number>();
+  const details: string[] = [];
+  let index = 0;
+  while (index < lines.length) {
+    if (!MARKDOWN_TABLE_ROW_RE.test(lines[index]!) || MARKDOWN_TABLE_DIVIDER_RE.test(lines[index]!)) { index += 1; continue; }
+    let end = index;
+    while (end + 1 < lines.length && MARKDOWN_TABLE_ROW_RE.test(lines[end + 1]!)) end += 1;
+    const dataIndexes: number[] = [];
+    for (let q = index + 1; q <= end; q += 1) {
+      if (!MARKDOWN_TABLE_DIVIDER_RE.test(lines[q]!)) dataIndexes.push(q);
+    }
+    const targets = dataIndexes.filter(q => {
+      const cells = lines[q]!.split('|').map(cell => cell.trim()).filter(cell => cell.length > 0);
+      return cells.some(cell => cell.length <= 24 && FALLBACK_CELL_RE.test(cell));
+    });
+    // 全命中时保守放弃（防删空表）；部分命中即删除命中行，残留转门禁
+    if (targets.length > 0 && targets.length < dataIndexes.length) {
+      for (const q of targets) { remove.add(q); details.push(`删除兜底话术表行：${lines[q]!.trim().slice(0, 48)}`); }
+    }
+    index = end + 1;
+  }
+  if (remove.size === 0) return { markdown, fixedCount: 0, details: [] };
+  return { markdown: lines.filter((_, lineIndex) => !remove.has(lineIndex)).join('\n'), fixedCount: remove.size, details };
+}
+
+/** 法规条目书名号内名称提取（fixer 与证据池合并器共用） */
+function regulationBookNameOf(entry: string): string {
+  return (entry.match(/《([^》]+)》/u) || [])[1] || '';
+}
+
+/** 4.32 招标文件证据池本地地方性法规补充提取（丰乐镇 v6 复测 #56 死结根治）：4.31 的
+ * fixBasisRegulationsRegion 只吃蓝图 basisRegulations，而蓝图在 stageBlueprint 时点提取
+ * （证据源为当刻的 writerEvidence），章级检索召回的招标文件「1.3 法律」小节
+ * （《合肥市公共资源交易管理条例》）彼时尚未入池——蓝图清单无地方条目、fixer 静默、
+ * 检测器「编制依据小节缺少安徽省地方性法规、条例」死结依旧。本函数在 stage5 交付前
+ * 时点（全部章级证据已入池）从证据文本二次提取：复用 extractBasisRegulations 同口径
+ * 书名号扫描，只保留含地方后缀（省/市/区/县/自治州/自治区）且书名号内含本项目建设
+ * 地点地名的条目（防其它地区/项目法规混入），与蓝图清单去重合并——fixer 与检测器消费
+ * 的仍是同一份「本地地方法规条目」口径，检测定位=修复定位不变；地点无法解析或证据
+ * 为空时原样返回蓝图清单（行为与 4.31 一致）。 */
+export function collectLocalBasisRegulations(
+  blueprintRegulations: readonly string[] | undefined,
+  evidenceText: string,
+  location: string,
+): string[] {
+  const merged = [...(blueprintRegulations || [])];
+  const seen = new Set(merged.map(entry => regulationBookNameOf(entry)));
+  // 本项目建设地点区域解析（与检测器 basisRegulationsCoverageIssues 同源正则）
+  const regions = [...location.matchAll(/([\u4e00-\u9fa5]{2,10}?[省市])/gu)].map(match => match[1]!);
+  if (regions.length === 0 || !evidenceText) return merged;
+  for (const entry of extractBasisRegulations(evidenceText)) {
+    const name = regulationBookNameOf(entry);
+    if (!name || seen.has(name)) continue;
+    if (!/[\u4e00-\u9fa5]{2,10}(?:省|市|区|县|自治州|自治区)/u.test(name)) continue;
+    if (!regions.some(region => name.includes(region))) continue;
+    seen.add(name);
+    merged.push(entry);
+  }
+  return merged;
+}
+
+/** 编制依据地方性法规确定性补写（4.31 丰乐镇 v6 #71，与检测器 basisRegulationsCoverageIssues
+ * 同源）：招标文件已提取到含地方后缀（省/市/区/县）的法规条目而编制依据小节未列时（LLM
+ * 无源可写的死结），从蓝图 basisRegulations 照抄补写「地方法规规章」行——行内已有具体
+ * 书名号条目时按顿号追加，否则用确定性清单重写类别话术尾。找不到编制依据小节或地方
+ * 法规规章行时静默跳过（保持模板结构，不新增行）。 */
+export function fixBasisRegulationsRegion(
+  markdown: string,
+  basisRegulations?: readonly string[],
+): { markdown: string; fixedCount: number; details: string[] } {
+  if (!basisRegulations || basisRegulations.length === 0) return { markdown, fixedCount: 0, details: [] };
+  const bookNameOf = regulationBookNameOf;
+  const missing = basisRegulations.filter(entry => {
+    const name = bookNameOf(entry);
+    if (!name) return false;
+    if (!/[\u4e00-\u9fa5]{2,10}(?:省|市|区|县|自治州|自治区)/u.test(name)) return false;
+    if (/中华人民共和国|国务院/u.test(name)) return false;
+    return !markdown.includes(`《${name}》`);
+  });
+  if (missing.length === 0) return { markdown, fixedCount: 0, details: [] };
+  const lines = markdown.split(/\r?\n/u);
+  // 编制依据小节定位（与检测器 extractBasisRegulationSection 同口径：H2-H4 或粗体标题）
+  let sectionStart = -1;
+  let sectionLevel = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    const trimmed = lines[i]!.trim();
+    const hashHeading = /^(#{2,4})\s+(.+)$/u.exec(trimmed);
+    const boldHeading = hashHeading ? null : /^\*\*(.+)\*\*$/u.exec(trimmed);
+    if (!hashHeading && !boldHeading) continue;
+    const title = hashHeading ? hashHeading[2]! : (boldHeading?.[1] ?? '');
+    if (!/编制依据|编制说明|编制原则|编制目的/u.test(title)) continue;
+    sectionStart = i;
+    sectionLevel = hashHeading ? hashHeading[1]!.length : 0;
+    break;
+  }
+  if (sectionStart === -1) return { markdown, fixedCount: 0, details: [] };
+  let sectionEnd = lines.length;
+  for (let j = sectionStart + 1; j < lines.length; j += 1) {
+    const next = /^(#{1,4})\s+(.+)$/u.exec(lines[j]!.trim());
+    if (next && (sectionLevel === 0 || next[1]!.length <= sectionLevel)) { sectionEnd = j; break; }
+  }
+  const details: string[] = [];
+  for (let j = sectionStart + 1; j < sectionEnd; j += 1) {
+    const line = lines[j]!;
+    const labelMatch = /^(\s*[-*]?\s*)([^：:]{2,20}[：:])\s*(.*)$/u.exec(line);
+    if (!labelMatch) continue;
+    if (!/地方法规|地方性法规|地方规章/u.test(labelMatch[2]!)) continue;
+    const addEntries = missing.filter(entry => !line.includes(`《${bookNameOf(entry)}》`));
+    if (addEntries.length === 0) continue;
+    if (/《[^》]+》/u.test(labelMatch[3] || '')) {
+      lines[j] = `${line.replace(/[。；;\s]*$/u, '')}、${addEntries.join('、')}；`;
+    } else {
+      lines[j] = `${labelMatch[1]}${labelMatch[2]}${addEntries.join('、')}及工程所在地现行其他地方性法规与政府规章；`;
+    }
+    details.push(`编制依据补写地方性法规：${addEntries.join('、')}`);
+    break;
+  }
+  if (details.length === 0) return { markdown, fixedCount: 0, details: [] };
+  return { markdown: lines.join('\n'), fixedCount: details.length, details };
+}
+
+/** 埋深/覆土槽位数值错位确定性修复（4.31 丰乐镇 v6 #3，与检测器 factReconciliation D4.3
+ * SLOT_DEPTH_RE 同源）：槽位数值折算后 >10m（物理合理上限，管道埋深一般 <10m）时几乎必然
+ * 是长度/总长口径误塞槽位（实测「接地母线…埋深不小于 23.45m」= 接地母线长度 23.45m）。
+ * 修复=删除该槽位短语（含紧邻前导逗号/顿号），保留句子其余部分，残标点收敛；
+ * 不编造替代值（宁缺不假），语义完整性由原句其余部分承担。 */
+export function fixSlotDepthValue(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+  const SLOT_DEPTH_FIX_RE = /(?:埋深|覆土(?:厚度|深度)?|管顶覆土)(?:不小于|不大于|不低于|不超过|约|为|达|控制在|一般|宜|应)?[^。；;\n|]{0,10}?([\d,，]+(?:\.\d+)?)\s*(mm|cm|米|m)(?![a-zA-Z0-9²³])/gu;
+  const removals: Array<{ start: number; end: number; detail: string }> = [];
+  for (const match of markdown.matchAll(SLOT_DEPTH_FIX_RE)) {
+    const raw = Number((match[1] || '').replace(/[,，]/gu, ''));
+    if (!Number.isFinite(raw)) continue;
+    const unit = match[2];
+    const meters = unit === 'mm' ? raw / 1000 : unit === 'cm' ? raw / 100 : raw;
+    if (meters <= 10) continue;
+    const matchStart = match.index ?? 0;
+    // 前导逗号/顿号随短语一起删除（「敷设，埋深不小于 23.45m，」→「敷设，」）
+    const prefixLength = matchStart > 0 && /[，,、]/u.test(markdown[matchStart - 1]!) ? 1 : 0;
+    removals.push({ start: matchStart - prefixLength, end: matchStart + match[0].length, detail: `埋深/覆土槽位数值删除：${match[0].trim()}` });
+  }
+  if (removals.length === 0) return { markdown, fixedCount: 0, details: [] };
+  let result = markdown;
+  for (const item of [...removals].sort((left, right) => right.start - left.start)) {
+    result = `${result.slice(0, item.start)}${result.slice(item.end)}`;
+  }
+  // 残标点收敛（删除可能留下的标点组合）
+  result = result.replace(/，，/gu, '，').replace(/，；/gu, '；').replace(/，。/gu, '。').replace(/，、/gu, '、').replace(/、，/gu, '、').replace(/；，/gu, '；').replace(/。，/gu, '。');
+  return { markdown: result, fixedCount: removals.length, details: removals.map(item => item.detail) };
+}
+
+/** 小节标题工程类别未覆盖确定性改名（4.31 丰乐镇 v6 #90，与检测器 headingUncoveredEngineeringItems
+ * 同源单扫描 scanUncoveredEngineeringHeadings）：标题以「工程」结尾且含多个词段
+ * （「给排水、采暖、燃气工程」），正文未覆盖的词段从标题中移除（新标题=已覆盖词段+工程）；
+ * 编号前缀（如「2.11.4 」）保留；全部词段未覆盖时不动作（防生成空标题）。
+ * 标题改动后目录同步由后续 tocConsistencyFix（fixTocFromBody）承担。 */
+export function fixHeadingUncoveredItems(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+  const hits = scanUncoveredEngineeringHeadings(markdown);
+  if (hits.length === 0) return { markdown, fixedCount: 0, details: [] };
+  const lines = markdown.split(/\r?\n/u);
+  const details: string[] = [];
+  for (const hit of hits) {
+    const covered = hit.parts.filter(part => !hit.uncovered.includes(part));
+    if (covered.length === 0) continue;
+    const raw = lines[hit.lineIndex];
+    if (raw === undefined) continue;
+    const lineMatch = /^(\s*#{3,4}\s+)(.*?)\s*$/u.exec(raw);
+    if (!lineMatch) continue;
+    const numberMatch = /^([\d.]+[\s\u00a0]+)/u.exec(lineMatch[2]!);
+    const newTitle = `${covered.join('、')}工程`;
+    lines[hit.lineIndex] = `${lineMatch[1]}${numberMatch ? numberMatch[1] : ''}${newTitle}`;
+    details.push(`标题工程类别覆盖修正：${hit.title} → ${numberMatch ? numberMatch[1] : ''}${newTitle}`);
+  }
+  if (details.length === 0) return { markdown, fixedCount: 0, details: [] };
+  return { markdown: lines.join('\n'), fixedCount: details.length, details };
 }
 
 // ── 12. 商务条款数据入正文检测（Q3）：施组正文禁止出现商务数据封闭集，出现即评审失分（徽光阁实测：暂列金额 60 万入正文） ──
@@ -1549,6 +1838,36 @@ export function fixQualityAssuranceCoverage(markdown: string): { markdown: strin
   return { markdown: next, fixedCount: 1, details: [`6.1 施工部署块补全质量保障协同段（核心术语 ${coreTerms.length - hitCount}/${coreTerms.length} 缺失）`] };
 }
 
+/** 6.2 工伤保险缴纳表述补全（4.32 丰乐镇 v6 #60）：「正文有劳务/农民工管理内容但未提及工伤保险
+ * 缴纳」blocker 死结——检测器 localAdaptationKeywordIssues 的 workInjury 查询由 bge 语义判定，
+ * LLM 修复轮未定位到劳务管理小节。在含「农民工工资专用账户」等劳资管理锚点的段落行尾补写缴纳
+ * 表述（检测定位=修复定位：补写句逐字包含查询短语「按规定为作业人员办理工伤保险」）。
+ * 幂等：正文已含办理/缴纳/参保类工伤保险表述时跳过（仅引用《工伤保险条例》书名不构成缴纳表述）。 */
+
+const WORK_INJURY_ANCHOR_LEVELS: RegExp[] = [
+  /农民工工资专用账户|工资专用账户|农民工工资/u,
+  /劳务用工|劳务管理|实名制|工资支付/u,
+  /农民工|劳务/u,
+];
+
+export function fixWorkInjuryInsurance(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+  if (/(?:办理|缴纳|参保|缴费).{0,8}工伤保险|工伤保险.{0,8}(?:办理|缴纳|参保|缴费)/u.test(markdown)) return { markdown, fixedCount: 0, details: [] };
+  const lines = markdown.split('\n');
+  for (const anchorRe of WORK_INJURY_ANCHOR_LEVELS) {
+    // 取该级锚点的第一个普通正文行（劳资管理小节承载补写；标题/表格行/列表行/引用行不承载，
+    // 防锚到编制依据清单的法规引用行）
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      if (/^\s*[#|<>]|^\s*[-*·]/u.test(line)) continue;
+      if (!anchorRe.test(line)) continue;
+      const injected = '项目部按规定为作业人员办理工伤保险，参保信息纳入实名制管理，发生工伤事故时按法定程序申报处理。';
+      lines[index] = /[。；;]$/u.test(line.trim()) ? `${line}${injected}` : `${line}。${injected}`;
+      return { markdown: lines.join('\n'), fixedCount: 1, details: ['劳务管理段落补写工伤保险缴纳表述'] };
+    }
+  }
+  return { markdown, fixedCount: 0, details: [] };
+}
+
 // ── A6 危大/自伤/六个百分百确定性收口（丰乐镇 79 分基线对照实测）──────────────────
 // 首轮生成残留三类阻断（LLM 修复轮定位能力不足，残留被导出门禁硬阻断）：
 // ①危大「如涉及」假设性表述（语义命中自伤候选，暴露专项方案未落实短板）；
@@ -1857,6 +2176,9 @@ interface AmbiguousDecisionFix {
 
 const AMBIGUOUS_DECISION_FIXES: AmbiguousDecisionFix[] = [
   { from: /钢板桩或型钢支撑支护/gu, sides: [{ text: '钢板桩支护', keyword: /钢板桩/ }, { text: '型钢支撑支护', keyword: /型钢/ }], detail: '钢板桩型钢两可归一为钢板桩' },
+  // 4.32.0 扩围（丰乐镇复测 #78）：「沟槽开挖深度超过1.5m的区段采用钢板桩或木挡板支护」——
+  // 沟槽支护形态两可（与「放坡或挡板支护」先例同源，按正文主流侧/权威supportForm 归一）
+  { from: /钢板桩或木挡板支护/gu, sides: [{ text: '钢板桩支护', keyword: /钢板桩/ }, { text: '木挡板支护', keyword: /木挡板|挡板/ }], detail: '沟槽支护两可归一为钢板桩支护' },
   { from: /放坡或钢板桩支护/gu, sides: [{ text: '1:0.5放坡加钢板桩支护', keyword: /放坡|坡率/ }, { text: '钢板桩支护', keyword: /钢板桩|排桩/ }], detail: '放坡钢板桩两可归一为组合支护' },
   // A4 基线实测：波形梁护栏立柱安装方式两可（无清单权威，按正文主流侧默认归一）
   { from: /打桩机打入或混凝土基础固定/gu, sides: [{ text: '打桩机打入', keyword: /打入|打桩/ }, { text: '混凝土基础固定', keyword: /混凝土基础|现浇|基础固定/ }], detail: '护栏立柱安装两可归一为打桩机打入' },

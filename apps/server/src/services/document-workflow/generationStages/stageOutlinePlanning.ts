@@ -68,8 +68,8 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
   recordDiversityUsage(session.global.input.templateId, session.planning.diversityProfile.id);
   session.planning.fingerprintPool = loadFingerprintPool();
   const fingerprintAvoidTitles = [...new Set(session.planning.fingerprintPool.entries.flatMap(entry => [...(entry.h3 || []), ...(entry.h4 || [])]))].filter(Boolean).slice(0, 60);
-  const fingerprintOverlapCheck = (titles: string[]) => findFingerprintCollisions(titles, session.planning.fingerprintPool, { excludeDocumentId: session.global.input.diversitySeed }).map(item => `「${item.title}」↔历史「${item.collidedWith}」`);
-  let diversityRetryChapterCount = 0;
+  const fingerprintOverlapCheck = (titles: string[]) => findFingerprintCollisions(titles, session.planning.fingerprintPool, { excludeDocumentId: session.global.input.diversitySeed }).map(item => ({ title: item.title, collidedWith: item.collidedWith }));
+  let diversityRenameChapterCount = 0;
   let diversityRemainingCollisionCount = 0;
   session.planning.plannedChapters = await runWithAdaptiveConcurrency(session.planning.effectiveChapters.map((chapter, chapterIndex) => ({ chapter, chapterIndex })), async ({ chapter, chapterIndex }) => {
     const lockedRuleSections = session.planning.promptStructuralRules
@@ -87,7 +87,7 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
     const planningPromptExecution = resolveChapterPromptExecution(session.prepare.promptPlan, chapter);
     const planned = await planChapterSectionsWithLlm({ template: provisionalTemplate, chapter, chapterIndex, evidence: chapterEvidence, promptTexts: planningPromptExecution.promptTexts, projectContext: session.planning.projectContext, requirement: session.global.input.requirement, roleContext, targetWords: session.planning.provisionalBudget.chapterTargets.get(chapter.id) || 1200, projectGraphSummary: session.planning.chapterGraphSummaryText(chapter.id), lockedSections, signal: session.global.input.signal, diversity: { directive: session.planning.diversityProfile.prompt, avoidSections: fingerprintAvoidTitles, overlapCheck: fingerprintOverlapCheck } });
     if (planned.diversity?.retried) {
-      diversityRetryChapterCount += 1;
+      diversityRenameChapterCount += 1;
       diversityRemainingCollisionCount += planned.diversity.remainingCollisions;
     }
     plannedTablesByChapter.set(chapter.id, planned.tables);
@@ -245,7 +245,7 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
   upsertProgressStage(session.global.progressStages, displayStage({ type: 'role_binding', roleId: session.prepare.projectRoleConfigId, status: 'success', message: `已绑定项目资料 ${session.prepare.materialFilePaths.length} 份、${session.prepare.promptPlan.prompts.length} 个有效提示词；写作 ${session.prepare.promptPlan.writerPrompts.length}、章节 ${session.prepare.promptPlan.chapterPrompts.length}、抽取 ${session.prepare.promptPlan.extractionPrompts.length}；已自动抽取运行时规则 ${session.prepare.runtimePromptRules.executionSummary.length} 条${outlineMessage}`, details: [...promptPlanDetails, ...session.prepare.runtimePromptRules.executionSummary.map(item => `runtimeRule｜${item}`)] }, { subtitle: session.prepare.projectRoleConfigName, roleName: session.prepare.projectRoleConfigName }));
   upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'runtime-prompt-rules', status: 'success', message: `运行时提示词规则已抽取：${session.prepare.runtimePromptRules.executionSummary.length} 条，版本 ${session.prepare.runtimePromptRules.sourceHash}`, details: session.prepare.runtimePromptRules.executionSummary.length ? [...session.prepare.runtimePromptRules.executionSummary, `必需表格：${session.prepare.runtimePromptRules.requiredTables.join('、') || '无'}`, `必含关键词：${session.prepare.runtimePromptRules.requiredKeywords?.join('、') || '无'}`, `禁含内容：${session.prepare.runtimePromptRules.forbiddenPatterns?.join('、') || '无'}`] : ['未从提示词中识别到额外硬规则，使用系统默认质量规则'] }, { subtitle: '提示词规则执行' }));
   upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'document-readiness', status: session.prepare.readiness.ready ? 'success' : 'failed', message: '生成准备度：绑定资料已就绪', details: session.prepare.readiness.diagnostics }, { subtitle: '生成准备度检查' }));
-  upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'diversity-governance', status: 'success', message: `多文档反雷同：组织视角「${session.planning.diversityProfile.perspective}」×命名风格「${session.planning.diversityProfile.style}」；历史指纹避让 ${fingerprintAvoidTitles.length} 个标题${diversityRetryChapterCount > 0 ? `，撞名重规划 ${diversityRetryChapterCount} 章${diversityRemainingCollisionCount > 0 ? `（二次核验仍近似 ${diversityRemainingCollisionCount} 处，已接受）` : ''}` : ''}`, details: [`历史指纹池 ${session.planning.fingerprintPool.entries.length} 条（仅本机历史文档标题与结构，无正文）`, `多样性画像 ${session.planning.diversityProfile.id}`] }, { subtitle: '多样性治理' }));
+  upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'diversity-governance', status: 'success', message: `多文档反雷同：组织视角「${session.planning.diversityProfile.perspective}」×命名风格「${session.planning.diversityProfile.style}」；历史指纹避让 ${fingerprintAvoidTitles.length} 个标题${diversityRenameChapterCount > 0 ? `，撞名局部改名 ${diversityRenameChapterCount} 章${diversityRemainingCollisionCount > 0 ? `（局部改名后仍近似 ${diversityRemainingCollisionCount} 处，已接受）` : ''}` : ''}`, details: [`历史指纹池 ${session.planning.fingerprintPool.entries.length} 条（仅本机历史文档标题与结构，无正文）`, `多样性画像 ${session.planning.diversityProfile.id}`] }, { subtitle: '多样性治理' }));
   upsertProgressStage(session.global.progressStages, session.planning.sectionPlanningStage);
   session.global.emitProgress();
 }

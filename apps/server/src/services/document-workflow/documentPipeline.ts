@@ -56,7 +56,6 @@ import { constructionOrgProfessionalAuditIssues } from './constructionOrgAudit';
 import { buildProfessionalScoreReport } from './documentProfessionalScore';
 import { recordDeterministicFixCases } from './workflowCaseLog';
 import { reviewTemplatingSemantics } from './templatingReview';
-import { qingtianReviewValidationIssues, runFullDimensionReview } from './fullDimensionReview';
 import { SURFACE_FIX_STEPS, type SurfaceFixerContext } from './deterministicFixChains';
 import { assertRegistryConsistency, det } from './detectorFixerRegistry';
 import { createFinalizeSession, type FinalizeGenerationInput } from './finalize/finalizeSession';
@@ -68,7 +67,6 @@ import { stageTableRepair } from './finalize/repairRounds/tableRepair';
 
 import { stageSemanticChoice } from './finalize/repairRounds/semanticChoice';
 import { stageDeterministicStage5 } from './finalize/repairRounds/deterministicStage5';
-import { stageQingtianReview } from './finalize/repairRounds/qingtianReview';
 import { stagePostReviewSurface } from './finalize/repairRounds/postReviewSurface';
 import { stageNumericVerification } from './finalize/repairRounds/numericVerification';
 import { stageRequirementVerification } from './finalize/repairRounds/requirementVerification';
@@ -101,15 +99,16 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
 
   // P6：修复轮顺序由 FINALIZE_REPAIR_ROUNDS（detectorFixerRegistry）单源声明，下方线性链按声明顺序逐一对应：
   // fact-landing-round → table-repair-round → semantic-choice-conflict → deterministic-stage5 → formal-source-clean
-  // → qingtian-full-review → planned-section-final → commercial-strip → table-deterministic-repair
+  // → planned-section-final → commercial-strip → table-deterministic-repair
   // → numeric-verification → requirement-verification → post-review-surface → terminology-strip → toc-consistency
   //（顺序快照测试锁定；新增修复轮必须同时更新声明表）
+  // 方案 2.3：全维度评审轮（qingtian-full-review）已删除——九维检出全部由注册表检测器/写作执行器覆盖
+  // （含 S1 块级六类执行器），该轮历史实测检出 12 处/修复 0 处，无独有检出项
   await stageFactLanding(session);
   await stageTableRepair(session);
-  // P2 拆分（方案 5.2）：语义矛盾检测轮/阶段5确定性清洗/全维度评审轮/评审后兜底链/门禁收口已提取至 finalize/。
+  // P2 拆分（方案 5.2）：语义矛盾检测轮/阶段5确定性清洗/评审后兜底链/门禁收口已提取至 finalize/。
   await stageSemanticChoice(session);
   await stageDeterministicStage5(session);
-  await stageQingtianReview(session);
   // C2 正文数值 vs 资料原文确定性核对轮：零 LLM 确定性提取疑似无来源数值，未匹配项定向 LLM 修复（收敛修复：每章最多 2 轮，残留数下降才继续下一轮，未收敛残留以 warning 兜底）；
   // 置于评审后兜底链之后，核对覆盖全部修复轮成果，作为交付前数值兜底
   await stageNumericVerification(session);

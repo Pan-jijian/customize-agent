@@ -22,6 +22,7 @@ import { DIVISION_SECTION_RE } from './writingSpec';
 import { fiveElementBlockStats } from './tenderBidChecks';
 import { buildSemanticGate } from './semanticGate';
 import { longestCommonHanSubstring } from './numericalConsistency';
+import { scanUncoveredEngineeringHeadings } from './integrity/detectors/detectors';
 
 export function isExportBlockingIssue(issue: ValidationIssue) {
   return EXPORT_BLOCKING_ISSUE_RE.test(issue.message);
@@ -98,8 +99,6 @@ function classifyValidationIssue(issue: ValidationIssue): ValidationIssue {
 function isHardExportBlockingIssue(issue: ValidationIssue) {
   const governedIssue = classifyValidationIssue(issue);
   if (governedIssue.severity !== 'blocker') return false;
-  // round-20 S5/W8：评审轮问题按 category 直通硬阻断（复评残留的否决级/高风险），不再依赖消息正则
-  if (governedIssue.category === 'qingtian_review') return true;
   if (governedIssue.level === 'error' && governedIssue.severity === 'blocker' && /placeholder|source|style|format|structure/u.test(String(governedIssue.category || ''))) return true;
   // 4.19 危大闭环新检查器直通：危大分级/支护形式/设备进场的确定性判定（category=fact_consistency）
   // 消息锚点为三组新检查器专用前缀，不影响历史 fact_consistency 消息的白名单把关（宁漏报不误报）
@@ -259,7 +258,7 @@ export function buildExportGate(issues: ValidationIssue[], factsModel: DocumentF
   const manualPostprocessIssues = governedIssues.filter(issue => issue.level === 'error' && MANUAL_POSTPROCESS_ISSUE_RE.test(issue.message));
   // V2 批3 门禁升级（宁缺毋假）：category 白名单 → 黑名单式全量阻断——凡通过 isHardExportBlockingIssue
   // 的 error（含 category 直通与消息白名单校准后的残留）一律硬阻断，不再按旧 category 白名单
-  // （structure/style/fact_consistency/qingtian_review）二次过滤。旧白名单与 hasBody 开关会静默放行
+  // （structure/style/fact_consistency）二次过滤。旧白名单与 hasBody 开关会静默放行
   // table/format/scope/evidence_coverage/professional_chain/control_loop 类真缺陷（带病交付根因之一）；
   // 显式豁免仅保留人工兜底类（MANUAL_POSTPROCESS_ISSUE_RE：封面/页眉页脚/附图等后期人工完善项）。
   const blockingIssues = hardBlockingIssues;
@@ -554,7 +553,20 @@ export function formalContentIntegrityIssues(markdown: string): ValidationIssue[
   // 列表引导句（句尾冒号且含按以下/如下/包括/分为/包含/列出）是列表合法开场，均不得判截断
   const listLineRe = /^(?:[-*+]\s+|[（(]?\d+[）).、]\s*)/u;
   const listLeadInRe = /(?:按以下|如下|包括|分为|包含|列出).*[:：]$/u;
-  const unfinished = lines.filter(line => !listLineRe.test(line) && !listLeadInRe.test(line) && (/[，、；：和与在为对将]$/u.test(line) || /(通过|包括|如下|主要包括|验收|合格后|复查合格后|设计风|确认后|具体如下|应符合|不少于|以及|且应|不得少于)$/u.test(line))).slice(0, 3);
+  // 4.32 冒号引导句豁免（丰乐镇 v6 复测 #52/53）：「拆除作业按“先确认、后切断、再拆除”的编号
+  // 步骤组织：」「铺装面层施工按…的顺序组织：」+ 编号/项目符号列表是合法列表开场——行尾冒号
+  // 且下一行为列表项即引导句；原词表只覆盖「如下/包括/分为…」形态，组织类引导句被误判截断
+  const listLeadInColon = (index: number) => /[:：]$/u.test(lines[index]) && index + 1 < lines.length && listLineRe.test(lines[index + 1]);
+  // 4.31 软换行豁免（丰乐镇 v6 实测 #67-69）：行尾为句读标点（，、；：）且下一行仍为普通正文
+  // （非列表项）时属跨行软换行——LLM 长句在标点处折行续写（「…夯入土中；」+下一行正文），
+  // 此前「；」等标点结尾行被一律判截断，段落自带折行被误报为 blocker
+  const softWrapped = (index: number) => /[，、；：]$/u.test(lines[index]) && index + 1 < lines.length && !listLineRe.test(lines[index + 1]);
+  const unfinished: string[] = [];
+  for (let i = 0; i < lines.length && unfinished.length < 3; i += 1) {
+    const line = lines[i];
+    if (listLineRe.test(line) || listLeadInRe.test(line) || listLeadInColon(i) || softWrapped(i)) continue;
+    if (/[，、；：和与在为对将]$/u.test(line) || /(通过|包括|如下|主要包括|验收|合格后|复查合格后|设计风|确认后|具体如下|应符合|不少于|以及|且应|不得少于)$/u.test(line)) unfinished.push(line);
+  }
   for (const item of unfinished) {
     issues.push({ level: 'error', severity: 'blocker', category: 'format', owner: 'llm', repairability: 'llm_repairable', message: `正文存在疑似截断句：${item}`, suggestion: '请补完整该段落，避免以连接词、逗号、冒号或无句号的动作词结尾。' });
   }
@@ -783,12 +795,16 @@ export function basisRegulationsCoverageIssues(markdown: string, blueprintData?:
     issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: '编制依据小节缺少施工验收规范条目', suggestion: '编制依据必须包含与本工程分部对应的现行施工验收规范名称及编号（如《给水排水管道工程施工及验收规范》（GB 50268-2008））。' });
   }
   // 4. 地方性法规：建设地点含省/市地名时须有含该地名的书名号条目
+  // 4.31 区域口径校准（丰乐镇 v6 #71）：location「安徽省合肥市肥西县」解析省级+市级两级
+  // 地名，任一命中即通过——招标文件实际引用的是《合肥市公共资源交易管理条例》（市级），
+  // 原「仅按首个匹配（安徽省）核对」把本项目真实引用的市级条例漏判缺失（LLM 修复轮无
+  // 数据可写的死结）；fixBasisRegulationsRegion 同源按该口径回写地方条目
   const location = blueprintData?.project.location || '';
-  const regionMatch = /([\u4e00-\u9fa5]{2,10}?[省市])/u.exec(location);
-  if (regionMatch) {
-    const region = regionMatch[1];
-    if (!bookNames.some(name => name.startsWith(region) || name.includes(region))) {
-      issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `编制依据小节缺少${region}地方性法规、条例`, suggestion: `编制依据必须列出工程所在地（${region}）现行地方性法规及条例名称。` });
+  const regions = [...location.matchAll(/([\u4e00-\u9fa5]{2,10}?[省市])/gu)].map(match => match[1]);
+  if (regions.length > 0) {
+    const covered = regions.some(region => bookNames.some(name => name.startsWith(region) || name.includes(region)));
+    if (!covered) {
+      issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `编制依据小节缺少${regions[0]}地方性法规、条例`, suggestion: `编制依据必须列出工程所在地（${regions.join('、')}）现行地方性法规及条例名称。` });
     }
   }
   // 5. 招标文件提取法规（项目专属事实）：全部漏写 → error
@@ -1316,8 +1332,11 @@ export async function crossChapterConsistencyIssues(markdown: string, factsModel
   // 与排水 838.81/5106.97、门卫 3.15 等分部位真值合法并存），非口径矛盾——contextAware 条目
   // 仅当任意两条取值的 24 字前置语境共享 ≥6 字连续汉字成分（同句同语境）时判冲突；全部分异即
   // 合法分部位列举。阈值 6：单条锚点前缀「挖沟槽土方」仅 5 字，不至把纯锚点共享误判为同语境。
+  // 4.31 gap 收窄+标点阻断（丰乐镇 v6 #76 实测）：原 gap {0,15} 允许跨「：」等标点远距离取数，
+  // 把「4. 检查井、隔油池与终端设施安装：塑料检查井共555座」中相邻检查井数量 555
+  // 误算成隔油池第二个口径（523 vs 555 假冲突）；限 {0,6} 并排除冒号/逗号类分隔符
   const quantityScopeEntries: Array<{ label: string; re: RegExp; contextAware?: boolean }> = [
-    { label: '隔油池数量', re: /隔油池[^\d。；;\n|]{0,15}(\d+)\s*座/gu },
+    { label: '隔油池数量', re: /隔油池[^\d。；;\n|：:，,、]{0,6}(\d+)\s*座/gu },
     { label: '挖沟槽土方', re: /挖沟槽[^\d。；;\n|]{0,15}([\d,]+(?:\.\d+)?)\s*m[³3]/gu, contextAware: true },
   ];
   for (const { label, re, contextAware } of quantityScopeEntries) {
@@ -1734,7 +1753,10 @@ function generatedFactTokenClass(token: string, context: string, prefix?: string
   // P6 语料校准（run1 实测）：进度排布类汇总表述（「各阶段…合计344天，预留16天机动工期」）
   // 此前被「总工期/日历天」近邻窗口误升级为工期总量口径编造。合计/预留/机动/余量语境属
   // 排布分解数字（各阶段用时+机动工期推导），不是资料口径事实，不进总量口径反查池。
-  if (/(?:天|工作天|月|年)$/u.test(token) && /总工期|计划工期|合同工期|日历天|施工周期/u.test(scopeContext) && !/合计|总计|共计|累计|预留|机动|余量|剩余/u.test(scopeContext)) return 'scope';
+  // 4.32.0 扩围（丰乐镇复测 #99 五个时间数字全拦截）：excl 词表并入阶段分解/流程节点类
+  // 特征词（阶段/历时/用时/养护/编制/提交/签订/划分/闭合/控制基准/持续时间/关键/节点），
+  // 检查窗口由近邻 prefix 扩至 `${scopeContext}${context}`（覆盖 token 后置语境）
+  if (/(?:天|工作天|月|年)$/u.test(token) && /总工期|计划工期|合同工期|日历天|施工周期/u.test(scopeContext) && !/阶段|历时|用时|合计|总计|共计|累计|预留|机动|余量|剩余|养护|编制|提交|签订|划分|闭合|控制基准|持续时间|关键|节点/u.test(`${scopeContext}${context}`)) return 'scope';
   // 金额类不能裸匹配单字“元”：正文常见“结构单元/元件/元素/元器件”等词含“元”字，
   // 会把方法段工艺参数（如“拆除段单元划分”语境下的 200m2）误判为金额口径编造（十度实测误伤）
   if (/(?:万元|亿元|元)$/u.test(token) && /最高投标限价|招标控制价|合同估算价|投资估算|报价|金额|人民币/u.test(scopeContext)) return 'scope';
@@ -1865,7 +1887,11 @@ export async function generatedFactVerificationIssuesAsync(
     if (semanticMap && AMBIGUOUS_SCOPE_UNIT_RE.test(token)) {
       const semantic = semanticMap.get(token) || 'other';
       if (tokenClass === 'scope') tokenClass = semantic === 'scope' ? 'scope' : 'soft';
-      else if (semantic === 'scope') tokenClass = 'scope';
+      // 语义升级门（丰乐镇复测 #99）：语义分类器泛化会把工期排布/流程节点数字升级为总量口径编造——
+      // 仅当上下文含明确的工期口径关键词（总工期/计划工期/合同工期/日历天/施工周期）且不含
+      // 阶段分解/流程节点类特征词（阶段/历时/用时/养护/编制/提交/签订/划分/控制基准/预留…）时
+      // 才允许正则→scope 的语义升级（宁缺勿假：无关键词的漏判由 soft 计数提示兜底）
+      else if (semantic === 'scope' && /总工期|计划工期|合同工期|日历天|施工周期/u.test(context) && !/阶段|历时|用时|合计|总计|共计|累计|预留|机动|余量|剩余|养护|编制|提交|签订|划分|闭合|控制基准|持续时间|关键|节点/u.test(context)) tokenClass = 'scope';
     }
     if (tokenClass === 'scope' && !compactCorpus.includes(normalizedToken)) scopeSuspicious.push(token);
     if (tokenClass === 'spec' && !compactCorpus.includes(normalizedToken)) specSuspicious.push(token);
@@ -1898,7 +1924,9 @@ export function professionalScoreIssues(chapters: Array<Pick<DocumentDraftChapte
     const total = dimensionOrder.filter(dimension => analysis.dimensions[dimension]).length * 2;
     if (total < threshold.min) {
       const weak = dimensionOrder.filter(dimension => !analysis.dimensions[dimension]).join('、') || threshold.focus;
-      issues.push({ level: 'error', message: `${chapter.title} 专业评分不足：${total}/12，薄弱维度：${weak}`, suggestion: `请按章节任务卡补齐${threshold.focus}，并写出资料依据、实施流程、专业控制点和检查整改闭环。`, chapterId: chapter.id });
+      // 4.31 降级 warning（丰乐镇 v6 #74/#75）：六维语义评分是 LLM 修复轮的质量参考，
+      // 不达标时修复提示仍随 issue 进入补强流程，但不作为 blocker 阻断交付
+      issues.push({ level: 'warning', message: `${chapter.title} 专业评分不足：${total}/12，薄弱维度：${weak}`, suggestion: `请按章节任务卡补齐${threshold.focus}，并写出资料依据、实施流程、专业控制点和检查整改闭环。`, chapterId: chapter.id });
     }
   }
   return issues;
@@ -1921,6 +1949,18 @@ export function professionalContentIssues(chapters: Array<Pick<DocumentDraftChap
     if (!analysis) continue;
     for (const rule of rules) {
       if (!rule.re.test(chapter.title)) continue;
+      // 4.31 泛类规则优先级豁免（丰乐镇 v6 #73）：「施工|工艺|技术|方案」泛类正则会误命中
+      // 质量/安全/进度等专类章节标题（「确保安全生产的技术组织措施」含「技术」），
+      // 当其他专类规则也命中同一标题时以专类规则判定为准，跳过 construction 泛类条目
+      if (rule.needKey === 'construction' && rules.some(other => other.needKey !== 'construction' && other.re.test(chapter.title))) continue;
+      // 4.32 布置类章节豁免（丰乐镇 v6 #58）：「施工总平面布置图」被「施工|工艺|技术|方案」泛类
+      // 误命中，但布置类章节职责是场地分区与线路定位，不承担施工准备/工艺流程/控制点/验收标准
+      // （construction 语义锚点），泛类规则不适用——布置章不被 construction 规则审理
+      if (rule.needKey === 'construction' && /总平面|平面布置|布置图/u.test(chapter.title)) continue;
+      // 4.32 劳动力专章证据豁免（丰乐镇 v6 #57）：「劳动力安排计划」被「资源|材料|设备|劳动力」
+      // 泛类命中，但该章职责是劳动力组织（不承担材料设备保管），resource 泛类锚点（含材料设备）
+      // 不适用；章内存在进场/退场/调配/轮转证据时不按泛类锚点判缺（真无进场计划的章仍保留 error）
+      if (rule.needKey === 'resource' && /劳动力/u.test(chapter.title) && !/资源|材料|设备/u.test(chapter.title) && /进场|入场|退场|调配|轮转/u.test(chapter.content)) continue;
       if (!analysis.contentNeeds[rule.needKey]) issues.push({ level: 'error', message: `${chapter.title}：${rule.message}`, suggestion: '请按专业任务卡定向补写该章节，补齐可实施的控制措施、资料依据和闭环要求。', chapterId: chapter.id });
     }
   }
@@ -1931,6 +1971,12 @@ function shouldIgnorePreciseToken(token: string, context: string) {
   if (/万元|元|报价|单价|合价|综合单价|预留金|税率|增值税|利润|结算/u.test(`${token} ${context}`)) return true;
   if (/OCR|识别错误|乱码|无法确认|疑似|不确定|语义断裂|页码|目录/u.test(context)) return true;
   if (/^\d+$/.test(token) && Number(token) < 10) return true;
+  // 4.31 抽查池噪声过滤（丰乐镇 v6 #83）：「1.1项」为小节编号+量词误切、「184 页」为页码、
+  // 「COL/R2C3」为表格坐标，均非工程参数；「N天/日」且语境含期限时属条款期限非施工工期
+  if (/^\d+(?:\.\d+)+\s*(?:项|个|份|页|批|次|条|款)$/u.test(token)) return true;
+  if (/^\d+\s*页$/u.test(token) || /^(?:COL|R\d+C)\d*$/iu.test(token)) return true;
+  if (/^[A-Za-z]\.\d+$/u.test(token)) return true;
+  if (/^[\d.]+\s*(?:天|日)$/u.test(token) && /期限/u.test(context)) return true;
   // 合同条款义务类参数（如通用条款“之日起X天内发出开工通知”、“承包人应在X天内提交”）是法律条款表述，
   // 不是项目专属工程参数，不要求写入正文，也不进入抽查池；项目计划工期参数不受影响。
   // 违约金/保证金阶梯数字（“延期28天及以上”“竣工验收通过后28天”）：证据分块常截断“违约金”语境，
@@ -2183,43 +2229,14 @@ export function formalPlaceholderIssues(markdown: string): ValidationIssue[] {
 /** 小节标题工程类别存在性检测（丰乐镇第 3 轮实测）：工程量清单章节汇总行名称
  * （如「墙、柱面装饰与隔断、幕墙工程」）被 LLM 照抄为小节标题，但小节正文实际只施工
  * 墙面装饰（无幕墙/隔断/柱面装饰分项）——标题列出的工程类别必须在小节正文有对应
- * 施工内容。H3/H4 标题以「工程」结尾且含「、/与/及」分隔多词段时，逐词段核对小节
- * 正文（本标题至下一同级/上级标题之间）命中情况，未覆盖词段报 error 由修复轮改名。
- * 词段 <2 字不参与核对（单字工程词误报风险高）。 */
+ * 施工内容。4.31 起扫描口径收敛到 detectors 单源 scanUncoveredEngineeringHeadings
+ *（检测定位=修复定位：fixHeadingUncoveredItems 同源消费；归一化核对与词段守卫见该函数注释）。 */
 export function headingUncoveredEngineeringItems(markdown: string): ValidationIssue[] {
-  const issues: ValidationIssue[] = [];
-  const lines = markdown.split(/\r?\n/u);
-  const headings: Array<{ index: number; level: number; title: string }> = [];
-  lines.forEach((line, index) => {
-    const match = /^(#{3,4})\s+([^\n]+)$/u.exec(line.trim());
-    if (!match) return;
-    headings.push({ index, level: match[1].length, title: match[2].trim() });
-  });
-  for (let h = 0; h < headings.length; h += 1) {
-    const { index, level, title } = headings[h];
-    // 前置守卫（注释意图对齐）：仅「以工程结尾」的标题参与逐词段核对——非工程结尾标题
-    //（如「文明施工管理体系与责任分区」）不是清单工程类别汇总行，逐词段核对全部误报
-    const bare = title.replace(/^[\d.]+[\s\u00a0]*/u, '');
-    if (!/工程\s*$/u.test(bare)) continue;
-    const core = bare.replace(/\s*工程\s*$/u, '');
-    if (!core || !/[、与及]/u.test(core)) continue;
-    const parts = core.split(/[、与及]/u).map(part => part.trim()).filter(part => part.length >= 2);
-    if (parts.length < 2) continue;
-    // 小节正文边界：到下一同级（H2 时含所有下级）或更高级标题；无后续标题则到文末
-    let end = lines.length;
-    for (let k = h + 1; k < headings.length; k += 1) {
-      if (headings[k].level <= level) { end = headings[k].index; break; }
-    }
-    const body = lines.slice(index + 1, end).join('\n');
-    const uncovered = parts.filter(part => !body.includes(part));
-    if (uncovered.length === 0) continue;
-    issues.push({
-      level: 'error',
-      message: `小节标题「${title}」含本小节正文未覆盖的工程类别：${uncovered.join('、')}`,
-      suggestion: '标题中的工程类别必须在小节正文有对应施工内容；请将标题改为与实际施工内容一致的名称，不得照抄工程量清单章节汇总行名称。',
-    });
-  }
-  return issues;
+  return scanUncoveredEngineeringHeadings(markdown).map((hit): ValidationIssue => ({
+    level: 'error',
+    message: `小节标题「${hit.title}」含本小节正文未覆盖的工程类别：${hit.uncovered.join('、')}`,
+    suggestion: '标题中的工程类别必须在小节正文有对应施工内容；请将标题改为与实际施工内容一致的名称，不得照抄工程量清单章节汇总行名称。',
+  }));
 }
 
 function templateMatchesAutoSpecGate(text: string, matchers: string[]) {

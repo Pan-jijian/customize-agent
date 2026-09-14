@@ -447,7 +447,11 @@ export async function validateDocumentTemplateRun(templateId: string, projectRoo
     const previewChapters = effectiveTemplateChapters(template, spec);
     const settings = template.generationSettings || template.exportSettings;
     const charsPerPage = charsPerPageForSettings(template.exportSettings || template.generationSettings);
-    const explicit = explicitLengthTargets(options.requirement || '');
+    // 4.33 识别同源（舒城实测：模板提示词「全文正文要求14万字」预览却显示 900）：
+    // 与 buildDocumentBudget 同口径——requirement 优先，模板提示词文本兑底
+    const requirementExplicit = explicitLengthTargets(options.requirement || '');
+    const promptExplicit = explicitLengthTargets(resolvedPrompts.map(item => item.content).join('\n'));
+    const explicit = requirementExplicit.targetChars || requirementExplicit.targetPages ? requirementExplicit : promptExplicit;
     const settingPages = settings?.targetPages?.target || settings?.targetPages?.min;
     const estimatedTargetChars = explicit.targetChars || (explicit.targetPages ? explicit.targetPages * charsPerPage : undefined) || (settingPages ? settingPages * charsPerPage : undefined);
     const specMinTotal = previewChapters.reduce((sum, chapter) => sum + Math.max(

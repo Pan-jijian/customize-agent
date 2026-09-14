@@ -4,7 +4,7 @@
  * 修复器清单与顺序由 SURFACE_FIX_STEPS（deterministicFixChains）注册表单源定义。
  */
 import { applyDeterministicConsistencyFixes, applyDeterministicConsistencyFixesToMarkdown } from '../../qualityValidation';
-import { applyNumericConsistencyDeterministicFixes, extractGreeningMaintenanceAuthority, stripDuplicateTablesAcrossChapters, runFixUntilClean } from '../../documentIntegrityChecks';
+import { applyNumericConsistencyDeterministicFixes, extractGreeningMaintenanceAuthority, stripDuplicateTablesAcrossChapters, runFixUntilClean, collectLocalBasisRegulations } from '../../documentIntegrityChecks';
 import { blueprintLaborPeakAuthority, blueprintPhaseLaborAuthorities, buildAuthorityIndex } from '../../authorityIndex';
 import { fixScoringRequirementResponses } from '../../tenderRequirements';
 import { cleanFormalSourcePhrases } from '../../markdownComposer';
@@ -62,6 +62,15 @@ export async function stageDeterministicStage5(session: FinalizeSession): Promis
       ...session.template.chapters.flatMap(chapter => chapter.sections || []),
       ...session.finalChapterDrafts.flatMap(chapter => chapter.sections || []),
     ].filter(Boolean))],
+    // 4.31 招标文件引用法规清单（#71 编制依据地方性法规补写；与检测器 basisRegulationsCoverageIssues 同源）
+    // 4.32 #56 死结根治：章级检索证据在 stage5 时点已全部入池——从全量证据二次提取含本建设
+    // 地点地名的地方法规条目与蓝图清单合并（4.31 只吃蓝图清单，章级召回的《合肥市公共资源
+    // 交易管理条例》彼时不在其中，fixer 静默、检测死结）
+    basisRegulations: collectLocalBasisRegulations(
+      session.blueprintData?.basisRegulations,
+      session.allEvidence.map(item => String(item.content || '')).join('\n'),
+      session.blueprintData?.project.location || '',
+    ),
   };
   const surfaceFixCounts = new Map<string, number>();
   const addSurfaceFixCount = (key: string, count: number) => { if (count > 0) surfaceFixCounts.set(key, (surfaceFixCounts.get(key) ?? 0) + count); };
@@ -91,9 +100,16 @@ export async function stageDeterministicStage5(session: FinalizeSession): Promis
   const stage5TableRowDupCount = countOf('internal-table-row-dup');
   const stage5MaintenanceFixCount = countOf('greening-maintenance');
   const stage5TailRepeatCount = countOf('paragraph-tail-repeat');
-  if (stage5TableDup.removedCount > 0 || stage5ResidueCount > 0 || stage5FinishFixCount > 0 || stage5LaborFixCount > 0 || stage5PhaseLaborFixCount > 0 || stage5ResourceFixCount > 0 || stage5AmbiguousFixCount > 0 || stage5SelfFixCount > 0 || stage5EmptyRespCount > 0 || stage5TenderMetaCount > 0 || stage5DupResponseCount > 0 || stage5AtlasRefCount > 0 || stage5MetaFixCount > 0 || stage5FormulaFixCount > 0 || stage5OpeningFixCount > 0 || stage5TruncatedFixCount > 0 || stage5TableRowDupCount > 0 || stage5MaintenanceFixCount > 0 || stage5TailRepeatCount > 0) {
+  const stage5SlotDepthCount = countOf('slot-depth-value');
+  const stage5DupInfoTableCount = countOf('duplicate-basic-info-tables');
+  const stage5FallbackRowCount = countOf('fallback-placeholder-rows');
+  const stage5HeadingCoverCount = countOf('heading-uncovered-items');
+  const stage5BasisRegCount = countOf('basis-regulation-region');
+  const stage5ForbiddenCfgCount = countOf('forbidden-configuration');
+  const stage5WorkInjuryCount = countOf('work-injury-insurance');
+  if (stage5TableDup.removedCount > 0 || stage5ResidueCount > 0 || stage5FinishFixCount > 0 || stage5SlotDepthCount > 0 || stage5LaborFixCount > 0 || stage5PhaseLaborFixCount > 0 || stage5ResourceFixCount > 0 || stage5AmbiguousFixCount > 0 || stage5SelfFixCount > 0 || stage5EmptyRespCount > 0 || stage5TenderMetaCount > 0 || stage5DupResponseCount > 0 || stage5AtlasRefCount > 0 || stage5MetaFixCount > 0 || stage5FormulaFixCount > 0 || stage5OpeningFixCount > 0 || stage5TruncatedFixCount > 0 || stage5TableRowDupCount > 0 || stage5DupInfoTableCount > 0 || stage5FallbackRowCount > 0 || stage5MaintenanceFixCount > 0 || stage5HeadingCoverCount > 0 || stage5BasisRegCount > 0 || stage5ForbiddenCfgCount > 0 || stage5WorkInjuryCount > 0 || stage5TailRepeatCount > 0) {
     session.finalMarkdown = session.rebuildFinalMarkdown();
-    upsertProgressStage(session.progressStages, displayStage({ type: 'validation', roleId: 'deterministic-surface-fix', status: 'success', message: `交付前确定性清洗：跨章表格去重 ${stage5TableDup.removedCount} 行、断行残片合并 ${stage5ResidueCount} 处、装饰层厚度修复 ${stage5FinishFixCount} 处、劳动力峰值统一 ${stage5LaborFixCount} 处、阶段劳动力统一 ${stage5PhaseLaborFixCount} 处、资源数值统一 ${stage5ResourceFixCount} 处、两可表述归一 ${stage5AmbiguousFixCount} 处、段首机械重复剥离 ${stage5OpeningFixCount} 处、截断句残留收敛 ${stage5TruncatedFixCount} 处、元话语声明清洗 ${stage5MetaFixCount} 处、公式形态清洗 ${stage5FormulaFixCount} 处、自伤句式改写 ${stage5SelfFixCount} 处、空响应句改写 ${stage5EmptyRespCount} 处、招标元语言清理 ${stage5TenderMetaCount} 处、重复响应行去重 ${stage5DupResponseCount} 行、图集引用清洗 ${stage5AtlasRefCount} 处、表内重复行删除 ${stage5TableRowDupCount} 行、绿化养护期统一 ${stage5MaintenanceFixCount} 处、段内句级复读剥离 ${stage5TailRepeatCount} 处、叠词收敛` }, { subtitle: '交付前确定性清洗' }));
+    upsertProgressStage(session.progressStages, displayStage({ type: 'validation', roleId: 'deterministic-surface-fix', status: 'success', message: `交付前确定性清洗：跨章表格去重 ${stage5TableDup.removedCount} 行、断行残片合并 ${stage5ResidueCount} 处、装饰层厚度修复 ${stage5FinishFixCount} 处、埋深槽位错位删除 ${stage5SlotDepthCount} 处、劳动力峰值统一 ${stage5LaborFixCount} 处、阶段劳动力统一 ${stage5PhaseLaborFixCount} 处、资源数值统一 ${stage5ResourceFixCount} 处、两可表述归一 ${stage5AmbiguousFixCount} 处、段首机械重复剥离 ${stage5OpeningFixCount} 处、截断句残留收敛 ${stage5TruncatedFixCount} 处、元话语声明清洗 ${stage5MetaFixCount} 处、公式形态清洗 ${stage5FormulaFixCount} 处、自伤句式改写 ${stage5SelfFixCount} 处、空响应句改写 ${stage5EmptyRespCount} 处、招标元语言清理 ${stage5TenderMetaCount} 处、重复响应行去重 ${stage5DupResponseCount} 行、图集引用清洗 ${stage5AtlasRefCount} 处、表内重复行删除 ${stage5TableRowDupCount} 行、基础信息表合并 ${stage5DupInfoTableCount} 组、兜底话术表行删除 ${stage5FallbackRowCount} 行、绿化养护期统一 ${stage5MaintenanceFixCount} 处、标题工程类别覆盖修正 ${stage5HeadingCoverCount} 处、编制依据法规补写 ${stage5BasisRegCount} 处、配置禁用词清洗 ${stage5ForbiddenCfgCount} 处、工伤保险缴纳表述补写 ${stage5WorkInjuryCount} 处、段内句级复读剥离 ${stage5TailRepeatCount} 处、叠词收敛` }, { subtitle: '交付前确定性清洗' }));
   }
   const stage5MarkdownFix = await applyDeterministicConsistencyFixesToMarkdown(session.finalMarkdown, session.factsModel, session.scopeConflicts);
   if (stage5MarkdownFix.fixedCount > 0) session.finalMarkdown = stage5MarkdownFix.markdown;

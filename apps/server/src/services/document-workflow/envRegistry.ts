@@ -74,7 +74,6 @@ export const DOCUMENT_ENV_REGISTRY: readonly DocumentEnvEntry[] = [
   { name: 'DOCUMENT_PREFIX_WARMUP', status: 'managed', default: '1', note: 'prefix cache 预热开关' },
   { name: 'DOCUMENT_PREFIX_SCHEDULE_WINDOW_MS', status: 'managed', default: '300000', note: 'prefix 预热调度窗口' },
   { name: 'DOCUMENT_GLOBAL_CONSISTENCY_REVIEW', status: 'managed', default: 'auto', note: '全局一致性审查模式（0 关/1 强制/auto 按 strict 判定）' },
-  { name: 'DOCUMENT_QINGTIAN_REVIEW_ROUNDS', status: 'managed', default: '3', note: '全维度评审轮次上限' },
   { name: 'DOCUMENT_QINGTIAN_PATCH_GUARD', status: 'managed', default: 'observe', note: 'patchGuard 模式（observe/enforce），灰度完成后固化' },
   { name: 'DOCUMENT_EXPORT_PURE_RENDER', status: 'managed', default: 'observe', note: '导出纯渲染模式（off/observe/enforce）：观测期仅检测计数，enforce 阻断源层结构性缺陷（批 1 A1）' },
   { name: 'DOCUMENT_CONSISTENCY_SAMPLE_LIMIT', status: 'managed', default: '0', note: '数据一致性复核抽样上限（0=全量）' },

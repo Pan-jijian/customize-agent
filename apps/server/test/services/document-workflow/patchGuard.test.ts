@@ -157,10 +157,10 @@ describe('repairChapterByQuality patchGuard', () => {
     llmMock.mockResolvedValue({ patches: [{ originalText: '原文正文。', replacement: '本工程按工作包组织施工。' }] });
     const result = await repairChapterByQuality({
       template, chapter, issues: ['需要修复'], promptTexts: '提示词', forbidDrawingImages: false,
-      patchGuard: { observeOnly: false, repairRound: 'qingtian-review-repair', diagnostics },
+      patchGuard: { observeOnly: false, repairRound: 'global-consistency-repair', diagnostics },
     });
     expect(result.appliedCount).toBe(0);
-    expect(diagnostics.llm.patchGuardStats?.['qingtian-review-repair']?.rejects).toBe(1);
+    expect(diagnostics.llm.patchGuardStats?.['global-consistency-repair']?.rejects).toBe(1);
     expect(diagnostics.llm.patchGuardRejects).toBe(1);
   });
 

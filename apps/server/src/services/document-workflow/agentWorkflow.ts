@@ -2,7 +2,7 @@ import * as path from 'node:path';
 import { listKnowledgeFiles } from '../knowledge/kbService';
 import type { AgentChapterTask, AgentDocumentPlan } from './agentPlanner';
 import type { DocumentExecutionStage, DocumentFact, DocumentTemplate, ProjectBinding, ProjectGraph, ValidationIssue } from './types';
-import { sectionDuplicateIssues, sectionHeadingIssues, sourcePhraseIssues } from './markdownComposer';
+import { BACKSTAGE_OR_FALLBACK_TEXT_RE, sectionDuplicateIssues, sectionHeadingIssues, sourcePhraseIssues } from './markdownComposer';
 import { displayStage } from './progress';
 import { stableHash, stringifyFactValue } from './utils';
 
@@ -67,8 +67,6 @@ export interface AgentWorkflowContext {
 }
 
 type KnowledgeFile = { relativePath: string; chunkCount?: number; indexedAt?: number; status?: string };
-
-const BACKSTAGE_OR_FALLBACK_TEXT_RE = /知识库|系统暂未|项目资料暂未|资料未明确|暂未明确|待确认|待资料复核|待系统|通用兜底(?:段落|模板)?|兜底(?:占位|模板|内容)|未检索到|资料不足|无法确认|建议补充|不适用|COL\d+|可核验信息|以本项目招标文件明确内容为准/u;
 
 function normalizePathKey(filePath: string) {
   return filePath.replace(/\\/gu, '/').replace(/^\/+|\/+$/gu, '');

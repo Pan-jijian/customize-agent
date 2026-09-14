@@ -38,8 +38,8 @@ export interface DocumentGenerationDiagnostics {
   strategy: DocumentGenerationStrategy;
   metrics: DocumentPerformanceMetric[];
     llm: { calls: number; failures: number; maxActive: number; lastError?: string; lastInfo?: string; retries: number; failureStreak?: number; schemaFailures?: number; thinkingWarning?: string; promptCacheHitTokens?: number; promptCacheMissTokens?: number; reasoningTokens?: number; inputTokens?: number; outputTokens?: number; inputChars?: number; patchGuardHits?: number; patchGuardRejects?: number; layerChars?: { l0: number; l1: number; l2: number; l3: number }; unlayeredChars?: number;
-    /** 4.1 per-调用分量观测：按 prefixKey 分组累计 次数/输入字符/L3 字符/缓存命中/未命中 token（无 prefixKey 归入 '(none)'），进度页后台诊断展示 Top5 输入大头 */
-    callBreakdown?: Record<string, { calls: number; inputChars: number; l3Chars: number; cacheHitTokens: number; cacheMissTokens: number }>;
+    /** 4.1 per-调用分量观测：按 prefixKey 分组累计 次数/输入字符/L3 字符/缓存命中/未命中 token（无 prefixKey 归入 '(none)'），进度页后台诊断展示 Top5 输入大头；s1-slim 增 schemaFailures：schema 校验失败按调用类型归因（仅失败时出现） */
+    callBreakdown?: Record<string, { calls: number; inputChars: number; l3Chars: number; cacheHitTokens: number; cacheMissTokens: number; schemaFailures?: number }>;
     /** P25 patchGuard 按修复轮分组统计：键为修复轮 id（对齐 LLM_PATCH_REPAIR_ROUNDS），值为该轮 hits/rejects 计数（P12 扩展 rollbacks：withPatchRollback 回滚计数按轮分组） */
     patchGuardStats?: Record<string, { hits: number; rejects: number; rollbacks?: number }> };
     semantic: { embedCacheHits: number; embedCacheMisses: number };

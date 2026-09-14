@@ -5,7 +5,7 @@
  */
 import type { GenerationSession } from './generationSession';
 import type { IntegratedBlueprint } from '../integratedBlueprint';
-import { buildIntegratedBlueprint, renderBasicFactsForBlueprint, renderBlueprintDataText, resolveBillOfQuantities, saveBlueprintAsset } from '../integratedBlueprint';
+import { buildIntegratedBlueprint, renderBasicFactsForBlueprint, resolveBillOfQuantities, saveBlueprintAsset } from '../integratedBlueprint';
 import { buildBillFactLock } from '../billFactLock';
 import { displayStage, upsertProgressStage } from '../progress';
 import { Semaphore, runWithAdaptiveConcurrency } from '../utils';
@@ -94,8 +94,8 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
     }
   }
   // 蓝图接管（三期收口：旧 planDataMaster/decisionLock 管线已删除，蓝图是唯一计划类数值权威源）：
-  // 四道校验通过的蓝图，其参数桶渲染文本注入各章写作；章切片渲染文本逐章注入执行层
-  // （同章各块值相同 → 章内 prefix cache 共享前缀）；蓝图缺失/校验失败时参数桶为空、各章按证据独立成稿
+  // 四道校验通过的蓝图，其 data 与章切片对象注入执行层，由块级按块 token 聚焦渲染
+  // （s1-slim：参数桶/切片不再文档级预渲染全量文本，单块输入从 10 万字符级降到块相关量级）；
+  // 蓝图缺失/校验失败时参数桶为空、各章按证据独立成稿
   session.blueprint.blueprintActive = Boolean(session.blueprint.integratedBlueprint?.validation.passed);
-  session.blueprint.blueprintDataText = session.blueprint.integratedBlueprint?.validation.passed ? renderBlueprintDataText(session.blueprint.integratedBlueprint.data) : '';
 }

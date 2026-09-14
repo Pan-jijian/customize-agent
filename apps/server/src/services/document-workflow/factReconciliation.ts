@@ -302,7 +302,9 @@ function scanTotalClaims(markdown: string, authority: ReconciliationAuthority): 
       // 合计值与锚点不符：差额命中另一权威条目 → 分项显式/重复计入判定
       // （先检查正文是否已显式列出两项分项——已列出属合法分解展示，不得误报）
       const residual = total - anchor.value;
-      const other = candidates.find(entry => entry !== anchor && nearlyEqual(entry.value, residual));
+      // 同名多村组条目排除：差额恰等于同名另一村组条目值属聚合口径（29 村同名条目），
+      // 交由聚合闭包（aggregationClosure）判定，避免多村场景每村一条假「分项显式」错误
+      const other = candidates.find(entry => entry !== anchor && entry.name !== anchor.name && nearlyEqual(entry.value, residual));
       if (other) {
         const window = markdown.slice(Math.max(0, index - 150), index + match[0].length + 150);
         if (componentShown(window, anchor) && componentShown(window, other)) continue;
@@ -349,6 +351,18 @@ function scanTotalClaims(markdown: string, authority: ReconciliationAuthority): 
       }
       continue;
     }
+    // 同名条目组和闭合（4.31 丰乐镇 v6 「管沟开挖总量为 12599.51」= 24 条同名村组之和）：
+    // 直查不依赖上下文名称重叠——「挖沟槽土方」与「管沟开挖」无 ≥2 字连续子串时
+    // aggregationClosure 的相关组和收集会漏收本组（L478 漏网根因）
+    {
+      const nameSums = new Map<string, number>();
+      for (const entry of candidates) nameSums.set(entry.name, (nameSums.get(entry.name) || 0) + entry.value);
+      let nameSumHit = false;
+      for (const sum of nameSums.values()) {
+        if (nearlyEqual(sum, total)) { nameSumHit = true; break; }
+      }
+      if (nameSumHit) continue;
+    }
     // 聚合闭包：多村组同名聚合 / 跨类别合分项（案例：16037.54 = 8205.53 + 7525.01 + 307）
     if (aggregationClosure(total, unit, context, authority, poolSorted)) continue;
     // 无锚点无分项和：合计句数值未命中任何权威口径 → 疑似无源合计（须有类别相关条目在场，否则无法归因不报）
@@ -387,6 +401,9 @@ function scanSpecQuantityBindings(markdown: string, authority: ReconciliationAut
     if (!valueMatch) continue;
     // 槽位词豁免：规格与数值之间出现埋深/厚度等属性词 → 数值是工艺参数而非该规格工程量
     if (SLOT_WORD_RE.test(valueMatch[1])) continue;
+    // 工艺参数约束豁免（4.31 丰乐镇 v6 #2）：「DN25 管不大于 1.0m」的 1.0m 是支架间距的工艺
+    // 约束上限（不大于/不超过类），非该规格的清单数量，不得与其他规格数量互比张冠李戴
+    if (/不大于|不超过|不得大于|不得超过/.test(valueMatch[1])) continue;
     const value = parseNumeric(valueMatch[2]);
     if (value === undefined) continue;
     if (bound.some(item => nearlyEqual(item.value, value))) continue;
@@ -523,6 +540,76 @@ function windowArithmeticHit(markdown: string, at: number, nameLength: number, v
   return false;
 }
 
+/** D4.6a 豁免：同名条目子集和（4.31 丰乐镇 v6 #4-61）：正文绑定值恰为一组同名清单条目（多村组分项）
+ * 的子集之和时属聚合口径的正常引用（案例：挖一般土方 4040.45 = 同名 37 条全和 4187.38 − 146.93），
+ * 原“同名值集（单条）/组和（整组）”豁免覆盖不到的任意子集被逐条误报「绑定无源」——
+ * 丰乐镇 58 条同根因（4040.45/146.93/158.25/572.3/633 五个子集和对不同村组权威循环误报）。
+ * meet-in-middle 精确 cents 判定：池上限 40 条防组合爆炸；单元素表示由同名值集豁免覆盖，此处只认
+ * ≥2 元素组合（池内存在同值单条即返回 false）。
+ * 4.32 扩围（丰乐镇 v6 复测「回填方 4270」44 条放大误报）：同名池超 40 条上限时原实现整体返回
+ * false，44 条「回填方」池的 4270 = 3570 + 700（两值组合）失去豁免，命中的每个同名条目逐条误报
+ * 「绑定无源」——超限池退化为浅组合判定（正向两值和 / 全和减单值 / 全和减两值和，O(n²) 任意池
+ * 大小），深组合（≥3 元素）仍仅对 ≤40 池由 meet-in-middle 判定；浅组合不允许单元素表示。 */
+function subsetSumCentsHit(poolCents: number[], targetCents: number): boolean {
+  if (poolCents.length < 2 || targetCents <= 0) return false;
+  const sorted = [...poolCents].sort((left, right) => left - right);
+  if (sorted.some(cents => cents === targetCents)) return false;
+  const total = sorted.reduce((sum, cents) => sum + cents, 0);
+  if (targetCents > total) return false;
+  // 浅组合（任意池大小，O(n²)）：正向两值之和 == target；反向（补集视角）target = 全和 − 单值 /
+  // 全和 − 两值之和（即两值之和 == 全和 − target）。补集组合需排除单元素退化：n=2 时“全和 − 单值”
+  // 只剩 1 个元素、n=2 时“全和 − 两值和”为空集，均被单值/空集语义排除，此时由同名值集豁免兜底。
+  const reverseTarget = total - targetCents;
+  if (reverseTarget > 0 && reverseTarget !== targetCents) {
+    const ceiling = Math.max(targetCents, reverseTarget);
+    for (let i = 0; i < sorted.length; i += 1) {
+      for (let j = i + 1; j < sorted.length; j += 1) {
+        const pairSum = sorted[i] + sorted[j];
+        if (pairSum > ceiling) break;
+        if (pairSum === targetCents || pairSum === reverseTarget) return true;
+      }
+    }
+    // 全和 − 单值 == target（n≥3 时为 ≥2 元素组合；n=2 时的单元素情形已被同名值集豁免覆盖）
+    let lo = 0;
+    let hi = sorted.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (sorted[mid] === reverseTarget) return sorted.length >= 3;
+      if (sorted[mid] < reverseTarget) lo = mid + 1;
+      else hi = mid - 1;
+    }
+  } else {
+    for (let i = 0; i < sorted.length; i += 1) {
+      for (let j = i + 1; j < sorted.length; j += 1) {
+        const pairSum = sorted[i] + sorted[j];
+        if (pairSum > targetCents) break;
+        if (pairSum === targetCents) return true;
+      }
+    }
+  }
+  if (sorted.length > 40) return false;
+  const half = Math.ceil(sorted.length / 2);
+  const first = sorted.slice(0, half);
+  const second = sorted.slice(half);
+  const sumsOf = (items: number[]): Set<number> => {
+    let sums = new Set<number>([0]);
+    for (const item of items) {
+      const next = new Set<number>();
+      for (const partial of sums) {
+        next.add(partial);
+        next.add(partial + item);
+      }
+      sums = next;
+    }
+    return sums;
+  };
+  const secondSums = sumsOf(second);
+  for (const firstSum of sumsOf(first)) {
+    if (secondSums.has(targetCents - firstSum)) return true;
+  }
+  return false;
+}
+
 function scanNameBindings(markdown: string, authority: ReconciliationAuthority, lock?: BillFactLock): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const seen = new Set<string>();
@@ -544,6 +631,42 @@ function scanNameBindings(markdown: string, authority: ReconciliationAuthority, 
       groupTotals.set(bucket.name, list);
     }
   }
+  // 同名条目子集和豁免缓存（4.31）：池按「名称|单位」缓存（once per scan），判定结果按
+  // 「名称|单位|目标分值」记忆化——同一目标值被同名多条条目在同句重复触发时只算一次
+  const subsetPoolCache = new Map<string, number[]>();
+  const subsetHitCache = new Map<string, boolean>();
+  // 组和补差豁免缓存（4.31）：判定结果按「名称|目标分值」记忆化（同一命中点重复触发只算一次）
+  const groupDeltaCache = new Map<string, boolean>();
+  const subsetSumExempt = (targetName: string, targetUnit: string, target: number): boolean => {
+    const poolKey = `${targetName}\u0000${targetUnit}`;
+    let pool = subsetPoolCache.get(poolKey);
+    if (!pool) {
+      pool = authority.entries
+        .filter(entry => entry.name === targetName && normalizeUnit(entry.unit) === targetUnit && entry.value > 0)
+        .map(entry => Math.round(entry.value * 100));
+      subsetPoolCache.set(poolKey, pool);
+    }
+    if (pool.length < 2) return false;
+    const hitKey = `${poolKey}\u0000${Math.round(target * 100)}`;
+    const cached = subsetHitCache.get(hitKey);
+    if (cached !== undefined) return cached;
+    const hit = subsetSumCentsHit(pool, Math.round(target * 100));
+    subsetHitCache.set(hitKey, hit);
+    return hit;
+  };
+  /** D4.6a 豁免：组和补差（4.31 丰乐镇 v6 检查井 557）：正文值 = 同名条目组和 + 权威池任一值
+   * （557 = 塑料检查井 25 条组和 555 + 砌筑检查井 2）——跨名称聚合口径的正常引用；
+   * 与 aggregationClosure「相关组和 + 补差」同构（单值补差边界，不得放宽为任意两值拼合）。 */
+  const groupDeltaExempt = (targetName: string, target: number): boolean => {
+    const sums = groupTotals.get(targetName) || [];
+    if (sums.length === 0) return false;
+    const cacheKey = `${targetName}\u0000${Math.round(target * 100)}`;
+    const cached = groupDeltaCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+    const hit = sums.some(sum => authority.numberPool.some(pool => nearlyEqual(sum + pool, target)));
+    groupDeltaCache.set(cacheKey, hit);
+    return hit;
+  };
   // ── D4.6a 名称-数值绑定（清单条目名 + 紧邻数值对账）──
   if (lock) {
     for (const entry of lock.entries) {
@@ -561,6 +684,9 @@ function scanNameBindings(markdown: string, authority: ReconciliationAuthority, 
           from = at + 1;
           continue;
         }
+        // 构词延续：「回填方量」=「回填方」+「量」的复合词（回填方的方量），非清单名称引用 → 跳过
+        // （丰乐镇复测「回填方量为4270m³」被 29 个同名条目逐一误报「名称-数值绑定无源」根因）
+        if (markdown.slice(at + name.length, at + name.length + 1) === '量') continue;
         const window = markdown.slice(at + name.length, at + name.length + 20);
         const valueMatch = /^([^。；;\n|]{0,12}?)([\d,，]+(?:\.\d+)?)\s*(座|个|套|处|盏|棵|株|樘|扇|根|块|片|组|件|孔|间|栋|幢|户|米|m|km|公里|平方米|m2|㎡|m²|立方米|m3|m³|kg|吨|t)(?![a-zA-Z0-9²³])/u.exec(window);
         if (!valueMatch) continue;
@@ -570,10 +696,19 @@ function scanNameBindings(markdown: string, authority: ReconciliationAuthority, 
         if (nearlyEqual(value, entry.quantity)) continue;
         const unit = normalizeUnit(valueMatch[3]);
         if (unit !== normalizeUnit(entry.unit)) continue;
+        // 同名条目值集豁免：同名条目（多村组同名不同值，如 29 村「回填方」）值集中恰有本值 →
+        // 正文绑定值命中同名条目的合法数量（自身 quantity 已由上方 nearlyEqual 分支排除），属名称一致的非错位引用
+        if (authority.entries.some(other => other.name === name && nearlyEqual(other.value, value) && normalizeUnit(other.unit) === unit)) continue;
         // 同名组和豁免：多村组聚合口径（案例：石桌石凳 8个 = 同名清单条目 1×8 村组之和）
         if ((groupTotals.get(name) || []).some(sum => nearlyEqual(sum, value))) continue;
+        // 同名条目子集和豁免（4.31 丰乐镇 v6 #4-61）：正文绑定值恰为一组同名清单条目的子集之和
+        //（4040.45 = 同名 37 条全和 4187.38 − 146.93）属聚合口径正常引用，不判「绑定无源」
+        if (subsetSumExempt(name, unit, value)) continue;
+        // 组和补差豁免（4.31 丰乐镇 v6 检查井 557）：正文值 = 同名条目组和 + 权威池任一值
+        if (groupDeltaExempt(name, value)) continue;
         // 数字命中其他条目 + 其他条目名与本地语境重叠 → 正文实际在讲别的条目（豁免）
-        const localContext = markdown.slice(Math.max(0, at - 8), at + name.length + 20);
+        // 窗口 32 字：覆盖「挖基坑土方42.12m³、回填方…」型枚举引用（前项 foreign 名可能落在名称前 8 字窗外）
+        const localContext = markdown.slice(Math.max(0, at - 32), at + name.length + 20);
         // 名称相关组和豁免：正文以更短/更具体名引用清单组（案例：栽植色带（生态池外围）90m² = 组「栽植色带（生态池外围一圈）」之和）
         if (relatedGroupTotalHit(value, name, localContext, groupTotals)) continue;
         const foreign = authority.entries.find(other =>

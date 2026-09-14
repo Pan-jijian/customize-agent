@@ -1,8 +1,12 @@
 import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplateChapter, ValidationIssue } from './types';
 import { inferConstructionOrgProjectTypes, type ConstructionOrgProjectType } from './constructionOrgProjectTypes';
-import { DIVISION_PROCESS_LABEL_RE, DIVISION_SECTION_QUALITY, DIVISION_SECTION_RE, MAJOR_CONTENT_SECTION_RE } from './writingSpec';
+import { DIVISION_SECTION_QUALITY, DIVISION_SECTION_RE, MAJOR_CONTENT_SECTION_RE } from './writingSpec';
 import { hasProcessSequenceExpression, workPackageContentElementFlags, workPackageContentElementsComplete } from './utils';
 import { buildSemanticGate } from './semanticGate';
+
+/** 切块截尾（4.31 丰乐镇 v6 根治）：块内进入 #/##/### 级嵌入标题（跨小节内容混入）时只取标题前正文，
+ * 防止后续小节内容混入本块造成三要素判定/脏事实检测连带误报（实测：块尾吞并下级小节致多块误报）。 */
+const cutAtEmbeddedHeading = (block: string): string => block.split(/\n(?=#{1,3}\s)/u)[0].trim();
 
 /** 空话词表：词面只做召回（短路优化），语义判定由语义 gate 复核完成（阶段五——"精心组织"类口号
  * 出现在具体措施语境（如"精心组织劳动力进场"）不得误报空泛套话） */
@@ -240,11 +244,12 @@ export function constructionOrgMajorContentIssues(chapters: DocumentDraftChapter
     const clean = content.replace(/^####\s+(?:\d+(?:\.\d+)*\s+)?(?:项目主要施工\s*内容|主要施工\s*内容)\s*\n+/mu, '');
     const packageCount = (clean.match(/^####\s+(?:\d+(?:\.\d+)*\s+)?[一二三四五六七八九十\d]*[、.．]?\s*\S+/gmu) || []).length
       || (clean.match(/^[一二三四五六七八九十]+、\S+/gmu) || []).length;
-    const packageBlocks = clean.split(/^####\s+/gmu).slice(1).map(block => block.trim()).filter(Boolean);
+    const packageBlocks = clean.split(/^####\s+/gmu).slice(1).map(block => cutAtEmbeddedHeading(block)).filter(Boolean);
     // 4.17.9 内容要素检查（呈现形式不限）：三要素判定统一走 utils.workPackageContentElementsComplete。
     // 不再按“施工概况/施工流程/施工方法”标签字面判定——无标签但写法正确的块不应被误判缺失（写作侧同样不再强制标签）
     const incompletePackages = packageBlocks.filter(block => !workPackageContentElementsComplete(block));
-    const dirtyPackages = packageBlocks.filter(block => /资料内容事实|#{2,6}\s+|\*\*[^*]+\*\*|未尽事宜|专业施工内容统筹|招标范围还包含|具备有效的.*资质/u.test(block));
+    // 粗体伪标题只认整行粗体（^**…**$ + m 旗）：行内强调用粗体是正常行文，不得误报脏事实（4.31）
+    const dirtyPackages = packageBlocks.filter(block => /资料内容事实|#{2,6}\s+|^\*\*[^*]+\*\*$|未尽事宜|专业施工内容统筹|招标范围还包含|具备有效的.*资质/um.test(block));
     const weakMethodPackages = packageBlocks.filter(block => {
       // 4.17.9 无标签形态（自然成文）：方法要素强弱由上方内容要素检查（workPackageContentElementsComplete）把关，
       // 本检查只针对“施工方法：”标签形态的方法段，避免空提取把无标签块恒判“过弱”
@@ -261,7 +266,9 @@ export function constructionOrgMajorContentIssues(chapters: DocumentDraftChapter
     const normalizedTitles = packageBlocks.map(block => (block.split('\n')[0] || '').replace(/^\d+(?:\.\d+)*\s+/u, '').replace(/工程$/u, '').replace(/[、.．]/gu, '').trim());
     const duplicateTitles = [...new Set(normalizedTitles.filter((title, index) => title && normalizedTitles.indexOf(title) !== index))];
     if (duplicateTitles.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容存在 ${duplicateTitles.length} 组重复专业工程小节：${duplicateTitles.slice(0, 5).join('、')}`, suggestion: '同一专业工程只保留一个小节，将重复小节的独有内容合并后删除冗余小节，避免专业工程重复铺陈。' });
-    if (packageCount < 5) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容专业工程不足：当前 ${packageCount} 个，要求不少于 5 个`, suggestion: '按资料识别专业工程/分部分项工程逐项展开，每项覆盖作业对象与工程量、工序顺序、施工方法三方面要素（融入连贯叙述，不得以结构标签充当小节标题或段落开头引导）。' });
+    // 4.31 门槛校准：小型村组项目（如丰乐镇 3 大专业板块：景观/污水/绿化）3 个专业工程即达标，
+    // 原硬编码 5 对真实小项目恒误报 blocker
+    if (packageCount < 3) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容专业工程不足：当前 ${packageCount} 个，要求不少于 3 个`, suggestion: '按资料识别专业工程/分部分项工程逐项展开，每项覆盖作业对象与工程量、工序顺序、施工方法三方面要素（融入连贯叙述，不得以结构标签充当小节标题或段落开头引导）。' });
     if (incompletePackages.length > 0) issues.push({ level: 'error', severity: 'blocker', message: `${label} 主要施工内容存在 ${incompletePackages.length} 个专业工程内容要素不全（作业对象与工程量/工序顺序/施工方法至少缺一）`, suggestion: '每个专业工程需覆盖作业对象与工程量、工序安排、施工方法三方面要素，融入连贯段落叙述（禁止以“施工概况/施工流程/施工方法”等结构标签充当标题或段落开头引导）。' });
     // 概括话术检测（4.18.6）：工作包正文出现“按设计图纸执行/详见设计图纸”式留白——
     // 清单特征描述与图纸说明中大量存在该字样，Writer 照抄导致正文无具体数值
@@ -377,33 +384,33 @@ export function constructionOrgDivisionSectionIssues(chapters: DocumentDraftChap
     // 分项工程方案 = #### 小节（与 majorContent 工作包口径一致）；
     // 兼容粗体伪标题一段式：无 #### 小节时按“行首 **分项名**”切块（真实生成缺陷：LLM 用粗体行替代小节标题，
     // 历史验收器按 #### 切出 0 块只能报“分项不足”，无法定位各分项缺什么，粗体形态由此穿透门禁交付）
-    let packageBlocks = content.split(/^####\s+/gmu).slice(1).map(block => block.trim()).filter(Boolean);
+    let packageBlocks = content.split(/^####\s+/gmu).slice(1).map(block => cutAtEmbeddedHeading(block)).filter(Boolean);
     if (packageBlocks.length === 0) {
-      packageBlocks = [...content.matchAll(/^\*\*[^*]+\*\*[\s\S]*?(?=^\*\*[^*]+\*\*|\s*$)/gmu)].map(match => match[0].trim()).filter(Boolean);
+      packageBlocks = [...content.matchAll(/^\*\*[^*]+\*\*[\s\S]*?(?=^\*\*[^*]+\*\*|\s*$)/gmu)].map(match => cutAtEmbeddedHeading(match[0])).filter(Boolean);
     }
     // 章-节两级新结构（统一融合规划产物）：无 H4 工作包时，章下 H3 小节本身就是分项方案
     // （「### 2.1 场地平整与土方回填方法」= 一个分项）；H4 存在时仍按 H4 切块，保证与写作规格一致
     if (packageBlocks.length === 0) {
-      packageBlocks = content.split(/^###\s+/gmu).slice(1).map(block => block.trim()).filter(Boolean);
+      packageBlocks = content.split(/^###\s+/gmu).slice(1).map(block => cutAtEmbeddedHeading(block)).filter(Boolean);
     }
     const packageCount = packageBlocks.length;
-    // 4.17.9 内容要素检查（呈现形式不限）：不再按“施工概况/工艺流程/施工方法”标签字面判定缺失
-    const incompletePackages = packageBlocks.filter(block => {
-      const hasScope = /(?:施工)?(?:概况|范围)[:：]\s*\S|工程量|作业对象|部位/u.test(block);
-      const hasProcess = DIVISION_PROCESS_LABEL_RE.test(block) || hasProcessSequenceExpression(block);
-      const hasMethod = /(?:施工)?方法[:：]\s*\S|工艺参数|验收标准|检测|试验|记录/u.test(block);
-      return !hasScope || !hasProcess || !hasMethod;
-    });
+    // 4.17.9/4.31 内容要素检查（呈现形式不限）：与主要施工内容同口径——三要素判定统一走
+    // utils.workPackageContentElementsComplete（词表已覆盖「总量/共N」工程量表达与「检查/整改/养护」方法证据），
+    // 不再按“施工概况/工艺流程/施工方法”标签字面判定缺失（历史缺陷：自然成文分项块被恒判要素不全）
+    const incompletePackages = packageBlocks.filter(block => !workPackageContentElementsComplete(block));
     // 脏事实：资料原文残留、嵌入标题、粗体伪标题、空话套话（与专项提示词禁止项同口径）
-    const dirtyPackages = packageBlocks.filter(block => /资料内容事实|#{2,6}\s+|\*\*[^*]+\*\*|未尽事宜|按规范施工|结合实际执行|招标范围还包含/u.test(block));
+    // 粗体伪标题只认整行粗体（4.31）：行内强调用粗体是正常行文；嵌入标题已由切块截尾消除，此处为防御
+    const dirtyPackages = packageBlocks.filter(block => /资料内容事实|#{2,6}\s+|^\*\*[^*]+\*\*$|未尽事宜|按规范施工|结合实际执行|招标范围还包含/um.test(block));
     // 工序顺序表达检测：每个分项方案的施工方法段或流程段必须有工序顺序表达
     // （箭头链/编号步骤/有序无序列表/顺序词/连接线任一形式，不再强制“→”）
     const weakChainPackages = packageBlocks.filter(block => {
       // 粗体伪标签兼容：验收器直读最终 markdown，标签归一化虽已覆盖成稿链，双保险容忍粗体形态
       const method = block.match(/(?:\*\*)?施工方法(?:\*\*)?[:：]([\s\S]*?)(?=\n施工|$)/u)?.[1] || '';
-      if (method.trim() && hasProcessSequenceExpression(method)) return false;
       const flow = block.match(/(?:\*\*)?(?:施工流程|工艺流程)(?:\*\*)?[:：]([\s\S]*?)(?=\n(?:施工|工艺)|$)/u)?.[1] || '';
-      return !hasProcessSequenceExpression(flow);
+      // 4.31 无标签形态（自然成文）：方法/流程标签均不存在时按整块正文判定工序顺序表达——
+      // 原逻辑空提取恒判“缺少工序顺序表达”（丰乐镇 v6 实测：17 个自然成文分项块全部误报弱链）
+      const text = method.trim() || flow.trim() ? `${method}\n${flow}` : block;
+      return !hasProcessSequenceExpression(text);
     });
     // 参数密度：每个分项方案正文至少 4 个工艺参数（数字+单位，或“间距/偏差/坡度/养护”等工艺词+数字）；
     // 单位表含 N/颗/樘/扇：门窗维修类分项“启闭力不大于50N”“螺钉固定不少于2颗”属有效工艺参数（九度实测缺陷：正则漏判报参数不足）
@@ -592,7 +599,8 @@ export function majorContentGovernanceIssues(markdown: string): ValidationIssue[
         suggestion: '主要施工内容/主要施工方法应采用三级小节与段落式专业工程写法：每个专业工程一个 #### 小节，覆盖作业对象与工程量、工序顺序、施工方法三方面要素；表格数据改写成连贯叙述。',
       });
     }
-    const strongHits = [...new Set((body.match(/[^\n]{0,18}(?:分部小计|本页小计|按实|暂估|综合单价|规费|税金)[^\n]{0,18}/gu) || []).map(item => item.trim()))];
+    // 4.31 “按实(?!际)”：「按实际需要留置」等正常规范句不含清单口径语义，原正则裸匹配“按实”误报（丰乐镇 v6 实测）
+    const strongHits = [...new Set((body.match(/[^\n]{0,18}(?:分部小计|本页小计|按实(?!际)|暂估|综合单价|规费|税金)[^\n]{0,18}/gu) || []).map(item => item.trim()))];
     // 「措施项目」是工程类别名词的合法用法（2.18 措施项目小节、2.24 分部分项方案列举），
     // 仅当与清单计价语境共现（措施项目费 / 措施项目+清单/计价/费）才属清单内部口径（丰乐镇实测误报）
     const measureHits = [...new Set((body.match(/[^\n]{0,18}(?:措施项目费|措施项目[^\n]{0,8}(?:清单|计价|费率))[^\n]{0,18}/gu) || []).map(item => item.trim()))];

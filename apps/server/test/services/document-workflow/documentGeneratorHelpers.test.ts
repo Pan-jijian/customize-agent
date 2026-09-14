@@ -510,6 +510,18 @@ describe('callBreakdownTopSummary / callBreakdownTopDetails（4.1 per-调用分�
     ]);
   });
 
+  it('schema 失败按调用类型归因：summary 追加「（schema失败N）」、details 追加失败次数（无失败字段则省略）', () => {
+    const breakdown = {
+      'plan-block:c1': { ...bucket(3, 90000), schemaFailures: 2 },
+      'draft:c2': bucket(1, 50000),
+    };
+    expect(callBreakdownTopSummary(breakdown)).toBe('plan-block:c1 3次/9.0万字（schema失败2），draft:c2 1次/5.0万字');
+    expect(callBreakdownTopDetails(breakdown)).toEqual([
+      'plan-block:c1：3 次，输入 9.0 万字（L3 0.0 万字），schema 失败 2 次',
+      'draft:c2：1 次，输入 5.0 万字（L3 0.0 万字）',
+    ]);
+  });
+
   it('空/undefined breakdown 回退空串与空数组', () => {
     expect(callBreakdownTopSummary(undefined)).toBe('');
     expect(callBreakdownTopDetails(undefined)).toEqual([]);

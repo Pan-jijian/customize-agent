@@ -1273,6 +1273,26 @@ describe('E6 selfUnderminingCandidateIssues 自伤表述候选', () => {
     const md = '专项设计文件尚未完成，待后续补充；评分指标存在缺口尚未明确。';
     expect(await selfUnderminingCandidateIssues(md)).toHaveLength(2);
   });
+  it('E6 4.32 对X缺失闭环句豁免：对台账缺失…责成…补齐记录并完成复查销项（v6 #51）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '项目经理每周组织一次专项检查，对台账缺失、消纳去向不明的，责成材料员与施工员在3日内补齐记录并完成复查销项。';
+    expect(await selfUnderminingCandidateIssues(md)).toEqual([]);
+  });
+  it('E6 4.32 工序管控句豁免：不得…避免返工窝工损失（v6 #50）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '各阶段之间以工序交接验收为控制节点，前一阶段未完成交接检验的作业面不得提前插入后续工序，避免返工与窝工叠加造成工期损失。';
+    expect(await selfUnderminingCandidateIssues(md)).toEqual([]);
+  });
+  it('E6 4.32 重难点分析句豁免：难点源于…若未及时…将…（v6 #49）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '该难点源于绿化苗木栽植后根系尚未稳固，受风力、浇水不足或支撑松动影响易发生倒伏、断枝，若未及时扶正加固将降低成活率。';
+    expect(await selfUnderminingCandidateIssues(md)).toEqual([]);
+  });
+  it('E6 4.32 无整改动作的缺失自述仍召回（豁免未过宽）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '本工程竣工资料缺失较多，专项验收尚未完成。';
+    expect(await selfUnderminingCandidateIssues(md)).toHaveLength(1);
+  });
 });
 
 describe('E7 叠词检测与去重（REPEATED_WORD_RE）', () => {

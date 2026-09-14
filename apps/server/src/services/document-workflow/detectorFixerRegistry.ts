@@ -6,7 +6,7 @@
  *   buildStandardFinalValidationIssues（standard-final 组）的全部检测器在此登记元数据
  *   （id / 权威依赖 / deterministicSafe / scope / category），执行侧经 det() 包装登记引用；
  * - 修复器（FixerEntry）：确定性修复器（SURFACE_FIX_STEPS 锚定声明）与 LLM patch 修复轮
- *   （LLM_PATCH_REPAIR_ROUNDS 八调用点声明）强制 anchoredTo 锚定检测器——检测定位=修复定位；
+ *   （LLM_PATCH_REPAIR_ROUNDS 七调用点声明）强制 anchoredTo 锚定检测器——检测定位=修复定位；
  * - assertRegistryConsistency：启动与单测执行的结构一致性检查（锚定存在性 / 权威集合相等 /
  *   llm-patch 必带 patchGuard / patchGuard 引用检测器必须 deterministicSafe / category 合法性）。
  *
@@ -77,7 +77,7 @@ export interface DetectorEntry {
  * 静默逃逸硬阻断——「新检测器上线不生效」陷阱的根因之一，故纳入注册表一致性强制校验。
  */
 export const VALID_DETECTOR_CATEGORIES: ReadonlySet<string> = new Set([
-  'structure', 'table', 'fact_consistency', 'evidence_coverage', 'professional_chain', 'control_loop', 'format', 'style', 'scope', 'qingtian_review',
+  'structure', 'table', 'fact_consistency', 'evidence_coverage', 'professional_chain', 'control_loop', 'format', 'style', 'scope',
 ] satisfies NonNullable<ValidationIssue['category']>[]);
 
 /** 修复器条目：修复定位声明（anchoredTo 强制锚定检测器，防修复无检测哑火） */
@@ -112,6 +112,9 @@ export const FULL_VALIDATION_DETECTORS: readonly DetectorEntry[] = [
   { id: 'writer-missing-section', scope: 'full-document', category: 'structure', deterministicSafe: true },
   { id: 'critical-section-depth', scope: 'chapter', category: 'structure' },
   { id: 'critical-section-fact-density', scope: 'chapter', category: 'evidence_coverage' },
+  // 方案 2.2 密度执行器终检同源复核（chapterFactDensityIssues）：写作侧 block-fact-density 的
+  // finalize 复核函数（同 factDensityVerdict 比例口径 1.5/千字），检测⊆写作
+  { id: 'chapter-fact-density', scope: 'chapter', category: 'evidence_coverage' },
   { id: 'construction-org-professional-audit', scope: 'chapter', category: 'professional_chain' },
 ];
 
@@ -242,7 +245,9 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
 
 /**
  * 修复轮锚定检测器（不属上述两组标准数组、由修复轮/门禁独立消费的检测器）：
- * 全部为 FixerEntry.anchoredTo 或 patchGuard.detectors 的引用目标，保证锚定存在性检查可判定。
+ * 全部为 FixerEntry.anchoredTo 或 patchGuard.detectors 的引用目标，保证锚定存在性检查可判定；
+ * 另含块级质量执行器组（方案 2.2）：chapterGeneration.writeBlock 经 det() 登记消费，
+ * 不参与 full-validation/standard-final 组哑火检查（写作时阻断与终检复核双职，注册单源于此）。
  */
 export const AUXILIARY_DETECTORS: readonly DetectorEntry[] = [
   { id: 'important-unplaced-facts', scope: 'chapter', category: 'evidence_coverage' },
@@ -252,12 +257,24 @@ export const AUXILIARY_DETECTORS: readonly DetectorEntry[] = [
   { id: 'workpackage-skeleton', scope: 'chapter', category: 'structure' },
   { id: 'planned-section-completeness', scope: 'chapter', category: 'structure' },
   { id: 'global-consistency-review', scope: 'full-document', category: 'fact_consistency' },
-  { id: 'qingtian-review', scope: 'full-document', category: 'qingtian_review' },
   { id: 'source-enumeration', scope: 'full-document', category: 'style', deterministicSafe: true },
   { id: 'meta-discourse-declaration', scope: 'full-document', category: 'style', deterministicSafe: true },
   { id: 'finish-thickness', scope: 'full-document', category: 'fact_consistency', deterministicSafe: true },
   { id: 'formula-residue', scope: 'full-document', category: 'format', deterministicSafe: true },
   { id: 'truncated-sentence', scope: 'full-document', category: 'format', deterministicSafe: true },
+  // ── 块级质量执行器（方案 2.2 六类，写作时阻断 + finalize 同源复核双职；实现单源 blockQualityExecutors）──
+  // ① 结构（契约小节全覆盖/禁发明编号：writeBlock 内联判定，终检复核 section-content-integrity 族）
+  { id: 'block-structure-contract', scope: 'chapter', category: 'structure' },
+  // ② 密度（事实落位 ≥1.5/千字比例口径：assessBlockFactDensity，终检复核 chapter-fact-density）
+  { id: 'block-fact-density', scope: 'chapter', category: 'evidence_coverage' },
+  // ③ 模板化（套话句占比 >10% 或模糊句式 ≥3 处/块：scanBlockTemplating，终检复核 templating-filler）
+  { id: 'block-templating', scope: 'chapter', category: 'style' },
+  // ④ 归因量化（重难点类章条目双达标率 <50%：scanAttributionQuantification，终检复核 templating-difficulty）
+  { id: 'block-attribution-quantification', scope: 'chapter', category: 'professional_chain' },
+  // ⑤ 数值（正文数值 vs 证据池对账矛盾即阻断：writeBlock 内联 reconcileContentNumbers，终检复核数值族）
+  { id: 'block-numeric-reconciliation', scope: 'chapter', category: 'fact_consistency' },
+  // ⑥ 格式（后台/兜底话术硬约束：backstageFallbackHits，终检复核 formal-text-gate）
+  { id: 'block-format-constraints', scope: 'chapter', category: 'format' },
 ];
 
 // ═══════════════════════════ 修复器声明表 ═══════════════════════════
@@ -272,16 +289,24 @@ export const DETERMINISTIC_FIXER_ANCHORS: readonly FixerEntry[] = [
   { id: 'repeated-words', kind: 'deterministic', anchoredTo: 'repeated-word', giveUpOnFailure: true },
   { id: 'duplicate-tables', kind: 'deterministic', anchoredTo: 'duplicate-table', giveUpOnFailure: true },
   { id: 'finish-thickness', kind: 'deterministic', anchoredTo: 'finish-thickness', giveUpOnFailure: true },
+  // 4.31 埋深/覆土槽位数值错位删除（丰乐镇 v6 #3）：与检测器 fact-reconciliation D4.3 同源（blueprint 权威）
+  { id: 'slot-depth-value', kind: 'deterministic', anchoredTo: 'fact-reconciliation', authorities: ['blueprint'], giveUpOnFailure: true },
   { id: 'labor-peak', kind: 'deterministic', anchoredTo: 'resource-consistency', authorities: ['laborPeak'], giveUpOnFailure: true },
   // V5 P4b-2 阶段劳动力确定性回写（与检测器 phase-labor-mixing 同源双通道扫描；蓝图权威）
   { id: 'phase-labor-values', kind: 'deterministic', anchoredTo: 'phase-labor-mixing', authorities: ['blueprint'], giveUpOnFailure: true },
   // A3 资源章数值拆分确定性统一（4.27.0）：与检测器 resource-breakdown-consistency 同源（blueprint 权威）
   { id: 'resource-breakdown', kind: 'deterministic', anchoredTo: 'resource-breakdown-consistency', authorities: ['blueprint'], giveUpOnFailure: true },
   { id: 'internal-table-row-dup', kind: 'deterministic', anchoredTo: 'table-spam', giveUpOnFailure: true },
+  // 4.31 基础信息表重复合并（丰乐镇 v6 #70）：与检测器 table-quality（markdownTableQualityIssues）同源
+  { id: 'duplicate-basic-info-tables', kind: 'deterministic', anchoredTo: 'table-quality', giveUpOnFailure: true },
+  // 4.31 表格兜底话术行删除（丰乐镇 v6 #86/87）：与门禁检测器 formal-placeholder 同词表
+  { id: 'fallback-placeholder-rows', kind: 'deterministic', anchoredTo: 'formal-placeholder', giveUpOnFailure: true },
   { id: 'greening-maintenance', kind: 'deterministic', anchoredTo: 'greening-maintenance-mismatch', authorities: ['greeningMaintenance'], giveUpOnFailure: true },
   { id: 'paragraph-opening-repeat', kind: 'deterministic', anchoredTo: 'paragraph-opening-repeat', giveUpOnFailure: true },
   { id: 'paragraph-tail-repeat', kind: 'deterministic', anchoredTo: 'paragraph-tail-repeat', giveUpOnFailure: true },
   { id: 'collision-numbered-heading', kind: 'deterministic', anchoredTo: 'collision-numbered-heading', giveUpOnFailure: true },
+  // 4.31 小节标题工程类别未覆盖改名（丰乐镇 v6 #90）：与检测器 heading-uncovered-engineering-items 同源单扫描
+  { id: 'heading-uncovered-items', kind: 'deterministic', anchoredTo: 'heading-uncovered-engineering-items', giveUpOnFailure: true },
   { id: 'inverted-date-range', kind: 'deterministic', anchoredTo: 'inverted-date-range', giveUpOnFailure: true },
   { id: 'truncated-sentence', kind: 'deterministic', anchoredTo: 'truncated-sentence', giveUpOnFailure: true },
   { id: 'meta-discourse', kind: 'deterministic', anchoredTo: 'meta-discourse-declaration', giveUpOnFailure: true },
@@ -293,6 +318,12 @@ export const DETERMINISTIC_FIXER_ANCHORS: readonly FixerEntry[] = [
   // 4.27.2 招标元语言确定性清理（语气泄漏治理）：与检测器 formal-style（文风泄漏/后台话术）同源锚定——
   // 「按招标文件要求/约定」条幅与调用式元语言属正式文风失分面，检测定位=修复定位
   { id: 'tender-meta-language', kind: 'deterministic', anchoredTo: 'formal-style', giveUpOnFailure: true },
+  // 4.32 配置禁用词确定性清洗（丰乐镇 v6 #59）：与门禁检测器 formal-text-gate（forbiddenTexts 阻断词）同源
+  { id: 'forbidden-configuration', kind: 'deterministic', anchoredTo: 'formal-text-gate', giveUpOnFailure: true },
+  // 4.31 编制依据地方性法规补写（丰乐镇 v6 #71）：与检测器 basis-regulations-coverage 同源（blueprint 权威）
+  { id: 'basis-regulation-region', kind: 'deterministic', anchoredTo: 'basis-regulations-coverage', authorities: ['blueprint'], giveUpOnFailure: true },
+  // 4.32 工伤保险缴纳表述补写（丰乐镇 v6 #60）：与检测器 local-adaptation-keyword（workInjury 语义查询）同源
+  { id: 'work-injury-insurance', kind: 'deterministic', anchoredTo: 'local-adaptation-keyword', giveUpOnFailure: true },
   // 4.27.2 条款响应重复行去重：与检测器 duplicate-paragraph 同源（整行完全重复的重复段落族）
   { id: 'duplicate-response-line', kind: 'deterministic', anchoredTo: 'duplicate-paragraph', giveUpOnFailure: true },
   { id: 'atlas-reference', kind: 'deterministic', anchoredTo: 'drawing-reference', giveUpOnFailure: true },
@@ -340,7 +371,7 @@ const PATCH_GUARD_DETECTOR_IDS = [
 ] as const;
 
 /**
- * LLM patch 修复轮声明（repairChapterByQuality 八调用点，P11 全链接入的登记载体）：
+ * LLM patch 修复轮声明（repairChapterByQuality 七调用点，P11 全链接入的登记载体）：
  * - anchoredTo = 该轮触发检测器（修复定位=检测定位）；
  * - patchGuard.detectors = patch 应用前预检集（十类零误伤确定性检测器，P11 全链 observe 后
  *   按命中分布渐进扩展，见 rolePipeline.deterministicDefectPrecheck）。
@@ -353,7 +384,6 @@ export const LLM_PATCH_REPAIR_ROUNDS: readonly FixerEntry[] = [
   { id: 'workpackage-skeleton-repair', kind: 'llm-patch', anchoredTo: 'workpackage-skeleton', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
   { id: 'planned-section-repair', kind: 'llm-patch', anchoredTo: 'planned-section-completeness', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
   { id: 'global-consistency-repair', kind: 'llm-patch', anchoredTo: 'global-consistency-review', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
-  { id: 'qingtian-review-repair', kind: 'llm-patch', anchoredTo: 'qingtian-review', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
 ];
 
 /**
@@ -366,7 +396,6 @@ export const FINALIZE_REPAIR_ROUNDS = [
   'semantic-choice-conflict',    // 决策锁语义矛盾检测（semanticChoiceConflicts，无修复）
   'deterministic-stage5',        // 交付前确定性清洗（章级数值/SURFACE_FIX_STEPS/全文数值/表承载正文）
   'formal-source-clean',         // 来源罗列话术确定性清洗兜底（cleanFormalSourcePhrases）
-  'qingtian-full-review',        // 全维度评审轮（runFullDimensionReview）
   'planned-section-final',       // 缺节/空小节补写终兜底（enforcePlannedSectionCompleteness）
   'commercial-strip',            // 商务条款数据交付前兜底清洗（stripCommercialDataBodyLines）
   'table-deterministic-repair',  // 表格空单元格交付前确定性修复（repairTableBlocksInMarkdownDeterministically）

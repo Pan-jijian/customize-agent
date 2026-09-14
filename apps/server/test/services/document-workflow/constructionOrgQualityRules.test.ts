@@ -190,11 +190,16 @@ describe('constructionOrgMajorContentIssues（项目主要施工内容门禁）'
     expect(constructionOrgMajorContentIssues([chapter('项目主要施工内容', content)])).toHaveLength(0);
   });
 
-  it('工作包不足 5 个报 blocker', () => {
-    const content = `### 2.3 项目主要施工内容\n${[goodPackage(1, '室外道排工程'), goodPackage(2, '屋面维修工程'), goodPackage(3, '外墙装饰工程')].join('\n')}`;
+  it('工作包不足 3 个报 blocker（4.31 门槛校准：3 个专业板块即达标）', () => {
+    const content = `### 2.3 项目主要施工内容\n${[goodPackage(1, '室外道排工程'), goodPackage(2, '屋面维修工程')].join('\n')}`;
     const issues = constructionOrgMajorContentIssues([chapter('项目主要施工内容', content)]);
     expect(issues.length).toBe(1);
     expect(issues[0].message).toContain('专业工程不足');
+  });
+
+  it('工作包 3 个 → 达标不报（4.31 门槛校准：小型村组项目）', () => {
+    const content = `### 2.3 项目主要施工内容\n${[goodPackage(1, '室外道排工程'), goodPackage(2, '屋面维修工程'), goodPackage(3, '外墙装饰工程')].join('\n')}`;
+    expect(constructionOrgMajorContentIssues([chapter('项目主要施工内容', content)])).toHaveLength(0);
   });
 
   it('工作包内容要素不全报 blocker（三要素硬门槛）', () => {

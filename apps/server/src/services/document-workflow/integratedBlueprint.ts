@@ -15,7 +15,7 @@ import type { BillOfQuantitiesResult, BoqEntry } from './billOfQuantitiesParser'
 import { matchProcessKnowledgeCards, PROCESS_KNOWLEDGE_CARDS } from './constructionProcessKnowledge';
 import { validateJsonAgainstSchema } from './llmClient';
 import type { DocumentJsonSchema } from './llmClient';
-import { buildAuthorityIndex, renderAuthorityDomains, type AuthorityDomain } from './authorityIndex';
+import { buildAuthorityIndex, renderAuthorityDomains, renderAuthorityDomainsForBlock, type AuthorityDomain } from './authorityIndex';
 import { generatedRoot } from '../document-core/generatedDocumentService';
 import { bridgeTunnelStrategy, buildingStrategy, climateForZone, generalStrategy, highwayStrategy, resolveClimateByLocation, resolveDerivationStrategy, villageMunicipalStrategy, waterConservancyStrategy, type BlueprintDerivationStrategy, type LaborQuotaRow } from './blueprintDerivationStrategies';
 
@@ -1853,6 +1853,33 @@ export function renderBlueprintDataText(data: BlueprintData): string {
   return lines.join('\n');
 }
 
+/** 块级聚焦参数桶（s1-slim 单块输入瘦身）：与 renderBlueprintDataText 同构、行文案同源，
+ * 差异仅 quantity/material 域按块 token 条目级筛选 + 字符封顶（全量桶 36413 字符 → 块相关数千字符）。
+ * 计划类恒定行（工期/劳动力峰值/机械/红线等）全量保留——它们是「计划类数值唯一口径」的可见性保障。 */
+export function renderBlueprintDataTextForBlock(data: BlueprintData, options: { blockTokens: string[]; quantityCharsCap?: number; materialCharsCap?: number }): string {
+  const lines: string[] = ['【一体化蓝图参数桶——全项目口径唯一权威源，正文引用必须与此一致，不得自行推导不同数值】'];
+  lines.push('计划类数值（劳动力人数/工期/工程量/养护期）必须且只能引用以下锚点值：禁止将各工种人数相加推导峰值、禁止按定额自行估算、禁止改写锚点数值。');
+  lines.push(`- 项目：${data.project.name}（${data.project.scope}）`);
+  lines.push(...renderAuthorityDomainsForBlock(buildAuthorityIndex(data), options));
+  if (data.inspectionBatches.length > 0) {
+    lines.push(`- 检验批划分：${data.inspectionBatches.map(item => `${item.scope}——${item.planDesc}`).join('；')}`);
+  }
+  lines.push(`- 临时用电：${data.tempUtilities.powerLoad}`);
+  lines.push(`- 临时用水：${data.tempUtilities.waterUsage}`);
+  if (data.decisionLock.entries.length > 0) {
+    lines.push(`- 关键决策锁：${data.decisionLock.entries.map(entry => `${entry.label}：${entry.values.join('、')}`).join('；')}`);
+  }
+  if (data.constructionDeployment.sections.length > 0) {
+    lines.push(`- 施工部署：${data.constructionDeployment.flow}；施工顺序 ${data.constructionDeployment.sequence}`);
+  }
+  if (data.keyDifficulties.length > 0) {
+    lines.push(`- 重难点（逐项列明）：${data.keyDifficulties.map(item => `${item.name}——${item.measure}`).join('；')}`);
+  }
+  lines.push(`- 金额禁区：${data.amountRule}`);
+  lines.push(data.drawingNote);
+  return lines.join('\n');
+}
+
 /** 章级数值锚点路由：权威域 → 章标题命中正则（确定性零 LLM；V5 P2 由 8 个手写 render
  * 升级为「域路由表 + 通用渲染器」——命中域的全部权威条目经 renderAuthorityDomains 聚焦注入）。
  * 路由只是「聚焦加分」，不是数据可见性门槛：未命中任何域的章仍在全局参数桶中看到全部权威；
@@ -1911,7 +1938,7 @@ export function renderBlueprintChapterAuthorityCard(chapter: BlueprintChapter, d
 }
 
 /** 章切片渲染：该章 sub_sections + work_packages 展开为「本项目专属事实」文本（执行层只读切片写作）。
- * data 传入时尾部追加章级数值锚点卡（本章必须引用的计划类数值聚焦强约束）。 */
+ * data 传入时尾部追加章级数值锚点卡。 */
 export function renderBlueprintChapterSlice(chapter: BlueprintChapter, data?: BlueprintData): string {
   // M4·写作三源规则：章切片权威提示与全局写作提示词（FORMAL_WRITING_RULES）共用同一份三源规则模板，
   // 写作层在本章看到的全部计划类数值均以切片与章域卡为准，禁止按定额重算（跨工程串位/口径分裂的提示词级防线）
@@ -1924,18 +1951,93 @@ export function renderBlueprintChapterSlice(chapter: BlueprintChapter, data?: Bl
     const mustCite = subSection.requiredParams.filter(param => param.mode === 'must_cite').map(param => param.path);
     if (mustCite.length > 0) lines.push(`must_cite 参数（正文必须出现且与蓝图一致）：${mustCite.join('、')}`);
     for (const workPackage of subSection.workPackages) {
-      lines.push(`\n### 工作包：${workPackage.name}（${workPackage.kind === 'major' ? '主要' : '一般'}工作包）`);
-      const quantityText = Object.entries(workPackage.quantities).map(([name, quantity]) => `${name} ${quantity.value}${quantity.unit}`).join('、');
-      if (quantityText) lines.push(`- 工程量：${quantityText}`);
-      if (workPackage.processChain.length > 0) lines.push(`- 工序链：${workPackage.processChain.join(' → ')}`);
-      if (workPackage.methods.length > 0) lines.push(`- 施工方法（清单特征原文）：${workPackage.methods.join('；')}`);
-      if (workPackage.params.length > 0) lines.push(`- 工艺参数：${workPackage.params.map(param => `${param.key}=${param.value}`).join('；')}`);
-      if (workPackage.acceptance.length > 0) lines.push(`- 验收要求：${workPackage.acceptance.join('；')}`);
-      if (workPackage.standards.length > 0) lines.push(`- 规范依据：${workPackage.standards.join('；')}`);
+      lines.push(...renderWorkPackageLines(workPackage));
     }
   }
   const authorityCard = data ? renderBlueprintChapterAuthorityCard(chapter, data) : '';
   return [lines.join('\n'), authorityCard].filter(Boolean).join('\n\n');
+}
+
+/** 工作包详情行渲染（章切片/块级切片共用，行文案单一来源） */
+function renderWorkPackageLines(workPackage: BlueprintWorkPackage): string[] {
+  const lines: string[] = [`\n### 工作包：${workPackage.name}（${workPackage.kind === 'major' ? '主要' : '一般'}工作包）`];
+  const quantityText = Object.entries(workPackage.quantities).map(([name, quantity]) => `${name} ${quantity.value}${quantity.unit}`).join('、');
+  if (quantityText) lines.push(`- 工程量：${quantityText}`);
+  if (workPackage.processChain.length > 0) lines.push(`- 工序链：${workPackage.processChain.join(' → ')}`);
+  if (workPackage.methods.length > 0) lines.push(`- 施工方法（清单特征原文）：${workPackage.methods.join('；')}`);
+  if (workPackage.params.length > 0) lines.push(`- 工艺参数：${workPackage.params.map(param => `${param.key}=${param.value}`).join('；')}`);
+  if (workPackage.acceptance.length > 0) lines.push(`- 验收要求：${workPackage.acceptance.join('；')}`);
+  if (workPackage.standards.length > 0) lines.push(`- 规范依据：${workPackage.standards.join('；')}`);
+  return lines;
+}
+
+/** 块级切片渲染参数 */
+export interface BlueprintBlockSliceOptions {
+  /** 块标题（主题块 H3 标题） */
+  blockTitle: string;
+  /** 块内要点标题（H4 覆盖清单=骨架名同源） */
+  subPointTitles: string[];
+  /** 骨架名（工作包级块的可选补充匹配源） */
+  skeletonNames?: string[];
+  /** 切片字符封顶（默认 6000；超出按行级截断） */
+  sliceCharsCap?: number;
+}
+
+/** 块级切片渲染（s1-slim 单块输入瘦身）：整章 103488 字符切片 → 只展开与块相关的工作包（实测块相关 5~10 个）。
+ * 章级头部（三源规则/must_cite 汇总）与章域卡保留；无匹配工作包的块（容器块/总述块）给一行式工作包索引，
+ * 不展开细节——容器块本就不得复写单个分部方案（divisionContainerOverviewPrompt 同口径）。 */
+export function renderBlueprintBlockSlice(chapter: BlueprintChapter, data: BlueprintData, options: BlueprintBlockSliceOptions): string {
+  const tokens = [options.blockTitle, ...options.subPointTitles, ...(options.skeletonNames ?? [])]
+    .map(item => item.trim())
+    .filter(item => item.length >= 2);
+  const matchesToken = (name: string): boolean => tokens.some(token => name.includes(token) || token.includes(name));
+  const head: string[] = [
+    `【第 ${chapter.id} 章「${chapter.title}」蓝图切片（本节聚焦）——以下项目专属事实由蓝图冻结锁定，正文必须一致引用】`,
+    THREE_SOURCE_WRITE_RULES,
+  ];
+  const body: string[] = [];
+  const mustCiteAll = [...new Set(chapter.subSections.flatMap(section => section.requiredParams.filter(param => param.mode === 'must_cite').map(param => param.path)))];
+  if (mustCiteAll.length > 0) body.push(`本章 must_cite 参数（正文必须出现且与蓝图一致）：${mustCiteAll.join('、')}`);
+  const sectionBlocks: string[] = [];
+  for (const subSection of chapter.subSections) {
+    const hits = subSection.workPackages.filter(workPackage => matchesToken(workPackage.name));
+    if (hits.length === 0) continue;
+    const lines: string[] = [`## ${subSection.id} ${subSection.title}`];
+    const sectionMustCite = subSection.requiredParams.filter(param => param.mode === 'must_cite').map(param => param.path);
+    if (sectionMustCite.length > 0) lines.push(`must_cite 参数：${sectionMustCite.join('、')}`);
+    for (const workPackage of hits) lines.push(...renderWorkPackageLines(workPackage));
+    sectionBlocks.push(lines.join('\n'));
+  }
+  const workPackageCount = chapter.subSections.reduce((sum, sub) => sum + sub.workPackages.length, 0);
+  if (sectionBlocks.length === 0 && workPackageCount > 0) {
+    const indexLines: string[] = [];
+    for (const subSection of chapter.subSections) {
+      const names = subSection.workPackages.map(workPackage => {
+        const entries = Object.entries(workPackage.quantities);
+        const quantityText = entries.slice(0, 3).map(([name, quantity]) => `${name} ${quantity.value}${quantity.unit}`).join('、');
+        return quantityText ? `${workPackage.name}（${quantityText}${entries.length > 3 ? ' 等' : ''}）` : workPackage.name;
+      });
+      if (names.length > 0) indexLines.push(`- ${subSection.title}：${names.join('；')}`);
+    }
+    body.push(`【本章工作包索引（本节为章级总述/无专属工作包；各工作包详细参数见本章其他小节，本节不得复写单个分部方案）】\n${indexLines.join('\n')}`);
+  } else {
+    body.push(...sectionBlocks);
+  }
+  const authorityCard = renderBlueprintChapterAuthorityCard(chapter, data);
+  // 行级封顶：保留头部/三源规则/must_cite 与前部内容，超限截断加提示
+  const cap = options.sliceCharsCap ?? 6000;
+  let text = [...head, ...body, authorityCard].filter(Boolean).join('\n\n');
+  if (text.length > cap) {
+    const kept: string[] = [];
+    let total = 0;
+    for (const line of text.split('\n')) {
+      if (total + line.length + 1 > cap) break;
+      kept.push(line);
+      total += line.length + 1;
+    }
+    text = `${kept.join('\n')}\n（本节蓝图切片过长已截断，未展开工作包见本章其他小节与绑定材料）`;
+  }
+  return text;
 }
 
 /** 正则元字符转义（蓝图引用对齐锚定词安全） */
@@ -2089,6 +2191,12 @@ export interface PlannedChapterSubPoint {
   title: string;
   /** 本 H4 覆盖的输入细目原文（逐字；多条 = 语义合并，覆盖校验与溯源用） */
   sources: string[];
+  /** 容量规划配额：本要点在块预算内的目标字数（写作提示词按此下发育写详略）。
+   * 契约边界：配额是指令层（告诉模型写多深），块质检只查块总字数区间与质量执行器、
+   * 不逐点核对配额——检测口径与写作口径同源，避免「写作要详、检测要省」的相互冲突。 */
+  quotaWords?: number;
+  /** 容量规划详略级别：core=骨架工作包/评分重点（详写）；general=一般单元（标准）；brief=概览单元 */
+  tier?: 'core' | 'general' | 'brief';
 }
 
 export interface PlannedChapterBlock {
@@ -2098,10 +2206,8 @@ export interface PlannedChapterBlock {
   subPoints: PlannedChapterSubPoint[];
   /** 分配给本块的事实线索（证据关键句，≤60 字/条，来自绑定资料原文） */
   facts: string[];
-  /** 本块目标字数（1200~4000） */
+  /** 本块目标字数（容量规划产物：章目标 × 块权重归一；写作层合同区间 [0.85,1.15]×此值） */
   targetWords: number;
-  /** 单要点大块拆分后的半块内容分工指令（两半块共享同一要点时靠此指令区分内容边界） */
-  halfFocus?: string;
 }
 
 export interface PlannedChapterStructure {
@@ -2114,9 +2220,18 @@ export interface PlannedChapterStructure {
 
 /** 主题块内 H4 要点上限：超过则切分新块，控制单次调用输出量 */
 const MAX_SUB_POINTS_PER_BLOCK = 6;
-/** 主题块最小/最大目标字数 */
-const MIN_BLOCK_TARGET_WORDS = 1200;
-const MAX_BLOCK_TARGET_WORDS = 4000;
+/** 容量规划（全链唯一字数口径，替代历史 4.33/4.34 的事后归并/拆半/压缩——那些机制在写作层之后
+ * 改结构，与写作、检测、修复三方互相冲突）：规划层一次成型产出「块数 × 块预算 × 点配额」。
+ * 单块预算下限：块数上限 = 章目标/此值（低于此值模型输出收敛失效）；
+ * 单块预算上限：块数下限 = 章目标/此值（超出单次输出安全区）。 */
+const CAPACITY_MIN_BLOCK_WORDS = 1200;
+const CAPACITY_MAX_BLOCK_WORDS = 4500;
+/** 容量规划：单点配额软下限（权重分配低于软下限时按比例回收，不强制逐点达标） */
+const CAPACITY_POINT_MIN_QUOTA = 100;
+/** 容量规划：详略权重（core=骨架工作包/评分重点详写；general=一般单元；brief=概览单元带过） */
+const CAPACITY_TIER_WEIGHT: Record<'core' | 'general' | 'brief', number> = { core: 1.5, general: 1, brief: 0.6 };
+/** 容器块骨架展开：单包预算基准（单包三要素概览的最低可写量，展开上限 = 章目标/此值） */
+const CAPACITY_SKELETON_WORDS_PER_PACKAGE = 350;
 
 /** 单位工程多工作包语义化切块：按主题域聚合工作包（域序 = 首现序，同域非相邻包聚合进同一域块防同名），
  * 每域一块；域内超过单块要点上限时续块标题用「单位工程短名+块内首工作包名」——首工作包裸名会跨
@@ -2141,7 +2256,8 @@ function buildThemedBlocksForSubSection(subSectionTitle: string, subPoints: Plan
       const chunk = group.points.slice(offset, offset + MAX_SUB_POINTS_PER_BLOCK);
       // 拼接命名过长公共串消除（「装饰」+「装饰装修工程」不再产生「装饰装饰装修工程」）
       const title = offset === 0 ? composeBlockTitle(base, group.label) : composeBlockTitle(base, chunk[0]!.title);
-      blocks.push({ title, subPoints: chunk, facts: [], targetWords: MIN_BLOCK_TARGET_WORDS });
+      // 块预算由末尾容量规划统一分配（占位 0，规划层一次成型）
+      blocks.push({ title, subPoints: chunk, facts: [], targetWords: 0 });
     }
   }
   return blocks;
@@ -2184,40 +2300,108 @@ function sameSectionText(left: string, right: string) {
   return a === b || a.includes(b) || b.includes(a);
 }
 
-/** 按 subPoints 数量加权分配每块目标字数（基数=章目标/块数，浮动 ±25%，封顶 1200~4000）；
- * 长文目标下达：章目标/块数超过单块安全上限时，按 H4 要点对半拆分大块直到均分目标不超上限 */
-function allocateBlockTargetWords(blocks: PlannedChapterBlock[], targetWords: number, chapterTitle: string) {
-  const maxSplitRounds = 2;
-  for (let round = 0; round < maxSplitRounds && blocks.length > 0; round += 1) {
-    const perBlock = Math.floor(targetWords / blocks.length);
-    if (perBlock <= MAX_BLOCK_TARGET_WORDS) break;
-    // 容器块不参与字数上限拆块：其输出单元是工作包 H4 × 三要素，对半拆后新块标题
-    // 变为骨架名（容器语义丢失 → 骨架锁定不触发 → 三要素丢失），字数上限场景按其他块拆
-    const splittable = blocks.filter(block => block.subPoints.length >= 2 && !isContainerSectionTitle(block.title));
-    if (splittable.length === 0) break;
-    const biggest = splittable.reduce((left, right) => (right.subPoints.length > left.subPoints.length ? right : left));
-    const mid = Math.ceil(biggest.subPoints.length / 2);
-    blocks.push({ title: biggest.subPoints[mid].title || biggest.title, subPoints: biggest.subPoints.slice(mid), facts: [], targetWords: 0 });
-    biggest.subPoints = biggest.subPoints.slice(0, mid);
+/** 容量规划：把「块 × 点」一次成型规划到章目标容量内（规划层唯一字数/结构决策点）。
+ * 与历史事后链（4.33 分配层守恒 → 4.34 compressOversizedChapterStructure 事后折叠要点/合并块、
+ * splitSinglePointOversizedBlocks 事后拆半）的本质区别：块数、块预算、点配额全部在写作前一次完成，
+ * 写作层收到的就是最终结构（进度页可见），写作/检测/修复三层共用同一套预算与配额，无事后结构性动作。
+ * 算法：
+ * 1. 块数上限 = 章目标/1200（单块不低于可写下限，低于此值模型输出收敛失效）；
+ * 2. 块数超上限时按点数均衡归并相邻块（保序、容器块标题优先保留、facts 并集）；
+ * 3. 单块预算超单次输出安全区（4500）时按要点对半拆块（与归并同属规划层动作）；
+ * 4. 块预算 = 章目标 × 块权重归一（权重 = max(0.5, Σ点 tier 权重)，末块取余额，单块封顶安全区）
+ *    → 可装满结构下 Σ块预算 = 章目标精确守恒；
+ * 5. 点配额 = 块预算 × tier 权重归一（软下限 100，保底溢出时严格归一）→ Σ点配额 = 块预算。 */
+function capacityPlanChapterBlocks(blocks: PlannedChapterBlock[], targetWords: number) {
+  if (blocks.length === 0) return;
+  const target = Math.max(0, Math.round(targetWords));
+  const totalPoints = blocks.reduce((sum, block) => sum + Math.max(1, block.subPoints.length), 0);
+  const maxBlocks = Math.max(1, Math.floor(target / CAPACITY_MIN_BLOCK_WORDS));
+  // 1. 块容量归并：块数超上限时按点数均衡合并相邻块（保序；仅规划层动作，写作层无结构变更）
+  let planned = blocks;
+  if (planned.length > maxBlocks) {
+    const groups: PlannedChapterBlock[][] = [];
+    const targetPerGroup = Math.max(1, Math.ceil(totalPoints / maxBlocks));
+    let current: PlannedChapterBlock[] = [];
+    let currentPoints = 0;
+    for (const block of planned) {
+      const points = Math.max(1, block.subPoints.length);
+      if (current.length > 0 && groups.length < maxBlocks - 1 && currentPoints + points > targetPerGroup) {
+        groups.push(current);
+        current = [];
+        currentPoints = 0;
+      }
+      current.push(block);
+      currentPoints += points;
+    }
+    if (current.length > 0) groups.push(current);
+    planned = groups.map(group => group.length === 1 ? group[0]! : {
+      // 容器块标题优先保留（写作层骨架锁定按块标题判定，标题丢失会丢三要素结构）
+      title: (group.find(block => isContainerSectionTitle(block.title)) || group[0]!).title,
+      subPoints: group.flatMap(block => block.subPoints),
+      facts: [...new Set(group.flatMap(block => block.facts))],
+      targetWords: 0,
+    });
   }
-  // P2.5 小块下限动态化：蓝图分部章（清单分部逐个成块，块数可达 20+）每块目标为章目标均分
-  //（如 8000/23≈348 字），固定 1200 下限会把章字数膨胀到 27600+（块达标线=块目标，全文字数雪崩）；
-  // 分部块下限 400 字（每块三要素概览足够），普通章保持 1200 下限；
-  // 4.19.8 收口（丰乐镇第三轮实测）：分部章 11 块（>8 但 ≤12）时旧判定 blocks.length>12 不命中，
-  // 小分部块（楼地面装饰/亮化工程）目标 1200、达标线 1080，清单事实支撑不足 → 反复重试耗尽 →
-  // 「主要施工方法」章失败；判定改为章标题匹配分部章 + 小块数 ≥8 + 每块要点 ≤3（小分部三要素概览形态）
-  // 容器块（展开后 subPoints≥3）自带 3600 保底，不参与判定（否则 every 判定被容器块拖垮回 1200）
-  const smallBlocks = blocks.filter(block => !isContainerSectionTitle(block.title));
-  const divisionStyleChapter = DIVISION_SECTION_RE.test(chapterTitle) && smallBlocks.length >= 8 && smallBlocks.length > 0 && smallBlocks.every(block => block.subPoints.length <= 3);
-  const minTarget = divisionStyleChapter ? 400 : MIN_BLOCK_TARGET_WORDS;
-  const totalPoints = blocks.reduce((sum, block) => sum + block.subPoints.length, 0) || blocks.length;
-  for (const block of blocks) {
-    const base = Math.max(minTarget, Math.floor(targetWords / Math.max(1, blocks.length)));
-    const weighted = Math.floor((base * 0.75) + (targetWords * 0.25) * (block.subPoints.length / totalPoints));
-    block.targetWords = Math.min(MAX_BLOCK_TARGET_WORDS, Math.max(minTarget, weighted));
-    // 容器小节块预算保底：工作包容器（项目主要施工内容/主要分部分项工程施工方案）内部
-    // 承载多个骨架工作包三要素正文（每包 ≥300 字），块预算低于 3600 时工作包被摊薄
-    if (MAJOR_CONTENT_SECTION_RE.test(block.title) || DIVISION_SECTION_RE.test(block.title)) block.targetWords = Math.min(MAX_BLOCK_TARGET_WORDS, Math.max(block.targetWords, 3600));
+  // 1.5 块容量拆分：单块预算超单次输出安全区时按要点对半拆块（与归并同属规划层动作——
+  // 写作层收到的是最终结构，两半块共享父标题由章级拼接剥壳合并为一个小节）。与历史写作层
+  // 事后拆半的本质区别：此处预算尚未下发，不存在「半块重设预算使父块合同失效」的口径冲突
+  for (let guard = 0; guard < 64; guard += 1) {
+    const weightsNow = planned.map(block => Math.max(0.5, block.subPoints.reduce((sum, point) => sum + CAPACITY_TIER_WEIGHT[point.tier || 'general'], 0)));
+    const totalWeightNow = weightsNow.reduce((sum, weight) => sum + weight, 0) || planned.length;
+    let widest = -1;
+    let widestShare = CAPACITY_MAX_BLOCK_WORDS;
+    planned.forEach((block, index) => {
+      const share = Math.floor(target * weightsNow[index]! / totalWeightNow);
+      if (block.subPoints.length >= 2 && share > widestShare) {
+        widest = index;
+        widestShare = share;
+      }
+    });
+    if (widest < 0) break;
+    const block = planned[widest]!;
+    const mid = Math.ceil(block.subPoints.length / 2);
+    planned.splice(widest, 1,
+      { ...block, subPoints: block.subPoints.slice(0, mid), targetWords: 0 },
+      { ...block, subPoints: block.subPoints.slice(mid), targetWords: 0 });
+  }
+  // 3. 块预算：Σ块预算 = 章目标精确守恒（末块取余额）；单块封顶单次输出安全区——
+  // 不可拆块（单要点块）预算超限时接受章级欠产显式暴露（由章收口/修复链处理），
+  // 绝不向写作层下发不可写预算（块合同 [0.85,1.15]×块预算必然失守的根源）
+  const weights = planned.map(block => Math.max(0.5, block.subPoints.reduce((sum, point) => sum + CAPACITY_TIER_WEIGHT[point.tier || 'general'], 0)));
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0) || planned.length;
+  let assigned = 0;
+  planned.forEach((block, index) => {
+    const share = index === planned.length - 1 ? target - assigned : Math.floor(target * weights[index]! / totalWeight);
+    block.targetWords = Math.max(1, Math.min(share, CAPACITY_MAX_BLOCK_WORDS));
+    assigned += block.targetWords;
+  });
+  // 4. 点配额：块内 tier 权重归一；软下限让位优先（汇总超块预算时严格归一，覆盖清单概览形态）
+  for (const block of planned) {
+    if (block.subPoints.length === 0) continue;
+    const pointWeights = block.subPoints.map(point => CAPACITY_TIER_WEIGHT[point.tier || 'general']);
+    const weightSum = pointWeights.reduce((sum, weight) => sum + weight, 0) || block.subPoints.length;
+    const floored = pointWeights.map(weight => Math.max(CAPACITY_POINT_MIN_QUOTA, Math.floor(block.targetWords * weight / weightSum)));
+    const flooredSum = floored.reduce((sum, quota) => sum + quota, 0);
+    if (flooredSum > block.targetWords) {
+      let remaining = block.targetWords;
+      block.subPoints.forEach((point, index) => {
+        const quota = index === block.subPoints.length - 1 ? Math.max(1, remaining) : Math.max(1, Math.floor(block.targetWords * pointWeights[index]! / weightSum));
+        point.quotaWords = quota;
+        remaining -= quota;
+      });
+      continue;
+    }
+    const tallest = pointWeights.reduce((best, weight, index) => (weight > pointWeights[best]! ? index : best), 0);
+    const remainder = block.targetWords - flooredSum;
+    block.subPoints.forEach((point, index) => {
+      point.quotaWords = floored[index]! + (index === tallest ? remainder : 0);
+    });
+  }
+  // 归并/拆分可能重建了数组（planned !== blocks）：把最终结构原位写回调用方数组，
+  // 调用方持有的 blocks 引用必须反映容量规划产物
+  if (planned !== blocks) {
+    blocks.length = 0;
+    blocks.push(...planned);
   }
 }
 
@@ -2244,27 +2428,8 @@ function mergeUniqueSkeletonNames(names: string[], cap: number): string[] {
   return merged;
 }
 
-/** 单要点大块确定性拆分（丰乐镇实测）：subPoints===1 且 targetWords>2400 的大块拆为两个半块
- * （目标减半+分工指令），半块达标线落在模型单次输出能力内。
- * 丰乐镇三期验收实测：关键施工容器块（项目主要施工内容）拆半后 halfFocus「只写本部分内容，
- * 不得涉及后半部分的具体展开」与骨架锁定三要素硬要求冲突，模型每包只写「施工流程」一段带过，
- * 三要素丢两要素——容器块真实输出单元是工作包 H4（每包 ≥300 字 × 三要素），拆半在错误粒度操作，
- * 容器块一律不拆半（骨架展开后 subPoints≥3 天然免疫，此处为骨架名提取不足时的双保险） */
-export function splitSinglePointOversizedBlocks(structure: PlannedChapterStructure): PlannedChapterStructure {
-  const oversized = structure.blocks.some(block => block.subPoints.length === 1 && block.targetWords > 2400 && !isContainerSectionTitle(block.title));
-  if (!oversized) return structure;
-  const blocks = structure.blocks.flatMap(block => {
-    if (block.subPoints.length !== 1 || block.targetWords <= 2400 || isContainerSectionTitle(block.title)) return [block];
-    const halfTarget = Math.max(1200, Math.floor(block.targetWords / 2));
-    // 两半块共享父块标题（不加「（一）（二）」后缀）：写作层章级拼接按相邻同标题剥离后块 H3 外壳
-    // 合并为一个小节，目录不出现防撞名后缀（历史缺陷：拆半标题加后缀 → 后缀泄漏进目录）
-    return [
-      { ...block, targetWords: halfTarget, halfFocus: '本部分为该主题的前半部分，聚焦总体构成与组织框架：逐项列明构成要素、总体规模指标与组织方式；只写本部分内容，不得涉及后半部分的具体展开。' },
-      { ...block, targetWords: halfTarget, halfFocus: '本部分为该主题的后半部分，聚焦具体展开与实施要求：逐项展开实施内容、工艺要求与衔接安排；只写本部分内容，不得重复前半部分的总体框架。' },
-    ];
-  });
-  return { ...structure, blocks };
-}
+// （原 splitSinglePointOversizedBlocks 事后拆半已删除：容量规划在规划层按块数上限/点配额一次成型，
+//  写作层之后不允许任何结构性拆半/归并动作——与写作、检测、修复的口径冲突已消除）
 
 /** 确定性回退结构：蓝图切片不可用时按语义域分组，域内高相似细目合并进同一 H4（每块 ≤6 个 H4）；
  * 块顺序严格保持 inputSections 原顺序（域块取该域首次出现位置）——历史实现把人材机/容器块
@@ -2304,19 +2469,24 @@ export function fallbackStructureForSections(inputSections: string[], chapterTit
   const blocks: PlannedChapterBlock[] = [];
   for (const unit of unitOrder) {
     if (unit.kind === 'solo') {
-      blocks.push({ title: unit.section, subPoints: [{ title: unit.section, sources: [unit.section] }], facts: [], targetWords: MIN_BLOCK_TARGET_WORDS });
+      blocks.push({ title: unit.section, subPoints: [{ title: unit.section, sources: [unit.section] }], facts: [], targetWords: 0 });
       continue;
     }
     const mergedPoints = mergeDomainSections(byDomain.get(unit.key) || []);
     for (let offset = 0; offset < mergedPoints.length; offset += MAX_SUB_POINTS_PER_BLOCK) {
       const chunk = mergedPoints.slice(offset, offset + MAX_SUB_POINTS_PER_BLOCK);
-      blocks.push({ title: chunk[0].title || chapterTitle, subPoints: chunk, facts: [], targetWords: MIN_BLOCK_TARGET_WORDS });
+      blocks.push({ title: chunk[0].title || chapterTitle, subPoints: chunk, facts: [], targetWords: 0 });
     }
   }
-  // 章目标按块数+点数加权重分配（与蓝图切片转换路径同口径）
-  allocateBlockTargetWords(blocks, targetWords, chapterTitle);
+  // 容量规划：章目标一次成型分配（幂等；蓝图路径末尾统一规划时重算结果一致）
+  capacityPlanChapterBlocks(blocks, targetWords);
   return { blocks, coveredSections: inputSections.slice(), fallbackSections: [] };
 }
+
+// （原 foldSubPointsToQuota + compressOversizedChapterStructure 事后要点折叠/块数压缩已删除：
+//  要点数超容的场景由容量规划在规划层处理——块数上限 = 章目标/1200、点配额由 tier 权重归一，
+//  块内每个要点带 quotaWords 下发写作详略；点配额与块预算在规划层精确守恒，
+//  写作/检测/修复三层共用同一套数值，消除「写作逐点展开→事后折叠→检测再报警」的三角冲突）
 
 /**
  * 章规划结构确定性转换（三期收口：蓝图唯一规划路径，LLM 章规划删除）：
@@ -2347,12 +2517,14 @@ export function buildChapterStructureFromBlueprint(input: {
     fallbackSections = fallback.fallbackSections;
   } else {
     for (const subSection of blueprintChapter.subSections) {
-      const subPoints: PlannedChapterSubPoint[] = subSection.workPackages.map(workPackage => ({ title: workPackage.name, sources: [workPackage.name] }));
+      // 详略级别随工作包 kind 下发（major=清单主要分部/评分重点 → core 详写；其余 general）
+      const subPoints: PlannedChapterSubPoint[] = subSection.workPackages.map(workPackage => ({ title: workPackage.name, sources: [workPackage.name], tier: workPackage.kind === 'major' ? 'core' as const : 'general' as const }));
       if (subPoints.length > MAX_SUB_POINTS_PER_BLOCK) {
         // 单位工程多工作包按主题域语义化切块（「公厕结构与基础工程」），杜绝「公厕（1）（2）」防撞名泄漏目录
         blocks.push(...buildThemedBlocksForSubSection(subSection.title, subPoints));
       } else {
-        blocks.push({ title: subSection.title, subPoints, facts: [], targetWords: MIN_BLOCK_TARGET_WORDS });
+        // 块预算由末尾容量规划统一分配（占位 0，规划层一次成型）
+        blocks.push({ title: subSection.title, subPoints, facts: [], targetWords: 0 });
       }
     }
     if (blocks.length === 0) {
@@ -2416,20 +2588,37 @@ export function buildChapterStructureFromBlueprint(input: {
         ...outlineNames,
       ], 12);
       if (skeletonNames.length < 3) return block;
-      return { ...block, subPoints: skeletonNames.map(name => ({ title: name, sources: [name] })) };
+      // 容量规划（规划层详略设计）：容器块骨架展开数按章目标预算缩放（每包三要素概览最低可写量
+      // 350 字），超出容量的包名汇总为「其他分部分项工程施工要点」概览点（tier=brief，sources 保留
+      // 全部原名——覆盖校验/清单外白名单不受影响）——详略在规划层一次完成，写作层无折叠动作
+      const containerCount = Math.max(1, blocks.filter(item => isContainerSectionTitle(item.title)).length);
+      const expandCap = Math.max(3, Math.min(skeletonNames.length, Math.floor(targetWords / CAPACITY_SKELETON_WORDS_PER_PACKAGE / containerCount)));
+      if (skeletonNames.length <= expandCap) {
+        return { ...block, subPoints: skeletonNames.map(name => ({ title: name, sources: [name], tier: 'core' as const })) };
+      }
+      const detailed = skeletonNames.slice(0, expandCap);
+      const deferred = skeletonNames.slice(expandCap);
+      return {
+        ...block,
+        subPoints: [
+          ...detailed.map(name => ({ title: name, sources: [name], tier: 'core' as const })),
+          { title: '其他分部分项工程施工要点', sources: deferred, tier: 'brief' as const },
+        ],
+      };
     });
   }
   // 命名治理收口（L1）：章内块标题唯一化——重名者注入序号兜底（极端：续块首包名与域标签同名）
   const governedTitles = disambiguateBlockTitles(blocks.map(block => ({ title: block.title })));
   blocks.forEach((block, index) => { block.title = governedTitles[index]!; });
-  // 章目标按最终块集+点数加权重分配（挂回/展开后统一重分配，幂等）
-  allocateBlockTargetWords(blocks, targetWords, chapterTitle);
+  // 容量规划（规划层唯一结构/字数决策点）：块数 × 块预算 × 点配额一次成型；
+  // 块数超容量时在规划层按点数均衡归并（容器块标题优先保留），写作层收到的即最终结构，无事后折叠
+  capacityPlanChapterBlocks(blocks, targetWords);
   // C1 管线收敛补齐：空章节确定性兜底（模板细目被大纲主题过滤全部剔除、且无蓝图切片时，
   // 语义域分组无输入可聚 → blocks 为空素下游规划块管线无块可写将阻断整章）。退化为
-  // 「整章单块」结构：块标题=章标题、无 H4 要点（正文直接展开），块目标=整章目标（封顶 4000 字）——
+  // 「整章单块」结构：块标题=章标题、无 H4 要点（正文直接展开），块目标=整章目标（封顶单块上限）——
   // 保证章节无论小节数（0/1/2/5/30）恒有确定性成稿路径，不再因 blocks=[] 阻断
   if (blocks.length === 0 && chapterTitle.trim()) {
-    blocks = [{ title: chapterTitle, subPoints: [], facts: [], targetWords: Math.min(MAX_BLOCK_TARGET_WORDS, Math.max(MIN_BLOCK_TARGET_WORDS, targetWords)) }];
+    blocks = [{ title: chapterTitle, subPoints: [], facts: [], targetWords: Math.min(CAPACITY_MAX_BLOCK_WORDS, Math.max(CAPACITY_MIN_BLOCK_WORDS, targetWords)) }];
   }
   return { blocks, coveredSections, fallbackSections };
 }
@@ -2469,9 +2658,11 @@ export function blueprintCitationConsistencyIssues(markdown: string, data: Bluep
       const preWindow = dayWindow.slice(0, dayDigitAt);
       // 新增「计划/安排」词仅在非「总工期/施工工期/合同工期」显式前缀句生效（「计划总工期120天」
       // 类错值仍拦）；原词表豁免不受影响（「按90日历天总工期倒排，与污水管网工程63天」的
-      // 「按」豁免保持）
+      // 「按」豁免保持）。4.32.0 扩围（丰乐镇复测 #72 全量穷举收敛：机动/预留/保留/余量/缓冲/
+      // 占用/无法容纳/不少于/不超过/不得超过/不大于/不低于/至少/最多——「预留N天机动」「工期控制
+      // 的关键线路占用63天」「驻场时间每月不少于22天」等工期管理句词面全覆盖）
       const strictTotalForm = /^(?:总工期|施工工期|合同工期)/u.test(match[0]);
-      const legacyExempt = dayDigitAt > 0 && /按|阶段|拆除|清杂|准备|第\d+日|至第|集中|延误|滞后|分解/u.test(preWindow);
+      const legacyExempt = dayDigitAt > 0 && /按|阶段|拆除|清杂|准备|第\d+日|至第|集中|延误|滞后|分解|机动|预留|保留|余量|缓冲|占用|无法容纳|不少于|不超过|不得超过|不大于|不低于|至少|最多/u.test(preWindow);
       const planExempt = !strictTotalForm && dayDigitAt > 0 && /计划|安排/u.test(preWindow);
       if (legacyExempt || planExempt) continue;
       const value = Number(match[1]);
@@ -2500,7 +2691,8 @@ export function blueprintCitationConsistencyIssues(markdown: string, data: Bluep
   const villageFact = data.redLineFacts.find(fact => fact.key === '自然村数量');
   const villageAuthority = villageFact ? Number(/(\d+)/u.exec(villageFact.value)?.[1]) : 0;
   if (villageAuthority > 0) {
-    const villageRe = /(\d+)\s*个(?:美丽宜居)?自然村(?!分组)/gu;
+    // 4.32.0 扩围：「自然村施工组」为作业组织口径不参与（丰乐镇复测「9个自然村施工组」误报）
+    const villageRe = /(\d+)\s*个(?:美丽宜居)?自然村(?!分组|施工组)/gu;
     for (const match of nonTable.matchAll(villageRe)) {
       // 分区数学豁免（与修复器 villageRe 同源）：数值前 16 字含片区/分为/分成/划分为/每组/每片
       // 是分区数学（「每个片区包含4个自然村」20=5×4）而非村数冲突，不报
@@ -2552,7 +2744,17 @@ export function blueprintCitationConsistencyIssues(markdown: string, data: Bluep
       // 规格句豁免：名称与数值间出现间距/直径等规格限定词是规格表述非工程量
       // （「立柱间距不大于1200」「直径不小于10m」丰乐镇实测误报根因）
       const windowText = nonTable.slice(ns, ne + (match.index ?? 0) + match[0].length);
+      // 分区声明豁免（丰乐镇复测 #74/#75）：「水泥混凝土面层按强度与厚度分区浇筑：…12303.52m²」
+      // 「级配碎石层按厚度规格分区铺筑：…13304.02m²」的名称后声明是分区口径说明（非单一总量），
+      // 后随的分区明细值是合法展示形态，不判冲突
+      const nameTail = windowText.slice(name.length);
+      if (/按[^。；;\n|]{0,16}?(?:强度|厚度|规格|等级|部位)[^。；;\n|]{0,8}?(?:分区|分别|分规格|分强度|分等级|分部位)/u.test(nameTail)) continue;
       const digitAt = windowText.lastIndexOf(String(match[1]));
+      // 检测频次值豁免（4.32 丰乐镇复测「级配碎石 200m2」：「按每层每 200m² 不少于 1 点进行压实度
+      // 检测」的 200m² 是检测批/测点密度参数，非工程量）——数值前为「每层每/按每/每层」频次修饰，
+      // 或数值后随「不少于 N 点/处」的抽检点数表述，均不参与蓝图工程量比对
+      if (/(?:每层每|按每|每批|每处|每层)\s*$/u.test(windowText.slice(0, digitAt))) continue;
+      if (/^[^\d]{0,4}(?:不少于|至少)\s*\d+\s*[点个处]/u.test(windowText.slice(digitAt + String(match[1]).length))) continue;
       if (digitAt > 0 && /(?:间距|不大于|不小于|≥|≤|直径|宽度|厚度|高度|深度|坡度)[^0-9]*$/u.test(windowText.slice(0, digitAt))) continue;
       // 村名/分部语境豁免（与修复器 VILLAGE_LOCATION_HINT_RE 同源）：名称前 12 字内含
       // 村级地名/分部特征词是分村分表合法量（「化粪池2座…塑料管铺设7.8m」的 池 语境）

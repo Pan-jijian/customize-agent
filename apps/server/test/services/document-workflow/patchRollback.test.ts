@@ -167,15 +167,15 @@ describe('P25 rollbacks 分组统计', () => {
     expect(diagnostics.llm.patchGuardStats?.['fact-landing']).toEqual({ hits: 3, rejects: 1, rollbacks: 1 });
   });
 
-  it('非回滚轮不产生 rollbacks 计数', async () => {
+  it('未发生回滚时不写入 rollbacks 桶（仅回滚事件记账）', async () => {
     const diagnostics = mockDiagnostics();
     await withPatchRollback({
       originalContent: ORIGINAL,
-      repairRound: 'qingtian-review-repair',
+      repairRound: 'table-execution-repair',
       diagnostics,
       apply: async () => IMPROVED,
       recheck: (content) => [content === ORIGINAL ? 3 : 1],
     });
-    expect(diagnostics.llm.patchGuardStats?.['qingtian-review-repair']).toBeUndefined();
+    expect(diagnostics.llm.patchGuardStats?.['table-execution-repair']).toBeUndefined();
   });
 });

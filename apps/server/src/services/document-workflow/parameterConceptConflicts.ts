@@ -32,6 +32,11 @@ const GENERIC_MEASURE_WORDS = [
  * 此类数字一致性由跨章/审计通道把关，不参与参数口径互斥（「养护」类时长按对象天然多口径同）。 */
 const CONCEPT_BLACKLIST_RE = /自然村|村组|标段|区域|点位|养护/u;
 
+/** 动作词表（丰乐镇复测 #82 簇 A/B）：同簇各 token 原文分别含互不相同的施工/管理动作词
+ * （「签订 vs 提交」「开挖 vs 封闭」）时，是不同工序各自的动作参量而非同一参数多口径——
+ * bge 概念相似度会把「合同签订后…日内」与「资料提交…日内」误聚同簇，数字差异必误报。 */
+const CONCEPT_ACTION_WORDS = ['开挖', '封闭', '回填', '浇筑', '铺筑', '摊铺', '供应', '编制', '提交', '签订', '安装', '养护', '试验', '拆除', '砌筑'] as const;
+
 /** 概念归一化：去除单位词与标点后仅保留概念词面 */
 function normalizeConcept(concept: string): string {
   return concept
@@ -214,14 +219,29 @@ export async function conceptConflictGroups(markdown: string): Promise<ConceptCo
     }
     for (const unitGroup of byUnit.values()) {
       if (unitGroup.length < 2) continue;
+      // 动作词差异豁免（4.32.0 丰乐镇复测 #82 簇 A/B）：同簇各 token 原文含互不相同的施工/管理
+      // 动作词时（「签订 vs 提交」「开挖 vs 封闭」），是不同工序各自的参量而非同参数多口径，跳过
+      const actions = unitGroup.map(token => CONCEPT_ACTION_WORDS.find(word => token.raw.includes(word)) || '');
+      if (actions.length >= 2 && actions.every(action => action !== '') && new Set(actions).size === actions.length) continue;
+      // 合同阶梯豁免（4.31 丰乐镇 v6 #65）：同簇各值均处合同条款阶梯语境时（「逾期超过28日后…
+      // 自第29日起提高至万分之五；逾期超过56日后…单方解除合同」逐档提高的违约责任阶梯），
+      // 各档数值并存合法非口径冲突；窗口取出现位 -30 到 +raw.length+40，词面含违约金/解除合同/
+      // 提高至/自第/逾期超过之一；every 校验——任一口径不在阶梯语境即不豁免
+      const allInLadder = unitGroup.every(token => token.occurrences.some(occurrence => /违约金|解除合同|提高至|自第|逾期超过/u.test(
+        markdown.slice(Math.max(0, occurrence.matchIndex - 30), occurrence.matchIndex + token.raw.length + 40),
+      )));
+      if (allInLadder) continue;
       const values = [...new Set(unitGroup.map(token => token.value))];
       if (values.length < 2) continue;
       const maxValue = Math.max(...values);
       const minValue = Math.min(...values);
       // 差异 >2% 才算显著冲突；同簇同值多表述不算
       if (maxValue - minValue <= maxValue * 0.02) continue;
-      // 排除并列枚举：任一 token 原文后紧跟"、"或"/"且同句出现另一数字+单位
-      const enumerations = unitGroup.filter(token => /[、/](?:与)?\d/u.test(token.raw));
+      // 排除并列枚举：任一 token 的出现位后 12 字内含「、/ + 数字」枚举链（如「10cm、8cm」
+      // 匹配「、8」；「厚15cm、C30」匹配「、C30」）≥2 个即属多规格枚举声明——修复 4.32.0：
+      // 原检查针对 token.raw 而 PARAM_TOKEN_RE 字符类不含顿号/斜杠（永假死代码），改按
+      // occurrence.matchIndex 取出现位上下文判定（检测定位=原文定位）
+      const enumerations = unitGroup.filter(token => token.occurrences.some(occurrence => /[、/](?:与)?[A-Za-z]?\d/u.test(markdown.slice(occurrence.matchIndex, occurrence.matchIndex + token.raw.length + 12))));
       if (enumerations.length >= 2) continue;
       groups.push({ concept: unitGroup[0].concept, values: unitGroup });
       if (groups.length >= 4) break;

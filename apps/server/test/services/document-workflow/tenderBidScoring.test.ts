@@ -256,7 +256,7 @@ describe('buildTenderBidScores 编制规范性与低雷同性', () => {
     expect(scores.normalization).toBe(84);
   });
 
-  it('4.19.7 回归：category=table/format 直接计分，qingtian_review 不计', async () => {
+  it('4.19.7 回归：category=table/format 直接计分', async () => {
     const scores = await buildTenderBidScores({
       markdown: '',
       chapters: [],
@@ -265,7 +265,6 @@ describe('buildTenderBidScores 编制规范性与低雷同性', () => {
       issues: [
         { level: 'warning', category: 'table', message: '同主题表格重复堆叠：1 组相同表头出现 3 次及以上' },
         { level: 'warning', category: 'format', message: '正式正文仍包含后台内部术语“工作包”' },
-        { level: 'error', category: 'qingtian_review', message: '[全维度评审·数据逻辑·高风险]同一口径高峰人数出现1222人与700人两个数值并存，且本块后文表格均采用700人' },
       ],
     });
     expect(scores.normalization).toBe(94);
@@ -279,7 +278,6 @@ describe('buildTenderBidScores 编制规范性与低雷同性', () => {
       factTraces: [],
       issues: [
         { level: 'warning', message: '已确认事实未在正文中落位：招标人=R3C1建设项目招标图纸目录：' },
-        { level: 'warning', category: 'qingtian_review', message: '[全维度评审·数据逻辑·中风险]11J900为图集编号，正文表述为国标，图集与国标性质混淆' },
       ],
     });
     expect(scores.normalization).toBe(100);

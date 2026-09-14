@@ -297,7 +297,17 @@ export function scanResourceBreakdownClaims(markdown: string, authority: Resourc
       if (lineEnd === -1) lineEnd = markdown.length;
       const line = markdown.slice(lineStart, lineEnd);
       if (/^\s*\|?\s*(?:合计|小计|总计|累计)/u.test(line)) continue;
-      if (!line.includes(item.name)) continue;
+      // 4.31 名称段校验（丰乐镇 v6 #72）：名称归属必须落在 spec 同句——原实现仅校验整行含名称，
+      // 「给、排水附（配）件 6 个（组）；水表 DN50 1 组（个）」中水表的「DN50 1 组」被误归到
+      // 同行首侧材料名下（正文 1 vs 蓝图 4 假冲突）；按句读分隔切句，spec 所在句须含名称
+      const lineOffset = specIdx - lineStart;
+      const prevBreak = Math.max(line.lastIndexOf('；', lineOffset), line.lastIndexOf(';', lineOffset), line.lastIndexOf('。', lineOffset));
+      const sentenceStart = lineStart + prevBreak + 1;
+      const nextSemicolon = line.indexOf('；', lineOffset);
+      const nextHalfSemicolon = line.indexOf(';', lineOffset);
+      const nextPeriod = line.indexOf('。', lineOffset);
+      const nextBreak = Math.min(nextSemicolon === -1 ? line.length : nextSemicolon, nextHalfSemicolon === -1 ? line.length : nextHalfSemicolon, nextPeriod === -1 ? line.length : nextPeriod);
+      if (!markdown.slice(sentenceStart, lineStart + nextBreak).includes(item.name)) continue;
       const afterStart = specIdx + item.spec.length;
       const after = markdown.slice(afterStart, afterStart + 16);
       const match = MATERIAL_SPLIT_QUANTITY_RE.exec(after);

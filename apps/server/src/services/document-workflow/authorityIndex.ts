@@ -476,6 +476,68 @@ export function entriesByDomains(index: AuthorityIndex, domains: AuthorityDomain
   return index.entries.filter(entry => domains.includes(entry.domain));
 }
 
+// ── 块级聚焦渲染（s1-slim 单块输入瘦身）：quantity/material 条目级筛选 ──
+// 实测根因：参数桶全量注入（quantity 19387 + material 14941 字符，1014 条目）逐块进入 prompt，
+// 单块输入被推到 10 万字符级（验收线 4 万）。文档物资表/工程量引用实际只消费块相关条目
+// （真实文档 583 条物资中仅 ~84 条入表），全量注入绝大部分是噪声。
+
+/** 块级聚焦渲染参数 */
+export interface BlockAuthorityRenderOptions {
+  /** 块级相关 token 池（块标题/要点标题/评分细目/骨架名）：quantity/material 条目双向包含匹配依据 */
+  blockTokens: string[];
+  /** quantity 域字符封顶（条目级截断；未配置默认 9000） */
+  quantityCharsCap?: number;
+  /** material 域字符封顶（条目级截断；未配置默认 7000） */
+  materialCharsCap?: number;
+}
+
+/** 条目与块 token 的双向包含匹配（token ≥2 字；label/anchors 任一命中即相关） */
+function entryHitsBlockTokens(entry: AuthorityEntry, tokens: string[]): boolean {
+  const labels = [entry.label, ...entry.anchors].filter(Boolean);
+  return tokens.some(token => labels.some(label => label.includes(token) || token.includes(label)));
+}
+
+/** 域条目字符预算截断：按原序保留到预算内，超出条目以提示行收尾（条目级完整截断，不切半条） */
+function renderDomainWithCharsCap(domain: 'quantity' | 'material', entries: AuthorityEntry[], capChars: number): string[] {
+  if (entries.length === 0) return [];
+  const render = DOMAIN_RENDERERS[domain];
+  const full = render(entries);
+  if (full.join('\n').length <= capChars) return full;
+  let keep = entries.length;
+  while (keep > 0) {
+    keep = Math.floor(keep * 0.9);
+    if (keep <= 0) break;
+    const rows = render(entries.slice(0, keep));
+    if (rows.join('\n').length <= capChars) {
+      rows[0] += `（另有 ${entries.length - keep} 条未列出，其余清单条目见绑定材料）`;
+      return rows;
+    }
+  }
+  return ['- （本节相关清单条目超出预算未展开；引用清单数值必须逐字取自绑定材料，不得估计）'];
+}
+
+/**
+ * 块级聚焦权威渲染：quantity/material 域按块 token 条目级筛选并应用字符封顶，
+ * 其余域全量渲染（计划类数值恒定行小、必须全可见）。
+ * 与 renderAuthorityDomains 行文案同一来源（DOMAIN_RENDERERS），差异仅在条目集与预算。
+ */
+export function renderAuthorityDomainsForBlock(index: AuthorityIndex, options: BlockAuthorityRenderOptions): string[] {
+  const rows: string[] = [];
+  for (const domain of AUTHORITY_DOMAIN_RENDER_ORDER) {
+    const entries = index.byDomain.get(domain) ?? [];
+    if (domain === 'quantity' || domain === 'material') {
+      const relevant = entries.filter(entry => entryHitsBlockTokens(entry, options.blockTokens));
+      const cap = domain === 'quantity'
+        ? (options.quantityCharsCap ?? 9000)
+        : (options.materialCharsCap ?? 7000);
+      rows.push(...renderDomainWithCharsCap(domain, relevant, cap));
+    } else {
+      rows.push(...DOMAIN_RENDERERS[domain](entries));
+    }
+  }
+  return rows;
+}
+
 /** 数量分组明细辅助：分村多值合法性判定（值 ∈ 分组值 ∪ 合计 → 合法分层口径） */
 export function quantityValueIsLegal(entry: AuthorityEntry, value: number): boolean {
   if (typeof entry.value === 'number' && Math.abs(entry.value - value) < 1e-6) return true;

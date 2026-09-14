@@ -413,6 +413,21 @@ function stripInlineMarkdown(input: string) {
     .trim();
 }
 
+/** 4.33 中文字体 → docx 西文字体名映射（未收录时原样透传） */
+function fontAsciiName(name: string) {
+  const normalized = name.replace(/["'“”]/gu, '').trim();
+  const map: Record<string, string> = {
+    '宋体': 'SimSun',
+    '仿宋': 'FangSong',
+    '仿宋_GB2312': 'FangSong_GB2312',
+    '黑体': 'SimHei',
+    '楷体': 'KaiTi',
+    '楷体_GB2312': 'KaiTi_GB2312',
+    '微软雅黑': 'Microsoft YaHei',
+  };
+  return map[normalized] || normalized;
+}
+
 function pointsValue(value: string | undefined, fallback: number) {
   const match = /([\d.]+)\s*(pt|px)?/iu.exec(value || '');
   if (!match) return fallback;
@@ -447,8 +462,9 @@ function resolveExportStyle(settings?: DocumentExportSettings) {
   const h2Pt = 15;
   const h3Pt = 14;
   const linePt = typography.lineHeight ? pointsValue(typography.lineHeight, 18) : 18;
-  const headingFont = typography.fontFamily ? typography.fontFamily : '黑体';
-  const bodyFont = '宋体';
+  const headingFont = typography.headingFont ? typography.headingFont : typography.fontFamily ? typography.fontFamily : '黑体';
+  // 4.33 正文字体配置化（暗标常见要求：正文小三号仿宋_GB2312）：默认仍为宋体，模板可覆盖
+  const bodyFont = typography.bodyFont ? typography.bodyFont : '宋体';
   return {
     ...raw,
     bodyPt, h1Pt, h2Pt, h3Pt, linePt,
@@ -458,9 +474,9 @@ function resolveExportStyle(settings?: DocumentExportSettings) {
     h3HalfPoints: Math.round(h3Pt * 2),
     lineTwips: Math.round(linePt * 20),
     fontHeading: headingFont,
-    fontHeadingAscii: headingFont === '黑体' ? 'SimHei' : headingFont,
+    fontHeadingAscii: fontAsciiName(headingFont),
     fontBody: bodyFont,
-    fontBodyAscii: 'SimSun',
+    fontBodyAscii: fontAsciiName(bodyFont),
     bodyCss: `${bodyPt}pt`,
     h1Css: `${h1Pt}pt`,
     h2Css: `${h2Pt}pt`,
@@ -716,7 +732,7 @@ function docxStylesXml(settings?: DocumentExportSettings) {
   const style = resolveExportStyle(settings);
   const fontAttrs = `w:ascii="${escapeXml(style.fontBodyAscii)}" w:hAnsi="${escapeXml(style.fontBodyAscii)}" w:eastAsia="${escapeXml(style.fontBody)}" w:cs="${escapeXml(style.fontBodyAscii)}"`;
   const headingStyle = (id: string, name: string, size: number, level: number, before: number, after: number, align?: string) => `<w:style w:type="paragraph" w:styleId="${id}"><w:name w:val="${name}"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:uiPriority w:val="${9 + level}"/><w:qFormat/><w:rPr><w:b/><w:rFonts ${fontAttrs}/><w:sz w:val="${size}"/><w:szCs w:val="${size}"/></w:rPr><w:pPr><w:keepNext/><w:keepLines/><w:outlineLvl w:val="${level}"/><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:before="${before}" w:after="${after}"/>${align ? `<w:jc w:val="${align}"/>` : ''}</w:pPr></w:style>`;
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts ${fontAttrs}/><w:sz w:val="${style.bodyHalfPoints}"/><w:szCs w:val="${style.bodyHalfPoints}"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="120"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts ${fontAttrs}/><w:sz w:val="${style.bodyHalfPoints}"/><w:szCs w:val="${style.bodyHalfPoints}"/></w:rPr><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="120"/></w:pPr></w:style>${headingStyle('Heading1', 'heading 1', Math.max(style.h1HalfPoints + 4, 36), 0, 260, 180, 'center')}${headingStyle('Heading2', 'heading 2', Math.max(style.h1HalfPoints, 32), 1, 180, 100)}${headingStyle('Heading3', 'heading 3', Math.max(style.bodyHalfPoints, 28), 2, 120, 80)}<w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:uiPriority w:val="34"/><w:qFormat/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:style></w:styles>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts ${fontAttrs}/><w:sz w:val="${style.bodyHalfPoints}"/><w:szCs w:val="${style.bodyHalfPoints}"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="120"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts ${fontAttrs}/><w:sz w:val="${style.bodyHalfPoints}"/><w:szCs w:val="${style.bodyHalfPoints}"/></w:rPr><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="120"/></w:pPr></w:style>${headingStyle('Heading1', 'heading 1', Math.max(style.h1HalfPoints, 24), 0, 260, 180, 'center')}${headingStyle('Heading2', 'heading 2', Math.max(style.h2HalfPoints, 24), 1, 180, 100)}${headingStyle('Heading3', 'heading 3', Math.max(style.h3HalfPoints, 22), 2, 120, 80)}<w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:uiPriority w:val="34"/><w:qFormat/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:style></w:styles>`;
 }
 
 function docxNumberingXml() {
@@ -811,7 +827,7 @@ async function buildDocx(title: string, markdown: string, settings?: DocumentExp
   }
   const page = settings?.page || {};
   const zip = new JSZip();
-  zip.folder('word')?.file('document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${contentXml}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="${lengthToTwips(page.marginTop, 2.5)}" w:right="${lengthToTwips(page.marginRight, 2)}" w:bottom="${lengthToTwips(page.marginBottom, 2)}" w:left="${lengthToTwips(page.marginLeft, 2)}"/></w:sectPr></w:body></w:document>`);
+  zip.folder('word')?.file('document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${contentXml}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="${lengthToTwips(page.marginTop, 2.5)}" w:right="${lengthToTwips(page.marginRight, 2)}" w:bottom="${lengthToTwips(page.marginBottom, 2)}" w:left="${lengthToTwips(page.marginLeft, 2)}"${page.gutter ? ` w:gutter="${lengthToTwips(page.gutter, 0)}"` : ''}/></w:sectPr></w:body></w:document>`);
   await ensureDocxPackageParts(zip, title, settings, context.images);
   return zip.generateAsync({ type: 'nodebuffer' });
 }
@@ -830,10 +846,13 @@ function exportStyle(settings?: DocumentExportSettings) {
   const marginBottom = cssValue(page.marginBottom, '22mm');
   const marginLeft = cssValue(page.marginLeft, '18mm');
   const fontFamily = typography.fontFamily || 'SimSun, 宋体, serif';
+  // 4.33 正/标题字体分离：bodyFont/headingFont 优先；旧配置仅 fontFamily 时完全兼容旧行为
+  const bodyFontFamily = typography.bodyFont || typography.fontFamily || 'SimSun, 宋体, serif';
+  const headingFontFamily = typography.headingFont || typography.fontFamily || 'SimSun, 宋体, serif';
   const lineHeight = typography.lineHeight || '18pt';
   const titleSize = typography.titleSize || '22pt';
   const bodySize = typography.bodySize || '12pt';
-  return { paper, marginTop, marginRight, marginBottom, marginLeft, fontFamily, lineHeight, titleSize, bodySize };
+  return { paper, marginTop, marginRight, marginBottom, marginLeft, fontFamily, bodyFontFamily, headingFontFamily, lineHeight, titleSize, bodySize };
 }
 
 function enhanceTocHtml(body: string) {
@@ -851,14 +870,14 @@ function buildPrintCss(style: ReturnType<typeof resolveExportStyle>) {
 @page{size:${style.paper};margin:${style.marginTop} ${style.marginRight} ${style.marginBottom} ${style.marginLeft}}
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;background:#fff}
-body,p,div,li,td,th,span,section,article{font-family:${style.fontFamily};font-size:${style.bodyCss};line-height:${style.lineCss};color:#111827}
+body,p,div,li,td,th,span,section,article{font-family:${style.bodyFontFamily};font-size:${style.bodyCss};line-height:${style.lineCss};color:#111827}
 body{font-variant-east-asian:normal;text-rendering:geometricPrecision;word-break:normal;overflow-wrap:break-word}
 p{margin:0 0 7pt 0;text-align:justify;text-justify:inter-ideograph;text-indent:2em;orphans:2;widows:2}
 strong{font-weight:700}
 ul,ol{margin:0 0 8pt 2em;padding:0}li{margin:0 0 4pt 0;text-align:justify;break-inside:avoid}
-h1,h2,h3,h4{font-family:${style.fontFamily};line-height:${style.lineCss};font-weight:700;color:#111827;page-break-after:avoid;break-after:avoid;break-inside:avoid}
+h1,h2,h3,h4{font-family:${style.headingFontFamily};line-height:${style.lineCss};font-weight:700;color:#111827;page-break-after:avoid;break-after:avoid;break-inside:avoid}
 h1{text-align:center;font-size:${Math.max(style.h1Pt + 6, 22)}pt;margin:80pt 0 28pt 0}
-h2{text-align:center;font-size:${Math.max(style.h1Pt + 2, 18)}pt;border:0;padding:0;margin:24pt 0 14pt 0;break-before:auto;page-break-before:auto}
+h2{text-align:center;font-size:${style.h1Css};border:0;padding:0;margin:24pt 0 14pt 0;break-before:auto;page-break-before:auto}
 h2.document-chapter-heading:not(:first-child){page-break-before:always;break-before:page}
 h3{font-size:${style.h1Css};margin:16pt 0 7pt 0}
 h4{font-size:${style.bodyCss};margin:10pt 0 5pt 0}
@@ -867,9 +886,9 @@ h4{font-size:${style.bodyCss};margin:10pt 0 5pt 0}
 img{display:block;max-width:100%;max-height:500px;object-fit:contain;margin:10pt auto;page-break-inside:avoid;break-inside:avoid}
 table{width:100%;border-collapse:collapse;table-layout:auto;page-break-inside:auto;break-inside:auto;margin:8pt 0 10pt 0}
 thead{display:table-header-group}tfoot{display:table-footer-group}tr{page-break-inside:avoid;break-inside:avoid;page-break-after:auto}
-th,td{font-family:${style.fontFamily};font-size:${Math.max(style.bodyPt - 1, 9)}pt;line-height:${style.lineCss};border:1px solid #666;padding:3pt 5pt;vertical-align:top;text-indent:0;text-align:left;word-break:normal;overflow-wrap:break-word}
+th,td{font-family:${style.bodyFontFamily};font-size:${Math.max(style.bodyPt - 1, 9)}pt;line-height:${style.lineCss};border:1px solid #666;padding:3pt 5pt;vertical-align:top;text-indent:0;text-align:left;word-break:normal;overflow-wrap:break-word}
 th{background:#f3f4f6;font-weight:700;text-align:center}
-pre{white-space:pre-wrap;font-family:${style.fontFamily};font-size:${style.bodyCss};line-height:${style.lineCss};page-break-inside:avoid;break-inside:avoid}.page-break{page-break-after:always;break-after:page;height:0}
+pre{white-space:pre-wrap;font-family:${style.bodyFontFamily};font-size:${style.bodyCss};line-height:${style.lineCss};page-break-inside:avoid;break-inside:avoid}.page-break{page-break-after:always;break-after:page;height:0}
 @media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}a{text-decoration:none;color:#111827}}
 `;
 }

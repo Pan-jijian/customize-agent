@@ -8,12 +8,12 @@ describe('capFactCoverageContext', () => {
     expect(capFactCoverageContext(text)).toBe(text);
   });
 
-  it('超长文本按行完整截断到默认预算（26000 字符），并附加截断提示', () => {
+  it('超长文本按行完整截断到默认预算（6000 字符），并附加截断提示', () => {
     const line = `- 事实条目：${'内容'.repeat(100)}`;
     const lines = Array.from({ length: 1000 }, (_, index) => `${line}${index}`).join('\n');
-    expect(lines.length).toBeGreaterThan(26000);
+    expect(lines.length).toBeGreaterThan(6000);
     const capped = capFactCoverageContext(lines);
-    expect(capped.length).toBeLessThanOrEqual(26100);
+    expect(capped.length).toBeLessThanOrEqual(6100);
     // 按行完整截断：保留行均为完整行，且行号连续
     const kept = capped.split('\n').filter(item => item.startsWith('- 事实条目'));
     expect(kept.length).toBeGreaterThan(0);

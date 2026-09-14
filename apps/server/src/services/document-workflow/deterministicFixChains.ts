@@ -9,10 +9,15 @@
 import {
   collapseRepeatedWords,
   fixAmbiguousEitherOrCandidates,
+  fixBasisRegulationsRegion,
   fixCollisionNumberedHeadings,
+  fixDuplicateBasicInfoTables,
+  fixFallbackPlaceholderRows,
   fixFinishThickness,
+  fixForbiddenConfigurationTerms,
   fixFormulaResidues,
   fixGreeningMaintenanceMismatch,
+  fixHeadingUncoveredItems,
   fixInvertedDateRanges,
   fixLaborPeakConflict,
   fixMetaDiscourseDeclarations,
@@ -20,7 +25,9 @@ import {
   fixParagraphTailRepeats,
   fixPhaseLaborValues,
   fixSelfUnderminingCandidates,
+  fixSlotDepthValue,
   fixTruncatedSentenceArtifacts,
+  fixWorkInjuryInsurance,
   mergeTableLineResidues,
   stripDuplicateTables,
   stripInternalDuplicateTableRows,
@@ -48,6 +55,9 @@ export interface SurfaceFixerContext {
   plannedSectionTitles?: readonly string[];
   /** V5 P4b-2 阶段劳动力权威（phase-labor-values 消费：蓝图 byPhase 推导投影；缺失时该步静默） */
   phaseLaborAuthorities?: Array<{ phase: string; value: number; trace?: string }>;
+  /** 4.31 招标文件引用法规清单（basis-regulation-region 消费：蓝图 basisRegulations 照抄源；
+   * 缺失时该步静默——#71 LLM 无源可写死结的确定性回写） */
+  basisRegulations?: readonly string[];
 }
 
 export interface SurfaceFixStep {
@@ -80,6 +90,10 @@ export const SURFACE_FIX_STEPS: readonly SurfaceFixStep[] = [
   { key: 'repeated-words', stage5: true, round2: true, fix: markdown => { const next = collapseRepeatedWords(markdown); return { markdown: next, fixedCount: next === markdown ? 0 : 1 }; } },
   { key: 'duplicate-tables', stage5: false, round2: true, fix: markdown => { const r = stripDuplicateTables(markdown); return { markdown: r.markdown, fixedCount: r.removedCount }; } },
   { key: 'finish-thickness', stage5: true, round2: true, fix: markdown => { const r = fixFinishThickness(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
+  // 4.31 埋深/覆土槽位数值错位删除（丰乐镇 v6 #3「接地母线…埋深不小于 23.45m」= 长度口径
+  // 误塞埋深槽）：与检测器 factReconciliation D4.3 同源正则/阈值（>10m 即删槽位短语），
+  // 紧随 finish-thickness（同类数值定点修复）
+  { key: 'slot-depth-value', stage5: true, round2: true, fix: markdown => { const r = fixSlotDepthValue(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'labor-peak', stage5: true, round2: true, fix: (markdown, ctx) => { const r = fixLaborPeakConflict(markdown, ctx.laborPeakAuthority); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   // V5 P4b-2 阶段劳动力确定性回写（12:33 评审 P0-1）：与检测器 phase-labor-mixing 同源双通道
   // 扫描（scanPhaseLaborClaims 单源）——正文阶段人数与蓝图分阶段推导不符即定点硬替换
@@ -91,10 +105,20 @@ export const SURFACE_FIX_STEPS: readonly SurfaceFixStep[] = [
   // 与检测器 resource-breakdown-consistency 同源同扫描（resourceBreakdownNumbers 单源）
   { key: 'resource-breakdown', stage5: true, round2: true, fix: (markdown, ctx) => { const r = fixResourceBreakdownNumbers(markdown, ctx.resourceBreakdownAuthority); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'internal-table-row-dup', stage5: true, round2: true, fix: markdown => { const r = stripInternalDuplicateTableRows(markdown); return { markdown: r.markdown, fixedCount: r.removedCount }; } },
+  // 4.31 基础信息表重复合并（丰乐镇 v6 #70）：多张「信息项|内容」基础表字段并集化，删除
+  // 后续重复块（含「汇总成表」引导句），与检测器 markdownTableQualityIssues 同源字段词集合
+  { key: 'duplicate-basic-info-tables', stage5: true, round2: true, fix: markdown => { const r = fixDuplicateBasicInfoTables(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
+  // 4.31 表格兜底话术行删除（丰乐镇 v6 #86/87「资料未明确」行）：与门禁 formalTextGateIssues
+  // 行级扫描同词表，紧随基础表合并（合并跳过的兜底值行随块消失，孤立兜底行由本步收敛）
+  { key: 'fallback-placeholder-rows', stage5: true, round2: true, fix: markdown => { const r = fixFallbackPlaceholderRows(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'greening-maintenance', stage5: true, round2: true, fix: (markdown, ctx) => { const r = fixGreeningMaintenanceMismatch(markdown, ctx.greeningMaintenanceAuthority); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'paragraph-opening-repeat', stage5: true, round2: true, fix: markdown => { const r = fixParagraphOpeningRepeats(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'paragraph-tail-repeat', stage5: true, round2: true, fix: markdown => { const r = fixParagraphTailRepeats(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'collision-numbered-heading', stage5: true, round2: true, fix: markdown => { const r = fixCollisionNumberedHeadings(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
+  // 4.31 小节标题工程类别未覆盖改名（丰乐镇 v6 #90「给排水、采暖、燃气工程」正文只覆盖
+  // 给排水）：与检测器 headingUncoveredEngineeringItems 同源单扫描（scanUncoveredEngineeringHeadings），
+  // 未覆盖词段从标题移除；目录由后续 tocConsistencyFix/fixTocFromBody 同步
+  { key: 'heading-uncovered-items', stage5: true, round2: true, fix: markdown => { const r = fixHeadingUncoveredItems(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'inverted-date-range', stage5: true, round2: true, fix: markdown => { const r = fixInvertedDateRanges(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'truncated-sentence', stage5: true, round2: true, fix: markdown => { const r = fixTruncatedSentenceArtifacts(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'meta-discourse', stage5: true, round2: true, fix: markdown => { const r = fixMetaDiscourseDeclarations(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
@@ -107,12 +131,26 @@ export const SURFACE_FIX_STEPS: readonly SurfaceFixStep[] = [
   // 4.27.2 招标元语言确定性清理（语气泄漏治理 P0）：紧随 empty-scoring-response（空响应句先按
   // 条款语义改写为实义句，本步再清理其余「按招标文件要求/约定」条幅与「按上述条款」调用式元语言）
   { key: 'tender-meta-language', stage5: true, round2: true, fix: markdown => { const r = fixTenderMetaLanguage(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
+  // 4.32 配置禁用词确定性清洗（丰乐镇 v6 #59：正文「按设计要求确定」触发模板 forbiddenTexts
+  // 「配置要求不得出现：按设计要求」 blocker）：修复器 4.31 已实现但未接入两条链，注册即生效；
+  // 「按设计要求/按图纸/见图纸」类责任模糊留白改写为具体出处，与门禁 containsForbiddenText 同豁免口径
+  { key: 'forbidden-configuration', stage5: true, round2: true, fix: markdown => { const r = fixForbiddenConfigurationTerms(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
+  // 4.31 编制依据地方性法规确定性补写（丰乐镇 v6 #71：招标文件引用的《合肥市公共资源交易
+  // 管理条例》LLM 无源可写）：与检测器 basisRegulationsCoverageIssues 同源，从蓝图
+  // basisRegulations 照抄补写「地方法规规章」行（标签行缺失时静默）
+  { key: 'basis-regulation-region', stage5: true, round2: true, fix: (markdown, ctx) => { const r = fixBasisRegulationsRegion(markdown, ctx.basisRegulations); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
+  // 4.32 工伤保险缴纳表述补写（丰乐镇 v6 #60：检测器 localAdaptationKeywordIssues workInjury
+  // 查询由 bge 语义判定，LLM 修复轮未定位到劳务管理小节）：劳资管理锚点段落尾补写缴纳表述，
+  // 补写句逐字包含检测查询短语（检测定位=修复定位）
+  { key: 'work-injury-insurance', stage5: true, round2: true, fix: markdown => { const r = fixWorkInjuryInsurance(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   // 4.27.2 条款响应重复行去重（重复补写治理 P0）：紧随元语言清理（条幅剥离后行形态归一，
   // 重复判定口径与清理器输出同帧——两补写器历史重复插入的交付前最终兜底）
   { key: 'duplicate-response-line', stage5: true, round2: true, fix: markdown => { const r = stripDuplicateResponseLines(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'atlas-reference', stage5: true, round2: false, fix: markdown => { const r = stripAtlasReferencePhrases(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'tertiary-h4-dedupe', stage5: false, round2: true, fix: markdown => dedupeTertiaryH4Titles(markdown) },
-  { key: 'internal-term-heading', stage5: false, round2: true, fix: markdown => fixInternalTermHeadingPhrases(markdown) },
+  // 4.31 内部术语替换扩展至表格行（丰乐镇 v6 #66/#88：「作业面落位」表头行 blocker 死区），
+  // stage5 逐章链同样启用：替换为确定性词面安全替换，越早收敛越好
+  { key: 'internal-term-heading', stage5: true, round2: true, fix: markdown => fixInternalTermHeadingPhrases(markdown) },
   // WS4 骨架指纹确定性兜底（round-2 链末尾、终检前最后一道：超量指纹轮换变体清零，
   // 保证终检 skeletonFingerprintIssues 达标；stage5 不启用——只在评审后全文链做最终收敛）
   { key: 'skeleton-fingerprint-variants', stage5: false, round2: true, fix: markdown => { const r = fixSkeletonFingerprintRepetition(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },

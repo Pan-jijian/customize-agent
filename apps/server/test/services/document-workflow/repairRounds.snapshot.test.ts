@@ -7,14 +7,13 @@ import { describe, expect, it } from 'vitest';
 import { FINALIZE_REPAIR_ROUNDS, LLM_PATCH_REPAIR_ROUNDS } from '@/services/document-workflow/detectorFixerRegistry';
 
 describe('修复轮顺序快照（变更必须显式改快照并附理由）', () => {
-  it('FINALIZE_REPAIR_ROUNDS 14 轮顺序快照', () => {
+  it('FINALIZE_REPAIR_ROUNDS 13 轮顺序快照', () => {
     expect([...FINALIZE_REPAIR_ROUNDS]).toEqual([
       'fact-landing-round',          // 重要事实落位补写轮（uncoveredImportantFacts 触发）
       'table-repair-round',          // 表格数据完整性修复轮（markdownTableQualityIssues error 触发）
       'semantic-choice-conflict',    // 决策锁语义矛盾检测（semanticChoiceConflicts，无修复）
       'deterministic-stage5',        // 交付前确定性清洗（章级数值/SURFACE_FIX_STEPS/全文数值/表承载正文）
       'formal-source-clean',         // 来源罗列话术确定性清洗兜底（cleanFormalSourcePhrases）
-      'qingtian-full-review',        // 全维度评审轮（runFullDimensionReview）
       'planned-section-final',       // 缺节/空小节补写终兜底（enforcePlannedSectionCompleteness）
       'commercial-strip',            // 商务条款数据交付前兜底清洗（stripCommercialDataBodyLines）
       'table-deterministic-repair',  // 表格空单元格交付前确定性修复（repairTableBlocksInMarkdownDeterministically）
@@ -26,7 +25,7 @@ describe('修复轮顺序快照（变更必须显式改快照并附理由）', (
     ]);
   });
 
-  it('LLM_PATCH_REPAIR_ROUNDS 8 轮顺序快照（P11 全链接入的登记载体）', () => {
+  it('LLM_PATCH_REPAIR_ROUNDS 7 轮顺序快照（P11 全链接入的登记载体）', () => {
     expect(LLM_PATCH_REPAIR_ROUNDS.map(round => round.id)).toEqual([
       'fact-landing',
       'table-repair',
@@ -35,7 +34,6 @@ describe('修复轮顺序快照（变更必须显式改快照并附理由）', (
       'workpackage-skeleton-repair',
       'planned-section-repair',
       'global-consistency-repair',
-      'qingtian-review-repair',
     ]);
   });
 
@@ -48,7 +46,6 @@ describe('修复轮顺序快照（变更必须显式改快照并附理由）', (
       { id: 'workpackage-skeleton-repair', anchoredTo: 'workpackage-skeleton' },
       { id: 'planned-section-repair', anchoredTo: 'planned-section-completeness' },
       { id: 'global-consistency-repair', anchoredTo: 'global-consistency-review' },
-      { id: 'qingtian-review-repair', anchoredTo: 'qingtian-review' },
     ]);
   });
 });

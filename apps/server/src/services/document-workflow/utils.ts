@@ -42,9 +42,13 @@ export function hasProcessSequenceExpression(text: string): boolean {
  * 供检测器逐块给出「缺哪一维」的精确诊断（丰乐镇实测：楼地面装饰工程只有流程/方法两个 H4、
  * 缺作业对象与工程量，整块布尔判定只能报「不完整」，修复轮无从定向补齐）。 */
 export function workPackageContentElementFlags(block: string): { scope: boolean; process: boolean; method: boolean } {
-  const scope = /(?:施工)?(?:概况|范围)[:：]\s*\S|工程量|作业对象|部位/u.test(block);
-  const process = /(?:施工)?(?:流程|工序|顺序)[:：]\s*\S/u.test(block) || hasProcessSequenceExpression(block);
-  const method = /(?:施工)?方法[:：]\s*\S|工艺参数|验收标准|检测|试验|记录/u.test(block);
+  // 4.30 复测校准（丰乐镇 90 条阻断根治）：连贯叙述型块被窄词表误判缺要素——「总量15481m³」「共633m²」
+  // 是工程量表达，「路床碾压检验」「每日检查、整改、复查、销项」「养护」是方法与验收证据；
+  // 词表须覆盖真实写作形态（呈现形式不限口径与 hasProcessSequenceExpression 同向）。
+  // 检查(?!井)：排除名词「检查井」误命中，保留动词「检查」；三处验收器共用本函数，单点同源防漂移
+  const scope = /(?:施工)?(?:概况|范围)[:：]\s*\S|工程量|作业对象|部位|总量|共\s*\d/u.test(block);
+  const process = /工艺流程|施工流程/u.test(block) || /(?:施工)?(?:流程|工序|顺序)[:：]\s*\S/u.test(block) || hasProcessSequenceExpression(block);
+  const method = /(?:施工)?方法[:：]\s*\S|工艺参数|验收标准|检测|试验|记录|检查(?!井)|巡查|检验|整改|复查|销项|养护/u.test(block);
   return { scope, process, method };
 }
 

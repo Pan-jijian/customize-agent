@@ -302,8 +302,10 @@ export function llmPrefixFingerprint(system: string, prompt: string, prefixKey?:
   return prefixKey ? prefixKey : stableHash(`${system}\n${prompt.slice(0, 2000)}`);
 }
 
-/** 4.1 per-调用分量观测桶：按 prefixKey 分组惰性创建（无 prefixKey 归入 '(none)'） */
-function callBreakdownBucket(diagnostics: DocumentGenerationDiagnostics, prefixKey?: string) {
+/** 4.1 per-调用分量观测桶：按 prefixKey 分组惰性创建（无 prefixKey 归入 '(none)'）；s1-slim 增 schemaFailures 归因字段（仅失败时出现） */
+type CallBreakdownBucket = NonNullable<DocumentGenerationDiagnostics['llm']['callBreakdown']>[string];
+
+function callBreakdownBucket(diagnostics: DocumentGenerationDiagnostics, prefixKey?: string): CallBreakdownBucket {
   const breakdown = diagnostics.llm.callBreakdown ?? (diagnostics.llm.callBreakdown = {});
   const key = prefixKey || '(none)';
   return breakdown[key] ?? (breakdown[key] = { calls: 0, inputChars: 0, l3Chars: 0, cacheHitTokens: 0, cacheMissTokens: 0 });
@@ -657,11 +659,15 @@ export function repairTruncatedJson(raw: string): string | undefined {
   }
 }
 
-/** schema 校验失败记录：写入 diagnostics 供进度展示与测试断言（lastError 覆盖为可诊断原因） */
-function recordJsonValidationFailure(diagnostics: DocumentGenerationDiagnostics | undefined, message: string) {
+/** schema 校验失败记录：写入 diagnostics 供进度展示与测试断言（lastError 覆盖为可诊断原因）；
+ * s1-slim 按调用类型归因：同步累计到 prefixKey 分量桶（bucket.schemaFailures 仅失败时出现），
+ * 进度页可定位「哪类调用在失败」；maxItems 截断容忍路径不计失败、不产生归因 */
+function recordJsonValidationFailure(diagnostics: DocumentGenerationDiagnostics | undefined, message: string, prefixKey?: string) {
   if (!diagnostics) return;
   diagnostics.llm.schemaFailures = (diagnostics.llm.schemaFailures || 0) + 1;
   diagnostics.llm.lastError = message;
+  const bucket = callBreakdownBucket(diagnostics, prefixKey);
+  bucket.schemaFailures = (bucket.schemaFailures || 0) + 1;
 }
 
 /** V5 P4.1 截断告警记录：maxItems 超限已原地截断（不判失败、不计 schemaFailures），明细写 lastInfo 可观测 */
@@ -708,7 +714,7 @@ export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: st
         if (errors.length > 0) {
           const message = `JSON Schema 校验失败：${errors.join('；')}`;
           lastFailure = message;
-          recordJsonValidationFailure(options.diagnostics, message);
+          recordJsonValidationFailure(options.diagnostics, message, options.prefixKey);
           // 缺失字段类失败同样多为输出长度压力（模型为压预算省略字段），放大 maxTokens 重试
           //（历史缺陷：只对「JSON 被截断」放大，缺失字段类同额度重试仍缺字段，主表 6 次失败即此）
           if (message.includes('缺失字段')) retryMaxTokens = amplifiedTruncationMaxTokens(retryMaxTokens);
@@ -737,7 +743,7 @@ export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: st
             // 截断修复产物不满足 schema（如数组元素数不足）：按 schema 失败走重试
             const repairMessage = `JSON Schema 校验失败：${repairErrors.join('；')}`;
             lastFailure = repairMessage;
-            recordJsonValidationFailure(options.diagnostics, repairMessage);
+            recordJsonValidationFailure(options.diagnostics, repairMessage, options.prefixKey);
             if (repairMessage.includes('缺失字段')) retryMaxTokens = amplifiedTruncationMaxTokens(retryMaxTokens);
             if (attempt >= maxJsonAttempts) {
               if (options.outFailure) options.outFailure.value = repairMessage;
@@ -756,7 +762,7 @@ export async function callDocumentLlmJsonWithRetry<T>(system: string, prompt: st
       if (/JSON 被截断/u.test(message)) {
         retryMaxTokens = amplifiedTruncationMaxTokens(retryMaxTokens);
       }
-      recordJsonValidationFailure(options.diagnostics, message);
+      recordJsonValidationFailure(options.diagnostics, message, options.prefixKey);
       if (attempt >= maxJsonAttempts) {
         if (options.outFailure) options.outFailure.value = message;
         return undefined;

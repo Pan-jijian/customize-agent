@@ -25,15 +25,22 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'structure-integrity',
       'repeated-words',
       'finish-thickness',
+      // 4.31 显式快照变更（丰乐镇 v6 #3/#70/#86-87/#90/#71 五类误报修复器接入链，
+      // 均与锚定检测器同源；顺序约束：槽位数值紧随 finish-thickness、基础表/兜底行紧随
+      // table 修复族、标题覆盖紧随 collision-numbered-heading、法规补写紧随元语言清理）
+      'slot-depth-value',
       'labor-peak',
       // V5 P4b-2 阶段劳动力确定性回写（与检测器 phase-labor-mixing 同源双通道扫描）
       'phase-labor-values',
       'resource-breakdown',
       'internal-table-row-dup',
+      'duplicate-basic-info-tables',
+      'fallback-placeholder-rows',
       'greening-maintenance',
       'paragraph-opening-repeat',
       'paragraph-tail-repeat',
       'collision-numbered-heading',
+      'heading-uncovered-items',
       'inverted-date-range',
       'truncated-sentence',
       'meta-discourse',
@@ -43,8 +50,14 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'empty-scoring-response',
       // 4.27.2 招标元语言清理 + 重复响应行去重（紧随空响应句改写，条幅剥离后重复判定同帧）
       'tender-meta-language',
+      // 4.32 配置禁用词清洗 + 编制依据法规补写 + 工伤保险表述补写（丰乐镇 v6 #59/#71/#60）
+      'forbidden-configuration',
+      'basis-regulation-region',
+      'work-injury-insurance',
       'duplicate-response-line',
       'atlas-reference',
+      // 4.31 internal-term-heading 启用 stage5（丰乐镇 v6 #66/#88 表格行替换）
+      'internal-term-heading',
     ]);
   });
 
@@ -57,15 +70,20 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'repeated-words',
       'duplicate-tables',
       'finish-thickness',
+      // 4.31 显式快照变更（同 stage5 链五类修复器：丰乐镇 v6 #3/#70/#86-87/#90/#71）
+      'slot-depth-value',
       'labor-peak',
       // V5 P4b-2 阶段劳动力确定性回写（与检测器 phase-labor-mixing 同源双通道扫描）
       'phase-labor-values',
       'resource-breakdown',
       'internal-table-row-dup',
+      'duplicate-basic-info-tables',
+      'fallback-placeholder-rows',
       'greening-maintenance',
       'paragraph-opening-repeat',
       'paragraph-tail-repeat',
       'collision-numbered-heading',
+      'heading-uncovered-items',
       'inverted-date-range',
       'truncated-sentence',
       'meta-discourse',
@@ -75,6 +93,10 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'empty-scoring-response',
       // 4.27.2 招标元语言清理 + 重复响应行去重
       'tender-meta-language',
+      // 4.32 配置禁用词清洗 + 编制依据法规补写 + 工伤保险表述补写（丰乐镇 v6 #59/#71/#60）
+      'forbidden-configuration',
+      'basis-regulation-region',
+      'work-injury-insurance',
       'duplicate-response-line',
       'tertiary-h4-dedupe',
       'internal-term-heading',

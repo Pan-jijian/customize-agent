@@ -31,6 +31,9 @@ export interface PromptDocumentRuleSet {
   requiredTables: string[];
   requiredKeywords?: string[];
   forbiddenPatterns?: string[];
+  /** 4.33 招标文件附表清单（「除文字表述外可附下列图表」场景）：表类附表生成到正文文末附表区，图类附表由编制人人工补充 */
+  appendixTableTitles?: string[];
+  appendixAttachedAtEnd?: boolean;
 }
 
 export interface WebAccessConfig {
@@ -120,12 +123,18 @@ export interface DocumentExportSettings {
     marginRight?: string;
     marginBottom?: string;
     marginLeft?: string;
+    /** 4.33 装订线宽度（如 0.5cm；暗标格式常见要求 0.3~0.6cm），导出 docx 时写入 w:gutter */
+    gutter?: string;
   };
   typography?: {
     fontFamily?: string;
     lineHeight?: string;
     titleSize?: string;
     bodySize?: string;
+    /** 4.33 正文字体（如 仿宋_GB2312；缺省宋体） */
+    bodyFont?: string;
+    /** 4.33 标题字体（如 仿宋_GB2312；缺省沿用 fontFamily 或黑体） */
+    headingFont?: string;
   };
   targetPages?: {
     min?: number;

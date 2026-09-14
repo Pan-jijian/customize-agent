@@ -53,7 +53,7 @@ function makeSession(chapters: Array<{ id: string; title: string; content: strin
   return { session: session as unknown as FinalizeSession, progressStages, finalGateRepairStages };
 }
 
-/** repairChapterByQuality mock 返回体（与 fullDimensionReview 测试同形） */
+/** repairChapterByQuality mock 返回体（收敛修复轮共用形态） */
 function repairResult(content: string) {
   return { content, appliedCount: 1, producedCount: 1, repairType: 'quality' as never };
 }

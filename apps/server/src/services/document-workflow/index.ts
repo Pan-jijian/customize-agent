@@ -23,8 +23,8 @@ export { WORK_PACKAGE_SECTION_RE, hasProcessSequenceExpression, normalizeSubsect
 
 export { stageTitle, stageRoleDisplayName, displayStage, upsertProgressStage, elapsedMessage } from './progress';
 
-export { estimateDocumentPages, documentTextLength, charsPerPageForSettings, parseChineseNumber, explicitLengthTargets, chapterBudgetWeight, buildDocumentBudget, pageTargetIssues, documentBudgetIssues, documentBudgetStatus } from './budget';
-export type { DocumentBudget, ExplicitLengthMode } from './budget';
+export { estimateDocumentPages, documentTextLength, charsPerPageForSettings, parseChineseNumber, explicitLengthTargets, chapterBudgetWeight, chapterDetailLevel, CHAPTER_DETAIL_LEVEL_FACTORS, CHAPTER_MIN_BUDGET, allocateChapterTargets, buildDocumentBudget, pageTargetIssues, documentBudgetIssues, documentBudgetStatus } from './budget';
+export type { DocumentBudget, ExplicitLengthMode, ChapterDetailLevel } from './budget';
 
 export { extractFacts, extractStructuredTables, fieldExtractionPattern, extractStructuredFacts, extractLocalFactPool, sanitizeExtractedFacts, reliableFactForTarget, shouldRunLlmFactExtraction, extractFactsWithLlm, normalizedFactValue, detectFactConflicts, cleanPdfHeadingNoise, normalizeOcrFactText, isValidProjectBasicFactValue, extractProjectBasicFactsFromEvidence, extractPreciseFactsFromEvidence, buildSchemaFacts, buildChapterFactNeeds, resolveChapterFactNeeds, factsForChapterNeeds, factNeedsCoveragePrompt, buildFactsModel, extractBillItemFacts, buildSpecAuthorityMap } from './factsModel';
 export type { FactSanitizeStats } from './factsModel';

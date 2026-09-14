@@ -92,7 +92,7 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
 
   it('检测器 category 全部落在合法集（V2 批3：门禁硬阻断按 category 判定，非法值静默逃逸即缺陷）', () => {
     const all = [...FULL_VALIDATION_DETECTORS, ...STANDARD_FINAL_DETECTORS, ...AUXILIARY_DETECTORS];
-    expect(VALID_DETECTOR_CATEGORIES.size).toBe(10);
+    expect(VALID_DETECTOR_CATEGORIES.size).toBe(9);
     for (const entry of all) {
       expect(VALID_DETECTOR_CATEGORIES.has(entry.category)).toBe(true);
     }
@@ -120,8 +120,8 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
     }
   });
 
-  it('LLM patch 修复轮 8 轮全部带 patchGuard 且锚定检测器存在、guard 检测器全部 deterministicSafe', () => {
-    expect(LLM_PATCH_REPAIR_ROUNDS).toHaveLength(8);
+  it('LLM patch 修复轮 7 轮全部带 patchGuard 且锚定检测器存在、guard 检测器全部 deterministicSafe', () => {
+    expect(LLM_PATCH_REPAIR_ROUNDS).toHaveLength(7);
     for (const entry of LLM_PATCH_REPAIR_ROUNDS) {
       expect(entry.kind).toBe('llm-patch');
       expect(entry.patchGuard).toBeDefined();
@@ -133,7 +133,7 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
     }
   });
 
-  it('LLM patch 修复轮 8 轮 id 顺序快照（P11 全链接入登记，变更必须显式改快照并附理由）', () => {
+  it('LLM patch 修复轮 7 轮 id 顺序快照（P11 全链接入登记，变更必须显式改快照并附理由）', () => {
     expect(LLM_PATCH_REPAIR_ROUNDS.map(entry => entry.id)).toEqual([
       'fact-landing',
       'table-repair',
@@ -142,7 +142,6 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
       'workpackage-skeleton-repair',
       'planned-section-repair',
       'global-consistency-repair',
-      'qingtian-review-repair',
     ]);
   });
 
@@ -163,14 +162,13 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
     }
   });
 
-  it('FINALIZE_REPAIR_ROUNDS 顺序快照（14 轮锁死，变更必须显式改快照并附理由）', () => {
+  it('FINALIZE_REPAIR_ROUNDS 顺序快照（13 轮锁死，变更必须显式改快照并附理由）', () => {
     expect([...FINALIZE_REPAIR_ROUNDS]).toEqual([
       'fact-landing-round',
       'table-repair-round',
       'semantic-choice-conflict',
       'deterministic-stage5',
       'formal-source-clean',
-      'qingtian-full-review',
       'planned-section-final',
       'commercial-strip',
       'table-deterministic-repair',

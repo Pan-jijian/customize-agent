@@ -32,7 +32,6 @@ import {
   renderBlueprintDataText,
   renderBlueprintMustCiteValues,
   resolveBillOfQuantities,
-  splitSinglePointOversizedBlocks,
   validateBlueprint,
 } from '../integratedBlueprint';
 import type { BlueprintRedLineFact } from '../integratedBlueprint';
@@ -843,7 +842,11 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
     const structure = buildChapterStructureFromBlueprint({ blueprintChapter: chapter, inputSections: ['道路工程', '排水工程', '绿化工程'], chapterTitle: '主要分部分项工程施工方案', targetWords: 6000 });
     expect(structure.blocks.length).toBeGreaterThanOrEqual(chapter.subSections.length);
     expect(structure.blocks.flatMap(block => block.subPoints).map(point => point.title)).toContain('道路工程');
-    expect(structure.blocks.every(block => block.targetWords >= 1200 && block.targetWords <= 4000)).toBe(true);
+    // 容量规划守恒：Σ块预算 = 章目标（块预算一次成型，写作层无事后分配）；单块不超输出安全区
+    expect(structure.blocks.reduce((sum, block) => sum + block.targetWords, 0)).toBe(6000);
+    expect(structure.blocks.every(block => block.targetWords > 0 && block.targetWords <= 4500)).toBe(true);
+    // 点配额下发：每个 H4 要点带 quotaWords（指令层详略），写作提示词按此展开
+    expect(structure.blocks.flatMap(block => block.subPoints).every(point => (point.quotaWords ?? 0) > 0)).toBe(true);
     // 输入细目与切片同名 → 全量覆盖、零回退
     expect(structure.coveredSections.length).toBe(3);
     expect(structure.fallbackSections).toEqual([]);
@@ -861,11 +864,11 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
     // 块顺序保持 inputSections 原顺序（容器块不前置——第一章 1.1 应为「编制说明与工程概况」）
     expect(structure.blocks[0].title.startsWith('编制说明与工程概况')).toBe(true);
     expect(structure.blocks[1].title).toBe('项目主要施工内容');
-    const container = structure.blocks.find(block => block.title === '项目主要施工内容');
-    expect(container?.subPoints.map(point => point.title)).toEqual(expect.arrayContaining(['道路工程', '排水工程', '绿化工程']));
-    // 骨架展开后容器块不再被拆半（halfFocus 与三要素硬要求冲突根因）
-    const split = splitSinglePointOversizedBlocks(structure);
-    expect(split.blocks.some(block => block.title.startsWith('项目主要施工内容（'))).toBe(false);
+    // 容量规划：容器块骨架展开与预算缩放同源（350 字/包），超安全区时规划层按要点拆块（共享父块标题）
+    const containerPoints = structure.blocks.filter(block => block.title === '项目主要施工内容').flatMap(block => block.subPoints.map(point => point.title));
+    expect(containerPoints).toEqual(expect.arrayContaining(['道路工程', '排水工程', '绿化工程']));
+    expect(structure.blocks.reduce((sum, block) => sum + block.targetWords, 0)).toBe(8000);
+    expect(structure.blocks.every(block => block.targetWords <= 4500)).toBe(true);
   });
 
   it('4.19.5 回归：分部章容器块不展开任何骨架名（保持单要点总述块，含中文编号形态骨架名）', () => {
@@ -885,20 +888,18 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
     expect(container?.subPoints.map(point => point.title)).toEqual(['主要分部分项工程施工方案']);
   });
 
-  it('splitSinglePointOversizedBlocks：关键施工容器块不拆半，普通单要点大块照常拆半', () => {
-    const structure = splitSinglePointOversizedBlocks({
-      blocks: [
-        { title: '编制说明与工程概况', subPoints: [{ title: '编制说明与工程概况', sources: ['编制说明与工程概况'] }], facts: [], targetWords: 3600 },
-        { title: '项目主要施工内容', subPoints: [{ title: '项目主要施工内容', sources: ['项目主要施工内容'] }], facts: [], targetWords: 3600 },
-      ],
-      coveredSections: [], fallbackSections: [],
+  it('容量规划：单块预算超输出安全区时规划层按要点拆块（守恒、无不可写预算）', () => {
+    // 2 个域块各 3 个要点、章目标 12000：初始每块预算 6000 > 4500 → 规划层拆到每块 ≤4500，
+    // Σ块预算仍 = 章目标（写作层收到的即最终结构，无事后拆半）
+    const structure = buildChapterStructureFromBlueprint({
+      blueprintChapter: undefined,
+      inputSections: ['安全管理措施', '危大作业管控', '应急响应预案', '质量验收标准', '实测实量要求', '隐蔽验收规定'],
+      chapterTitle: '安全质量保证措施',
+      targetWords: 12000,
     });
-    const container = structure.blocks.find(block => block.title === '项目主要施工内容');
-    // A2：拆半两半块共享父块标题（不加「（一）（二）」后缀），按标题+halfFocus 定位
-    const plain = structure.blocks.find(block => block.title === '编制说明与工程概况' && block.halfFocus);
-    expect(container?.targetWords).toBe(3600);
-    expect(plain?.targetWords).toBeLessThan(3600);
-    expect(plain?.halfFocus).toBeDefined();
+    expect(structure.blocks.reduce((sum, block) => sum + block.targetWords, 0)).toBe(12000);
+    expect(structure.blocks.every(block => block.targetWords <= 4500)).toBe(true);
+    expect(structure.blocks.every(block => block.targetWords > 0)).toBe(true);
   });
 
   it('buildBlueprintOutline：机械章不再误挂清单分部（「主要施工」泛匹配串章根因）', () => {
@@ -948,10 +949,10 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
     expect(empty.blocks.length).toBe(1);
     expect(empty.blocks[0].title).toBe('工程概况');
     expect(empty.blocks[0].subPoints).toEqual([]);
-    // 块目标=整章目标（封顶 4000 字）——单块成稿字数预算覆盖整章
-    expect(empty.blocks[0].targetWords).toBe(4000);
-    // 空要点块不触发拆半（拆半语义要求 subPoints.length===1）
-    expect(splitSinglePointOversizedBlocks(empty).blocks.length).toBe(1);
+    // 块目标=整章目标（封顶单块输出安全区 4500 字）——单块成稿字数预算覆盖整章
+    expect(empty.blocks[0].targetWords).toBe(4500);
+    // 空要点块（无可拆单元）恒为单块：容量拆分的颗粒度是 H4 要点
+    expect(empty.blocks.length).toBe(1);
     // sectionCount=1：单小节归并为一个主题块
     const single = buildChapterStructureFromBlueprint({ blueprintChapter: undefined, inputSections: ['编制说明与工程概况'], chapterTitle: '工程概况', targetWords: 3000 });
     expect(single.blocks.length).toBeGreaterThanOrEqual(1);
@@ -972,7 +973,7 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
     const many = Array.from({ length: 30 }, (_, index) => `质量控制点位检查与验收要求第${'一二三四五六七八九十'[index % 10]}类`);
     const large = buildChapterStructureFromBlueprint({ blueprintChapter: undefined, inputSections: many, chapterTitle: '施工管理措施', targetWords: 12000 });
     expect(large.blocks.length).toBeGreaterThanOrEqual(1);
-    expect(large.blocks.every(block => block.targetWords >= 1200 && block.targetWords <= 4000)).toBe(true);
+    expect(large.blocks.every(block => block.targetWords >= 1200 && block.targetWords <= 4500)).toBe(true);
     expect(large.coveredSections.length).toBe(30);
   });
 

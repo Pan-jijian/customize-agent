@@ -94,10 +94,10 @@ describe('P2.7 division 章容器块展开排除分部块标题（P0 验收实�
   });
 });
 
-describe('4.19.8 division 分部章小块目标动态化（丰乐镇第三轮实测：块质检 1200 目标压垮小分部）', () => {
+describe('4.19.8 division 分部章容量规划（丰乐镇第三轮实测：块质检 1200 目标压垮小分部）', () => {
   const divisionSections = ['楼地面装饰工程', '亮化工程', '外墙保温工程', '屋面防水工程', '门窗安装工程', '栏杆安装工程', '道路工程', '景观绿化工程'];
 
-  it('8 个小分部块（每块 1 要点）→ 块目标按章目标均分（下限 400），不再强制 1200', () => {
+  it('8 个小分部块（每块 1 要点）→ 容量规划归并到章容量内（Σ 块预算精确守恒 4000）', () => {
     const structure = buildChapterStructureFromBlueprint({
       blueprintChapter: {
         title: '主要施工方法',
@@ -110,9 +110,11 @@ describe('4.19.8 division 分部章小块目标动态化（丰乐镇第三轮实
       evidence: [],
     });
     const targets = structure.blocks.map(block => block.targetWords);
-    // 旧判定（blocks.length > 12）不命中 → 每块下限 1200、达标线 1080，小分部清单事实撑不起 → 重试耗尽章失败
-    expect(targets.every(target => target < 1200)).toBe(true);
-    // 总目标不随 1200 下限膨胀（旧行为 8×1200=9600 字数雪崩）
-    expect(targets.reduce((sum, target) => sum + target, 0)).toBeLessThanOrEqual(5000);
+    // 容量规划一次成型：块数 ≤ floor(章目标/1200)（旧行为 8 块各下限 1200 → 9600 字数雪崩）
+    expect(structure.blocks.length).toBeLessThanOrEqual(Math.floor(4000 / 1200));
+    // Σ块预算 = 章目标精确守恒（末块取余额，规划层无事后归并/拆半）
+    expect(targets.reduce((sum, target) => sum + target, 0)).toBe(4000);
+    // 单块预算落在单次输出安全区（0, 4500]
+    expect(targets.every(target => target > 0 && target <= 4500)).toBe(true);
   });
 });

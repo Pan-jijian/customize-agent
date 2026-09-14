@@ -203,13 +203,11 @@ function analyze(docId: string) {
   const blocking = draft.draft?.exportGate?.blockingIssues ?? [];
   const warningIssues = draft.warningIssues ?? [];
   const factBlockers = blocking.filter(item => item.category === 'fact_consistency');
-  const reviewDataLogic = blocking.filter(item => item.category === 'qingtian_review' && /数据逻辑|数值|口径/u.test(item.message ?? ''));
   const warningData = warningIssues.filter(message => WARNING_DATA_RE.test(message));
   const checklistFailed = (draft.reviewMetadata?.reviewChecklist ?? []).filter(item => !item.passed);
 
   const failures: string[] = [];
   if (factBlockers.length > 0) failures.push(`门禁数据类阻断 ${factBlockers.length} 条`);
-  if (reviewDataLogic.length > 0) failures.push(`终审数据逻辑高风险 ${reviewDataLogic.length} 条`);
   if (warningData.length > 0) failures.push(`警告层数据类残留 ${warningData.length} 条`);
   if (recomputed.unregisteredCount > 0) failures.push(`审计未登记项 ${recomputed.unregisteredCount} 个`);
   if (persisted && persisted.unregisteredCount !== recomputed.unregisteredCount) {
@@ -267,7 +265,6 @@ function analyze(docId: string) {
       blockingCount: blocking.length,
       blockingByCategory,
       factBlockers: factBlockers.slice(0, 6).map(item => item.message ?? ''),
-      reviewDataLogic: reviewDataLogic.slice(0, 6).map(item => item.message ?? ''),
       warningTotal: warningIssues.length,
       warningDataCount: warningData.length,
       warningDataSamples: warningData.slice(0, 6),

@@ -1,11 +1,12 @@
 import type { DocumentEvidence, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, PromptChapterStructuralRule, PromptDocumentRuleSet, RuleExtractionTrace, RuntimePromptRuleSet } from './types';
-import { documentTextLength } from './budget';
+import { documentTextLength, explicitLengthTargets } from './budget';
 import { buildEvidenceBundle, evidenceBundlePrompt, evidencePromptBudgetForTarget } from './evidence';
 import { callDocumentLlmJson } from './llmClient';
 import { displayChapterTitle, isFragmentLikeSectionTitle, normalizePlannedSectionTitle } from './outline';
 import { docSystemPrefix } from './markdownComposer';
 import { isStructuralLabelTitle } from './templatingGovernance';
-import { isDegenerateSectionTitle } from './sectionNamingGovernance';
+import { isDegenerateSectionTitle, sectionTitleKey } from './sectionNamingGovernance';
+import { titlesCollide } from './sectionFingerprint';
 import { DIVERSITY_PLANNING_TEMPERATURE } from './diversityProfile';
 
 /** 清单层小节标题清洗（确定性结构清洗）：词尾等长严格重复去重（「要点要点」→「要点」，与成稿 H4 清洗同口径）。
@@ -160,11 +161,42 @@ function extractOutlineHeadings(text: string) {
 }
 
 function extractMinWords(text: string) {
+  // 4.33 识别同源（舒城实测：模板提示词「全文正文要求14万字」窄前缀零命中，预算侧却已识别 140000）
+  // 宽正则（explicitLengthTargets）与 buildDocumentBudget 完全同源，保证「规则摘要/模板预览/生成预算」三处同数；
+  // 宽正则未命中时保留窄前缀兜底（兼容旧用例）
+  const wide = explicitLengthTargets(text);
+  if (wide.targetChars && wide.targetChars > 0) return wide.targetChars;
   const match = /(?:不少于|至少|最低|必须生成不少于)\s*(\d+(?:\.\d+)?)\s*(万)?\s*字/u.exec(text);
   if (!match) return undefined;
   const value = Number(match[1]);
   if (!Number.isFinite(value) || value <= 0) return undefined;
   return Math.floor(value * (match[2] ? 10000 : 1));
+}
+
+/**
+ * 4.33 招标文件附表清单提取（「除文字表述外可附下列图表，图表及格式要求附后。附表一 …」场景）：
+ * 触发句 + 附表编号条目双条件，避免「投标人须知前附表/评标办法前附表」误报；
+ * 附表四（进度网络图）/附表五（总平面图）为图类，由编制人人工补充，不参与系统生成。
+ */
+export function extractAppendixTables(text: string) {
+  const normalized = text.replace(/\\n/gu, '\n').replace(/\r/gu, '');
+  const triggerRe = /(?:除文字表述外)?可附下列图表|图表及格式要求附后|附下列图表|附表.{0,12}附后/u;
+  if (!triggerRe.test(normalized)) return { titles: [] as string[], attachedAtEnd: false };
+  const titles: string[] = [];
+  const seenNumbers = new Set<string>();
+  for (const match of normalized.matchAll(/附表\s*([一二三四五六七八九十\d]{1,3})\s*[:：]?\s*([^\n。；;：:]{2,40}(?:表|图))/gu)) {
+    const number = (match[1] || '').trim();
+    // kb 切片存在断词空格（如“拟配备本 标段的…”）：清 CJK 语境空格，保证标题与文末幂等检查一致
+    const name = (match[2] || '')
+      .replace(/\s+/gu, ' ')
+      .replace(/([\u3400-\u9fff\u3000-\u303f\uff00-\uffef])[ \u3000]+(?=[\u3400-\u9fff\u3000-\u303f\uff00-\uffef])/gu, '$1')
+      .trim();
+    if (!number || !name || name.length < 3) continue;
+    if (seenNumbers.has(number)) continue;
+    seenNumbers.add(number);
+    titles.push(`附表${number} ${name}`);
+  }
+  return { titles, attachedAtEnd: titles.length >= 2 };
 }
 
 function splitExplicitRuleList(value: string) {
@@ -252,6 +284,8 @@ export function buildRuntimePromptRules(input: {
   const normalizedText = [input.promptTexts, input.requirement || ''].filter(Boolean).join('\n\n').replace(/\\n/gu, '\n');
   const base = extractPromptDocumentRules(normalizedText);
   const requiredTables = [...new Set([...base.requiredTables, ...extractRequiredTableTitles(normalizedText)])];
+  // 4.33 招标附表清单（提示词侧）：用户将「附表一…附表六附后」直接写入提示词时同样生效
+  const appendixTables = extractAppendixTables(normalizedText);
   const requiredKeywords = extractRequiredKeywordRules(normalizedText);
   const forbiddenPatterns = extractForbiddenPatternRules(normalizedText);
   const exactHeadings = extractOutlineHeadings(normalizedText);
@@ -279,9 +313,10 @@ export function buildRuntimePromptRules(input: {
     forbiddenSubjects.length ? `已识别禁用主体表达：${forbiddenSubjects.join('、')}` : '',
     base.forbiddenTerms.length ? `已识别禁用词 ${base.forbiddenTerms.length} 个` : '',
     requiredTables.length ? `已识别必需表格：${requiredTables.join('、')}` : '',
+    appendixTables.titles.length ? `已识别招标附表清单（文末附列）：${appendixTables.titles.join('、')}` : '',
     requiredKeywords.length ? `已识别必含关键词：${requiredKeywords.join('、')}` : '',
     forbiddenPatterns.length ? `已识别禁止出现内容：${forbiddenPatterns.join('、')}` : '',
-    minWords ? `已识别最低字数要求：${minWords} 字` : '',
+    minWords ? `已识别目标字数要求：${minWords} 字` : '',
     roleRules.length ? `已抽取角色执行规则 ${roleRules.length} 组` : '',
   ].filter(Boolean);
   // 构建规则溯源信息
@@ -305,6 +340,8 @@ export function buildRuntimePromptRules(input: {
     requiredTables,
     requiredKeywords,
     forbiddenPatterns,
+    appendixTableTitles: appendixTables.titles.length > 0 ? appendixTables.titles : undefined,
+    appendixAttachedAtEnd: appendixTables.attachedAtEnd || undefined,
     sourceHash: simpleHashText(normalizedText),
     exactHeadings,
     forbidExtraHeadings: /不得合并|不得删除|不得改名|不得新增|严格按.*章节名称|一级章节.*不得/u.test(normalizedText) || exactHeadings.length > 0,
@@ -463,14 +500,15 @@ export function minimumSectionCount(chapter: DocumentTemplateChapter, targetWord
  * 表格需求（表名+表头字段，写作期按此注入表格硬性要求）。小节结构只来自用户声明与 LLM 规划，
  * 系统不生成任何小节：LLM 失败时保留锁定结构继续；无锁定结构且规划失败/无产出即显性失败（throw），不凑数补位。
  */
-export async function planChapterSectionsWithLlm(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; chapterIndex?: number; evidence: DocumentEvidence[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; projectGraphSummary?: string; lockedSections?: string[]; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; diversity?: { directive: string; avoidSections?: string[]; overlapCheck?: (sections: string[]) => string[] } }): Promise<{ sections: string[]; tables: PlannedTableRequest[]; diversity?: { retried: boolean; remainingCollisions: number } }> {
+export async function planChapterSectionsWithLlm(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; chapterIndex?: number; evidence: DocumentEvidence[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; projectGraphSummary?: string; lockedSections?: string[]; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; diversity?: { directive: string; avoidSections?: string[]; overlapCheck?: (sections: string[]) => Array<{ title: string; collidedWith: string }> } }): Promise<{ sections: string[]; tables: PlannedTableRequest[]; diversity?: { retried: boolean; remainingCollisions: number } }> {
   const locked = normalizePlannedSections(input.lockedSections || [], input.chapter.title);
   const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, input.evidence), { maxChars: evidencePromptBudgetForTarget(input.targetWords, 5000, 12000), diagnostics: input.diagnostics });
   const minSections = minimumSectionCount(input.chapter, input.targetWords, input.evidence, locked.length);
   const maxSections = Math.max(minSections, Math.min(7, input.targetWords >= 8000 ? 7 : 6));
-  // 编排约定：章节顺序只靠提示词指令引导，不做代码硬排与重规划反馈（禁止确定性兜底）
+  // 编排约定：小节顺序由提示词指令引导 + 确定性置首（概况类小节置首为目标形制，非“代码硬排”）；
+  // 撞名不再触发重规划反馈（方案 2.3 已移除整章重跑，见文末局部候选名替换）
   const overviewChapter = input.chapterIndex === 0 || /编制说明|工程概况|项目概况/u.test(input.chapter.title);
-  const planOnce = async (verificationFeedback = '') => {
+  const planOnce = async () => {
     const result = await callDocumentLlmJson<{ sections?: string[]; tables?: Array<{ title?: string; fields?: string[] }> }>([
       docSystemPrefix('你是专业文档结构规划专家。'),
       '只根据用户提示词、章节标题和真实绑定资料规划本章二级小节。',
@@ -494,7 +532,6 @@ export async function planChapterSectionsWithLlm(input: { template: DocumentTemp
       evidenceText ? `真实绑定资料：\n${evidenceText}` : '',
       `请输出 ${minSections}-${maxSections} 个适合直接成稿的二级小节标题。标题必须具体、业务相关、能承载真实资料；每个标题控制在 16 个汉字以内，避免多个小节表达同一内容。`,
       '如本章需要输出管理表格或清单（投入计划表、控制要点表、验收清单、管控台账、检查记录表等），必须在 tables 中逐表给出表名与表头字段（字段名必须具体、可填）；不需要表格时 tables 返回空数组。',
-      verificationFeedback ? `上一轮规划存在以下必须修正的问题：\n${verificationFeedback}` : '',
       'JSON 格式：{"sections":["小节标题1","小节标题2"],"tables":[{"title":"表名","fields":["字段1","字段2"]}]}',
     ].filter(Boolean).join('\n\n'), { maxTokens: 2400, temperature: DIVERSITY_PLANNING_TEMPERATURE, signal: input.signal, diagnostics: input.diagnostics });
     const plannedItems: string[] = [];
@@ -529,33 +566,90 @@ export async function planChapterSectionsWithLlm(input: { template: DocumentTemp
     }
     throw error;
   }
-  // 统一核验-反馈框架（上限 1 轮）：首章概况小节置首核验 + 指纹撞名核验合并为一次反馈，
-  // 第二轮一次性消化全部核验问题；二次核验未清零不阻断（多样性是软质量，不能让生成失败）
-  const verifyPlan = (titles: string[]) => {
-    const feedback: string[] = [];
-    if (overviewChapter && titles.length > 0 && !/编制说明|工程概况|项目概况/u.test(titles[0]!)) {
-      const overviewIndex = titles.findIndex(title => /编制说明|工程概况|项目概况/u.test(title));
-      // 条件语义与提示词一致：仅“规划出但未置首”才反馈；完全未规划该类小节不强制补（不臆造结构）
-      if (overviewIndex > 0) feedback.push(`本章是全文第一章，“编制说明与工程概况”类小节必须置于小节清单第一位（当前排在第 ${overviewIndex + 1} 位）。`);
+  // 核验与局部处理（方案 2.3：移除“撞名整章重规划”整章重跑，降为局部候选名替换）：
+  // - 首章概况小节未置首 → 确定性调序（零 LLM，与下游 prioritizeOverviewSections 同口径）；
+  // - 历史指纹撞名 → 一次轻量改名调用只产出撞名标题的候选名映射，确定性校验后替换；
+  // 调用失败/全部校验不过不阻断（多样性是软质量，不能让生成失败），剩余撞名数上报。
+  let sections = planned.sections;
+  if (overviewChapter) {
+    const overviewIndex = sections.findIndex(title => /编制说明|工程概况|项目概况/u.test(title));
+    // 条件语义保持：仅“规划出但未置首”才调序；完全未规划该类小节不强制补（不臆造结构）
+    if (overviewIndex > 0) {
+      sections = [sections[overviewIndex]!, ...sections.slice(0, overviewIndex), ...sections.slice(overviewIndex + 1)];
     }
-    const collisions = input.diversity?.overlapCheck ? input.diversity.overlapCheck(titles) : [];
-    if (collisions.length > 0) feedback.push(`以下小节标题与历史文档高度近似，必须换角度、换表述重新命名（不得只调整语序或添加“工作/内容”尾词）：${collisions.slice(0, 8).join('；')}。`);
-    return { feedback, collisions };
-  };
-  const firstCheck = verifyPlan(planned.sections);
-  if (firstCheck.feedback.length === 0) return planned;
-  let diversity: { retried: boolean; remainingCollisions: number } = { retried: true, remainingCollisions: firstCheck.collisions.length };
-  try {
-    planned = await planOnce(firstCheck.feedback.join('\n'));
-  } catch (error) {
-    console.warn(`[plan] 核验反馈重规划失败（保留首轮结果）：${input.chapter.title}，${error instanceof Error ? error.message : String(error)}`);
-    return { ...planned, diversity };
   }
-  const secondCheck = verifyPlan(planned.sections);
-  diversity = { retried: true, remainingCollisions: secondCheck.collisions.length };
-  if (secondCheck.collisions.length > 0) console.warn(`[plan] 二次核验仍存在历史撞名（接受，不阻断）：${input.chapter.title}，${secondCheck.collisions.slice(0, 4).join('；')}`);
-  if (secondCheck.feedback.some(item => item.includes('第一位'))) console.error(`[plan] 二次核验首章概况小节仍未置于首位：${input.chapter.title}`);
-  return { ...planned, diversity };
+  const collisions = input.diversity?.overlapCheck ? input.diversity.overlapCheck(sections) : [];
+  if (collisions.length === 0) return { ...planned, sections };
+  const replaced = await replaceCollidedSectionNames({
+    chapter: input.chapter,
+    sections,
+    collisions,
+    locked,
+    overlapCheck: input.diversity?.overlapCheck,
+    signal: input.signal,
+    diagnostics: input.diagnostics,
+  });
+  const remainingCollisions = input.diversity?.overlapCheck ? input.diversity.overlapCheck(replaced.sections).length : 0;
+  if (remainingCollisions > 0) console.warn(`[plan] 局部改名后仍存在历史撞名（接受，不阻断）：${input.chapter.title}，${remainingCollisions} 处`);
+  if (replaced.renamed > 0) console.info(`[plan] 撞名局部改名：${input.chapter.title}，${replaced.renamed} 个标题已替换候选名`);
+  return { ...planned, sections: replaced.sections, diversity: { retried: true, remainingCollisions } };
+}
+
+/**
+ * 规划期撞名局部候选名替换（方案 2.3：替代原“整章重规划”）：一次轻量改名调用（maxTokens 600，
+ * 输入仅本章小节清单+撞名对照，不含整章规划上下文）只输出撞名标题的候选名映射；
+ * 候选名经确定性校验后应用（与 L2 章级定名轮同口径）：非空/非退化/过规划卫生/不与本章
+ * 其他标题撞/不撞历史池；锁定小节不改名（用户声明结构不可改）；失败保留原名不阻断。
+ */
+async function replaceCollidedSectionNames(input: {
+  chapter: DocumentTemplateChapter;
+  sections: string[];
+  collisions: Array<{ title: string; collidedWith: string }>;
+  locked: string[];
+  overlapCheck?: (sections: string[]) => Array<{ title: string; collidedWith: string }>;
+  signal?: AbortSignal;
+  diagnostics?: DocumentGenerationDiagnostics;
+}): Promise<{ sections: string[]; renamed: number }> {
+  const sections = [...input.sections];
+  const targets = input.collisions
+    .filter(item => !input.locked.some(lockedTitle => sectionTitleEquivalent(lockedTitle, item.title)))
+    .map(item => item.title);
+  if (targets.length === 0) return { sections, renamed: 0 };
+  let renames: Record<string, string>;
+  try {
+    const result = await callDocumentLlmJson<{ renames?: Record<string, string> }>([
+      docSystemPrefix('你是施工组织设计目录命名审查专家。'),
+      '输入某章的小节标题清单与需改名的标题（与历史文档撞名），只输出改名映射。',
+      '改名规则：只改点名标题，不改未点名标题；新标题必须仍是同一专业对象或同一工程内容的具体表述，不得改变小节实质；16 个汉字以内；不得仅通过添加“工作/内容/相关/方案”等尾词规避撞名，必须实质性更换措辞；不得与本章其他小节标题用词高度相似（防章内撞名）。',
+      '只返回 JSON。',
+    ].join('\n'), [
+      `章标题：${displayChapterTitle(input.chapter.title)}`,
+      `本章小节清单：\n${sections.map(title => `- ${title}`).join('\n')}`,
+      `需要改名的标题：${targets.join('、')}`,
+      `历史撞名对照（本次 ↔ 历史文档）：\n${input.collisions.map(item => `「${item.title}」↔「${item.collidedWith}」`).join('\n')}`,
+      'JSON 格式：{"renames":{"原标题":"新标题"}}（只包含需要改名的标题）',
+    ].join('\n\n'), { maxTokens: 600, temperature: DIVERSITY_PLANNING_TEMPERATURE, signal: input.signal, diagnostics: input.diagnostics });
+    renames = result?.renames && typeof result.renames === 'object' ? result.renames : {};
+  } catch (error) {
+    console.warn(`[plan] 撞名局部改名调用失败（保留原名）：${input.chapter.title}，${error instanceof Error ? error.message : String(error)}`);
+    return { sections, renamed: 0 };
+  }
+  let renamed = 0;
+  for (const [from, toRaw] of Object.entries(renames)) {
+    const fromKey = sectionTitleKey(from);
+    if (!fromKey || !targets.some(target => sectionTitleKey(target) === fromKey)) continue;
+    const index = sections.findIndex(title => sectionTitleKey(title) === fromKey);
+    if (index < 0) continue;
+    const to = normalizePlannedSectionTitle(String(toRaw || ''));
+    if (!to || to.length > 24 || isDegenerateSectionTitle(to)) continue;
+    if (isInvalidPlannedSectionTitle(to, input.chapter.title)) continue;
+    // 新名不得与本章其他标题撞（含未点名标题与已接受新名），不得撞历史池
+    if (sections.some((title, position) => position !== index && titlesCollide(title, to))) continue;
+    if (input.overlapCheck && input.overlapCheck([to]).length > 0) continue;
+    sections[index] = to;
+    renamed += 1;
+  }
+  return { sections, renamed };
 }
 
 /** 提示词保存前预检结果：向用户展示系统运行时将从该提示词中执行的硬性规则 */

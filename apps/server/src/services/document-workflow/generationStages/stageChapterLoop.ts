@@ -34,7 +34,7 @@ import { retrievePlannedMaterialEvidence, sampleProjectMaterialEvidence } from '
 import { buildChapterFactCoverageContext, buildPlannedChapterContent, capFactCoverageContext, evidenceForSection } from '../chapterGeneration';
 import type { PlannedChapterContentInput, PlannedChapterContentResult } from '../chapterGeneration';
 import { chapterCompletionStatus, chapterGenerationTargets, compactChapterQueries, finalizeChapterContentQuality, optimizeChapterEvidence, preselectSemanticCandidates, resolveChapterPromptExecution, retrieveSectionEvidence, semanticEvidenceText, stripBidDisciplineSentencesSemantic } from '../documentGeneratorHelpers';
-import { alignChapterContentToBlueprint, buildChapterStructureFromBlueprint, chapterBlueprintAuthoritiesNeeded, chapterBlueprintAuthorityGaps, findBlueprintChapter, renderBlueprintChapterSlice, renderBlueprintMustCiteValues, splitSinglePointOversizedBlocks } from '../integratedBlueprint';
+import { alignChapterContentToBlueprint, buildChapterStructureFromBlueprint, chapterBlueprintAuthoritiesNeeded, chapterBlueprintAuthorityGaps, findBlueprintChapter, renderBlueprintMustCiteValues } from '../integratedBlueprint';
 import type { BlueprintAuthorityId, PlannedChapterStructure } from '../integratedBlueprint';
 import { blueprintPhaseLaborAuthorities } from '../authorityIndex';
 import { fixPhaseLaborValues } from '../documentIntegrityChecks';
@@ -481,7 +481,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     const sectionCount = chapter.sections?.filter(Boolean).length || 0;
     const targetPlan = chapterGenerationTargets({ budgetTarget, sectionCount, title: chapter.title, longformStrict: session.planning.documentBudget.longformStrict });
     const chapterMaxChars = Math.ceil(targetPlan.maxWords * (session.planning.documentBudget.maxChars ? 1.05 : 1));
-    // 二期蓝图接管：本章章切片渲染文本 + 参数桶权威文本（蓝图活跃时替换主表口径）；
+    // 二期蓝图接管：章切片对象与参数桶 data 交由块级聚焦渲染（s1-slim：参数桶按块 token 条目级筛选、切片只展开块相关工作包）；
     // P14：整体校验未通过但本章所需权威全可用（blueprintGaps 为空）时，数值密集章仍注入章切片，
     // 避免放行章节无权威数值按证据独立成稿（非数值密集章维持现状：整体未通过不注入）
     // P17 语义化：章切片注入判定与阻断判定共用同一分类器（语义优先、正则兑底）
@@ -489,8 +489,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     const chapterBlueprintSlice = (session.blueprint.blueprintActive || (chapterNeedsBlueprintAuthority && blueprintGaps.missing.length === 0)) && session.blueprint.integratedBlueprint
       ? findBlueprintChapter(session.blueprint.integratedBlueprint, chapter.title)
       : undefined;
-    // 章切片尾部追加章级数值锚点卡（本章必须引用的计划类数值聚焦强约束，写作层抑制自编数值）
-    const blueprintSliceText = chapterBlueprintSlice && session.blueprint.integratedBlueprint ? renderBlueprintChapterSlice(chapterBlueprintSlice, session.blueprint.integratedBlueprint.data) : '';
+    // 本章 must_cite 数值锚点清单（本章必须引用的计划类数值聚焦强约束，写作层抑制自编数值；章切片不再章级预渲染）
     const blueprintMustCiteHint = chapterBlueprintSlice && session.blueprint.integratedBlueprint ? renderBlueprintMustCiteValues(chapterBlueprintSlice, session.blueprint.integratedBlueprint.data) : '';
     const targetWords = targetPlan.roundTarget;
     // 长文模式：目标字数以提示词预算为准（roundTarget 已含完整章预算），不再被 structureTarget 二次压制；
@@ -543,10 +542,10 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
       session.global.emitProgress();
       let llmContent: string | undefined;
-      // C3 块级失败隔离重试器：失败块按同一目标字数单独成稿并插回原位置（成功块不动，不整章降级重写）。
-      // 整章降级是历史缺陷「整章备用=整章失败重写」与全文字数雪崩的根因——单块质检未达标即全章重写，
-      // 已成功的 2/3 内容全部作废；隔离重试只补失败块，成功块内容与 token 零浪费
-      // 达标契约：重试不降标（历史 0.75/0.55 紧缩预算已删除）
+      // C3 块级失败隔离定向重写器（章定向重写 1 次）：失败块按同一目标字数单独成稿并插回原位置
+      //（成功块不动，不整章降级重写）。整章降级是历史缺陷「整章备用=整章失败重写」与全文字数雪崩的根因——
+      // 单块质检未达标即全章重写，已成功的 2/3 内容全部作废；隔离重写只补失败块，成功块内容与 token 零浪费
+      // 达标契约：重写不降标（历史 0.75/0.55 紧缩预算已删除），仍失败即章阻断、文档显式失败
       const retryFailedBlocks = async (buildInput: PlannedChapterContentInput, failedBlocks: PlannedChapterContentResult['failedBlocks'], sections: Array<string | undefined>): Promise<Array<string | undefined>> => {
         const retried = await Promise.all(failedBlocks.map(({ block }) =>
           buildPlannedChapterContent({ ...buildInput, targetWords: block.targetWords, maxWords: Math.ceil(block.targetWords * 1.1) }, { blocks: [block], coveredSections: [], fallbackSections: [] })
@@ -563,12 +562,11 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       // 规划驱动管线（C1 管线收敛后为章节成稿唯一路径；三期收口：蓝图章切片→块结构确定性转换，零 LLM 调用）：
       // 蓝图小节/工作包映射主题块+H4 要点，相近细目语义合并进重写标题的 H4；
       // 本章无蓝图切片时由确定性语义域分组接管（永不回退逐小节碎片化成稿）
-      const plannedStructureRaw = await session.global.withProgressHeartbeat(() => measureGenerationStep(session.planning.generationDiagnostics, `chapter-plan:${chapter.id}`, async () =>
+      // 容量规划收口（规划层一次成型）：块数 × 块预算 × 点配额已在 buildChapterStructureFromBlueprint 内完成，
+      // 写作层不再有任何事后拆半/归并动作（原 splitSinglePointOversizedBlocks 已删除）
+      let plannedStructure = await session.global.withProgressHeartbeat(() => measureGenerationStep(session.planning.generationDiagnostics, `chapter-plan:${chapter.id}`, async () =>
         buildChapterStructureFromBlueprint({ blueprintChapter: chapterBlueprintSlice, inputSections: chapter.sections || [], chapterTitle: displayChapterTitle(chapter.title), targetWords: effectiveTargetWords, projectContext: session.planning.projectContext, evidence })
       ));
-      // A22 单要点大块确定性拆分（丰乐镇第八轮失败实测）：规划器产出单要点 3600 字大块时
-      // 模型单次输出达不到达标线且无拆半退路 → 章失败；规划层即拆为两个半块（目标减半+分工指令）
-      let plannedStructure = splitSinglePointOversizedBlocks(plannedStructureRaw);
       // L2 章级定名轮：撞名（指纹池）/退化标题信号门控——无信号零 LLM 调用；改名经确定性校验后应用
       const namingReview = await session.global.withProgressHeartbeat(() => governChapterBlockNames({
         chapterTitle: displayChapterTitle(chapter.title),
@@ -606,18 +604,17 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
           chapterTaskStage.message = `${chapterTaskResult.task.sections.filter(item => item.ready).length}/${chapterTaskResult.task.sections.length} 条细目任务就绪（已规划为 ${plannedStructure.blocks.length} 个主题块）`;
         }
         session.global.emitProgress(session.global.chapterDrafts);
-        const plannedBuildInput: PlannedChapterContentInput = { template: session.prepare.template, chapter, evidence, missingFacts, promptTexts: plannedPromptTexts, projectContext: session.planning.chapterScopedProjectContext(chapter), skeletonProjectContext: session.planning.projectContext, requirement: session.global.input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, compactProjectContext: true, scopedProjectContext: true, blueprintDataText: session.blueprint.blueprintDataText, blueprintSliceText, blueprintMustCiteHint, sectionEvidenceProvider: sectionEvidenceForChapter, onSectionProgress: onSectionProgressForCheckpoint, diagnostics: session.planning.generationDiagnostics, signal: session.global.input.signal };
+        const plannedBuildInput: PlannedChapterContentInput = { template: session.prepare.template, chapter, evidence, missingFacts, promptTexts: plannedPromptTexts, projectContext: session.planning.chapterScopedProjectContext(chapter), skeletonProjectContext: session.planning.projectContext, requirement: session.global.input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, compactProjectContext: true, scopedProjectContext: true, blueprintData: session.blueprint.integratedBlueprint?.validation.passed ? session.blueprint.integratedBlueprint.data : undefined, blueprintChapter: chapterBlueprintSlice, blueprintMustCiteHint, sectionEvidenceProvider: sectionEvidenceForChapter, onSectionProgress: onSectionProgressForCheckpoint, diagnostics: session.planning.generationDiagnostics, signal: session.global.input.signal };
         const plannedFirst = await session.global.withProgressHeartbeat(() => measureGenerationStep(session.planning.generationDiagnostics, `chapter-planned-block-draft:${chapter.id}`, () =>
           buildPlannedChapterContent(plannedBuildInput, plannedStructure)
         ));
         if (plannedFirst?.allSucceeded) {
           llmContent = plannedFirst.markdown;
         } else if (plannedFirst) {
-          // C3：失败块两轮隔离重试（同一目标字数），全部成功即拼回完整章节；
-          // 重试后仍失败即阻断本章（旧「整章备用」降级路径已随 C1 管线收敛删除，成功块不再被整章重写作废）
-          let mergedSections = await retryFailedBlocks(plannedBuildInput, plannedFirst.failedBlocks, plannedFirst.sections);
-          const stillFailed = plannedFirst.failedBlocks.filter(({ index }) => !mergedSections[index]);
-          if (stillFailed.length > 0) mergedSections = await retryFailedBlocks(plannedBuildInput, stillFailed, mergedSections);
+          // C3：失败块定向重写 1 次（同一目标字数、块写作合同不降标），全部成功即拼回完整章节；
+          // 仍失败即章阻断、文档显式失败（方案 2.1：块失败 → 章定向重写 1 次 → 章失败 → 文档显式失败；
+          // 旧「整章备用」降级与多轮重试路径已随 C1 管线收敛删除，成功块不再被整章重写作废）
+          const mergedSections = await retryFailedBlocks(plannedBuildInput, plannedFirst.failedBlocks, plannedFirst.sections);
           if (mergedSections.every((section): section is string => Boolean(section))) llmContent = `## ${chapter.title}\n\n${mergedSections.join('\n\n')}`;
         }
       }
@@ -687,7 +684,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     const generatedSectionsForReview = extractGeneratedSections(content);
     // C1 目录确定性：draft.sections 必须等于生成前规划大纲（主题块管线=块标题，其余=规划小节），
     // 不得从正文提取——正文 H3 被 LLM 改写后提取进目录是「目录污染」的直接源头；仅无任何规划来源时才提取兜底。
-    // 相邻同名去重：单要点大块拆半的两半共享父标题（章级拼接剥壳后正文只合并为一个小节），
+    // 相邻同名去重（防御性）：容量规划归并后的相邻块标题若归一化同名（章级拼接剥壳后正文只合并为一个小节），
     // sections 元数据不去重会在目录/检查器侧双写同名小节（11 章相邻重复小节根因）
     const plannedSectionTitlesRaw = plannedStructureRef && plannedStructureRef.blocks.length > 0 ? plannedStructureRef.blocks.map(block => block.title) : (chapter.sections || []).filter(Boolean);
     const plannedSectionTitles = plannedSectionTitlesRaw.filter((title, index) => title !== plannedSectionTitlesRaw[index - 1]);

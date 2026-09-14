@@ -225,7 +225,6 @@ export interface GenerationSessionBlueprint {
   basicFactSearchResults: KbSearchResult[];
   integratedBlueprint: IntegratedBlueprint | undefined;
   blueprintActive: boolean;
-  blueprintDataText: string;
   /** 清单事实锁（阶段 3 构建：条目→特征→工程量行级确定性锁，写作直读 + 生成后数值核对共用） */
   billFactLock: BillFactLock | undefined;
 }

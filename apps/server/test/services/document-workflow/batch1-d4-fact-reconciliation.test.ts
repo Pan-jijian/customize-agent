@@ -79,6 +79,25 @@ describe('D4.2 规格-数值绑定对账（张冠李戴拦截）', () => {
     const issues = factReconciliationIssues({ markdown: 'DN200 污水管 211m，DN300 波纹管 7965m。', billFactLock: lock });
     expect(issues).toEqual([]);
   });
+
+  // 4.31 丰乐镇 v6 #2：DN25 管「不大于 1.0m」为支架间距工艺约束上限，非该规格清单数量
+  it('DN25 管不大于 1.0m（工艺约束句）→ 不报（4.31 约束豁免）', () => {
+    const constraintLock = lockOf([
+      lockEntry({ name: '塑料管', quantity: 9.87, unit: 'm', specQuantityPairs: [{ spec: 'DN25', quantity: '9.87m' }] }),
+      lockEntry({ name: '提升泵', quantity: 4, unit: '台', specQuantityPairs: [{ spec: '5.5m', quantity: '4台' }] }),
+    ]);
+    const issues = factReconciliationIssues({ markdown: 'DN25 管不大于 1.0m。', billFactLock: constraintLock });
+    expect(issues.filter(issue => issue.message.includes('DN25'))).toEqual([]);
+  });
+
+  it('DN25 11.23m（属 DN32 清单数量）→ 张冠李戴仍报（豁免未过宽）', () => {
+    const crossLock = lockOf([
+      lockEntry({ name: '塑料管', quantity: 9.87, unit: 'm', specQuantityPairs: [{ spec: 'DN25', quantity: '9.87m' }] }),
+      lockEntry({ name: '塑料管', quantity: 11.23, unit: 'm', specQuantityPairs: [{ spec: 'DN32', quantity: '11.23m' }] }),
+    ]);
+    const issues = factReconciliationIssues({ markdown: 'DN25 11.23m。', billFactLock: crossLock });
+    expect(issues.some(issue => issue.message.includes('DN25'))).toBe(true);
+  });
 });
 
 describe('D4.3 数值语义槽位对账（埋深误用总长口径拦截）', () => {
@@ -162,6 +181,69 @@ describe('D4.6 名称口径对账（材质替换 / 名称-数值无源）', () =
   it('正确名称与正确数值（金属门 12 樘、顶棚抹灰 18.57m²）→ 不报', () => {
     const issues = factReconciliationIssues({ markdown: '金属门 12 樘；顶棚抹灰 18.57m²。', billFactLock: lock });
     expect(issues).toEqual([]);
+  });
+});
+
+// 4.31 丰乐镇 v6 聚合口径豁免：子集和（#4-61）/ 组和补差（检查井 557）/ 同名组和闭合（开挖 12599.51）
+describe('D4.6/D4.1 聚合口径豁免（4.31，跨名称组和与同名组和闭合）', () => {
+  it('塑料检查井 557 座（= 同名组和 555 + 砌筑检查井 2）→ 不报（组和补差豁免）', () => {
+    const wellsLock = lockOf([
+      lockEntry({ name: '塑料检查井', quantity: 300, unit: '座' }),
+      lockEntry({ name: '塑料检查井', quantity: 255, unit: '座' }),
+      lockEntry({ name: '砌筑检查井', quantity: 2, unit: '座' }),
+    ]);
+    const issues = factReconciliationIssues({ markdown: '检查井逐座验收，共塑料检查井557座。', billFactLock: wellsLock });
+    expect(issues.filter(issue => issue.message.includes('557'))).toEqual([]);
+  });
+
+  it('塑料检查井 558 座（≠ 组和 + 权威池任一值）→ 仍报（防豁免过宽）', () => {
+    const wellsLock = lockOf([
+      lockEntry({ name: '塑料检查井', quantity: 300, unit: '座' }),
+      lockEntry({ name: '塑料检查井', quantity: 255, unit: '座' }),
+      lockEntry({ name: '砌筑检查井', quantity: 2, unit: '座' }),
+    ]);
+    const issues = factReconciliationIssues({ markdown: '检查井逐座验收，共塑料检查井558座。', billFactLock: wellsLock });
+    expect(issues.some(issue => issue.message.includes('558'))).toBe(true);
+  });
+
+  it('「管沟开挖总量为 12599.51m³」= 同名 2 条村组之和 → 不报（同名组和闭合）', () => {
+    const earthLock = lockOf([
+      lockEntry({ name: '挖沟槽土方', quantity: 8000, unit: 'm3' }),
+      lockEntry({ name: '挖沟槽土方', quantity: 4599.51, unit: 'm3' }),
+      lockEntry({ name: '回填方', quantity: 3000, unit: 'm3' }),
+    ]);
+    const issues = factReconciliationIssues({ markdown: '本工程排水管沟开挖总量为12599.51m³。', billFactLock: earthLock });
+    expect(issues.filter(issue => issue.message.includes('12599.51'))).toEqual([]);
+  });
+
+  it('「管沟开挖总量为 12599.61m³」≠ 任何组和 → 仍报（防豁免过宽）', () => {
+    const earthLock = lockOf([
+      lockEntry({ name: '挖沟槽土方', quantity: 8000, unit: 'm3' }),
+      lockEntry({ name: '挖沟槽土方', quantity: 4599.51, unit: 'm3' }),
+      lockEntry({ name: '回填方', quantity: 3000, unit: 'm3' }),
+    ]);
+    const issues = factReconciliationIssues({ markdown: '本工程排水管沟开挖总量为12599.61m³，回填方总量3000m³。', billFactLock: earthLock });
+    expect(issues.some(issue => issue.message.includes('12599.61'))).toBe(true);
+  });
+});
+
+// 4.32 丰乐镇 v6 复测：同名池超 meet-in-middle 上限（40 条）→ 浅组合判定
+// （回填方 4270 = 3570 + 700，原实现在池 >40 时整体返回 false，42 条同名条目逐条误报「绑定无源」）
+describe('D4.6a 超上限同名池浅组合判定（4.32，回填方 4270 = 3570 + 700）', () => {
+  const bigLock = lockOf([
+    ...Array.from({ length: 40 }, (_, index) => lockEntry({ name: '回填方', quantity: Number((index + 1.11).toFixed(2)), unit: 'm3' })),
+    lockEntry({ name: '回填方', quantity: 3570, unit: 'm3' }),
+    lockEntry({ name: '回填方', quantity: 700, unit: 'm3' }),
+  ]);
+
+  it('42 条「回填方」池 4270 = 3570 + 700（两值之和）→ 不报', () => {
+    const issues = factReconciliationIssues({ markdown: '本分项回填方 4270m³ 已分层夯实完成。', billFactLock: bigLock });
+    expect(issues.filter(issue => issue.message.includes('4270'))).toEqual([]);
+  });
+
+  it('42 条池 4273（≠ 任何浅组合）→ 仍报（防豁免过宽）', () => {
+    const issues = factReconciliationIssues({ markdown: '本分项回填方 4273m³ 已完成分层夯实。', billFactLock: bigLock });
+    expect(issues.some(issue => issue.message.includes('4273'))).toBe(true);
   });
 });
 

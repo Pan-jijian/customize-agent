@@ -415,6 +415,11 @@ function scanTruncatedLines(lines: string[], result: StructureScanResult): void 
     // 引导句（以冒号结尾）/ 表题图题（以表/图结尾）不判截断
     if (/[:：、]$/u.test(line) || /[表图]$/u.test(line)) continue;
     const next = nextContentLine(lines, i);
+    // 4.31 列表引导句豁免：行尾为「…完成后/完毕后/结束后/如下/以下」类引导语且后续行为列表项时，
+    // 属“引导句+列表”正常结构（丰乐镇 v6 实测：工序叙述“……摊铺完成后”+有序列表被误判句尾截断）
+    if (next >= 0
+      && (isOrderedItem(lines[next]) || isBulletItem(lines[next]))
+      && /(?:完成后|完毕后|结束后|如下|以下)$/u.test(line)) continue;
     const nextIsBoundary = next === -1
       || isHeading(lines[next])
       || isTableRow(lines[next])

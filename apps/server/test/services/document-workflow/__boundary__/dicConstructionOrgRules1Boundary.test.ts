@@ -481,12 +481,14 @@ describe('Y7 constructionOrgMajorContentIssues', () => {
     expect(constructionOrgMajorContentIssues([draftChapter('项目主要施工内容', majorSection(5))])).toEqual([]);
   });
 
-  it('4 个工作包 → blocker 专业工程不足', () => {
-    const issues = constructionOrgMajorContentIssues([draftChapter('项目主要施工内容', majorSection(4))]);
-    expect(issues).toHaveLength(1);
-    expect(issues[0].severity).toBe('blocker');
-    expect(issues[0].message).toContain('专业工程不足');
-    expect(issues[0].message).toContain('当前 4 个');
+  it('2 个工作包 → blocker 专业工程不足（4.31 门槛校准：要求不少于 3 个）', () => {
+    const issues = constructionOrgMajorContentIssues([draftChapter('项目主要施工内容', majorSection(2))]);
+    expect(issues.some(issue => issue.severity === 'blocker' && issue.message.includes('专业工程不足'))).toBe(true);
+    expect(issues.some(issue => issue.message.includes('当前 2 个'))).toBe(true);
+  });
+
+  it('4 个工作包 → 不报（4.31 门槛校准：≥3 达标）', () => {
+    expect(constructionOrgMajorContentIssues([draftChapter('项目主要施工内容', majorSection(4))])).toEqual([]);
   });
 
   it('段落正文 + 数据附表（2 行小表）→ 不报（表格承载判定口径校准）', () => {

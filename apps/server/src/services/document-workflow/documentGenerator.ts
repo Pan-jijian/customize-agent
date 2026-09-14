@@ -28,7 +28,6 @@ export async function generateDocumentDraft(input: { templateId: string; require
       basicFactSearchResults: [],
       integratedBlueprint: undefined,
       blueprintActive: false,
-      blueprintDataText: '',
       billFactLock: undefined,
     },
     chapterLoop: { draftPhaseStartedAt: 0, chapterDraftsFinal: [], globalReviewPhaseStartedAt: 0 },
