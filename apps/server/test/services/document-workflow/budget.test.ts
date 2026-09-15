@@ -16,6 +16,7 @@ import {
   pageTargetIssues,
   parseChineseNumber,
   reanchorChapterTargetsByFeasibility,
+  stripExplicitLengthLines,
   type DocumentBudget,
 } from '@/services/document-workflow/budget';
 import type { AutoDocumentSpecPackage } from '@/services/document-core/autoDocumentSpecTypes';
@@ -113,6 +114,40 @@ describe('explicitLengthTargets', () => {
     expect(result.pageMode).toBeUndefined();
     expect(result.targetChars).toBeUndefined();
     expect(result.charMode).toBeUndefined();
+  });
+});
+
+describe('stripExplicitLengthLines（4.40 篇幅指令分层编译·文本侧消解）', () => {
+  it('独立行文档级篇幅声明整行剥离', () => {
+    expect(stripExplicitLengthLines('1. 全文正文不得少于14万字\n2. 必须紧扣招标文件响应完整。'))
+      .toBe('2. 必须紧扣招标文件响应完整。');
+    expect(stripExplicitLengthLines('全文不少于 5 万字\n必须紧扣招标文件。'))
+      .toBe('必须紧扣招标文件。');
+  });
+
+  it('句内文档级篇幅从句消解（保留同句其余要求）', () => {
+    expect(stripExplicitLengthLines('内容重点突出，正文不少于14万字，采用暗标。'))
+      .toBe('内容重点突出，采用暗标。');
+    expect(stripExplicitLengthLines('全文正文要求14万字。必须紧扣招标文件响应完整。'))
+      .toBe('必须紧扣招标文件响应完整。');
+  });
+
+  it('章节级/小节级字数要求不消解（保护范围外）', () => {
+    expect(stripExplicitLengthLines('安全管理章节不少于5000字，需逐项展开。'))
+      .toBe('安全管理章节不少于5000字，需逐项展开。');
+    // 「N 字的小节」尾随「的」视为从属修饰（非篇幅声明），不得误杀
+    expect(stripExplicitLengthLines('本节是篇幅约2000字的小节，需详写。'))
+      .toBe('本节是篇幅约2000字的小节，需详写。');
+  });
+
+  it('整行删除后处理孤立标点与空行', () => {
+    expect(stripExplicitLengthLines('前言说明。\n\n全文不少于10万字；\n\n后续内容按章节展开。'))
+      .toBe('前言说明。\n\n后续内容按章节展开。');
+  });
+
+  it('未命中篇幅声明 → 原样返回', () => {
+    const text = '按章节自然组织内容，重点突出施工工艺细节。';
+    expect(stripExplicitLengthLines(text)).toBe(text);
   });
 });
 

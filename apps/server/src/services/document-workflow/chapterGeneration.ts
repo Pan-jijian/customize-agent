@@ -301,7 +301,7 @@ function factCoveredByEvidence(fact: string, evidence: DocumentEvidence[]): bool
 }
 
 /** 使用 LLM 生成单章内容，基于证据包、提示词角色和用户需求 */
-export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; maxWords?: number; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; twoStep?: boolean; supplementEvidenceProvider?: (missingFacts: string[]) => Promise<DocumentEvidence[]>; diagnostics?: DocumentGenerationDiagnostics; evidenceFloorChars?: number; evidenceCeilingChars?: number; compactProjectContext?: boolean; scopedProjectContext?: boolean; sharedFactLayerText?: string; evidenceRankBoost?: (item: DocumentEvidence) => number; onlyRankBoosted?: boolean; chapterLevelContext?: string; blueprintDataText?: string; blueprintSliceText?: string; skipT2Catalog?: boolean; /** 标书编制规格（阶段 1 判定）：暗标正文禁表/禁图/身份禁语写作口径注入 */ bidComposition?: BidCompositionSpec } = {}) {
+export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; twoStep?: boolean; supplementEvidenceProvider?: (missingFacts: string[]) => Promise<DocumentEvidence[]>; diagnostics?: DocumentGenerationDiagnostics; evidenceFloorChars?: number; evidenceCeilingChars?: number; compactProjectContext?: boolean; scopedProjectContext?: boolean; sharedFactLayerText?: string; evidenceRankBoost?: (item: DocumentEvidence) => number; onlyRankBoosted?: boolean; chapterLevelContext?: string; blueprintDataText?: string; blueprintSliceText?: string; skipT2Catalog?: boolean; /** 标书编制规格（阶段 1 判定）：暗标正文禁表/禁图/身份禁语写作口径注入 */ bidComposition?: BidCompositionSpec } = {}) {
   const bundle = buildEvidenceBundle(chapter, evidence);
   // 证据注入预算与 generationBudget 的证据区间（7k-26k 档）对齐：未显式传入时保持旧默认，
   // 由 documentGenerator 主路径统一传入按章节目标字计算的 floor/ceiling
@@ -400,6 +400,11 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     bidCompositionWritingRules(options.bidComposition),
     // A5a 前缀缓存：可变 promptTexts 已移入 user 首部，system 保持恒定（跨章共享 prefix cache）
   ].filter(Boolean).join('\n\n');
+  // 4.40 块写作字数合同（单通道指令）：提示词直接下达目标与合格区间（与块质检 [0.85,1.15] 同一合同）。
+  // 旧渲染「内容不少于 X 字，最多不超过 Y 字」有两个缺陷：①「不少于」措辞诱导模型向上界乃至以上写作；
+  // ② 上限 Y（1.1×）与质检口径（1.15×）不一致，取两套数字的并集即系统性超产的诱导源。
+  const writingTarget = options.targetWords || options.minWords || 1000;
+  const lengthContractLine = `- 保留章节标题；本节正文篇幅目标 ${writingTarget} 字（合格区间 ${Math.floor(writingTarget * 0.85)}~${Math.ceil(writingTarget * 1.15)} 字）：篇幅向目标收敛，不得超过上限、不得低于下限。`;
   const prompt = [
     promptTexts ? `配置写作主控提示词：\n${promptTexts}` : '',
     `文档模板：${template.name}`,
@@ -434,7 +439,7 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     SECTION_GENERATION_SAFETY_RULES,
     // ── 块级变化段起点（同章各块以下内容互不相同；保持其在 prompt 尾部，共享前缀到此为止恒定）──
     `章节标题：${chapter.title}`,
-    `- 保留章节标题；内容不少于 ${options.minWords || 1000} 字${options.targetWords ? `，目标约 ${options.targetWords} 字` : ''}${options.maxWords ? `，最多不超过 ${options.maxWords} 字` : ''}。`,
+    lengthContractLine,
     chapter.sections?.length ? '- 必须完整包含已规划小节；不要新增未规划的二级小节。' : '- 未预设小节时，不要为了凑结构强行新增小节。',
     isBodyTableForbidden(options.bidComposition) ? '' : chapter.tablePlans?.length ? '- 本章存在结构化表格规划时，必须输出正式 Markdown 表格；表头必须严格使用规划字段，不得擅自改字段、删字段或增加后台溯源列。' : chapter.tableSections?.length ? `- 以下小节可使用表格辅助表达：${chapter.tableSections.join('、')}。` : '',
     isBodyTableForbidden(options.bidComposition) ? '' : chapter.tablePlans?.length ? '- 表格字段值必须优先来自项目图谱、可信事实和绑定材料；projectFactOnly 字段不得编造，也不得写任何固定占位话术。' : '',
@@ -484,7 +489,7 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     ]),
     l3: contextLayerChars([
       `章节标题：${chapter.title}`,
-      `- 保留章节标题；内容不少于 ${options.minWords || 1000} 字${options.targetWords ? `，目标约 ${options.targetWords} 字` : ''}${options.maxWords ? `，最多不超过 ${options.maxWords} 字` : ''}。`,
+      lengthContractLine,
       chapter.sections?.length ? '- 必须完整包含已规划小节；不要新增未规划的二级小节。' : '- 未预设小节时，不要为了凑结构强行新增小节。',
       chapter.tablePlans?.length ? '- 本章存在结构化表格规划时，必须输出正式 Markdown 表格；表头必须严格使用规划字段，不得擅自改字段、删字段或增加后台溯源列。' : chapter.tableSections?.length ? `- 以下小节可使用表格辅助表达：${chapter.tableSections.join('、')}。` : '',
       chapter.tablePlans?.length ? '- 表格字段值必须优先来自项目图谱、可信事实和绑定材料；projectFactOnly 字段不得编造，也不得写任何固定占位话术。' : '',
@@ -1392,8 +1397,9 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     let lastFormatFeedback = '';
     // V2 批1 结构完整性反馈（第二轮注入）：首轮 blocking 类结构缺陷原文定向重写
     let lastStructureFeedback = '';
-    // 4.34 块超产反馈（第二轮注入）：模型对小目标块系统性超产（舒城实测 505 字目标实写 1858 字，
-    // 全章 59473 = 目标 3.68 倍），验收只查下限时超产零拦截——首轮超产阻断后携带压缩指令定向重写
+    // 4.40 块超产反馈（第二轮注入）：模型对小目标块系统性超产（舒城实测 505 字目标实写 1858 字，
+    // 全章 59473 = 目标 3.68 倍），验收只查下限时超产零拦截——超产阻断携带压缩指令定向重写；
+    // 二轮仍超产不再放行（旧 4.35「二轮一律放行」是超产进入成稿的最后失守环节）
     let lastOverProduceFeedback = '';
     // 2.6 补写上限收紧：块级写作/反馈重试循环上限显式化（固化为 2，与既有行为一致）
     // ——上限超出即判失败转上层紧凑备用（原 DOCUMENT_BLOCK_MAX_ATTEMPTS 已固化删除）
@@ -1443,11 +1449,11 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           scopedProjectContext: input.scopedProjectContext,
           // F9：章级角色上下文上移 L2 共享段（同章各块完全相同 → prefix cache 共享命中）
           chapterLevelContext: input.roleContext || '',
-          // 达标契约：minWords = 块目标（不打折）。实测 deepseek-v4-pro 单次可稳定输出 4000~6300 字，
-          // 提示词"不少于 X 字"即必然达标；0.6 折扣是历史人为降标，是"初稿不达标→补写"链的源头
+          // 4.40 字数合同（单通道）：minWords/targetWords = 块目标（不打折），篇幅目标与合格区间由
+          // buildLlmChapterContent 内 lengthContractLine 统一下达（目标 ±15% 双向合同，与块质检同一口径）；
+          // maxWords 旧参数已删——1.1× 上限与质检 1.15× 口径不一致，取并集即系统性超产的诱导源
           minWords: block.targetWords,
           targetWords: block.targetWords,
-          maxWords: Math.ceil(block.targetWords * 1.1),
           // deepseek 思考 token 与正文共享输出池，目标字数 ×1.5 且下限 3200 留足输出空间
           //（实测 6300 字仅耗 4202 token，8192 共享池富余充足）
           maxTokens: Math.max(3200, Math.ceil(block.targetWords * 1.5)),
@@ -1596,8 +1602,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
             extraneous: findExtraneousBlockTitles(withBlockShell, block.title, sectionTitles, [...otherBlockTitleSet], [...block.subPoints.flatMap(point => point.sources), ...blockSkeletonNames]),
           };
         });
-        // 达标契约：块写作字数合同 = [0.85,1.15]×块目标（达标区；minWords 已不打折：提示词硬要求写满
-        // 目标字数）。4.35 分层验收（见下方字数判定）：接受区 [0.7,1.4] 直通，越界仅首轮阻断重写一次
+        // 4.40 块写作字数双向硬合同 = [0.85,1.15]×块目标（详见下方字数判定段的完整口径）
         // P4：首轮确定性错误数值阻断重试（feedback 携带正确值）；第二轮仍错误时放行（避免无限重试，
         // 错误数值交由下游 Reviewer/跨章一致性审查兜底）
         const numericBlocking = attempt === 0 && numericReconciliation.mismatched.length > 0;
@@ -1607,20 +1612,22 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         const expectedFlowForm = keySectionKind && !isDivisionChapterContainer ? flowFormForBlockIndex(index) : undefined;
         const actualFlowForm = expectedFlowForm ? primaryFlowForm(withBlockShell) : undefined;
         const flowFormBlocking = attempt === 0 && expectedFlowForm !== undefined && actualFlowForm !== undefined && actualFlowForm !== expectedFlowForm;
-        // 块写作字数合同 [0.85,1.15]：4.35 分层验收——字数只做首轮转向，不再构成块失败/章阻断。
-        // 舒城实测：重写对字数几乎不收敛（验收基准块 2270→2066→2376→1710 越写越偏），越界重写风暴
-        // 把每块写作放大 2~4 次（130 分钟时长与 9 章阻断的主因）；旧实现二轮仍阻断是最后失守环节。
+        // 4.40 块写作字数双向硬合同（根治超产：旧 4.35「接受区 [0.7,1.4] 放行」使超产 40% 也可成稿，
+        // 全章块级超产叠加即文档级篇幅膨胀的失守环节；旧「二轮一律放行」使超产零拦截）：
         //  - 达标区 [0.85,1.15]：直通；
-        //  - 接受区 [0.7,1.4]（非达标区）：记录放行，不耗重写预算（规划层已把块预算校准到模型
-        //    自然输出区间，微越界重写的收敛期望为负）；
-        //  - 越界区 <0.7 或 >1.4：仅首轮（attempt 0）阻断重写一次，二轮一律放行交终检链兜底
-        //    （照 numericBlocking「首轮阻断、二轮放行」成熟模式）
+        //  - 欠产侧 [0.7,0.85)：记录放行（规划层已把块预算校准到模型自然输出区间，微缺口重写
+        //    收敛期望为负）；<0.7 仅首轮（attempt 0）阻断补足重写一次，二轮仍欠产放行交终检链兜底
+        //    （照 numericBlocking「首轮阻断、二轮放行」成熟模式）；
+        //  - 超产侧 >1.15：任何轮次一律阻断——首轮阻断携压缩指令重写，二轮仍超产 → 块失败
+        //    （上层隔离重写，仍失败即章阻断、文档显式失败：零降级，宁缺毋假）。不设「二轮放行」：
+        //    提示词已下达同一合同区间（lengthContractLine），压缩是确定性可行的收敛方向（合并同类
+        //    工序/删除重复铺陈），与欠产侧「补足需新事实」的不可控性有本质区别。
         const underProduceBlocking = attempt === 0 && chars < Math.floor(block.targetWords * 0.7);
-        const overProduceBlocking = attempt === 0 && chars > Math.ceil(block.targetWords * 1.4);
+        const overProduceBlocking = chars > Math.ceil(block.targetWords * 1.15);
         if (underProduceBlocking || overProduceBlocking) {
-          console.error(`[gen][block-qc] 篇幅越界阻断 attempt=${attempt}（${chars} 字 vs 块目标 ${block.targetWords} 字，越界区 <${Math.floor(block.targetWords * 0.7)} 或 >${Math.ceil(block.targetWords * 1.4)}）: ${block.title}`);
-        } else if (chars < Math.floor(block.targetWords * 0.85) || chars > Math.ceil(block.targetWords * 1.15)) {
-          console.error(`[gen][block-qc] 篇幅接受区放行（${chars} 字 vs 块目标 ${block.targetWords} 字，达标区 ${Math.floor(block.targetWords * 0.85)}~${Math.ceil(block.targetWords * 1.15)}）: ${block.title}`);
+          console.error(`[gen][block-qc] 篇幅失守阻断 attempt=${attempt}（${chars} 字 vs 块目标 ${block.targetWords} 字，欠产线 <${Math.floor(block.targetWords * 0.7)} / 超产线 >${Math.ceil(block.targetWords * 1.15)}）${attempt > 0 && overProduceBlocking ? '［二轮仍超产 → 块失败］' : ''}: ${block.title}`);
+        } else if (chars < Math.floor(block.targetWords * 0.85)) {
+          console.error(`[gen][block-qc] 篇幅欠产接受区放行（${chars} 字 vs 块目标 ${block.targetWords} 字，达标区 ${Math.floor(block.targetWords * 0.85)}~${Math.ceil(block.targetWords * 1.15)}）: ${block.title}`);
         }
         if (!underProduceBlocking && !overProduceBlocking && missing.length === 0 && duplicates.length === 0 && extraneous.length === 0 && !numericBlocking && !flowFormBlocking && !fillerBlocking && !structureBlocking && !densityBlocking && !attributionBlocking && !formatBlocking) {
           return withBlockShell;
@@ -1663,10 +1670,12 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           // 修复后字数达标即通过——标题层问题由代码确定性修复，不因整块删除掉档触发重试/失败
           const repaired = stripExtraneousBlockHeadings(dedupeRepeatedSubsections(withBlockShell), block.title, sectionTitles, [...block.subPoints.flatMap(point => point.sources)]);
           const repairedChars = documentTextLength(repaired);
-          // 字数合同同步复核（4.35 分层口径）：修复只会减字数（标题剥离会掉档），首轮按接受区下限
-          // 复核（越界区交二轮压缩/补足重写）；二轮一律放行（字数不再构成块失败——与直通路径同一口径）
-          const repairedWithinBudget = repairedChars >= Math.floor(block.targetWords * 0.7) && repairedChars <= Math.ceil(block.targetWords * 1.4);
-          if (attempt > 0 || repairedWithinBudget) {
+          // 字数合同同步复核（4.40 双向硬合同）：修复只会减字数（标题剥离会掉档）——修复后仍超产
+          // （>1.15×）不得经本通道放行（超产侧无豁免轮次）；欠产侧 <0.7× 仅首轮不放行、二轮放行
+          // （与直通路径同一口径）
+          const repairedOverProduce = repairedChars > Math.ceil(block.targetWords * 1.15);
+          const repairedUnderProduce = repairedChars < Math.floor(block.targetWords * 0.7);
+          if (!repairedOverProduce && (attempt > 0 || !repairedUnderProduce)) {
             if (input.diagnostics && (extraneous.length > 0 || duplicates.length > 0)) input.diagnostics.llm.lastInfo = `块标题层已确定性修复：${block.title}（清单外 ${extraneous.length} 个、重复 H4 ${duplicates.length} 个；${chars}→${repairedChars} 字）`;
             return repaired;
           }

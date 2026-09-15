@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { __documentExportTest__ } from '@/pages/api/documents/export';
 
-const { createExportRenderAudit, exportPureRenderMode, exportRenderAuditReport, normalizeExportUnits, normalizeLooseMarkdownTables, normalizeParagraphs, prepareExportMarkdown } = __documentExportTest__;
+const { createExportRenderAudit, exportPureRenderMode, exportRenderAuditReport, normalizeExportUnits, normalizeLooseMarkdownTables, normalizeParagraphs, prepareExportMarkdown, enhanceTocHtml } = __documentExportTest__;
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -106,5 +106,28 @@ describe('A1 导出纯渲染：结构操作保留并计数', () => {
     const prepared = prepareExportMarkdown('# 第一章 总则\n\n正文内容如下。');
     expect(prepared.audit.mode).toBe('observe');
     expect(exportRenderAuditReport(prepared.audit).blockerCount).toBe(0);
+  });
+});
+
+describe('B4 enhanceTocHtml 目录区结构驱动边界（4.40）', () => {
+  it('无 page-break div（成稿实况）：目录包裹到下一 H2 章标题，不再整体缺失', () => {
+    const body = ['<h2>目录</h2>', '<p>第一章 工程概况</p>', '<p>1.1 编制依据</p>', '<h2 class="document-chapter-heading">第一章 工程概况</h2>', '<p>正文。</p>'].join('\n');
+    const out = enhanceTocHtml(body);
+    expect(out).toContain('<section class="document-toc"><h2>目录</h2>');
+    expect(out).toContain('</section><h2 class="document-chapter-heading">第一章 工程概况</h2>');
+    expect(out).toContain('<p class="toc-section">1.1 编制依据</p>');
+    expect(out).toContain('<p class="toc-chapter">第一章 工程概况</p>');
+  });
+
+  it('有 page-break div：行为与历史一致（div 边界原样保留）', () => {
+    const body = ['<h2>目录</h2>', '<p>第一章 工程概况</p>', '<div class="page-break"></div>', '<h2>第一章 工程概况</h2>'].join('\n');
+    const out = enhanceTocHtml(body);
+    expect(out).toContain('<section class="document-toc"><h2>目录</h2>');
+    expect(out).toContain('</section><div class="page-break"></div>');
+  });
+
+  it('无目录块：原样返回', () => {
+    const body = '<h2 class="document-chapter-heading">工程概况</h2><p>正文。</p>';
+    expect(enhanceTocHtml(body)).toBe(body);
   });
 });

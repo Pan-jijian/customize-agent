@@ -386,9 +386,10 @@ export interface DocumentFactsModel {
   canonical?: CanonicalFactModel;
 }
 
-/** 招标要求响应方式三态：respond=正文显性响应（创优/等级/技术条款）；comply=遵守类（工期基准/禁编日期等，不逐条抄写但不得违背）；
- * qualitative=商务定性（保证金/付款/结算等，技术标按合同约定定性响应，不落商务数字参数） */
-export type TenderRequirementPolicy = 'respond' | 'comply' | 'qualitative';
+/** 招标要求响应方式两态：respond=正文显性响应（创优/等级/技术条款）；comply=遵守类（工期基准/禁编日期等，
+ * 不逐条抄写但不得违背）。商务域条款（付款/保证金/结算/报价/税金等）在判定层排除（reason=commercial_scope），
+ * 技术标正文零商务句——相关响应属商务标内容。 */
+export type TenderRequirementPolicy = 'respond' | 'comply';
 
 /** 单条实质要求（条款穷举+逐条判定产物）：text 为条款原文（忠实引用），coreTerms 为正文命中检测核心词，
  * sources 为多来源聚合（同一要求在招标/补疑重复出现时合并，不丢来源） */
@@ -404,11 +405,12 @@ export interface TenderRequirementEntry {
 }
 
 /** 被排除条款记录（reason：non_requirement=目录/导语/说明；out_of_scope=投标程序/资格/评标规则/纪律；
- * no_value=条款值为「无」；duplicate=重复文本合并）——仅对账与审计用，不注入写作 */
+ * no_value=条款值为「无」；duplicate=重复文本合并；commercial_scope=商务与造价条款（付款/保证金/结算/
+ * 报价/税金等，技术标正文零商务句，响应由商务标承接））——仅对账与审计用，不注入写作 */
 export interface TenderRequirementExclusion {
   text: string;
   source?: string;
-  reason: 'non_requirement' | 'out_of_scope' | 'no_value' | 'duplicate';
+  reason: 'non_requirement' | 'out_of_scope' | 'no_value' | 'duplicate' | 'commercial_scope';
 }
 
 /** 提取对账：条款总数 = entries 覆盖 + excluded + 重复合并 + undecidedCount（必须为 0 才对账闭合） */

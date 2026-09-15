@@ -381,7 +381,10 @@ export function runtimePromptRulesPrompt(rules: RuntimePromptRuleSet) {
     rules.requiredTables.length ? `必须输出以下正式 Markdown 表格：${rules.requiredTables.join('、')}。表格必须包含表名、表头、分隔线和数据行。` : '',
     rules.requiredKeywords?.length ? `正文必须覆盖以下关键词或要点：${rules.requiredKeywords.join('、')}。` : '',
     rules.forbiddenPatterns?.length ? `正文禁止出现以下内容：${rules.forbiddenPatterns.join('、')}。` : '',
-    rules.minWords ? `全文不少于 ${rules.minWords} 字。` : '',
+    // 4.40 篇幅指令分层编译：minWords（已识别全文目标字数）不再渲染进运行时规则文本——
+    // 全文级字数指令只作为预算层输入（buildDocumentBudget 编译为章预算/块目标下发），
+    // 旧渲染行「全文不少于 X 字」与块级「目标 X 字」构成双通道指令，是块级系统性超产的根因之一；
+    // minWords 数据字段保留（规则摘要/审计/规则冲突检测仍消费）。
   ].filter(Boolean);
   return `以下规则由系统运行时从用户绑定指令中自动抽取，不作为用户可编辑内容。生成、检查和修复必须共同遵守：\n${lines.map((line, index) => `${index + 1}. ${line}`).join('\n')}`;
 }

@@ -718,7 +718,7 @@ function parseChapterNumber(raw: string): number | undefined {
  * `#### X.Y.Z` 的父前缀同步、末位按出现序重放；无编号 H3 一并纳入编号体系（异常形态归一）。
  * 使用场景：清洗层删除重复 H3 行（fixCollisionNumberedHeadings 等）或降级合并后编号出现空档时，
  * 在 stage5/round-2 链尾原子重放——「编号被分配又被删除」的历史缺陷（远端 4.35.0 缺 1.12/1.13/1.15
- * 同签名）在此必然收敛。保护域：代码围栏内、目录区（## 目录 至 page-break）、非「第N章」容器
+ * 同签名）在此必然收敛。保护域：代码围栏内、目录区（## 目录 至下一 ## 标题行）、非「第N章」容器
  * （附录等）之后的标题、带缩进异常行不改动；仅重写编号前缀不改标题文本；无编号 H4（「（一）」式）保持原样；幂等。
  * 章片段模式（4.36 A2 接线修复）：stage5 逐章链输入为章节正文（章标题行「## X」由写作侧带出、
  * 装配层成文时才替换为「## 第N章」，正文内不得依赖其解析章号），调用方经 options.chapterNumber
@@ -741,8 +741,12 @@ export function renumberSectionHeadings(markdown: string, options?: { chapterNum
       if (inFence) continue;
       if (/^##\s+目录\s*$/u.test(line)) { inToc = true; continue; }
       if (inToc) {
-        if (/^<div class="page-break"><\/div>$/u.test(line)) inToc = false;
-        continue;
+        // 目录区结束判定（4.40 根治）：结构驱动——任一「## 」标题行即目录结束，且该行继续按正常标题行处理；
+        // 历史缺陷：唯一退出条件依赖 <div class="page-break"></div>，而成稿 markdown 经 fixTocFromBody/
+        // ensureFormalToc 重建目录后无该行 → inToc 永真 → 全文行跳过 → chapterInfos 空 → 下方提前
+        // return → round-2 全文链重编号静默死区（「编号被分配又被删除」缺号缺陷无兜底的根因）
+        if (!/^##\s/u.test(line)) continue;
+        inToc = false;
       }
       const chapter = /^##\s+第([一二三四五六七八九十百千万\d]+)章\s+/u.exec(line);
       if (chapter) {
@@ -785,8 +789,9 @@ export function renumberSectionHeadings(markdown: string, options?: { chapterNum
     if (inFence) return rawLine;
     if (/^##\s+目录\s*$/u.test(trimmed)) { inToc = true; return rawLine; }
     if (inToc) {
-      if (/^<div class="page-break"><\/div>$/u.test(trimmed)) inToc = false;
-      return rawLine;
+      // 与第一遍同源：结构驱动退出（任一「## 」行），退出行不吞掉——继续走下方章标题/容器判定分支
+      if (!/^##\s/u.test(trimmed)) return rawLine;
+      inToc = false;
     }
     if (/^##\s+第[一二三四五六七八九十百千万\d]+章\s+/u.test(trimmed)) {
       activeNumber = fragmentNumber ?? chapterNumbers[chapterSeq];

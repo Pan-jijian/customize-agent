@@ -370,10 +370,19 @@ const SEQUENCE_FRAME_RE = /先([^。；\n]{2,200}?)[，,、]\s*最后([^。；\n
 /** 序列步骤分隔（连接词前须有分隔符；不把裸「后」当连接词——「、后浇带」类术语防误切） */
 const SEQUENCE_STEP_SPLIT_RE = /[，,、]\s*(?:再|接着|随后|然后|继而)\s*/u;
 
+/** 序列帧前缀边界（悬空前缀保护回溯锚：句界/分句界/冒号/换行——冒号紧邻「先」即合法引导语位） */
+const SEQUENCE_PREFIX_BOUNDARY_RE = /[。；：！？\n]/u;
+
 /** 顺序词叙述 → 编号步骤：序列句拆为编号行（连接词剥离，内容与数值逐字保留） */
 function sequenceToNumberedSteps(text: string): string | undefined {
   let changed = false;
-  const next = text.replace(SEQUENCE_FRAME_RE, (match, middle: string, last: string, tail: string) => {
+  const next = text.replace(SEQUENCE_FRAME_RE, (match, middle: string, last: string, tail: string, offset: number) => {
+    // 悬空前缀保护（4.39 截断根因治理）：「先」嵌在句中时，转换会把前缀遗留为无标点悬空行尾
+    // （「……水舌3个。施工先基层清理，再开孔，最后封堵。」→「……水舌3个。施工⏎1. …」，终检误判
+    // 「句尾截断」）；回溯至最近句界，前缀非空一律放弃转换（零误伤，句子保持原样留待 LLM 改述）
+    let cursor = offset;
+    while (cursor > 0 && !SEQUENCE_PREFIX_BOUNDARY_RE.test(text[cursor - 1])) cursor -= 1;
+    if (text.slice(cursor, offset).trim() !== '') return match;
     const steps = middle.split(SEQUENCE_STEP_SPLIT_RE).concat(last.split(SEQUENCE_STEP_SPLIT_RE)).map(part => part.trim()).filter(Boolean);
     if (steps.length < 3) return match;
     changed = true;
@@ -531,6 +540,13 @@ export function fixFlowFormRepetition(markdown: string): FlowFormFixOutcome {
  * 在施组体裁中严重误伤——「由安全员检查临边防护」类实体句被当成空壳套话（舒城实测单章
  * 家族命中 130 处、空壳 0 处），且修复目标量级（每家族 4 句）与检测量级不可收敛。
  * 现按验收表原义收敛：逐字短语弹性匹配（空白容错）、全文精确计数、>2 即报。
+ *
+ * 4.40 d5e 根治（变体复读盲区）：写作卡/修复建议曾附「同义表达示例」，LLM 集中抄写示例——
+ * 4.39 舒城实测「技术负责人牵头组织」37 处、「合格后再行」28 处、「验收通过后」17 处，
+ * 基准字形全部 ≤2 的表象达标下藏着新套话（「换皮复读」零检测零治理）。现按族治理：
+ * 每族声明合规变体形态池（variant form），任一变体形态全篇 > SKELETON_VARIANT_CAP 即复读；
+ * 确定性兜底按形态池做负载均衡同构改写（删除冗余虚词/动词短语级同义替换，语法安全单测锁定）；
+ * 示例文案全部从写作卡与修复建议中删除（示例即模板化源头，不再向 LLM 暴露具体变体）。
  */
 export interface SkeletonFingerprint {
   id: string;
@@ -538,8 +554,26 @@ export interface SkeletonFingerprint {
   text: string;
   /** 弹性匹配正则（空白容错；检测 / 修复 / 验收计数同源） */
   pattern: RegExp;
-  /** 变体池（确定性修复轮换替换用；变体不得命中任一指纹 pattern，单测锁定防替换后复发） */
-  variants: readonly string[];
+  /** 变体形态池（4.40 d5e：合规同义表达的单形态基准 + 弹性匹配 + 超量时的同构安全改写；
+   * 前缀「由/项目」归一同形态——「由技术负责人牵头组织」与「技术负责人牵头组织」是一种表达） */
+  variantForms: readonly SkeletonVariantForm[];
+}
+
+/** 骨架变体形态（4.40 d5e）：同义表达的一种合规字形——检测计数与确定性改写共用单源 */
+export interface SkeletonVariantForm {
+  /** 形态基准字形（展示与计数基准） */
+  text: string;
+  /** 弹性匹配正则（空白容错；检测 / 修复 / 验收计数同源） */
+  pattern: RegExp;
+  /** 本形态超量时的确定性同构改写（命中片段内短语替换）：
+   * from 只匹配可安全替换的虚词/动词短语位，to 为同义目标（空串 = 删除冗余虚词）；
+   * 语法安全性由单测按舒城实测句锁定（替换后句子仍通顺、事实不变） */
+  rewrites: readonly SkeletonVariantRewrite[];
+}
+
+export interface SkeletonVariantRewrite {
+  from: RegExp;
+  to: string;
 }
 
 export const SKELETON_FINGERPRINTS: readonly SkeletonFingerprint[] = [
@@ -547,27 +581,128 @@ export const SKELETON_FINGERPRINTS: readonly SkeletonFingerprint[] = [
     id: 'by-tech-lead-org',
     text: '由技术负责人组织',
     pattern: /由\s*技术负责人\s*组织/gu,
-    variants: ['技术负责人牵头组织', '项目部安排技术负责人主持', '技术负责人负责组织实施', '由项目技术负责人统筹安排'],
+    variantForms: [
+      {
+        text: '技术负责人牵头组织',
+        pattern: /(?:由\s*)?(?:项目\s*部?\s*)?技术负责人\s*牵头\s*组织/gu,
+        rewrites: [
+          { from: /牵头\s*组织/u, to: '负责组织' },
+          { from: /牵头\s*组织/u, to: '统筹组织' },
+          { from: /牵头\s*组织/u, to: '组织' },
+          { from: /牵头\s*组织/u, to: '统一组织' },
+          { from: /牵头\s*组织/u, to: '直接组织' },
+        ],
+      },
+      {
+        text: '技术负责人负责组织',
+        pattern: /(?:由\s*)?(?:项目\s*部?\s*)?技术负责人\s*负责\s*组织/gu,
+        rewrites: [
+          { from: /负责\s*组织/u, to: '统筹组织' },
+          { from: /负责\s*组织/u, to: '组织' },
+        ],
+      },
+      {
+        text: '技术负责人统筹组织',
+        pattern: /(?:由\s*)?(?:项目\s*部?\s*)?技术负责人\s*统筹\s*组织/gu,
+        rewrites: [
+          { from: /统筹\s*组织/u, to: '组织' },
+          { from: /统筹\s*组织/u, to: '负责组织' },
+        ],
+      },
+      {
+        text: '技术负责人统一组织',
+        pattern: /(?:由\s*)?(?:项目\s*部?\s*)?技术负责人\s*统一\s*组织/gu,
+        rewrites: [
+          { from: /统一\s*组织/u, to: '组织' },
+          { from: /统一\s*组织/u, to: '直接组织' },
+        ],
+      },
+      {
+        text: '技术负责人直接组织',
+        pattern: /(?:由\s*)?(?:项目\s*部?\s*)?技术负责人\s*直接\s*组织/gu,
+        rewrites: [{ from: /直接\s*组织/u, to: '组织' }],
+      },
+      {
+        text: '技术负责人组织',
+        pattern: /(?:项目\s*部?\s*)?技术负责人\s*组织/gu,
+        rewrites: [
+          { from: /负责人\s*组织/u, to: '负责人负责组织' },
+          { from: /负责人\s*组织/u, to: '负责人统筹组织' },
+        ],
+      },
+    ],
   },
   {
     id: 'post-qualified',
     text: '合格后方可',
     pattern: /合格\s*后方可/gu,
-    variants: ['合格后再行', '合格后方能', '合格后才可', '检验合格方可', '合格以后方可'],
+    variantForms: [
+      {
+        text: '合格后再行',
+        pattern: /合格\s*后再行/gu,
+        rewrites: [{ from: /再行/u, to: '' }],
+      },
+      {
+        text: '合格后方能',
+        pattern: /合格\s*后方能/gu,
+        rewrites: [{ from: /方能/u, to: '' }],
+      },
+      {
+        text: '合格后才可',
+        pattern: /合格\s*后才可/gu,
+        rewrites: [{ from: /才可/u, to: '' }],
+      },
+      {
+        text: '合格以后方可',
+        pattern: /合格\s*以后方可/gu,
+        rewrites: [{ from: /以后/u, to: '' }],
+      },
+    ],
   },
   {
     id: 'after-acceptance',
     text: '验收合格后',
     pattern: /验收\s*合格\s*后/gu,
-    variants: ['验收通过后', '验收签认后', '验收确认后', '检验合格后'],
+    variantForms: [
+      {
+        text: '验收通过后',
+        pattern: /验收\s*通过后/gu,
+        rewrites: [
+          { from: /验收\s*通过后/u, to: '通过验收后' },
+          { from: /验收\s*通过后/u, to: '验收签认后' },
+          { from: /验收\s*通过后/u, to: '验收确认后' },
+        ],
+      },
+      {
+        text: '通过验收后',
+        pattern: /通过\s*验收后/gu,
+        rewrites: [{ from: /通过\s*验收后/u, to: '验收签认后' }],
+      },
+      {
+        text: '验收签认后',
+        pattern: /验收\s*签认后/gu,
+        rewrites: [{ from: /验收\s*签认后/u, to: '验收确认后' }],
+      },
+      {
+        text: '验收确认后',
+        pattern: /验收\s*确认后/gu,
+        rewrites: [{ from: /验收\s*确认后/u, to: '验收签认后' }],
+      },
+    ],
   },
 ];
 
 /** 每条骨架指纹全文出现上限（验收表口径：每条骨架全文 ≤2 次） */
 export const SKELETON_FINGERPRINT_CAP = 2;
 
-/** 写作侧骨架指纹禁令（写作卡 / 任务卡注入文案单源） */
-export const SKELETON_FINGERPRINT_BAN_LINE = '句式禁止复读：全篇「由技术负责人组织」「合格后方可」「验收合格后」三类骨架表述各自不得超过 2 次，同义表达轮换使用（如“技术负责人牵头组织”“检验合格后再行”“验收通过后”），保持句式多样、事实不变。';
+/** 变体形态单形态全文上限（4.40 d5e：基准线的 4 倍——同义变体允许更宽，但天花板防「换皮复读」；
+ * 4.39 舒城实测 37/28/17 次集中单形态全部落入本线的拦截范围） */
+export const SKELETON_VARIANT_CAP = 8;
+
+/** 写作侧骨架指纹禁令（写作卡 / 任务卡注入文案单源）：
+ * 4.40 d5e 去示例——历史缺陷：禁令曾附「如“技术负责人牵头组织”…」示例，LLM 把示例当模板
+ * 全篇复制（舒城 4.39 实测 37 处），示例即模板化源头，方针化表述不暴露具体变体 */
+export const SKELETON_FINGERPRINT_BAN_LINE = '句式禁止复读：全篇「由技术负责人组织」「合格后方可」「验收合格后」三类骨架表述各自不得超过 2 次，任何同义替换表达全篇不得超过 8 次；同义表达必须逐句轮换、句式多样（动词与语序随句变化），不得集中复用同一说法，保持事实不变（岗位、数值、频次不得丢失）。';
 
 /** 骨架指纹全文计数（弹性空白匹配；检测 / 修复复扫 / 验收统计同源） */
 export function countSkeletonFingerprint(markdown: string, fingerprint: SkeletonFingerprint): number {
@@ -584,32 +719,74 @@ function sentenceAround(text: string, start: number, end: number): string {
   return text.slice(left, right).trim();
 }
 
+/** 骨架族治理形态（基准 + 变体形态统一视图：同一框架下检测上限与同构改写候选） */
+interface SkeletonGovernanceForm {
+  form: SkeletonVariantForm;
+  cap: number;
+}
+
+/** 族治理形态表：基准字形（改写候选 = 各变体形态字形）+ 变体形态（改写候选 = 自身 rewrites） */
+function governanceFormsOf(fingerprint: SkeletonFingerprint): SkeletonGovernanceForm[] {
+  return [
+    {
+      form: {
+        text: fingerprint.text,
+        pattern: fingerprint.pattern,
+        rewrites: fingerprint.variantForms.map(variant => ({ from: fingerprint.pattern, to: variant.text })),
+      },
+      cap: SKELETON_FINGERPRINT_CAP,
+    },
+    ...fingerprint.variantForms.map(form => ({ form, cap: SKELETON_VARIANT_CAP })),
+  ];
+}
+
 /**
- * 骨架指纹复读检测（终检注册）：任一指纹全篇出现 >2 处即 blocker
- * （验收口径「每条骨架全文 ≤2 次」；round-2 确定性修复器 fixSkeletonFingerprintRepetition 兜底清零）。
+ * 骨架指纹复读检测（终检注册）：
+ * ① 基准字形全篇 >2 处即 blocker（验收表口径「每条骨架全文 ≤2 次」）；
+ * ② 4.40 d5e 变体形态全篇 > SKELETON_VARIANT_CAP 即 blocker（示例变体被 LLM 集中抄写实锤：
+ *   舒城 4.39「技术负责人牵头组织」37 处、「合格后再行」28 处、「验收通过后」17 处——
+ *   基准字形 ≤2 的表象达标不算治理完成，同义替换单形态集中复用即「换皮复读」）；
+ * round-2 确定性修复器 fixSkeletonFingerprintRepetition 按形态池负载均衡兜底收敛。
+ * 修复建议不再附具体同义示例（示例即模板化源头，历史缺陷）。
  */
 export function skeletonFingerprintIssues(markdown: string): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   for (const fingerprint of SKELETON_FINGERPRINTS) {
     const count = countSkeletonFingerprint(markdown, fingerprint);
-    if (count <= SKELETON_FINGERPRINT_CAP) continue;
-    issues.push({
-      level: 'error',
-      severity: 'blocker',
-      category: 'style',
-      owner: 'llm',
-      repairability: 'llm_repairable',
-      message: `句式骨架复读：「${fingerprint.text}」全篇出现 ${count} 处（上限 ${SKELETON_FINGERPRINT_CAP} 处）——模板化复用句式`,
-      suggestion: `保留全文前 2 处「${fingerprint.text}」，其余处按句子语境轮换同义表达（如：${fingerprint.variants.slice(0, 3).join('、')}）；改写保留原句全部事实信息（岗位、数值、频次不得丢失），不得用结构标签或固定套语替代。`,
-    });
+    if (count > SKELETON_FINGERPRINT_CAP) {
+      issues.push({
+        level: 'error',
+        severity: 'blocker',
+        category: 'style',
+        owner: 'llm',
+        repairability: 'llm_repairable',
+        message: `句式骨架复读：「${fingerprint.text}」全篇出现 ${count} 处（上限 ${SKELETON_FINGERPRINT_CAP} 处）——模板化复用句式`,
+        suggestion: `保留全文前 ${SKELETON_FINGERPRINT_CAP} 处「${fingerprint.text}」，其余处逐句改用不同句式（同义表达须逐句轮换，不得集中复用同一替换说法）；改写保留原句全部事实信息（岗位、数值、频次不得丢失），不得用结构标签或固定套语替代。`,
+      });
+    }
+    for (const variant of fingerprint.variantForms) {
+      const variantCount = [...markdown.matchAll(variant.pattern)].length;
+      if (variantCount <= SKELETON_VARIANT_CAP) continue;
+      issues.push({
+        level: 'error',
+        severity: 'blocker',
+        category: 'style',
+        owner: 'llm',
+        repairability: 'llm_repairable',
+        message: `句式变体复读：「${variant.text}」全篇出现 ${variantCount} 处（同义表达单形态上限 ${SKELETON_VARIANT_CAP} 处）——同义替换被集中复用`,
+        suggestion: `保留全文前 ${SKELETON_VARIANT_CAP} 处，其余处逐句改用不同句式（替换动词、调整语序或换用其他同义表达），不得继续复用同一替换表达；改写保留原句全部事实信息（岗位、数值、频次不得丢失）。`,
+      });
+    }
   }
   return issues;
 }
 
-/** 骨架指纹修复目标（repairTemplatingIssues 消费：按章聚合超量命中句，全文口径第 3 处起，每章每指纹至多 4 句） */
+/** 骨架指纹修复目标（repairTemplatingIssues 消费：按章聚合超量命中句；全文口径超出保留额度 cap 后，每章每形态至多 4 句） */
 export interface SkeletonFingerprintRepairTarget {
   chapterTitle: string;
   fingerprintLabel: string;
+  /** 本形态全文保留额度（验收上限：基准字形 2 / 变体形态 8） */
+  cap: number;
   /** 全篇出现总次数（prompt 供 LLM 了解治理总量级） */
   totalCount: number;
   sentences: string[];
@@ -619,29 +796,32 @@ export function skeletonFingerprintRepairTargets(markdown: string): SkeletonFing
   const targets: SkeletonFingerprintRepairTarget[] = [];
   const chapters = chapterSlices(markdown);
   for (const fingerprint of SKELETON_FINGERPRINTS) {
-    const total = countSkeletonFingerprint(markdown, fingerprint);
-    if (total <= SKELETON_FINGERPRINT_CAP) continue;
-    const byChapter = new Map<string, string[]>();
-    for (const chapter of chapters) {
-      if (!chapter.body) continue;
-      for (const match of chapter.body.matchAll(fingerprint.pattern)) {
-        const start = match.index ?? 0;
-        const sentence = sentenceAround(chapter.body, start, start + match[0].length);
-        if (sentence.length < 6) continue;
-        const list = byChapter.get(chapter.title) ?? [];
-        if (!list.includes(sentence)) list.push(sentence);
-        byChapter.set(chapter.title, list);
+    for (const { form, cap } of governanceFormsOf(fingerprint)) {
+      const total = [...markdown.matchAll(form.pattern)].length;
+      if (total <= cap) continue;
+      const byChapter = new Map<string, string[]>();
+      for (const chapter of chapters) {
+        if (!chapter.body) continue;
+        for (const match of chapter.body.matchAll(form.pattern)) {
+          const start = match.index ?? 0;
+          const sentence = sentenceAround(chapter.body, start, start + match[0].length);
+          if (sentence.length < 6) continue;
+          const list = byChapter.get(chapter.title) ?? [];
+          if (!list.includes(sentence)) list.push(sentence);
+          byChapter.set(chapter.title, list);
+        }
+      }
+      // 全文保留额度 cap 处：按章序打平消耗，其余为超量修复目标（每章至多 4 句进锚点修复）
+      let keepQuota = cap;
+      for (const [chapterTitle, sentences] of byChapter) {
+        const overflow = sentences.slice(keepQuota).slice(0, 4);
+        keepQuota = Math.max(0, keepQuota - sentences.length);
+        if (overflow.length > 0) targets.push({ chapterTitle, fingerprintLabel: form.text, cap, totalCount: total, sentences: overflow });
       }
     }
-    // 全文保留额度 2 处：按章序打平消耗，其余为超量修复目标（每章至多 4 句进锚点修复）
-    let keepQuota = SKELETON_FINGERPRINT_CAP;
-    for (const [chapterTitle, sentences] of byChapter) {
-      const overflow = sentences.slice(keepQuota).slice(0, 4);
-      keepQuota = Math.max(0, keepQuota - sentences.length);
-      if (overflow.length > 0) targets.push({ chapterTitle, fingerprintLabel: fingerprint.text, totalCount: total, sentences: overflow });
-    }
   }
-  return targets.slice(0, 12);
+  // 上限 24（4.40 d5e：变体形态纳入治理后组数扩大——3 族最多 3×(基准+6 变体) 形态×多章）
+  return targets.slice(0, 24);
 }
 
 /** 骨架指纹确定性修复产出 */
@@ -652,26 +832,44 @@ export interface SkeletonFingerprintFixOutcome {
 }
 
 /**
- * 骨架指纹确定性兜底（round-2 链 / 终检前最后一道）：每指纹保留全文前 2 处匹配，
- * 其余轮换替换为变体池表达（实时重扫保证「验收合格后方可」类重叠指纹组合收敛）。
- * 变体池单测锁定「替换后不命中任一指纹」，短语级同义改写不丢事实、不改句法。
+ * 骨架指纹确定性兜底（round-2 链 / 终检前最后一道，4.40 d5e 族级升级）：
+ * 基准字形保留全文前 2 处，变体形态保留前 8 处，其余按「形态池负载均衡」同构改写：
+ * 候选改写只落在可安全替换的虚词/动词短语位（删除冗余虚词或动词同义替换，语法安全性单测锁定）；
+ * 候选按目标形态当前计数取最闲者（min-max 均衡），防「换皮复读」（旧实现固定轮换变体池，
+ * 舒城 4.39 实测示例变体被集中抄写 37/28/17 处而兜底零感知）。
+ * 每轮重扫全族计数（重叠形态自然校准）；替换使源形态计数单调下降 → 有限轮次收敛。
  */
 export function fixSkeletonFingerprintRepetition(markdown: string): SkeletonFingerprintFixOutcome {
   let next = markdown;
   let fixedCount = 0;
   const details: Array<{ id: string; replaced: number }> = [];
   for (const fingerprint of SKELETON_FINGERPRINTS) {
+    const forms = governanceFormsOf(fingerprint);
     let replaced = 0;
-    for (;;) {
-      const matches = [...next.matchAll(fingerprint.pattern)];
-      if (matches.length <= SKELETON_FINGERPRINT_CAP) break;
-      const overflow = matches[SKELETON_FINGERPRINT_CAP];
+    // guard 上限 = 单族最大可能替换量（形熊池容量有限，收敛单调）
+    for (let guard = 0; guard < 600; guard += 1) {
+      const scans = forms.map(item => [...next.matchAll(item.form.pattern)]);
+      const counts = scans.map(list => list.length);
+      const overflowIndex = counts.findIndex((count, index) => count > forms[index].cap);
+      if (overflowIndex < 0) break;
+      const source = forms[overflowIndex];
+      const overflow = scans[overflowIndex][source.cap];
+      if (!overflow) break;
       const start = overflow.index ?? 0;
-      const variant = fingerprint.variants[replaced % fingerprint.variants.length];
-      const candidate = next.slice(0, start) + variant + next.slice(start + overflow[0].length);
-      // 防御：若变体误命中自身指纹则计数不降（变体池单测锁定不触发），跳出防死循环
-      if (countSkeletonFingerprint(candidate, fingerprint) >= matches.length) break;
-      next = candidate;
+      const matched = overflow[0];
+      let best: { candidate: string; pressure: number } | undefined;
+      for (const rewrite of source.form.rewrites) {
+        const replacement = matched.replace(rewrite.from, rewrite.to);
+        if (!replacement || replacement === matched) continue;
+        const candidate = next.slice(0, start) + replacement + next.slice(start + matched.length);
+        if (candidate === next) continue;
+        // 压力 = 替换后命中形态（含重叠）中的最大当前计数（0 = 零压力改写，如删除冗余虚词）
+        const hitCounts = forms.flatMap((item, index) => ([...replacement.matchAll(item.form.pattern)].length > 0 ? [counts[index]] : []));
+        const pressure = hitCounts.length > 0 ? Math.max(...hitCounts) : 0;
+        if (!best || pressure < best.pressure) best = { candidate, pressure };
+      }
+      if (!best) break;
+      next = best.candidate;
       replaced += 1;
     }
     if (replaced > 0) {

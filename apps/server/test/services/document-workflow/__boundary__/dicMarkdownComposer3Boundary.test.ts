@@ -408,6 +408,15 @@ describe('O3 promptDocumentRuleIssues 深挖', () => {
     expect(issues.some(issue => issue.message.includes('未允许的一级章节'))).toBe(true);
   });
 
+  it('目录不参与一级章节契约比对（系统目录不报未允许章节）', async () => {
+    // 4.40 锁定：目录为系统导航块（tocPolicy!=='forbidden' 恒由 ensureFormalToc 生成/替换），
+    // 提示词去掉「必须生成文档目录」后 tocPolicy=unspecified，系统目录不得反被报「未允许的一级章节」
+    const rules = { exactHeadings: ['第一章 工程概况'], forbidExtraHeadings: true, tocPolicy: 'unspecified' } as PromptDocumentRuleSet & { exactHeadings: string[]; forbidExtraHeadings: boolean };
+    const md = '## 目录\n\n第一章 工程概况 …… 1\n\n## 第一章 工程概况\n\n正文';
+    const issues = await promptDocumentRuleIssues(md, rules);
+    expect(issues.some(issue => issue.message.includes('未允许的一级章节'))).toBe(false);
+  });
+
   it('forbiddenSubjects 命中 → 升级 error', async () => {
     const rules = { forbiddenSubjects: ['乙方'] } as PromptDocumentRuleSet & { forbiddenSubjects: string[] };
     const issues = await promptDocumentRuleIssues('乙方负责施工', rules);

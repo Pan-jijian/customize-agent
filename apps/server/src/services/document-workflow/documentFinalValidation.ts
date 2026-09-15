@@ -241,7 +241,7 @@ export async function buildStandardFinalValidationIssues(input: {
     ...det('paragraph-opening-repeat', () => paragraphOpeningRepeatIssues(input.markdown)),
     // WS3 分部分项章相邻块工序表达形式重复（写作侧 index%4 轮换指定与首轮块质检的生后验收兜底）
     ...det('flow-form-repeat', () => flowFormRepeatIssues(input.markdown)),
-    // WS4 骨架指纹复读（由技术负责人组织 / 合格后方可 / 验收合格后 各全文 ≤2 次，round-2 确定性兜底同源清零）
+    // WS4 骨架指纹复读（由技术负责人组织 / 合格后方可 / 验收合格后 各全文 ≤2 次 + 4.40 d5e 变体形态单形态 ≤8 次，round-2 确定性兜底同源清零）
     ...det('skeleton-fingerprint', () => skeletonFingerprintIssues(input.markdown)),
     // Q8 叠词重复表述（L1 封闭结构提取 + 确定性去重）
     ...det('repeated-word', () => repeatedWordIssues(input.markdown)),

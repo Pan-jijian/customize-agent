@@ -64,6 +64,34 @@ export function explicitLengthTargets(text: string) {
   return { targetPages: pageTarget?.value, pageMode: pageTarget?.mode, targetChars: charTarget?.value, charMode: charTarget?.mode };
 }
 
+/**
+ * 篇幅指令分层编译·文本侧消解（4.40，写前调用）：从写作/事实/审查/修复提示词链与用户提示词内容中
+ * 剥离「全文/正文篇幅目标」语句——文档级字数指令只作为预算层输入（buildDocumentBudget 已把它编译为
+ * 章预算与块目标逐级下发），不得以原始形态再进入 LLM 提示词：模型同时看到块级「目标 X 字」与全文级
+ * 「不少于 14 万字」时锚定全文数字，是块级系统性超产（舒城 14 万目标产出 22 万字）的根因之一。
+ * 口径与 explicitLengthTargets 同源（识别什么就消解什么）：仅命中文档级主体（全文/正文/成文/
+ * 总字数/篇幅/投标文件/施工组织设计/技术标）的语句与整行式篇幅声明；章节/小节级字数要求
+ * （如「安全管理章节不少于 5000 字」）不在此列。命中返回消解后文本（清理孤立标点/空行），否则原样返回。
+ */
+export function stripExplicitLengthLines(text: string): string {
+  if (!text) return text;
+  const docSubject = '全文|正文|成文|总字数|篇幅|投标文件|施工组织设计|技术标';
+  const lengthVerb = '不得少于|不应少于|不少于|不低于|不得超过|不超过|至少|要求|需要|达到|控制在|约为|约';
+  // 长度值形态：「14万字 / 140000 字 / 14.5万字符 / 十四万字」+ 以上/左右/以内/以下；尾随「的」视为从属修饰（非篇幅声明）不剥离
+  const lengthValue = '(?:\\d+(?:\\.\\d+)?|[一二两三四五六七八九十百]{1,6})\\s*万?\\s*(?:字|字符)(?:以上|左右|以内|以下)?(?!的)';
+  // 主体可连续组合（「全文正文不得少于14万字」）：单主体或双主体前缀后接长度声明
+  const standaloneLine = new RegExp(`^[ \\t]*(?:\\d+[.、]\\s*)?(?:${docSubject}){0,2}[ \\t]*(?:${lengthVerb})?[ \\t]*${lengthValue}[。；;:：]?[ \\t]*$\\n?`, 'gmu');
+  const embeddedClause = new RegExp(`(?:${docSubject})[^。；;，,、!？?!\\n]{0,12}?(?:${lengthVerb})?\\s*${lengthValue}`, 'gu');
+  const stripped = text.replace(standaloneLine, '').replace(embeddedClause, '');
+  if (stripped === text) return text;
+  return stripped
+    .replace(/(^|\n)[ \t]*(?:\d+[.、]\s*)?[。；;，,、!？?!]+[ \t]*/gu, '$1')
+    .replace(/[，,、]{2,}/gu, '，')
+    .replace(/[，,、][ \t]*(?=[。；;!？?!])/gu, '')
+    .replace(/([。；;!？?!])[ \t]*[，,、]+/gu, '$1')
+    .replace(/\n{3,}/gu, '\n\n');
+}
+
 /** 章详略级别（容量需求估算档位：详写/标准/概述三档，预算因子参数化） */
 export type ChapterDetailLevel = 'detailed' | 'standard' | 'brief';
 
@@ -236,9 +264,14 @@ export function documentBudgetIssues(budget: DocumentBudget, markdown: string): 
     issues.push({ level: 'error', message: `正文篇幅超过目标字数区间：当前 ${currentChars} 字，建议不超过 ${budget.maxChars} 字`, suggestion: '请压缩重复段落、过细小节或过度展开内容后再导出。' });
   } else if (budget.maxChars && currentChars > budget.maxChars) {
     issues.push({ level: 'warning', message: `正文篇幅超过目标字数区间：当前 ${currentChars} 字，建议不超过 ${budget.maxChars} 字`, suggestion: '建议减少重复段落、过细小节或过度展开内容。' });
+  } else if (budget.mode === 'minimum' && budget.targetChars && currentChars > Math.ceil(budget.targetChars * 1.2)) {
+    // 4.40 篇幅上限硬约束：minimum 语义旧实现「不少于 X 字」只设下限（4.33 仅升 warning 不阻断），
+    // 舒城 14 万目标产出 22 万字的膨胀被静默放行。块级合同（1.15×块目标）之上的章级叠加
+    // （要求补写/表格回填/终稿扩写）超出目标 20% 即为实质性膨胀：置 error → severity 自动升 blocker
+    // → 进修复/门禁/挂起链，不允许超产文档静默交付（宁缺毋假）。
+    issues.push({ level: 'error', message: `正文篇幅严重超出目标字数：当前 ${currentChars} 字，目标约 ${budget.targetChars} 字（超出 ${Math.round((currentChars / budget.targetChars - 1) * 100)}%，超过 20% 即阻断交付）`, suggestion: '按章节完成率定位超产章节，压缩重复段落与过度展开内容（保留全部事实与关键数值），使正文回到目标篇幅附近后重新验收。' });
   } else if (budget.mode === 'minimum' && budget.targetChars && currentChars > Math.ceil(budget.targetChars * 1.15)) {
-    // 4.33 minimum 语义软上限：旧实现「不少于 X 字」只设下限，超产无感（丰乐镇 5 万目标产出 10 万字仅靠人工发现）；
-    // 超出目标 15% 置 warning（不阻断导出），供修复轮与人工收敛定位篇幅异常
+    // 超幅 15%~20%：warning 提示收敛（不阻断导出），供修复轮与人工定位篇幅异常
     issues.push({ level: 'warning', message: `正文篇幅超出目标字数：当前 ${currentChars} 字，目标约 ${budget.targetChars} 字（超出 ${Math.round((currentChars / budget.targetChars - 1) * 100)}%）`, suggestion: '建议压缩重复段落与过度展开内容，使正文接近目标篇幅。' });
   }
   if (budget.minPages && estimatedPages < budget.minPages) {

@@ -685,6 +685,14 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     }
     const factUsageIssues = await chapterSectionFactUsageIssues({ chapter, content, evidence });
     const chapterChars = documentTextLength(content);
+    // 4.40 章级篇幅审计：章完成率 >1.2× 本轮目标即登记超产告警——块级双向硬合同是主拦截面，
+    // 章级超产是块级容差超产的累计放大面，此处为文档级阻断线（目标总额 +20%）的早发现观测点；
+    // 不改变 chapterCompletionStatus 语义（字数是质量信号，不单独构成章失败）
+    const chapterOverProducePercent = targetPlan.roundTarget > 0 ? Math.round(chapterChars / targetPlan.roundTarget * 100) : 0;
+    const chapterOverProduce = targetPlan.roundTarget > 0 && chapterChars > Math.ceil(targetPlan.roundTarget * 1.2);
+    if (chapterOverProduce) {
+      console.error(`[gen][chapter-audit] 章篇幅超产 ${chapterOverProducePercent}%（${chapterChars} 字 vs 本轮目标 ${targetPlan.roundTarget} 字，终稿篇幅阻断线为目标总额 +20%）: ${displayChapterTitle(chapter.title)}`);
+    }
     const generatedSectionsForReview = extractGeneratedSections(content);
     // C1 目录确定性：draft.sections 必须等于生成前规划大纲（主题块管线=块标题，其余=规划小节），
     // 不得从正文提取——正文 H3 被 LLM 改写后提取进目录是「目录污染」的直接源头；仅无任何规划来源时才提取兜底。
@@ -703,7 +711,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       promptId: chapterPromptExecution.primaryPromptId,
       status: chapterStatus,
       message: elapsedMessage(`${displayChapterTitle(chapter.title)} 已由大模型成稿：当前 ${chapterChars} 字；章节预算约 ${targetPlan.budgetTarget} 字，本轮目标约 ${targetPlan.roundTarget} 字${chapterIssues.length ? `；待优化：${chapterIssues.slice(0, 8).join('、')}` : ''}`, chapterStartedAt),
-      details: [`本轮完成率：${Math.round(chapterChars / Math.max(1, targetPlan.roundTarget) * 100)}%`, `结构目标约 ${targetPlan.structureTarget} 字`, ...chapterPromptDetails, `二级小节：${sections.length} 个`],
+      details: [`本轮完成率：${chapterOverProducePercent}%`, `结构目标约 ${targetPlan.structureTarget} 字`, ...chapterPromptDetails, `二级小节：${sections.length} 个`, ...(chapterOverProduce ? [`篇幅审计：章超产（${chapterChars} 字 vs 本轮目标 ${targetPlan.roundTarget} 字，终稿篇幅阻断线为目标总额 +20%）`] : [])],
       progress: { current: chapterOrder + 1, total: session.planning.effectiveChapters.length, label: chapterIssues.length ? '章节已生成' : '章节达标' },
     }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
     session.understanding.chapterGenerationStagesByOrder[chapterOrder] = latestChapterStageForProgress;

@@ -181,7 +181,8 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   { id: 'paragraph-opening-repeat', scope: 'full-document', category: 'style', deterministicSafe: true },
   // WS3 工序表达形式轮换（flowFormRepeatIssues）：分部分项章相邻块同形式即违规
   { id: 'flow-form-repeat', scope: 'full-document', category: 'style' },
-  // WS4 骨架指纹复读（skeletonFingerprintIssues）：由技术负责人组织/合格后方可/验收合格后 各全文 ≤2 次
+  // WS4 骨架指纹复读（skeletonFingerprintIssues）：由技术负责人组织/合格后方可/验收合格后 各全文 ≤2 次；
+  // 4.40 d5e 扩展变体形态：同义替换单形态全篇 ≤8 次（示例变体被 LLM 集中抄写 37/28/17 次实锤）
   { id: 'skeleton-fingerprint', scope: 'full-document', category: 'style' },
   { id: 'repeated-word', scope: 'full-document', category: 'style', deterministicSafe: true },
   { id: 'commercial-data-in-body', scope: 'full-document', category: 'scope' },
@@ -332,7 +333,7 @@ export const DETERMINISTIC_FIXER_ANCHORS: readonly FixerEntry[] = [
   { id: 'atlas-reference', kind: 'deterministic', anchoredTo: 'drawing-reference', giveUpOnFailure: true },
   { id: 'tertiary-h4-dedupe', kind: 'deterministic', anchoredTo: 'tertiary-heading', giveUpOnFailure: true },
   { id: 'internal-term-heading', kind: 'deterministic', anchoredTo: 'internal-terminology-anchor', giveUpOnFailure: true },
-  // WS4 骨架指纹确定性兜底（round-2 链末尾 / 终检前最后一道：超量指纹变体轮换替换清零）
+  // WS4 骨架指纹确定性兜底（round-2 链末尾 / 终检前最后一道：基准字形 + 变体形态按形态池负载均衡同构改写清零）
   { id: 'skeleton-fingerprint-variants', kind: 'deterministic', anchoredTo: 'skeleton-fingerprint', giveUpOnFailure: true },
   // WS3 工序形式确定性兜底（round-2 链、终检前最后一道：相邻同形式轮换转换清零）
   { id: 'flow-form-variants', kind: 'deterministic', anchoredTo: 'flow-form-repeat', giveUpOnFailure: true },
@@ -340,6 +341,9 @@ export const DETERMINISTIC_FIXER_ANCHORS: readonly FixerEntry[] = [
   { id: 'truncated-title-completion', kind: 'deterministic', anchoredTo: 'title-integrity', giveUpOnFailure: true },
   // 4.27.2 句化标题切分（标题合并治理）：与检测器 title-integrity（句化标题「含逗号」判定）同源锚定
   { id: 'sentence-like-heading-split', kind: 'deterministic', anchoredTo: 'title-integrity', giveUpOnFailure: true },
+  // 4.40 d5d 同章同名 H3 小节确定性合并：与检测器 heading-duplicate（headingDuplicateIssues 二级小节同名分支）
+  // 同源锚定——同名检测命中后确定性合并（高重合整块删除/否则内容并入首现块），检测定位=修复定位
+  { id: 'heading-duplicate-merge', kind: 'deterministic', anchoredTo: 'heading-duplicate', giveUpOnFailure: true },
   // 4.36 A2 小节编号重放（结构事务化）：与检测器 section-numbering（编号连续性 blocker）同源锚定——
   // 删行类修复器造成编号空档时链尾原子重排，检测定位=修复定位
   { id: 'section-renumber', kind: 'deterministic', anchoredTo: 'section-numbering', giveUpOnFailure: true },

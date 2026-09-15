@@ -643,7 +643,8 @@ export const FORMAL_WRITING_RULES = [
   '以下规则仅用于保障导出格式正确和事实安全，不得覆盖用户在提示词中已明确的要求。',
   '严禁使用“根据/依据招标文件、补疑澄清文件、工程量清单及设计图纸”等资料来源罗列开头；正文必须直接写项目事实、施工内容、控制措施、验收节点。编制依据类小节除外：该小节可集中罗列编制依据文件清单。',
   '禁止模板化空话与流程套话：不同小节必须写各自专属的专业内容，逐节落位本项目工程量、设备规格、工艺参数与验收标准，不得复制相同段落，不得用泛化的流程描述代替专业内容；正文末尾不得输出自我总结或合规声明段落。',
-  // WS4 骨架指纹禁令（验收口径单源：由技术负责人组织 / 合格后方可 / 验收合格后 各全文 ≤2 次）
+  // WS4 骨架指纹禁令（验收口径单源：由技术负责人组织 / 合格后方可 / 验收合格后 各全文 ≤2 次；
+  // 4.40 d5e：禁令文案去示例——示例变体曾被 LLM 当模板全篇复制，同义替换单形态上限 8 次）
   SKELETON_FINGERPRINT_BAN_LINE,
   // L0 重组（2.2）：评分方法论（TENDER_BID_WRITING_RULES）前移至写作纪律之后——青天评分器
   // 4.7+ 的核心评分点规则（五要素/闭环句式/参数密度）置于规则前部注意力窗口；后台话术禁令与
@@ -855,6 +856,91 @@ export function dedupeCrossLevelHeadingDuplicates(markdown: string): string {
     output.push(downgrade ? lines[index].replace(/^##\s+/, '### ') : lines[index]);
   }
   return output.join('\n').replace(/\n{3,}/gu, '\n\n');
+}
+
+/**
+ * 小节标题同一性键（4.40 d5d 单源）：装配层 L5 同名降级（normalizeSectionHeading 的 sectionKey）、
+ * 终检同名检测（headingDuplicateIssues·二级小节分支）与确定性合并修复器
+ * （dedupeDuplicateSectionHeadings）共用同一口径——去编号/标点/尾部防撞名括号后全等。
+ */
+export function sectionHeadingIdentityKey(title: string): string {
+  return normalizePlannedSectionTitle(title);
+}
+
+/**
+ * 同章同名 H3 小节确定性合并（4.40 d5d · 终检 headingDuplicateIssues 二级小节同名项）：
+ * LLM 把同一主题小节写两遍（舒城实测第十章 10.1/10.5「分区落实与临时道路流线」正文双写、
+ * 目录重复堆叠）此前只剩 LLM 修复且无最终兜底——同名 H4 已有 tertiary-h4-dedupe，H3 同名缺失。
+ * 同一性键与装配层 L5 同名降级单源（sectionHeadingIdentityKey）。处理（零标题改写、零内容丢失）：
+ * ①后现块与首现块句指纹重合率 ≥50%（与 dedupeCrossLevelHeadingDuplicates 同口径）→ 整块删除
+ *   （内容已在首现同名小节中，属重复展开）；
+ * ②否则整块内容（去标题行）并入首现同名小节块末——同主题合为一个小节。
+ * 仅在章内聚合（「## 」行为作用域边界；stage5 章片段模式无「## 」行即单作用域，跨章同名由
+ * crossChapterDuplicateSectionIssues 独立治理，不在此合并）；编号空档由链内 section-renumber
+ * 原子重放、目录由后续 toc-consistency 重建。幂等。
+ */
+export function dedupeDuplicateSectionHeadings(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+  const lines = markdown.split(/\r?\n/u);
+  // 代码围栏内不参与（标题形态行可能出现在示例代码中）
+  const inFence: boolean[] = [];
+  let fence = false;
+  for (const line of lines) {
+    if (/^\s*(?:```|~~~)/u.test(line)) fence = !fence;
+    inFence.push(fence);
+  }
+  const blockEnd = (start: number) => {
+    for (let cursor = start + 1; cursor < lines.length; cursor += 1) {
+      if (!inFence[cursor] && /^#{1,3}\s/u.test(lines[cursor].trim())) return cursor;
+    }
+    return lines.length;
+  };
+  const firstBlocks = new Map<string, { start: number; end: number; fingerprints: Set<string> }>();
+  const removed = new Set<number>();
+  const insertions = new Map<number, string[]>();
+  const details: string[] = [];
+  let scope = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (inFence[index]) continue;
+    const trimmed = lines[index].trim();
+    if (/^#{1,2}\s/u.test(trimmed)) { scope += 1; continue; }
+    const heading = /^###\s+(.+)$/u.exec(trimmed);
+    if (!heading) continue;
+    const key = sectionHeadingIdentityKey(heading[1] || '');
+    if (key.length < 2) continue;
+    const scopeKey = `${scope}::${key}`;
+    const end = blockEnd(index);
+    const first = firstBlocks.get(scopeKey);
+    if (!first) {
+      firstBlocks.set(scopeKey, { start: index, end, fingerprints: headingBlockSentenceFingerprints(lines, index + 1, end) });
+      continue;
+    }
+    const laterBody = lines.slice(index + 1, end).join('\n').trim();
+    const laterFingerprints = headingBlockSentenceFingerprints(lines, index + 1, end);
+    const overlap = [...laterFingerprints].filter(fingerprint => first.fingerprints.has(fingerprint)).length;
+    const minSize = Math.min(first.fingerprints.size, laterFingerprints.size);
+    if (!laterBody || (minSize > 0 && overlap / minSize >= 0.5)) {
+      details.push(`删除重复同名小节：${trimmed}`);
+    } else {
+      // 并入首现同名小节块末（去标题行；空白由末尾 \n{3,} 收敛）
+      const content = lines.slice(index + 1, end).join('\n').trim();
+      const pending = insertions.get(first.end) || [];
+      pending.push('', ...content.split('\n'), '');
+      insertions.set(first.end, pending);
+      details.push(`合并同名小节内容：${trimmed}`);
+    }
+    for (let cursor = index; cursor < end; cursor += 1) removed.add(cursor);
+  }
+  if (details.length === 0) return { markdown, fixedCount: 0, details };
+  const output: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const pending = insertions.get(index);
+    if (pending) output.push(...pending);
+    if (removed.has(index)) continue;
+    output.push(lines[index]);
+  }
+  const tail = insertions.get(lines.length);
+  if (tail) output.push(...tail);
+  return { markdown: output.join('\n').replace(/\n{3,}/gu, '\n\n'), fixedCount: details.length, details };
 }
 
 /**
@@ -1091,8 +1177,10 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
     return lines.slice(start + 1, end).some(line => {
       const trimmed = line.trim();
       if (inToc) {
-        if (/^<div class="page-break"><\/div>$/u.test(trimmed)) inToc = false;
-        return false;
+        // 目录区结束判定（4.40 根治）：结构驱动，与 renumberSectionHeadings/fixTocFromBody 同源——
+        // 旧口径仅认 page-break div，无 div 成稿上章级常量恒假（H4→H3 升级判定依据失效）
+        if (!/^##\s/u.test(trimmed)) return false;
+        inToc = false;
       }
       if (/^##\s+目录\s*$/u.test(trimmed)) { inToc = true; return false; }
       return /^##\s+.+/u.test(trimmed) || /^###\s+.+/u.test(trimmed);
@@ -1178,11 +1266,13 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
       inTocBlock = true;
       return line;
     }
-    if (inTocBlock && /^<div class="page-break"><\/div>$/u.test(trimmed)) {
+    if (inTocBlock) {
+      // 目录区结束判定（4.40 根治）：结构驱动——任一「## 」标题行即退出并继续归一该行；
+      // 历史缺陷：仅认 page-break div，无 div 成稿（fixTocFromBody 重建目录后）目录区永不结束，
+      // 其后全部正文跳过归一（章节/小节编号归一静默失效）
+      if (!/^##\s/u.test(trimmed)) return line;
       inTocBlock = false;
-      return line;
     }
-    if (inTocBlock) return line;
     if (/^##\s+第[一二三四五六七八九十百千万\d]+章\s+/u.test(trimmed)) {
       chapterIndex += 1;
       sectionIndex = 0;
@@ -1475,7 +1565,11 @@ export async function promptDocumentRuleIssues(markdown: string, rules?: PromptD
   const runtimeRules = rules as PromptDocumentRuleSet & { exactHeadings?: string[]; forbidExtraHeadings?: boolean; requiredSubjects?: string[]; forbiddenSubjects?: string[]; minChars?: number };
   const exactHeadings = runtimeRules.exactHeadings || [];
   if (exactHeadings.length > 0) {
-    const actualHeadings = [...markdown.matchAll(/^##\s+(.+)$/gmu)].map(match => displayChapterTitle(match[1] || '')).filter(title => !(title === '目录' && rules.tocPolicy === 'required') && !/^附录/u.test(title));
+    // 4.40 根治：「目录」是系统导航块（tocPolicy!=='forbidden' 时 finalizeDocumentMarkdown 经 ensureFormalToc 确定性生成/替换），
+    // 与文末「附录」附表区同为非章节结构，一律不参与一级章节契约比对——旧豁免条件（tocPolicy==='required'）
+    // 与提示词目录语句绑定，提示词去掉目录语句后系统目录反被本校验误报「未允许的一级章节」；
+    // 目录的存在性/禁止性只由目录政策检查承担（上文缺少目录/残留目录分支），本处不再重复判定。
+    const actualHeadings = [...markdown.matchAll(/^##\s+(.+)$/gmu)].map(match => displayChapterTitle(match[1] || '')).filter(title => title !== '目录' && !/^附录/u.test(title));
     const normalizedExactHeadings = exactHeadings.map(displayChapterTitle);
     const missingHeadings = exactHeadings.filter(title => !actualHeadings.includes(displayChapterTitle(title)));
     const extraHeadings = runtimeRules.forbidExtraHeadings ? actualHeadings.filter(title => !normalizedExactHeadings.includes(displayChapterTitle(title))) : [];

@@ -1,9 +1,10 @@
 /**
  * buildPlannedChapterContent（块写作合同）单测：
- * 字数分层验收（4.35）：达标区 [0.85,1.15] 直通；接受区 [0.7,1.4]（非达标区）记录放行不耗重写；
- * 越界区 <0.7 或 >1.4 仅首轮阻断重写一次、二轮一律放行——字数不再构成块失败/章阻断（重写对字数
- * 不收敛：舒城实测验收基准块 2270→2066→2376→1710）；结构硬门保留零降级（缺失/重复 H4、清单外
- * 标题）→ 标题层缺陷确定性修复通道（修复后按接受区复核）→ 两轮不达标返回失败块隔离清单（不整章降级）。
+ * 字数双向硬合同（4.40）：达标区 [0.85,1.15] 直通；欠产侧接受区 [0.7,0.85) 记录放行、<0.7 仅
+ * 首轮阻断（二轮放行）；超产侧 >1.15 任何轮次阻断（二轮仍超产 → 块失败，零降级）——旧 4.35
+ * 「接受区 [0.7,1.4] 放行 / 二轮一律放行」是超产进入成稿的最后失守环节（舒城 14 万目标产出 22 万字）。
+ * 结构硬门保留零降级（缺失/重复 H4、清单外标题）→ 标题层缺陷确定性修复通道（修复后仍超产不得
+ * 放行）→ 两轮不达标返回失败块隔离清单（不整章降级）。
  * LLM 通道 mock（callDocumentLlm 按 prompt 特征返回受控内容）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -128,9 +129,9 @@ describe('buildPlannedChapterContent（块字数分层验收 + 结构硬门 + �
     expect(result?.markdown).toContain(H4D);
   });
 
-  it('两轮字数均严重不足但结构齐全 → 二轮一律放行成稿（字数不再构成块失败）', async () => {
-    // 160 字 vs 500（0.32×）两轮不变：首轮越界区阻断重写、二轮放行——块成功、章不被阻断
-    //（旧实现二轮仍阻断 → 块失败 → 章阻断，舒城 9 章失败链的根源）
+  it('两轮字数均严重不足但结构齐全 → 二轮放行成稿（欠产侧不构成块失败）', async () => {
+    // 160 字 vs 500（0.32×）两轮不变：首轮 <0.7× 阻断重写、二轮放行——欠产侧二轮放行（补足需新事实，
+    // 不可控；与超产侧压缩的确定性收敛不同）；块成功、章不被阻断
     llmMock.mockResolvedValue(`### 测量放线\n\n${[H4A, H4B, H4C, H4D].map((title, index) => `#### ${title}\n\n${bodyLine(25, index)}`).join('\n\n')}`);
     const result = await buildPlannedChapterContent(makeInput(), makeStructure());
     expect(result?.allSucceeded).toBe(true);
@@ -138,9 +139,34 @@ describe('buildPlannedChapterContent（块字数分层验收 + 结构硬门 + �
     expect(result?.markdown).toContain(H4A);
   });
 
-  it('首轮严重超产（>1.4×）→ 二轮携压缩反馈重写；二轮仍超产 → 放行成稿', async () => {
-    // 860 字 vs 500（1.72×）两轮不变：首轮越界区阻断并携带压缩指令、二轮放行（旧实现超产二轮仍阻断）
+  it('首轮严重超产（>1.15×）→ 二轮携压缩反馈重写；二轮仍超产 → 块失败（零降级）', async () => {
+    // 860 字 vs 500（1.72×）两轮不变：超产侧任何轮次阻断——二轮仍超产 → 块失败 → 返回 undefined
+    //（单块章全失败 → 上层章阻断、文档显式失败）；多块章的失败块隔离重试由 stageChapterLoop.retryFailedBlocks 处理
     llmMock.mockResolvedValue(passingContent([H4A, H4B, H4C, H4D], 200));
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure());
+    expect(result).toBeUndefined();
+    expect(llmMock).toHaveBeenCalledTimes(2);
+    expect(llmMock.mock.calls[1][1]).toContain('【上一轮篇幅超限】');
+  });
+
+  it('首轮超产（>1.15×）→ 二轮携压缩反馈压缩达标 → 成稿（压缩是确定性收敛方向）', async () => {
+    // 860 字 vs 500（1.72×）：首轮超产阻断并携带压缩指令；二轮压缩到 540 字（1.08×）进达标区成稿
+    llmMock
+      .mockResolvedValueOnce(passingContent([H4A, H4B, H4C, H4D], 200))
+      .mockResolvedValueOnce(passingContent([H4A, H4B, H4C, H4D], 120));
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure());
+    expect(result?.allSucceeded).toBe(true);
+    expect(llmMock).toHaveBeenCalledTimes(2);
+    expect(llmMock.mock.calls[1][1]).toContain('【上一轮篇幅超限】');
+  });
+
+  it('清单外 H4 修复后仍超产（>1.15×）→ 修复通道不放行，二轮重写达标成稿', async () => {
+    // ≈974 字（1.95×）且含清单外 H4：标题层修复（删标题留正文）只减 9 字，修复后仍 >1.15×（575）
+    // → 不得经修复通道放行（超产侧无豁免轮次）→ 二轮重写；二轮压缩到 540 字成稿
+    const oversizeWithExtraneous = `### 测量放线\n\n${[H4A, H4B, H4C, H4D].map((title, index) => `#### ${title}\n\n${bodyLine(200, index)}`).join('\n\n')}\n\n#### 自由发挥一\n\n${bodyLine(100, 4)}`;
+    llmMock
+      .mockResolvedValueOnce(oversizeWithExtraneous)
+      .mockResolvedValueOnce(passingContent([H4A, H4B, H4C, H4D], 120));
     const result = await buildPlannedChapterContent(makeInput(), makeStructure());
     expect(result?.allSucceeded).toBe(true);
     expect(llmMock).toHaveBeenCalledTimes(2);

@@ -361,4 +361,26 @@ describe('headingDuplicateIssues', () => {
     expect(r.length).toEqual(1);
     expect(r[0]?.message.includes("施工流程")).toEqual(true);
   });
+  it('4.40 d5d：同章同名 H3 小节照报（舒城第十章 10.1/10.5 实测形态）', () => {
+    const r = headingDuplicateIssues('## 第十章 施工总平面布置\n### 10.1 分区落实与临时道路流线\n作业分区与道路内容。\n### 10.5 分区落实与临时道路流线\n二次搭设步骤内容。');
+    expect(r.length).toEqual(1);
+    expect(r[0]?.level).toEqual('error');
+    expect(r[0]?.message.includes("分区落实与临时道路流线")).toEqual(true);
+    expect(r[0]?.message.includes("2 次")).toEqual(true);
+  });
+  it('4.40 d5d：H3 近名判定同源（连接符/去编号归一后同名照报）', () => {
+    const r = headingDuplicateIssues('## 第九章 配套设施\n### 9.1 综合配套用房-安装工程\n内容一。\n### 9.2 综合配套用房安装工程\n内容二。');
+    expect(r.length).toEqual(1);
+    expect(r[0]?.message.includes("综合配套用房安装工程")).toEqual(true);
+  });
+  it('4.40 d5d：跨章同名 H3 不互计（归属章仲裁由 crossChapterDuplicateSectionIssues 负责）', () => {
+    const r = headingDuplicateIssues('## 第一章 编制说明\n### 1.1 施工总平面布置\n内容一。\n## 第二章 主要施工方法\n### 2.1 施工总平面布置\n内容二。');
+    expect(r.length).toEqual(0);
+  });
+  it('4.40 d5d：H3 与 H4 层级分账（互不计数、各自独立成账）', () => {
+    const r = headingDuplicateIssues('## 第二章 主要施工方法\n### 2.1 质量控制\n内容一。\n### 2.5 质量控制\n内容二。\n#### 质量控制\n内容三。');
+    expect(r.length).toEqual(1);
+    expect(r[0]?.message.includes("质量控制")).toEqual(true);
+    expect(r[0]?.message.includes("2 次")).toEqual(true);
+  });
 });

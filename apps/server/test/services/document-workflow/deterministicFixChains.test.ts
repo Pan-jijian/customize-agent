@@ -58,6 +58,8 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'atlas-reference',
       // 4.31 internal-term-heading 启用 stage5（丰乐镇 v6 #66/#88 表格行替换）
       'internal-term-heading',
+      // 4.40 d5d 同章同名 H3 小节确定性合并（与检测器 heading-duplicate 同源）：紧随其后 section-renumber 编号重放
+      'heading-duplicate-merge',
       // 4.36 A2 小节编号重放（结构事务化 · 编号不变量 INV-1：链尾原子重放，清洗层删 H3 行后的编号空档在此收敛）
       'section-renumber',
     ]);
@@ -112,6 +114,8 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'truncated-title-completion',
       // 4.27.2 句化标题切分（标题合并治理 · round-2 链最后：标题还原规划标题+续写句转正文）
       'sentence-like-heading-split',
+      // 4.40 d5d 同章同名 H3 小节确定性合并（与检测器 heading-duplicate 同源）：紧随其后 section-renumber 编号重放
+      'heading-duplicate-merge',
       // 4.36 A2 小节编号重放（结构事务化 · 编号不变量 INV-1：链尾原子重放，H4 父前缀同步）
       'section-renumber',
     ]);

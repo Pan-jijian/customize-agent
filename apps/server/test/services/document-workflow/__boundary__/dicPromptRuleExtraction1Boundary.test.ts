@@ -171,7 +171,9 @@ describe('normalizePlannedSectionTitle', () => {
     expect(normalizePlannedSectionTitle("第一章")).toEqual("");
   });
   it('编号无标题', () => {
-    expect(normalizePlannedSectionTitle("1.2.3")).toEqual("3");
+    // 4.40 残号根治：多段编号整段剥离，不再留半段残号（旧行为「1.2.3」→「3」与「「2.16杭北」→「16杭北」」
+    // 同源；与「只编号」"1."→""、「只章号」"第一章"→"" 同口径）
+    expect(normalizePlannedSectionTitle("1.2.3")).toEqual("");
   });
   it('英文字母编号', () => {
     expect(normalizePlannedSectionTitle("A. 施工方案")).toEqual("A. 施工方案");
@@ -439,8 +441,10 @@ describe('sectionTitleEquivalent', () => {
   it('全标点 vs 全标点', () => {
     expect(sectionTitleEquivalent("。：", "，；")).toEqual(false);
   });
-  it('数字等价', () => {
-    expect(sectionTitleEquivalent("2.1", "2.1")).toEqual(true);
+  it('纯编号（无标题）归一为空不再等价', () => {
+    // 4.40 残号根治：纯编号整段归一为空 → 空守卫 false（与「空串 vs 空串」同口径；
+    // 旧行为两侧都退化为残号「1」而判等价，属半段剥离缺陷）
+    expect(sectionTitleEquivalent("2.1", "2.1")).toEqual(false);
   });
 });
 describe('dedupePlannedSections', () => {

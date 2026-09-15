@@ -35,7 +35,7 @@ import {
 import type { DeterministicFixOutcome } from './documentIntegrityChecks';
 import { fixResourceBreakdownNumbers, type ResourceBreakdownAuthority } from './resourceBreakdownNumbers';
 import { cleanStructureDefects, renumberSectionHeadings } from './structureIntegrityRules';
-import { dedupeTertiaryH4Titles } from './markdownComposer';
+import { dedupeDuplicateSectionHeadings, dedupeTertiaryH4Titles } from './markdownComposer';
 import { fixInternalTermHeadingPhrases } from './internalTerminologyAnchors';
 import { stripAtlasReferencePhrases } from './documentGeneratorHelpers';
 import { fixEmptyScoringResponses, fixTenderMetaLanguage, stripDuplicateResponseLines } from './tenderRequirements';
@@ -161,7 +161,7 @@ export const SURFACE_FIX_STEPS: readonly SurfaceFixStep[] = [
   // 4.31 内部术语替换扩展至表格行（丰乐镇 v6 #66/#88：「作业面落位」表头行 blocker 死区），
   // stage5 逐章链同样启用：替换为确定性词面安全替换，越早收敛越好
   { key: 'internal-term-heading', stage5: true, round2: true, fix: markdown => fixInternalTermHeadingPhrases(markdown) },
-  // WS4 骨架指纹确定性兜底（round-2 链末尾、终检前最后一道：超量指纹轮换变体清零，
+  // WS4 骨架指纹确定性兜底（round-2 链末尾、终检前最后一道：基准字形 + 变体形态按负载均衡同构改写清零，
   // 保证终检 skeletonFingerprintIssues 达标；stage5 不启用——只在评审后全文链做最终收敛）
   { key: 'skeleton-fingerprint-variants', stage5: false, round2: true, fix: markdown => { const r = fixSkeletonFingerprintRepetition(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   // WS3 工序形式确定性兜底（round-2 链、终检前最后一道：相邻同形式轮换转换清零，
@@ -175,6 +175,11 @@ export const SURFACE_FIX_STEPS: readonly SurfaceFixStep[] = [
   // 续写句已被正文覆盖则丢弃、未覆盖部分转正文行（内容零丢失）；装配层 markdownComposer 同源前缀
   // 匹配在更早环节收敛；切分后标题结构变化由后续 toc-consistency 轮重同步目录
   { key: 'sentence-like-heading-split', stage5: false, round2: true, fix: (markdown, ctx) => { const r = fixSentenceLikeHeadingSplit(markdown, ctx.plannedSectionTitles); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
+  // 4.40 d5d 同章同名 H3 小节确定性合并：LLM 把同一主题小节写两遍（舒城实测 10.1/10.5「分区落实与临时道路流线」
+  // 目录与正文重复堆叠）——后现块与首现块句指纹高重合整块删除，否则内容（去标题行）并入首现同名小节块末
+  // （零标题改写/零内容丢失）；紧随其后 section-renumber 原子重放编号，toc-consistency 重建目录。
+  // 与终检 headingDuplicateIssues 二级小节分支同源（sectionHeadingIdentityKey 单源）。
+  { key: 'heading-duplicate-merge', stage5: true, round2: true, fix: markdown => { const r = dedupeDuplicateSectionHeadings(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   // 4.36 A2 小节编号重放（结构事务化 · 编号不变量 INV-1）：链尾原子重放——清洗层删除重复 H3 行
   // （fixCollisionNumberedHeadings / 降级合并 / 直接删行类修复器）后编号出现空档时，按 H3 出现顺序
   // 重排「章序.节序」（章号=章标题解析值/前缀多数派，与终检 sectionNumberingIssues 同源），

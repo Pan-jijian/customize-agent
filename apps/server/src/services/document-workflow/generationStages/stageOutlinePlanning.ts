@@ -8,7 +8,7 @@ import type { DocumentTemplateChapter } from '../types';
 import { displayChapterTitle } from '../outline';
 import { evidenceMatchesFact } from '../factMatching';
 import { selectEvidenceByBudget } from '../evidence';
-import { buildDocumentBudget } from '../budget';
+import { buildDocumentBudget, stripExplicitLengthLines } from '../budget';
 import { chapterCriteriaText, prioritizeOverviewSections, validateBidStructureBeforeGeneration } from '../constructionBidStructure';
 import { buildSemanticSimilarity } from '../semanticSimilarity';
 import { filterOffTopicSectionsForChapters } from '../evidenceContentSafety';
@@ -51,6 +51,60 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
   const provisionalTemplate = { ...session.prepare.template, chapters: session.planning.effectiveChapters };
   session.planning.promptStructuralRules = extractPromptStructuralRules([session.prepare.promptTexts, session.global.input.requirement || ''].filter(Boolean).join('\n\n'), session.planning.effectiveChapters);
   session.planning.provisionalBudget = buildDocumentBudget({ requirement: session.global.input.requirement, promptTexts: session.prepare.promptTexts, template: provisionalTemplate, chapters: session.planning.effectiveChapters, spec: session.prepare.documentSpec });
+  // 4.40 篇幅指令分层编译（文本侧消解）：文档级字数指令仅作为预算层输入——provisional/final 两次
+  // buildDocumentBudget 都从原始文本识别全文目标并编译为章预算（Σ=T 守恒）与块目标（写作层下发）；
+  // 此处先捕获识别源（消解会剥离其中数字），随后把原始篇幅语句从用户需求原文、写作/规划/事实/审查/
+  // 修复提示词链与用户提示词内容中剥离。消解必须晚于临时预算、早于小节规划——LLM 提示词（规划/写作）
+  // 不得再看到原始全文篇幅语句（块级「目标 X 字」+ 全文级「不少于 14 万字」双通道指令是块级系统性
+  // 超产的根因），全文级目标只以编译产物（章预算/块目标）形态进入 LLM。
+  const budgetLengthSource = { requirement: session.global.input.requirement, promptTexts: session.prepare.promptTexts };
+  const dissolvedLengthFields: string[] = [];
+  const dissolveLength = (field: string, value: string): string => {
+    const next = stripExplicitLengthLines(value || '');
+    if (next !== (value || '')) dissolvedLengthFields.push(field);
+    return next;
+  };
+  // 用户需求原文（requirement）：章写作经「用户要求：${requirement}」与事实需求构建直通块提示词
+  if (session.global.input.requirement) {
+    const nextRequirement = dissolveLength('requirement', session.global.input.requirement);
+    session.global.input.requirement = nextRequirement || undefined;
+  }
+  session.prepare.runtimeRulesText = dissolveLength('runtimeRulesText', session.prepare.runtimeRulesText);
+  session.prepare.promptTexts = dissolveLength('promptTexts', session.prepare.promptTexts);
+  session.prepare.factExtractionPromptTexts = dissolveLength('factExtractionPromptTexts', session.prepare.factExtractionPromptTexts);
+  session.prepare.reviewPromptTexts = dissolveLength('reviewPromptTexts', session.prepare.reviewPromptTexts);
+  session.prepare.repairPromptTexts = dissolveLength('repairPromptTexts', session.prepare.repairPromptTexts);
+  // 项目上下文（LLM 理解产物可能复述需求原文的篇幅语句）：规划提示词与块写作「上下文/历史记忆」行消费
+  session.planning.baseProjectContext = dissolveLength('baseProjectContext', session.planning.baseProjectContext);
+  session.planning.projectContext = session.planning.baseProjectContext;
+  // 用户提示词原文（promptPlan 解析产物）：章级写作链经 resolveChapterPromptExecution 直接渲染其内容
+  //（不经过 prepare.promptTexts 快照）——不消解则「全文正文要求14万字」仍随章提示词进入块写作提示词
+  const dissolvedPromptIds = new Set<string>();
+  const dissolvedPromptContents = new Set<object>();
+  for (const prompt of [...session.prepare.promptPlan.prompts, ...session.prepare.promptPlan.writerPrompts, ...session.prepare.promptPlan.chapterPrompts, ...session.prepare.promptPlan.formattingPrompts, ...session.prepare.promptPlan.extractionPrompts, ...session.prepare.promptPlan.referencePrompts]) {
+    if (dissolvedPromptContents.has(prompt)) continue;
+    dissolvedPromptContents.add(prompt);
+    const next = stripExplicitLengthLines(prompt.content || '');
+    if (next !== (prompt.content || '')) {
+      prompt.content = next;
+      dissolvedPromptIds.add(prompt.id);
+    }
+  }
+  if (dissolvedLengthFields.length > 0 || dissolvedPromptIds.size > 0) {
+    upsertProgressStage(session.global.progressStages, displayStage({
+      type: 'validation',
+      roleId: 'length-instruction-dissolve',
+      status: 'success',
+      message: `篇幅指令分层编译：全文级字数指令已消解（提示词链 ${dissolvedLengthFields.length} 处、用户提示词 ${dissolvedPromptIds.size} 个），篇幅目标由章预算/块目标统一下达`,
+      details: [
+        ...dissolvedLengthFields.map(field => `消解字段：${field}`),
+        ...(dissolvedPromptIds.size > 0 ? [`消解用户提示词：${[...dissolvedPromptIds].join('、')}`] : []),
+        session.planning.provisionalBudget.targetChars ? `识别口径：全文目标 ${session.planning.provisionalBudget.targetChars} 字（已编译为 ${session.planning.effectiveChapters.length} 章预算，Σ=目标守恒）` : '未识别到显式全文目标，按模板/spec 默认预算下达',
+        '写作链不再携带原始全文篇幅语句（双通道指令 → 单通道编译下发）',
+      ],
+    }, { subtitle: '篇幅预算', order: session.global.progressStages.length }));
+    session.global.emitProgress();
+  }
   // 统一融合规划（组件 2）：所有章同一条路——locked（用户声明：提示词强制小节 + 模板/OUTLINE 已提供小节）
   // 置前锁定，LLM 基于提示词/资料/图谱全量规划专业工作面，融合去重后输出；小节结构只来自用户声明与
   // LLM 规划，系统不生成任何小节。规划产物同时含本章表格需求（表名+表头字段），供表格计划构建使用
@@ -180,8 +234,9 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
   // 本地语义模型恒可用，构建失败直接抛出，无不可用降级路径
   session.planning.professionalDepthClassifier = await buildProfessionalDepthClassifier();
   session.planning.writingTaskBrief = buildWritingTaskBrief({ chapters: session.planning.effectiveChapters, factsModel: session.understanding.preliminaryFactsModel, projectGraph: session.understanding.projectGraph || undefined, requirement: session.global.input.requirement, templateName: session.prepare.template.name });
-  // 评分项要求写作规则注入：生成时显性响应招标要求（零响应即评标失分），与零响应检测共用同一份提取模型
-  session.planning.tenderWritingRulesText = tenderRequirementsWritingRules(session.planning.tenderRequirements);
+  // 评分项要求写作规则注入：生成时显性响应招标要求（零响应即评标失分），与零响应检测共用同一份提取模型；
+  // 全文级篇幅语句同样消解（规则文本随章级 scoped 上下文直通块写作提示词）
+  session.planning.tenderWritingRulesText = dissolveLength('tenderWritingRulesText', tenderRequirementsWritingRules(session.planning.tenderRequirements));
   session.planning.projectContext = [session.planning.baseProjectContext, session.planning.tenderWritingRulesText].filter(Boolean).join('\n\n');
   // 章级 scoped 上下文（三期收口：旧文档蓝图已删除，事实上下文由一体化蓝图参数桶+章切片接管）：
   // 章级只保留 constructionOrgContext（不在任何 promptTexts 变体中）与评分项要求规则；
@@ -190,7 +245,9 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
   session.planning.chapterScopedProjectContext = (_chapter: DocumentTemplateChapter) => {
     return [session.planning.constructionOrgContext, session.planning.tenderWritingRulesText].filter(Boolean).join('\n\n');
   };
-  session.planning.documentBudget = buildDocumentBudget({ requirement: session.global.input.requirement, promptTexts: session.prepare.promptTexts, template: session.prepare.template, chapters: session.planning.effectiveChapters, spec: session.prepare.documentSpec });
+  // 4.40 篇幅指令分层编译：最终预算与临时预算同源（budgetLengthSource 为消解前捕获的原始文本——
+  // 篇幅数字所在），chapters 用规划后 effectiveChapters 重分配
+  session.planning.documentBudget = buildDocumentBudget({ requirement: budgetLengthSource.requirement, promptTexts: budgetLengthSource.promptTexts, template: session.prepare.template, chapters: session.planning.effectiveChapters, spec: session.prepare.documentSpec });
   session.planning.plannedDocument = await session.planning.plannedDocumentTask;
   session.understanding.agentWorkflow.documentPlan = session.planning.plannedDocument.plan;
   session.understanding.agentWorkflow.nodes.push(session.planning.plannedDocument.node);

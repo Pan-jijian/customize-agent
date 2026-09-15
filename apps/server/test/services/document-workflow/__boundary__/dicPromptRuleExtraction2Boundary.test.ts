@@ -396,12 +396,15 @@ describe('runtimePromptRulesPrompt', () => {
     const r = runtimePromptRulesPrompt(...[{"coverPolicy":"unspecified" as const,"tocPolicy":"unspecified" as const,"forbidCover":false,"forbidToc":false,"forbiddenTerms":["知识库","提示词","建议补充","资料库","OCR","后台话术","后台流程","后台数据","后台资料","后台溯源","绑定片段"],"preferredTerms":[{"from":"高度重视","to":"严格落实"},{"from":"重中之重","to":"关键控制事项"}],"requiredTables":[],"requiredKeywords":[],"forbiddenPatterns":[],"sourceHash":"811c9dc5","exactHeadings":[],"forbidExtraHeadings":false,"requiredSubjects":[],"forbiddenSubjects":[],"backendTerms":["知识库","提示词","建议补充","资料库","OCR","后台话术","后台流程","后台数据","后台资料","后台溯源","绑定片段"],"commercialTerms":[],"forbidFabrication":false,"requireEvidenceForQuantities":false,"preferProjectFacts":false,"chapterRules":[],"roleRules":[],"executionSummary":["已识别禁用词 11 个"]}]);
     expect(r.includes("禁止输出系统内部话术")).toEqual(true);
   });
-  it('表格+关键词+禁词+字数', () => {
+  it('表格+关键词+禁词', () => {
     const r = runtimePromptRulesPrompt(...[{"coverPolicy":"unspecified" as const,"tocPolicy":"unspecified" as const,"forbidCover":false,"forbidToc":false,"forbiddenTerms":["知识库","提示词","建议补充","资料库","OCR","后台话术","后台流程","后台数据","后台资料","后台溯源","绑定片段"],"preferredTerms":[{"from":"高度重视","to":"严格落实"},{"from":"重中之重","to":"关键控制事项"}],"requiredTables":["项目基本信息表"],"requiredKeywords":["BIM"],"forbiddenPatterns":["空话"],"sourceHash":"18886fa9","exactHeadings":[],"forbidExtraHeadings":false,"requiredSubjects":[],"forbiddenSubjects":[],"backendTerms":["知识库","提示词","建议补充","资料库","OCR","后台话术","后台流程","后台数据","后台资料","后台溯源","绑定片段"],"commercialTerms":[],"forbidFabrication":false,"requireEvidenceForQuantities":false,"preferProjectFacts":false,"minWords":10000,"minChars":10000,"chapterRules":[],"roleRules":[],"executionSummary":["已识别禁用词 11 个","已识别必需表格：项目基本信息表","已识别必含关键词：BIM","已识别禁止出现内容：空话","已识别最低字数要求：10000 字"],"ruleSources":{"requiredTables":[{"promptId":"system:generation-control","roleId":"generation-control","pattern":"全文必须输出|必须输出表格|项目基本信息表","matchedText":"项目基本信息表"}],"requiredKeywords":[{"promptId":"system:generation-control","roleId":"generation-control","pattern":"必须包含|必须含|应包含|需要包含","matchedText":"BIM"}],"forbiddenPatterns":[{"promptId":"system:generation-control","roleId":"generation-control","pattern":"禁止|不得|严禁|杜绝","matchedText":"空话"}],"minWords":[{"promptId":"system:generation-control","roleId":"generation-control","pattern":"\\d{3,}\\s*字","matchedText":"10000"}]},"extractionTrace":[{"rule":"必需表格：项目基本信息表","source":{"promptId":"system:generation-control","roleId":"generation-control","pattern":"全文必须输出|必须输出表格|项目基本信息表"},"matchedText":"项目基本信息表"},{"rule":"必含关键词：BIM","source":{"promptId":"system:generation-control","roleId":"generation-control","pattern":"必须包含|必须含|应包含|需要包含"},"matchedText":"BIM"},{"rule":"禁止内容：空话","source":{"promptId":"system:generation-control","roleId":"generation-control","pattern":"禁止|不得|严禁|杜绝"},"matchedText":"空话"},{"rule":"最低字数：10000","source":{"promptId":"system:generation-control","roleId":"generation-control","pattern":"\\d{3,}\\s*字"},"matchedText":"10000"}]}]);
     expect(r.includes("必须输出以下正式 Markdown 表格")).toEqual(true);
     expect(r.includes("正文必须覆盖以下关键词")).toEqual(true);
     expect(r.includes("正文禁止出现以下内容")).toEqual(true);
-    expect(r.includes("全文不少于 10000 字")).toEqual(true);
+    // 4.40 篇幅指令分层编译：minWords 数据字段保留（规则摘要/审计/规则冲突检测仍消费），
+    // 但不再渲染进运行时规则文本——全文级字数指令只经预算层编译下发（章预算/块目标），
+    // 渲染行「全文不少于 X 字」会与块级目标构成双通道指令（块级系统性超产的诱导源）
+    expect(r.includes("全文不少于")).toEqual(false);
   });
 });
 describe('previewPromptRules', () => {

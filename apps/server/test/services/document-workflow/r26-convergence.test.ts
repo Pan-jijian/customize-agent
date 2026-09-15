@@ -116,7 +116,7 @@ describe('4.33 字数识别同源（explicitLengthTargets / previewPromptRules�
   });
 });
 
-describe('4.33 minimum 模式软上限告警（documentBudgetIssues）', () => {
+describe('4.40 minimum 模式双向篇幅告警（documentBudgetIssues）', () => {
   const minimumBudget = (): DocumentBudget => ({
     targetChars: 50000,
     minChars: 50000,
@@ -127,8 +127,16 @@ describe('4.33 minimum 模式软上限告警（documentBudgetIssues）', () => {
     longformStrict: true,
   });
 
-  it('5 万目标产出 10 万字（超 15%）触发 warning 且不阻断', () => {
+  it('5 万目标产出 10 万字（超 100%，越 20% 阻断线）触发 error 阻断交付', () => {
+    // 4.40 篇幅上限硬约束：minimum 语义旧实现只设下限（4.33 超产仅 warning 不阻断），
+    // 舒城 14 万目标产出 22 万字的膨胀被静默放行——超目标 20% 即为实质性膨胀，置 error
+    //（severity 自动升 blocker）进修复/门禁/挂起链，不允许超产文档静默交付（宁缺毋假）
     const issues = documentBudgetIssues(minimumBudget(), '正文内容。'.repeat(20000));
+    expect(issues.some(issue => issue.level === 'error' && issue.message.includes('严重超出目标字数'))).toBe(true);
+  });
+
+  it('5 万目标产出 5.9 万字（超 18%，15%~20% 收敛区）触发 warning 不阻断', () => {
+    const issues = documentBudgetIssues(minimumBudget(), '正文内容。'.repeat(11800));
     expect(issues.some(issue => issue.level === 'warning' && issue.message.includes('超出目标字数'))).toBe(true);
     expect(issues.some(issue => issue.level === 'error')).toBe(false);
   });

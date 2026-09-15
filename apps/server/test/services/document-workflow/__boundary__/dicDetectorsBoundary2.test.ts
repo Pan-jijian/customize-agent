@@ -125,26 +125,30 @@ describe('F6 commercialDataInBodyIssues 截断与去重', () => {
   });
 });
 
-// ── F7. 补写器定性响应句豁免（第十六版双端对齐：与 stripCommercialDataBodyLines 清洗豁免同源谓词）──
-describe('F7 commercialDataInBodyIssues 定性响应句豁免', () => {
-  it('F7 「按招标文件约定：」定性句（含强词+变体）→ 豁免不报', async () => {
-    const md = '按招标文件约定：本工程暂列金额按招标文件约定计入投标总价并按规定计税，暂列金额的使用范围与计价规则按合同约定执行。';
-    expect(await commercialIssues(md)).toEqual([]);
+// ── F7. 商务句零豁免（4.40.0：豁免通道随商务全链清理删除，检测端与清洗端同口径无例外）──
+describe('F7 commercialDataInBodyIssues 商务句零豁免', () => {
+  it('F7 含商务词的定性句（无豁免通道，强词直杀）→ 报出', async () => {
+    const md = '按招标文件约定：本工程暂列金额按规定计入费用计划并按规定计税。';
+    const issues = await commercialIssues(md);
+    expect(issues.length).toBeGreaterThan(0);
+    expect(issues[0].message).toContain('暂列金额');
   });
-  it('F7 「按招标文件要求：」条幅含商务数字 → 不豁免报出（4.27.2 数字硬闸）', async () => {
+  it('F7 「按招标文件要求：」条幅含商务数字 → 报出', async () => {
     const issues = await commercialIssues('按招标文件要求：暂列金额为10万元。');
     expect(issues.length).toBeGreaterThan(0);
     expect(issues[0].message).toContain('暂列金额');
   });
-  it('F7 「按招标文件要求：」条幅无商务数字 → 豁免不报（legacy 形态兼容）', async () => {
-    expect(await commercialIssues('按招标文件要求：暂列金额的使用按约定管理。')).toEqual([]);
+  it('F7 「按招标文件要求：」条幅无商务数字 → 同样报出（零豁免）', async () => {
+    const issues = await commercialIssues('按招标文件要求：暂列金额的使用按约定管理。');
+    expect(issues.length).toBeGreaterThan(0);
+    expect(issues[0].message).toContain('暂列金额');
   });
-  it('F7 无前缀污染句仍报（豁免不削弱防线）', async () => {
+  it('F7 无前缀污染句仍报（防御全线不放松）', async () => {
     const issues = await commercialIssues('本项目暂列金额为60万元。');
     expect(issues.length).toBeGreaterThan(0);
     expect(issues[0].message).toContain('暂列金额');
   });
-  it('F7 超 120 字受控句不豁免仍报（豁免窗口边界）', async () => {
+  it('F7 超 120 字受控句仍报（窗口无关，零豁免）', async () => {
     const md = `按招标文件约定：${'甲'.repeat(121)}暂列金额。`;
     const issues = await commercialIssues(md);
     expect(issues.length).toBeGreaterThan(0);

@@ -853,12 +853,15 @@ function exportStyle(settings?: DocumentExportSettings) {
 }
 
 function enhanceTocHtml(body: string) {
-  return body.replace(/(<h2[^>]*>\s*目录\s*<\/h2>)([\s\S]*?)(<div class="page-break"><\/div>)/u, (_match, heading: string, content: string, pageBreak: string) => {
+  // 目录区边界判定（4.40 根治）：结构驱动——page-break div 或下一 H2 标题行；成稿 markdown 无 div
+  // （装配链 fixTocFromBody/ensureFormalToc 重建目录不产 div）时旧口径不匹配 → .document-toc 包裹
+  // 与分页/缩进样式整体缺失；两形态同源，导出与生成链目录区判定口径一致
+  return body.replace(/(<h2[^>]*>\s*目录\s*<\/h2>)([\s\S]*?)(<div class="page-break"><\/div>|<h2[^>]*>)/u, (_match, heading: string, content: string, boundary: string) => {
     const normalized = content.replace(/<ol>\s*([\s\S]*?)\s*<\/ol>/u, (_ol, listContent: string) => listContent)
       .replace(/<li>\s*([^<]+?)\s*<\/li>/gu, '<p>$1</p>')
       .replace(/<p>(?:\s|&nbsp;|&#160;)*(\d+\.\d+\s+[^<]+)<\/p>/giu, '<p class="toc-section">$1</p>')
       .replace(/<p>(?!(?:\s|&nbsp;|&#160;)*<\/p>|(?:\s|&nbsp;|&#160;)*\d+\.\d+\s)([\s\S]*?)<\/p>/giu, '<p class="toc-chapter">$1</p>');
-    return `<section class="document-toc">${heading}${normalized}</section>${pageBreak}`;
+    return `<section class="document-toc">${heading}${normalized}</section>${boundary}`;
   });
 }
 

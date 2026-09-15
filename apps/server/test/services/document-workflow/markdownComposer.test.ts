@@ -11,6 +11,7 @@ import {
   composeDocumentMarkdown,
   ensureFormalToc,
   dedupeCrossLevelHeadingDuplicates,
+  dedupeDuplicateSectionHeadings,
   dedupeRepeatedBlocksWithinSections,
   dedupeTertiaryH4Titles,
   extractGeneratedSections,
@@ -279,6 +280,14 @@ describe('ensureFormalToc', () => {
     expect(result).toContain('## 目录');
     expect(result).toContain('1.1 施工准备');
   });
+
+  it('成稿目录无 page-break（fixTocFromBody 重建口径）：目录后正文归一不失效', () => {
+    // 4.40 死区根治：旧实现 inTocBlock 仅认 page-break div 退出，无 div 成稿上目录区永不结束，
+    // 其后全部正文跳过章节/小节编号归一（成稿实际形态：## 目录 + 裸目录行 + ## 第一章）
+    const markdown = ['## 目录', '第一章 工程概况', '  1.1 施工准备', '## 第一章 工程概况', '', '### 施工准备', '正文。'].join('\n');
+    const result = ensureFormalToc(markdown, [{ title: '工程概况', sections: ['施工准备'], content: '' }]);
+    expect(result).toContain('### 1.1 施工准备');
+  });
 });
 
 describe('findChapterBlock', () => {
@@ -485,5 +494,101 @@ describe('dedupeTertiaryH4Titles（F4 H4-H3 同名确定性重命名）', () => 
     const first = dedupeTertiaryH4Titles(markdown);
     const second = dedupeTertiaryH4Titles(first.markdown);
     expect(second.fixedCount).toBe(0);
+  });
+});
+
+describe('dedupeDuplicateSectionHeadings（4.40 d5d 同章同名 H3 小节确定性合并）', () => {
+  it('同章同名 H3 内容不重合 → 内容并入首现同名小节块末（舒城 10.1/10.5 实测形态）', () => {
+    const markdown = [
+      '## 第十章 施工总平面布置图',
+      '### 10.1 分区落实与临时道路流线',
+      '总平面分区以各自然村施工组为基本单元，结合施工内容划分为作业区与材料周转区。',
+      '### 10.2 供电路径与阶段退场恢复',
+      '临时用电以村庄既有电源分散接入为主，各施工组单独设置配电箱与计量表。',
+      '### 10.5 分区落实与临时道路流线',
+      '作业分区按空间分布与作业性质划分，临时道路流线按进出分离单向循环原则布设。',
+      '围挡封闭按施工区域与作业性质分为固定围挡、移动围挡和临时警戒隔离三类。',
+    ].join('\n');
+    const result = dedupeDuplicateSectionHeadings(markdown);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).not.toContain('### 10.5');
+    expect(result.markdown).toContain('### 10.1 分区落实与临时道路流线');
+    // 零内容丢失：并入首现小节块末（10.2 之前）
+    const merged = result.markdown.indexOf('作业分区按空间分布');
+    expect(merged).toBeGreaterThan(-1);
+    expect(merged).toBeLessThan(result.markdown.indexOf('### 10.2'));
+    expect(result.markdown.indexOf('总平面分区以各自然村')).toBeLessThan(merged);
+  });
+
+  it('同章同名 H3 内容高重合（≥50%）→ 整块删除（内容已在首现小节）', () => {
+    const body = '总平面布置随施工阶段推进实施动态转换，拆除作业面与渣土临时归集点按施工组划分。';
+    const markdown = [
+      '## 第一章 工程概况',
+      '### 1.1 施工部署',
+      `${body}各阶段转换由项目经理组织复核。`,
+      '### 1.7 施工部署',
+      `${body}各阶段转换由项目经理组织复核。`,
+    ].join('\n');
+    const result = dedupeDuplicateSectionHeadings(markdown);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).not.toContain('### 1.7');
+    expect(result.markdown.split('总平面布置随施工阶段推进实施动态转换').length - 1).toBe(1);
+  });
+
+  it('跨章同名不合并（由 crossChapterDuplicateSectionIssues 独立治理）', () => {
+    const markdown = [
+      '## 第一章 编制说明',
+      '### 1.1 编制依据',
+      '依据内容。',
+      '## 第二章 主要施工方法',
+      '### 2.1 编制依据',
+      '方法依据内容。',
+    ].join('\n');
+    expect(dedupeDuplicateSectionHeadings(markdown).fixedCount).toBe(0);
+  });
+
+  it('stage5 章片段模式（无「## 第N章」行）同样合并', () => {
+    const markdown = [
+      '### 10.1 分区落实与临时道路流线',
+      '总平面分区说明。',
+      '### 10.2 供电路径',
+      '供电说明。',
+      '### 10.4 分区落实与临时道路流线',
+      '分区细化说明。',
+    ].join('\n');
+    const result = dedupeDuplicateSectionHeadings(markdown);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).not.toContain('### 10.4');
+    expect(result.markdown).toContain('分区细化说明。');
+  });
+
+  it('H4 与 H3 同名不属本器范围；标题只差连接符/空格仍同一性键命中', () => {
+    const untouched = '### 绿化工程\n正文。\n#### 绿化工程\n正文二。';
+    expect(dedupeDuplicateSectionHeadings(untouched).fixedCount).toBe(0);
+    const variant = [
+      '## 第一章 A',
+      '### 1.1 综合配套用房-安装工程',
+      '内容一。',
+      '### 1.2 综合配套用房安装工程',
+      '内容二：配电箱与照明线路安装。',
+    ].join('\n');
+    const result = dedupeDuplicateSectionHeadings(variant);
+    expect(result.markdown).not.toContain('### 1.2');
+    expect(result.markdown).toContain('内容二：配电箱与照明线路安装。');
+  });
+
+  it('幂等：重复执行零命中且输出不再变化', () => {
+    const markdown = [
+      '## 第一章 A',
+      '### 1.1 施工准备',
+      '准备说明。',
+      '### 1.2 施工准备',
+      '补充说明：办公区与堆场定位后接通临时用水用电。',
+    ].join('\n');
+    const first = dedupeDuplicateSectionHeadings(markdown);
+    expect(first.fixedCount).toBe(1);
+    const second = dedupeDuplicateSectionHeadings(first.markdown);
+    expect(second.fixedCount).toBe(0);
+    expect(second.markdown).toBe(first.markdown);
   });
 });

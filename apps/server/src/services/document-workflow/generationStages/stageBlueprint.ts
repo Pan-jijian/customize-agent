@@ -8,7 +8,7 @@ import { buildIntegratedBlueprint, estimateChapterMinFeasibleWords, findBlueprin
 import { reanchorChapterTargetsByFeasibility } from '../budget';
 import type { DocumentTemplateChapter } from '../types';
 import { buildBillFactLock } from '../billFactLock';
-import { assignTenderRequirementsToChapters, saveRequirementAssignmentsAsset } from '../tenderRequirements';
+import { routeTenderRequirementsToChapters, saveRequirementAssignmentsAsset } from '../tenderRequirements';
 import { displayStage, upsertProgressStage } from '../progress';
 import { Semaphore, runWithAdaptiveConcurrency } from '../utils';
 import { PROJECT_BASIC_FACT_QUERIES } from '../documentGeneratorHelpers';
@@ -102,28 +102,47 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
     }
   }
   // ── 招标要求分配（唯一权威分配：每条要求唯一主责章；章级注入/章级验收/终局对账共用同一份分配） ──
-  // 分配对账：assignments.length === entries.length（结构性不变量：未分配恒为 0）；低置信分配标记供审计
+  // 低置信条目经 LLM 按实际章节列表裁决主责章；LLM 明确拒选（none）即移出要求池（excluded 审计，
+  // 回写模型保证提取对账守恒）；LLM 不可用/缺号时保留 argmax 分配（不丢条目）。
+  // 分配对账：assignments.length === entries.length（结构性不变量：未分配恒为 0）
   {
-    const requirementEntries = session.planning.tenderRequirements.entries;
-    const assignmentResult = assignTenderRequirementsToChapters(requirementEntries, session.planning.effectiveChapters, session.planning.requirementsSimilarity);
-    session.blueprint.requirementAssignments = assignmentResult.assignments;
-    if (assignmentResult.assignments.length !== requirementEntries.length) {
-      throw new Error(`招标要求分配对账失败：要求 ${requirementEntries.length} 条，分配 ${assignmentResult.assignments.length} 条`);
+    const requirementModel = session.planning.tenderRequirements;
+    const routingResult = await routeTenderRequirementsToChapters(requirementModel.entries, session.planning.effectiveChapters, session.planning.requirementsSimilarity, {
+      signal: session.global.input.signal,
+      diagnostics: session.planning.generationDiagnostics,
+    });
+    session.blueprint.requirementAssignments = routingResult.assignments;
+    if (routingResult.dropped.length > 0) {
+      // LLM 拒选条目移出要求池：entries → excluded 回写（对账守恒：clauseCount 不变）
+      const droppedSet = new Set(routingResult.dropped);
+      requirementModel.entries = requirementModel.entries.filter(entry => !droppedSet.has(entry));
+      requirementModel.excluded.push(...routingResult.dropped.map(entry => ({
+        text: entry.text,
+        source: entry.sources.map(source => [source.file, source.location].filter(Boolean).join('｜')).filter(Boolean).join('；') || undefined,
+        reason: 'non_requirement' as const,
+      })));
+      requirementModel.reconciliation.entryCount = requirementModel.entries.length;
+      requirementModel.reconciliation.excludedCount = requirementModel.excluded.length;
     }
-    if (requirementEntries.length > 0) {
-      const assetPath = saveRequirementAssignmentsAsset(session.prepare.projectRoot, assignmentResult.assignments);
+    const assignedCount = session.blueprint.requirementAssignments.length;
+    if (assignedCount !== requirementModel.entries.length) {
+      throw new Error(`招标要求分配对账失败：要求 ${requirementModel.entries.length} 条，分配 ${assignedCount} 条`);
+    }
+    if (requirementModel.entries.length > 0) {
+      const assetPath = saveRequirementAssignmentsAsset(session.prepare.projectRoot, routingResult.assignments);
       const byChapter = new Map<string, number>();
-      for (const assignment of assignmentResult.assignments) byChapter.set(assignment.chapterTitle, (byChapter.get(assignment.chapterTitle) || 0) + 1);
+      for (const assignment of routingResult.assignments) byChapter.set(assignment.chapterTitle, (byChapter.get(assignment.chapterTitle) || 0) + 1);
       upsertProgressStage(session.global.progressStages, displayStage({
         type: 'validation',
         roleId: 'tender-requirement-assignment',
         status: 'success',
-        message: `招标要求分配：${assignmentResult.assignments.length} 条要求全部落位 ${byChapter.size} 个责任章${assignmentResult.lowConfidenceCount > 0 ? `（低置信 ${assignmentResult.lowConfidenceCount} 条，已分配唯一主责章）` : ''}`,
+        message: `招标要求分配：${assignedCount} 条要求全部落位 ${byChapter.size} 个责任章${routingResult.dropped.length > 0 ? `（LLM 拒选 ${routingResult.dropped.length} 条移出要求池）` : ''}${routingResult.lowConfidenceCount > 0 ? `（保留低置信 ${routingResult.lowConfidenceCount} 条，LLM 未裁决）` : ''}`,
         details: [
-          `分配对账：要求 ${requirementEntries.length} 条 = 分配 ${assignmentResult.assignments.length} 条（未分配 0）`,
+          `分配对账：要求 ${requirementModel.entries.length} 条 = 分配 ${assignedCount} 条（未分配 0）`,
           `落盘：${assetPath}`,
+          ...(routingResult.dropped.length > 0 ? [`LLM 拒选 ${routingResult.dropped.length} 条（无章节可承载，已移出要求池）`] : []),
           ...[...byChapter.entries()].map(([title, count]) => `${title}：${count} 条`),
-          ...assignmentResult.assignments.filter(assignment => assignment.lowConfidence).slice(0, 8).map(assignment => `低置信：${assignment.entry.text} → ${assignment.chapterTitle}（相似度 ${assignment.score.toFixed(2)}）`),
+          ...routingResult.assignments.filter(assignment => assignment.lowConfidence).slice(0, 8).map(assignment => `低置信：${assignment.entry.text} → ${assignment.chapterTitle}（相似度 ${assignment.score.toFixed(2)}）`),
         ],
       }, { subtitle: '招标要求分配', order: session.global.progressStages.length }));
       session.global.emitProgress();

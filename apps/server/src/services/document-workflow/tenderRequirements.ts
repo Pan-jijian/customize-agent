@@ -25,7 +25,8 @@ import { docSystemPrefix } from './markdownComposer';
  * （条款总数 = entries + excluded + 未判定 0）。对账未闭合时缓存不落盘并显式告警。
  *
  * 消费链：① 蓝图统一分配（每条 entry 有唯一主责章，未分配=0）；② 章级验收（写作收口前逐条核验本章责任
- * 要求，按 policy 分流：respond=语义+锚点落位，qualitative=定性响应句，comply=数据一致域核验）。
+ * 要求，按 policy 分流：respond=语义+锚点落位，comply=数据一致域核验）。商务域条款在判定层排除
+ * （技术标正文零商务句），不进入要求池与验收链。
  * 「不能遗漏」由穷举+对账结构性保证，不再依赖事后补丁（窄通道/字段补提/复核通道/条目上限均已删除）。
  *
  * 判定失败/资料为空时返回 extracted=false 的空模型，下游不得据此阻断生成（LLM 不可用不得阻塞）。
@@ -72,6 +73,9 @@ function clauseSentenceHasNoValue(sentence: string): boolean {
   return false;
 }
 
+/** 纯引导词碎片（「回复：」「答：/」等引导词后无内容的残行）：无实质要求内容，判定后确定性复核丢弃 */
+const BARE_REPLY_RE = /^(?:回复|答复|答疑|答|澄清|释义)[：:]\s*[。；;、/]?\s*$/u;
+
 /** 章节标题行归一化：去 markdown 标题前缀与编号前缀，保证与相似度闭包缓存 key 一致（缓存 miss 会静默返回 0） */
 export function normalizeChapterTitleLine(line: string): string {
   return line.trim().replace(/^#{2,4}\s+/u, '').replace(/^\d+(?:\.\d+)*[\s、.]+/u, '').trim();
@@ -110,6 +114,18 @@ function isShortKeyValueLine(line: string): boolean {
   return line.length <= 300 && /[：:]/u.test(line) && !/[。；;]/u.test(line.slice(0, line.search(/[：:]/u)));
 }
 
+/** 答疑问题行（暂挂等待「回复：」配对）：问题/疑问类前缀行（可带编号），或行尾为问号 */
+const QUESTION_SUSPEND_RE = /^(?:问题|疑问|提问|咨询|质疑|问)[一二三四五六七八九十\d]{0,3}[：:]|[？?]\s*$/u;
+
+/** 答疑回复行：并入上文问题单元成为问答配对；缓冲为空（悬空回复）时独立成单元交判定层复核 */
+const REPLY_LEAD_RE = /^(?:回复|答复|答疑|答|澄清|释义)[：:]/u;
+
+/** 微碎片（≤8 字、无句末标点、无数字参数，如「续表」「附：」「/」残片）：无独立语义，与相邻单元归并，
+ *  资料末尾仍无相邻单元时兜底独立产出（不丢数据） */
+function isMicroFragmentText(text: string): boolean {
+  return text.length <= 8 && !/[。；;！？!?]/u.test(text) && !/\d/u.test(text);
+}
+
 /** 超长单元二次切分：按句末标点打包为 ≤2000 字符的子单元（不丢任何句子） */
 const CLAUSE_UNIT_MAX_CHARS = 2000;
 
@@ -143,12 +159,9 @@ export function splitTenderClauses(evidence: DocumentEvidence[]): TenderClauseUn
     let section = item.sectionTitle?.trim() || undefined;
     let clauseNo: string | undefined;
     let buffer: string[] = [];
-    const flush = () => {
-      const text = buffer.join('\n').trim();
-      const no = clauseNo;
-      buffer = [];
-      clauseNo = undefined;
-      if (!text) return;
+    // 微碎片暂挂：无独立语义的残片延迟到有相邻单元时归并；资料末尾仍孤立即兜底独立产出（不丢数据）
+    const pending: { fragment: { text: string; clauseNo?: string } | null } = { fragment: null };
+    const emit = (text: string, no: string | undefined) => {
       const units = splitOversizedText(text);
       units.forEach((unit, unitIndex) => {
         clauses.push({
@@ -158,6 +171,23 @@ export function splitTenderClauses(evidence: DocumentEvidence[]): TenderClauseUn
           text: unit,
         });
       });
+    };
+    const flush = () => {
+      let text = buffer.join('\n').trim();
+      const no = clauseNo;
+      buffer = [];
+      clauseNo = undefined;
+      if (!text) return;
+      const pendingNo = pending.fragment?.clauseNo || no;
+      if (pending.fragment) {
+        text = `${pending.fragment.text}\n${text}`;
+        pending.fragment = null;
+      }
+      if (isMicroFragmentText(text)) {
+        pending.fragment = { text, clauseNo: pendingNo };
+        return;
+      }
+      emit(text, pendingNo);
     };
     for (const rawLine of content.split(/\r?\n/u)) {
       // markdown 标题行（# 是结构标记而非噪声，清洗前判定）：更新 section 上下文，不作为条款单元
@@ -174,6 +204,12 @@ export function splitTenderClauses(evidence: DocumentEvidence[]): TenderClauseUn
         if (buffer.length > 0) flush();
         continue;
       }
+      // 答疑回复行：与上文（问题/编号）同缓冲配对；缓冲为空即悬空回复，独立成单元交判定层复核
+      if (REPLY_LEAD_RE.test(line)) {
+        buffer.push(line);
+        if (buffer.length === 1) flush();
+        continue;
+      }
       const numbered = extractClauseNumber(line);
       if (numbered) {
         if (buffer.length > 0) flush();
@@ -184,12 +220,18 @@ export function splitTenderClauses(evidence: DocumentEvidence[]): TenderClauseUn
       if (isShortKeyValueLine(line)) {
         if (buffer.length > 0) flush();
         buffer.push(line);
-        flush();
+        // 答疑问题行暂挂等待「回复：」配对（配对单元上下文完整，判定更准）；其余键值行独立成单元
+        if (!QUESTION_SUSPEND_RE.test(line)) flush();
         continue;
       }
       buffer.push(line);
     }
     if (buffer.length > 0) flush();
+    // 资料末尾兜底：仍暂挂的微碎片独立产出（不丢数据）
+    if (pending.fragment) {
+      emit(pending.fragment.text, pending.fragment.clauseNo);
+      pending.fragment = null;
+    }
   }
   return clauses;
 }
@@ -243,18 +285,20 @@ const CLAUSE_JUDGE_PROMPT = [
   '1. isRequirement：该条是否构成对投标人的实质要求（需写入正文响应或必须遵守）？',
   '   - true：明确的目标/等级/标准/参数/义务/禁止性要求（确保、达到、不低于、不得、严禁、必须、应当等约束语义）',
   '   - false：目录、章节导语、说明性/解释性文字、空白表头、格式模板、无约束力的描述',
+  '   - 孤立碎片（无问题上下文的「回复：××」「答：××」、表格残片、无法独立理解的半截句）→ false（reason="non_requirement"）',
+  '   - 问答对（「问题：×× … 回复：××」）：答复含实质要求（指标/标准/义务/禁止性内容）→ true（按答复内容给出 policy/coreTerms）；纯程序性答复（「按招标文件执行」「详见补遗」）→ false',
   '   - 条款值被明确标注「无」「☑无」「不适用」「/」时 → isRequirement=false（reason="no_value"）',
   '   - 工程量清单条目、项目特征描述、工程量数据不是本通道要求（由清单蓝图通道处理）→ false',
   '2. inScope：该条是否属于施工组织设计正文的职责范围？',
   '   - true：质量/工期/安全/环保目标、创优奖项、绿色建筑/智慧工地/装配式等级、体系基准（六个百分百/四节一环保等）、',
-  '     工期与进度约束、人员配置与分包限制、材料工艺与验收标准、禁止性事项、必须遵守的合同约束、',
-  '     保证金/付款/结算等商务约束（技术标定性响应）',
+  '     工期与进度约束、人员配置与分包限制、材料工艺与验收标准、禁止性事项、必须遵守的技术约束',
   '   - false：纯投标程序事务（开标时间地点/保证金账户信息/递交解密方式/评标委员会组成）、投标资格条件',
-  '     （营业执照/资质证书/业绩要求）、评标否决规则（否决其投标/废标情形）、商务纪律承诺（廉洁承诺）、格式签章要求',
+  '     （营业执照/资质证书/业绩要求）、评标否决规则（否决其投标/废标情形）、商务纪律承诺（廉洁承诺）、格式签章要求、',
+  '     商务与造价条款（付款/进度款/工程款/结算/保证金/违约金/保函/预付款/税金/税率/报价/综合单价/暂列金额/暂估价/限价/调差等，',
+  '     属商务标响应内容，技术标正文不出现）',
   '3. policy（isRequirement 且 inScope 时必填，其余省略）：',
   '   - "respond"：必须在正文显性写出的要求（创优目标/奖项、质量目标、等级指标、体系基准、技术工艺条款、人员与分包约束、验收标准）',
   '   - "comply"：不逐条抄写但全文必须遵守的约束（以开工令为准的日期约束、工期总日历天数基准、全局禁止性事项）',
-  '   - "qualitative"：商务性约束（保证金/付款/结算/违约金等）——技术标按合同约定定性响应，不落商务数字参数',
   '4. coreTerms：2-4 个用于正文核对的核心词（专有名词/等级名/体系名/关键数字参数，如「黄山杯」「二星级」「六个百分百」「300万元」）；',
   '   数字参数必须保留数字与单位；不要泛化词（「施工」「工程」类不能作为核心词）',
   '5. category：按招标语义命名类别（如「质量创优」「工期进度」「安全文明」「绿色施工」「人员管理」「商务支付」「禁止性要求」），',
@@ -262,7 +306,7 @@ const CLAUSE_JUDGE_PROMPT = [
   '',
   'isRequirement=false 或 inScope=false 时须给出 reason（枚举）：',
   '- "non_requirement"：非约束性内容（目录/导语/说明/描述）',
-  '- "out_of_scope"：超出施组职责（投标程序/资格/评标规则/纪律/格式）',
+  '- "out_of_scope"：超出施组职责（投标程序/资格/评标规则/纪律/格式/商务与造价）',
   '- "no_value"：条款值为「无」或不适用',
   '',
   '输出 JSON 结构（覆盖全部序号，每序号必出结果）：',
@@ -279,7 +323,7 @@ function cleanCoreTerms(terms: string[] | undefined): string[] {
 }
 
 function normalizePolicy(policy: string | undefined): TenderRequirementPolicy {
-  if (policy === 'comply' || policy === 'qualitative') return policy;
+  if (policy === 'comply') return policy;
   return 'respond';
 }
 
@@ -374,8 +418,9 @@ export interface TenderClauseJudgmentResult {
 /**
  * 逐条判定：分批（40 条/批，并发 3 路）LLM 判定全部条款单元，序号严格对齐（缺号重试一次，
  * 仍缺记入 undecided 显式告警——未判定 >0 即对账未闭合）。
- * 判定后确定性复核：无值条款（☑无/值为无）→ no_value；商务纪律/资格条件/评标规则 → out_of_scope
- * （词表判定与旧提取层同源，LLM 漏判时本地纠正，从源头阻断这些内容进入写作与检测）。
+ * 判定后确定性复核：无值条款（☑无/值为无）→ no_value；商务纪律/资格条件/评标规则 → out_of_scope；
+ * 商务与造价条款（付款/保证金/结算/报价/税金等）→ commercial_scope（词表判定，LLM 漏判时本地纠正，
+ * 技术标正文零商务句——商务响应由商务标承接）。
  */
 export async function judgeTenderClauses(
   clauses: TenderClauseUnit[],
@@ -406,13 +451,21 @@ export async function judgeTenderClauses(
         excluded.push({ text: clause.text, source: formatClauseSource(clause), reason: normalizeExclusionReason(judgment) });
         return;
       }
-      // 确定性复核：无值条款/商务纪律/资格条件/评标规则不进 entries（判定 LLM 漏判时本地纠正）
+      // 确定性复核：无值条款/纯引导词碎片/商务纪律/资格条件/评标规则不进 entries（判定 LLM 漏判时本地纠正）
       if (EMPTY_CLAUSE_VALUE_RE.test(clause.text) || clauseSentenceHasNoValue(clause.text)) {
         excluded.push({ text: clause.text, source: formatClauseSource(clause), reason: 'no_value' });
         return;
       }
+      if (BARE_REPLY_RE.test(clause.text)) {
+        excluded.push({ text: clause.text, source: formatClauseSource(clause), reason: 'non_requirement' });
+        return;
+      }
       if (isBidDisciplineSentence(clause.text) || isBidderQualificationText(clause.text) || isBidEvaluationRuleText(clause.text)) {
         excluded.push({ text: clause.text, source: formatClauseSource(clause), reason: 'out_of_scope' });
+        return;
+      }
+      if (isCommercialScopeClause(clause.text)) {
+        excluded.push({ text: clause.text, source: formatClauseSource(clause), reason: 'commercial_scope' });
         return;
       }
       const policy = normalizePolicy(judgment.policy);
@@ -500,7 +553,7 @@ export async function extractTenderRequirements(
  * 无要求项目（entries=0 但全部条款 excluded）同样对账闭合，缓存可命中（旧门禁在此场景永不命中）。
  * 哈希失效：key = 提取器版本 + 招标文件直读集合全量指纹；判定 prompt / 复核口径变更时递增版本。
  */
-const TENDER_REQUIREMENTS_CACHE_VERSION = 'tender-requirements-extraction-v4';
+const TENDER_REQUIREMENTS_CACHE_VERSION = 'tender-requirements-extraction-v5';
 
 function tenderRequirementsCacheRoot(projectRoot?: string) {
   const root = path.join(process.env.HOME || process.cwd(), '.customize-agent', 'cache', 'document-workflow', stableHash(projectRoot || 'default'));
@@ -577,6 +630,11 @@ export function tenderRequirementsSummary(model: TenderRequirementModel | undefi
   for (const [category, texts] of grouped) {
     summary.push(`${category} ${texts.length} 条：${texts.join('、')}`);
   }
+  // 商务域排除可见性（实机验收指标：技术标正文零商务句，响应由商务标承接）
+  const commercialScopeCount = model.excluded.filter(item => item.reason === 'commercial_scope').length;
+  if (commercialScopeCount > 0) {
+    summary.push(`商务域排除 ${commercialScopeCount} 条（付款/保证金/结算/报价/税金等，技术标正文零商务句）`);
+  }
   if (r.undecidedCount > 0) {
     summary.push(`未判定条款 ${r.undecidedCount} 条：对账未闭合（LLM 输出缺号且重试后仍缺），请检查 LLM 可用性`);
   }
@@ -616,7 +674,7 @@ export function tenderRequirementsWritingRules(model: TenderRequirementModel | u
     if (!entry.global) continue;
     lines.push(`全局遵守：${entry.text}（全文任何章节不得违反，禁止自行设定该类数据）`);
   }
-  lines.push('本章分配到的招标要求（见「本章必须处理的招标要求」清单）必须逐条处理：显性响应类须写入正文并配套保证措施；遵守类须全文一致遵守；定性响应类按合同约定定性声明。奖项名称、等级指标、数字参数必须与招标文件原文逐字一致，禁止替换、降级或省略。');
+  lines.push('本章分配到的招标要求（见「本章必须处理的招标要求」清单）必须逐条处理：显性响应类须写入正文并配套保证措施；遵守类须全文一致遵守。奖项名称、等级指标、数字参数必须与招标文件原文逐字一致，禁止替换、降级或省略。商务域条款（付款/保证金/结算等）不在技术标响应范围——正文不得出现任何商务内容。');
   return `【招标要求全局口径红线（全文档适用）】\n${lines.map((line, index) => `${index + 1}. ${line}`).join('\n')}\n${systemConstraintLine('以上为系统提取的招标要求全局口径：本段提示词文字本身（编号、括号说明等元话语）禁止复述进正文')}`;
 }
 
@@ -626,7 +684,6 @@ export function renderChapterRequirementSlice(entries: TenderRequirementEntry[])
   const policyLabel: Record<TenderRequirementPolicy, string> = {
     respond: '显性响应',
     comply: '全文遵守',
-    qualitative: '定性响应',
   };
   const lines = entries.map(entry => {
     const source = entry.sources.find(item => item.file)?.file;
@@ -686,6 +743,144 @@ export function assignTenderRequirementsToChapters(
     assignments.push({ entry, chapterTitle: bestTitle, score: bestScore, lowConfidence });
   }
   return { assignments, lowConfidenceCount };
+}
+
+/** 低置信路由裁决批大小（与判定批同规格：批内序号对齐可靠） */
+const ROUTE_DECISION_BATCH_SIZE = 40;
+
+const ROUTE_DECISION_JSON_SCHEMA: DocumentJsonSchema = {
+  type: 'object',
+  required: ['results'],
+  properties: {
+    results: {
+      type: 'array',
+      required: true,
+      minItems: 1,
+      items: {
+        type: 'object',
+        required: true,
+        properties: {
+          index: { type: 'number', required: true },
+          chapter: { type: 'string', required: true, maxLength: 60 },
+        },
+      },
+    },
+  },
+};
+
+const ROUTE_DECISION_PROMPT = [
+  docSystemPrefix('你是招标要求章责分配器。'),
+  '输入是语义路由置信度偏低的技术标要求条目与本文档全部章节标题列表。',
+  '为每条要求裁决其唯一主责章节（写该章节正文时必须响应此要求），逐条必出结果（不得遗漏序号）。',
+  '',
+  '- chapter：从章节标题列表中选择内容最匹配的一项，必须与列表原文逐字一致',
+  '- chapter 填 "none"：该条不是可写入技术标正文的实质要求（无问题上下文的残片/客套答复/程序性说明），或没有任何章节能承载其内容',
+  '',
+  '输出 JSON：{ "results": [ { "index": 0, "chapter": "章节标题或none" } ] }，只返回 JSON。',
+].join('\n');
+
+export interface TenderRequirementRoutingResult {
+  assignments: TenderRequirementAssignment[];
+  /** LLM 明确拒选（none）的条目：任何章节均无法承载 → 移出要求池（excluded 审计） */
+  dropped: TenderRequirementEntry[];
+  /** 精化后仍为低置信的分配数（LLM 不可用/缺号/无效章节名时保留 argmax 分配） */
+  lowConfidenceCount: number;
+}
+
+/** 单批低置信路由裁决：返回「批内序号 → 章节标题/none」映射（序号对齐，缺号由调用侧保留原分配） */
+async function decideRouteBatch(
+  batch: TenderRequirementAssignment[],
+  chapterTitles: string[],
+  options: { signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics } = {},
+): Promise<Map<number, string>> {
+  const prompt = [
+    `章节标题列表：\n${chapterTitles.map((title, index) => `${index + 1}. ${title}`).join('\n')}`,
+    '',
+    batch.map((assignment, index) => `【要求 ${index}】${assignment.entry.text}`).join('\n\n'),
+  ].join('\n');
+  const raw = await callDocumentLlmJson<{ results?: Array<{ index?: number; chapter?: string }> }>(
+    ROUTE_DECISION_PROMPT,
+    prompt,
+    {
+      maxTokens: 4000,
+      temperature: 0,
+      signal: options.signal,
+      diagnostics: options.diagnostics,
+      schema: ROUTE_DECISION_JSON_SCHEMA,
+      taskKind: 'structuredGeneration',
+    },
+  );
+  const decided = new Map<number, string>();
+  for (const item of raw?.results || []) {
+    if (typeof item.index !== 'number' || !Number.isInteger(item.index) || item.index < 0 || item.index >= batch.length) continue;
+    if (typeof item.chapter !== 'string') continue;
+    const chapter = item.chapter.trim();
+    if (chapter) decided.set(item.index, chapter);
+  }
+  return decided;
+}
+
+/**
+ * 低置信路由精化（4.40.0 碎片/答疑治理根治）：语义 argmax 相似度低于 ROUTE_SCORE_MIN 的条目
+ * 批量交 LLM 按实际章节列表裁决唯一主责章——语义相似度对碎片/问答类条目不可靠，LLM 依据章节语义裁决；
+ * LLM 明确拒选（none）即任何章节均无法承载，条目移出要求池（excluded，reason="non_requirement"）。
+ * LLM 不可用/输出缺号/章节名无效时保留原 argmax 低置信分配（宁保留不丢数据，不阻断生成）。
+ */
+export async function routeTenderRequirementsToChapters(
+  entries: TenderRequirementEntry[],
+  chapters: Array<{ title: string }>,
+  similarity: SemanticSimilarityFn,
+  options: { signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics } = {},
+): Promise<TenderRequirementRoutingResult> {
+  const rough = assignTenderRequirementsToChapters(entries, chapters, similarity);
+  const chapterTitles = chapters.map(chapter => normalizeChapterTitleLine(chapter.title)).filter(Boolean);
+  const lowIndexes = rough.assignments.map((assignment, index) => (assignment.lowConfidence ? index : -1)).filter(index => index >= 0);
+  if (lowIndexes.length === 0 || chapterTitles.length === 0 || options.signal?.aborted) {
+    return { assignments: rough.assignments, dropped: [], lowConfidenceCount: rough.lowConfidenceCount };
+  }
+  const batches: number[][] = [];
+  for (let index = 0; index < lowIndexes.length; index += ROUTE_DECISION_BATCH_SIZE) {
+    batches.push(lowIndexes.slice(index, index + ROUTE_DECISION_BATCH_SIZE));
+  }
+  const outcomes = await mapWithConcurrency(batches, CLAUSE_BATCH_CONCURRENCY, batch => (
+    decideRouteBatch(batch.map(index => rough.assignments[index]), chapterTitles, options)
+  ));
+  const decisions = new Map<number, string>();
+  outcomes.forEach((outcome, batchIndex) => {
+    for (const [indexInBatch, chapter] of outcome) {
+      const assignmentIndex = batches[batchIndex][indexInBatch];
+      if (assignmentIndex !== undefined) decisions.set(assignmentIndex, chapter);
+    }
+  });
+  const titleSet = new Set(chapterTitles);
+  const assignments: TenderRequirementAssignment[] = [];
+  const dropped: TenderRequirementEntry[] = [];
+  let lowConfidenceCount = 0;
+  rough.assignments.forEach((assignment, index) => {
+    if (!assignment.lowConfidence) {
+      assignments.push(assignment);
+      return;
+    }
+    const decision = decisions.get(index);
+    if (!decision) {
+      // LLM 缺号/未裁决：保留 argmax 低置信分配（不丢条目）
+      assignments.push(assignment);
+      lowConfidenceCount += 1;
+      return;
+    }
+    if (/^(?:none|无)$/iu.test(decision)) {
+      dropped.push(assignment.entry);
+      return;
+    }
+    if (titleSet.has(decision)) {
+      assignments.push({ ...assignment, chapterTitle: decision, lowConfidence: false });
+      return;
+    }
+    // 章节名不在候选列表（幻觉输出）：保留 argmax 低置信分配
+    assignments.push(assignment);
+    lowConfidenceCount += 1;
+  });
+  return { assignments, dropped, lowConfidenceCount };
 }
 
 /** 分配落盘（审计资产 generatedDocuments/assets/requirement-assignments.json，与 blueprint.json 同目录） */
@@ -857,71 +1052,23 @@ function clauseSatisfied(item: { text: string; coreTerms: string[] }, normalized
   return false;
 }
 
-// round-27 污染根治（丰乐镇实测：成品出现「招标要求响应（前附表响应条款）：履约保证金金额：
-// 中标金额的2%…」等商务条款原文被逐条抄入技术标正文）——商务条款的金额/时限/利率参数属商务文件
-// 内容，技术标只做定性响应：检测侧数字锚点豁免，补写侧不抄条款原文只写定性落实句。
-const COMMERCIAL_RESPONSE_RE = /履约保证金|质量保证金|保证金账户|中标金额|进度款|工程款|付款|结清|结算|违约金|贷款市场报价利率|LPR|最高投标限价|工程结算价款|预付款|支付担保|保函|暂列金额|暂估价|结算核减|造价咨询费|工程量.*异议|增值税|异地纳税人|报价明细|综合单价|清单合价|预留金|投标报价|异常低价|评标基准价/u;
+// 商务域条款排除词表（4.40.0 零商务句根治，取代旧「定性响应句」通道）：丰乐镇与舒城实测均出现
+// 商务条款原文/商务声明句被写入技术标正文——商务与造价条款（金额/利率/时限/计价规则）在判定层
+// 即排除出要求池，技术标正文既不定性声明也不落商务参数，响应由商务标承接。
+const COMMERCIAL_SCOPE_RE = /履约保证金|质量保证金|保证金账户|中标金额|进度款|工程款|付款|结清|结算|违约金|贷款市场报价利率|LPR|最高投标限价|工程结算价款|预付款|支付担保|保函|暂列金额|暂估价|结算核减|造价咨询费|工程量.*异议|增值税|异地纳税人|报价明细|综合单价|清单合价|预留金|投标报价|异常低价|评标基准价|总价包干|总价合同|调差|可调整价差/u;
 
-function isCommercialResponseClause(text: string) {
-  return COMMERCIAL_RESPONSE_RE.test(text);
+function isCommercialScopeClause(text: string) {
+  return COMMERCIAL_SCOPE_RE.test(text);
 }
 
-/**
- * 商务条款定性响应句分支表：每条=条款匹配 + 关键词（幂等判定锚）+ 响应句三件套，
- * 关键词必须出现在对应响应句中（检测/补写/清洗三端同源判定「定性响应式存在即通过」）；
- * 分支顺序即优先级（特异性降序）。
- */
-const COMMERCIAL_RESPONSE_BRANCHES: Array<{ re: RegExp; keyword: string; sentence: string }> = [
-  { re: /违约金|贷款市场报价利率|LPR/u, keyword: '违约金', sentence: '本工程工期延误违约金按合同约定条款执行，进度计划与纠偏措施按进度管理制度落实。' },
-  { re: /质量保证金/u, keyword: '质量保证金', sentence: '本工程质量保证金按合同约定的金额、担保方式与退还时限执行，可采用电子保函或纸质保函等担保方式替代。' },
-  { re: /保证金/u, keyword: '保证金', sentence: '本工程履约保证金按合同约定的金额、提交期限与退还时限执行，可按约定以保函形式替代。' },
-  { re: /预付款/u, keyword: '预付款', sentence: '本工程预付款的支付、扣回与使用按合同约定执行，专款用于施工准备。' },
-  { re: /支付担保/u, keyword: '支付担保', sentence: '本工程发包人工程款支付担保按合同约定执行，担保办结后我方按约组织进场施工。' },
-  { re: /扬尘/u, keyword: '扬尘', sentence: '本工程扬尘污染防治费用与建筑工人实名制管理费用按合同约定列入费用计划并专款专用。' },
-  { re: /水电费/u, keyword: '水电费', sentence: '本工程水电费用由我方承担，工程结算时按合同约定在结算价中核算处理，缴费与结算资料按合同约定办理。' },
-  { re: /最高投标限价/u, keyword: '最高投标限价', sentence: '本工程最高投标限价按合同约定执行，相关费用列入计划并专款专用。' },
-  { re: /暂列金额|暂估价/u, keyword: '暂列金额', sentence: '本工程暂列金额按合同约定计入投标总价并按规定计税，暂列金额的使用范围与计价规则按合同约定执行。' },
-  { re: /核减|造价咨询费/u, keyword: '核减', sentence: '本工程竣工结算审核核减额与报审金额的核对、造价咨询费承担方式按合同约定执行，结算编制与报审按合同约定时限办理。' },
-  { re: /清单.*异议|工程量.*错误|异议.*清单/u, keyword: '异议', sentence: '本工程开工前完成工程量清单核对，对清单工程量中的错误在异议截止日期前提出异议并附计算依据。' },
-  { re: /注册地/u, keyword: '注册地', sentence: '本工程我方注册地及纳税人身份按合同约定执行，异地提供建筑服务时在建筑服务发生地预缴增值税，计税资料与申报口径按合同约定办理。' },
-  { re: /增值税|纳税人/u, keyword: '增值税', sentence: '本工程按合同约定的计税方法执行异地纳税人增值税相关规定，计税资料与申报口径按合同约定办理。' },
-  { re: /结清|结算|付款|进度款|工程款/u, keyword: '结算', sentence: '本工程进度款、竣工结算款与最终结清款的支付审批时限按合同约定执行。' },
-  { re: /投标报价|报价明细|综合单价|清单合价|预留金|异常低价|评标基准价/u, keyword: '投标报价', sentence: '本工程投标报价已覆盖招标范围的全部工作内容，施工期间发生的工程内容均按合同约定的计量计价规则执行。' },
-];
-
-/** 商务条款定性响应句（技术标口径：只声明按约定执行，不落商务参数） */
-function commercialClauseResponse(text: string): string {
-  return COMMERCIAL_RESPONSE_BRANCHES.find(branch => branch.re.test(text))?.sentence ?? '本工程相关商务条款按合同约定执行。';
-}
-
-/** 定性响应句关键词（幂等判定锚）：与分支表同源，对应响应句必含该词面 */
-function commercialClauseKeyword(text: string): string {
-  return COMMERCIAL_RESPONSE_BRANCHES.find(branch => branch.re.test(text))?.keyword ?? '商务条款';
-}
-
-/**
- * 商务条款定性响应句存在性判定（检测/补写/清洗三端同源）：正文中任一含该条款分支关键词的句子
- * 附近 48 字窗口内出现「按合同约定」即视为已定性响应——商务数字参数永不落位技术标正文，
- * 锚点判定对本类条款无意义（定性式存在即通过）。
- */
-function hasCommercialResponseSentence(normalizedMarkdown: string, text: string): boolean {
-  const keyword = commercialClauseKeyword(text);
-  let from = normalizedMarkdown.indexOf(keyword);
-  while (from >= 0) {
-    const scope = normalizedMarkdown.slice(Math.max(0, from - 48), from + keyword.length + 48);
-    if (scope.includes('按合同约定')) return true;
-    from = normalizedMarkdown.indexOf(keyword, from + keyword.length);
-  }
-  return false;
-}
 
 /**
  * 章级要求验收（写作收口前对本章责任要求的逐条核验；也用于修复轮后回归重验）。
  * 按 policy 分流：
  * - comply（遵守类）：不做落位验收（其核验属数据一致性域：工期基准/禁编日期等→蓝图权威值核对）；
- * - qualitative（商务定性）或商务词表命中：判定「关键词 + 按合同约定」定性响应句存在性，缺失报 info 提示；
  * - respond（显性响应）：语义（bge ≥0.6）+ 金额锚点 + 锚点全覆盖/分句/voice 三通道；部分响应经
  *   「或/及」批量判定后定向补写缺失锚点；零响应报 blocker（章内定向修复输入）。
+ * 商务域条款已在判定层排除（commercial_scope），不在验收范围。
  * 返回全量 issues（不截断）。
  */
 export async function requirementAcceptanceIssues(input: {
@@ -955,21 +1102,6 @@ export async function requirementAcceptanceIssues(input: {
     const kind = entry.category;
     // 遵守类不落位验收（数据一致性域负责）
     if (entry.policy === 'comply') continue;
-    // 商务定性响应口径：定性响应句存在即通过（缺 Missing 报 info 不阻断）
-    if (entry.policy === 'qualitative' || isCommercialResponseClause(entry.text)) {
-      if (!hasCommercialResponseSentence(normalized, entry.text)) {
-        issues.push({
-          level: 'info',
-          severity: 'warning',
-          category: 'evidence_coverage',
-          owner: 'llm',
-          repairability: 'llm_repairable',
-          message: `商务条款定性响应：${kind}“${entry.text}”商务参数不要求落位技术标正文，定性响应句未检出`,
-          suggestion: '商务条款按合同约定执行：技术标以“本工程…按合同约定…”定性响应句声明落实（不出现“按招标文件约定/要求”元语言前缀），商务参数（金额/比例/时限）保留在商务标与合同文件。',
-        });
-      }
-      continue;
-    }
     // 六项词面兜底：总称条款（六个百分百）语义判定前先做词面命中判定，命中 ≥4 项即已响应
     if (/六个百分百|扬尘治理/u.test(entry.text) && dustSixLexicalHitCount() >= 4) continue;
     const query = tenderRequirementSemanticQuery(entry);
@@ -1036,14 +1168,12 @@ export async function requirementAcceptanceIssues(input: {
 
 /**
  * 补写段落构造（章级补写与终检补写共用，检测=修复同源）：
- * 商务条款 → 定性响应句（不抄商务参数）；无要求条款 → “无强制要求”直述不虚假承诺；
- * 其余 → 条款全文（投标人口吻）+ 差异化落实句。补写一律用条款全文（部分响应补写 missing 锚点会
- * 产出空泛句）。条款抄写句统一经 bidderVoiceClauseText 转为投标人口吻（「承包人」→「我方」）。
+ * 无要求条款 → “无强制要求”直述不虚假承诺；其余 → 条款全文（投标人口吻）+ 技术落实句。
+ * 补写一律用条款全文（部分响应补写 missing 锚点会产出空泛句）。条款抄写句统一经
+ * bidderVoiceClauseText 转为投标人口吻（「承包人」→「我方」）。商务域条款不进补写链（判定层已排除）。
  */
 function buildScoringFixParagraph(item: { text: string }): string {
   const trimmed = item.text.trim();
-  // 商务条款只写定性响应句（不抄条款原文、不加元语言前缀）——商务参数属商务文件内容
-  if (isCommercialResponseClause(trimmed)) return commercialClauseResponse(trimmed);
   // 无要求条款豁免：绿色建筑等级要求值为「无」时套用“承诺严格落实”产生逻辑矛盾且属套话
   const noRequirement = /(?:要求|等级|标准)[：:]\s*无\s*$/u.test(trimmed);
   // 条款原文以省略号结尾（资料截断残留）时裁掉省略号，避免补写句带「……」入正文
@@ -1055,42 +1185,32 @@ function buildScoringFixParagraph(item: { text: string }): string {
 }
 
 /**
- * 评分项响应补写落实句生成器：按条款关键词生成差异化落位声明，替代统一套话句式
- * （防全维度评审「模板化承诺句式」阻断）。全部「按上述条款/上述时限」指代替换为「按合同约定/约定时限」。
+ * 补写落实句生成器：按条款关键词生成技术性落位声明，替代统一套话句式（防全维度评审「模板化承诺句式」阻断）。
+ * 全部产出为技术管理表述——商务/合同声明句（「按合同约定执行」式）不得出现（商务域条款已在判定层排除）；
+ * 无分支命中时返回空串（条款原文本身即完整响应，不再生成商务套话兜底句）。
  */
 function scoringResponseTail(text: string): string {
   if (/分包/u.test(text)) return '本工程全部施工任务由我公司项目部自行组织实施，严禁违法分包、转包及挂靠行为。';
-  if (/总价合同|总价包干/u.test(text)) return '本工程合同价款按总价包干执行，除合同约定调整情形外不予调整。';
-  if (/隐蔽工程/u.test(text)) return '本工程隐蔽验收按约定时限提前通知监理单位参加检查。';
-  if (/预付款/u.test(text)) return '本工程预付款的支付、扣回与使用按合同约定执行，专款用于施工准备。';
-  if (/扬尘/u.test(text)) return '本工程扬尘污染防治费用按合同约定列入计划并专款专用。';
-  if (/工期延误|违约金/u.test(text)) return '本工程工期与违约金管理按合同约定执行，进度计划与纠偏措施按进度管理制度落实。';
-  if (/保证金/u.test(text)) return '本工程保证金缴纳、退还与保函替代按合同约定执行。';
-  if (/更换主要施工管理人员|更换项目经理/u.test(text)) return '本工程主要施工管理人员保持稳定，确需更换时提前按合同约定提交书面申请并获发包人书面同意后执行。';
-  if (/农民工工资专用账户|农民工工资/u.test(text)) return '本工程农民工工资专用账户按合同约定设立并专款专用，实名制管理与工资支付保障按劳动力管理制度落实。';
-  if (/支付担保/u.test(text)) return '本工程发包人工程款支付担保按合同约定执行，担保办结后我方按约组织进场施工。';
-  if (/安全生产|事故/u.test(text)) return '本工程安全生产无事故目标与带班检查频次按合同约定执行，现场安全管理按安全检查与整改销项制度落实。';
+  if (/隐蔽工程/u.test(text)) return '本工程隐蔽验收按约定时限提前通知监理单位参加检查，检查合格后方可进行下道工序。';
+  if (/扬尘/u.test(text)) return '本工程扬尘污染防治纳入绿色施工专项策划，落实洒水降尘、物料覆盖与出入车辆冲洗措施。';
+  if (/工期延误|赶工/u.test(text)) return '本工程建立进度偏差预警与纠偏机制，出现工期延误风险时按进度管理制度及时纠偏并留存记录。';
+  if (/更换主要施工管理人员|更换项目经理/u.test(text)) return '本工程主要施工管理人员保持稳定，确需更换时提前履行书面报批程序后执行。';
+  if (/农民工工资专用账户|农民工工资/u.test(text)) return '本工程落实农民工工资专用账户管理与实名制考勤，工资支付保障按劳务管理制度执行。';
+  if (/安全生产|事故/u.test(text)) return '本工程以安全生产无事故为目标，落实项目负责人带班检查制度，隐患整改闭环按安全管理制度执行。';
   if (/工程报表|周报/u.test(text)) return '本工程每月25日前报送工程报表与下月计划、周例会前一天报送周报，由资料员按期编制报送。';
-  if (/竣工资料|竣工结算/u.test(text)) return '本工程竣工资料套数与移交时限按合同约定执行，竣工结算申请与审批按约定时限办理。';
-  if (/缺陷责任期|保修/u.test(text)) return '本工程缺陷责任期与保修响应时限按合同约定执行，保修期内接到通知按时限到场修复。';
+  if (/竣工资料/u.test(text)) return '本工程竣工资料按档案管理要求同步整理、分阶段移交，移交清单与时限按验收程序办理。';
+  if (/缺陷责任期|保修/u.test(text)) return '本工程建立缺陷责任期保修服务响应机制，接到通知后按约定程序及时到场修复。';
   if (/工期总日历天数/u.test(text)) return '本工程工期天数计算以工期总日历天数为准，进度计划按总日历天数编制并动态校核。';
-  if (/可调整价差|市场价格波动|价格调整|调差/u.test(text)) return '本工程价格调整范围按《可调整价差人工和主要材料一览表》执行：表内人工与主要材料按合同约定调差，表外材料价格风险由我方承担，调差申请与审批按合同专用条款办理。';
   if (/注册建造师|建造师数量|资质标准/u.test(text)) return '项目部按资质标准配置市政公用工程专业注册建造师，数量满足招标要求，注册建造师证书注册于本公司并在岗履职。';
-  if (/养护等级|养护期|绿化养护/u.test(text)) return '本工程绿化养护执行合同约定的养护等级与养护期，养护期内按养护方案落实浇水、修剪、施肥、除虫等作业并留存养护记录。';
-  if (/视同|漏报|没有报价|未报价/u.test(text)) return '本工程对清单项目逐项复核报价，未报价项目费用按合同约定执行，不重复计取。';
-  // fallback 具体化：无关键词分支的条款提取条款主题词构造落实句——无主题可提取时返回空串
-  // （删除「本工程施工过程中严格执行合同约定的各项要求。」兜底套话句，条款全文本身即响应内容）
-  const subject = /^([^：:]{2,24})[：:]/u.exec(text)?.[1];
-  if (subject && !/承包人|发包人|招标人/u.test(subject)) {
-    return `本工程${subject}按合同约定执行，具体安排见对应章节。`;
-  }
+  if (/养护等级|养护期|绿化养护/u.test(text)) return '本工程绿化养护落实招标文件明确的养护等级与养护期要求，养护期内按养护方案落实浇水、修剪、施肥、除虫等作业并留存养护记录。';
   return '';
 }
 
 /**
  * 要求响应确定性补写（章级定向修复/修复轮复写，判定=修复同源）：
- * 按蓝图分配遍历全部要求条目，未满足（clauseSatisfied 三通道 / 商务定性句存在性）的条款在
- * 责任章末尾补写响应句；遵守类（comply）不补写（数据一致性域核验）；幂等——已满足条目零触碰。
+ * 按蓝图分配遍历全部要求条目，未满足（clauseSatisfied 三通道）的条款在责任章末尾补写响应句；
+ * 遵守类（comply）不补写（数据一致性域核验）；幂等——已满足条目零触碰。
+ * 商务域条款不在补写链（判定层已排除，零「按合同约定」商务声明句产出）。
  */
 export async function fixScoringRequirementResponses(input: {
   chapters: Array<{ title: string; content: string }>;
@@ -1107,11 +1227,7 @@ export async function fixScoringRequirementResponses(input: {
   for (const assignment of assignments) {
     const { entry } = assignment;
     if (entry.policy === 'comply') continue;
-    if (entry.policy === 'qualitative' || isCommercialResponseClause(entry.text)) {
-      if (hasCommercialResponseSentence(normalizedAcc, entry.text)) continue;
-    } else if (clauseSatisfied(entry, normalizedAcc)) {
-      continue;
-    }
+    if (clauseSatisfied(entry, normalizedAcc)) continue;
     const chapter = chapters.find(item => normalizeChapterTitleLine(item.title) === assignment.chapterTitle);
     if (!chapter) continue;
     const paragraph = buildScoringFixParagraph(entry);
@@ -1171,11 +1287,7 @@ export async function fixScoringRequirementResponsesInFinalMarkdown(input: {
   for (const assignment of assignments) {
     const { entry } = assignment;
     if (entry.policy === 'comply') continue;
-    if (entry.policy === 'qualitative' || isCommercialResponseClause(entry.text)) {
-      if (hasCommercialResponseSentence(normalizedAcc, entry.text)) continue;
-    } else if (clauseSatisfied(entry, normalizedAcc)) {
-      continue;
-    }
+    if (clauseSatisfied(entry, normalizedAcc)) continue;
     const insertionLine = locateChapterInsertionLine(lines, assignment.chapterTitle);
     if (insertionLine < 0) continue;
     const paragraph = buildScoringFixParagraph(entry);
@@ -1255,12 +1367,13 @@ export function fixTenderMetaLanguage(markdown: string): { markdown: string; fix
     if (banner) next = `${banner[1]}${bidderVoiceClauseText(banner[2])}`;
     // ③空响应句删除（先于②，避免「按上述条款要求」被②拆改后检测串失配）
     next = next.replace(/本施工组织设计已按上述条款要求逐项落实执行。?/gu, '');
-    // ②句内元语言替换（按上述条款要求优先于被截短形态，交替顺序即优先级）
+    // ②句内元语言替换（按上述条款要求优先于被截短形态，交替顺序即优先级）；
+    // 替换目标用中性「按招标要求」——不得改写为「按合同约定」式商务声明句（技术标正文零商务句）
     next = next
-      .replace(/按招标文件约定/gu, '按合同约定')
+      .replace(/按招标文件约定/gu, '按招标要求')
       .replace(/按招标文件要求/gu, '按招标要求')
-      .replace(/按招标文件规定/gu, '按合同约定')
-      .replace(/按上述条款要求|按上述条款|按上述要求/gu, '按合同约定')
+      .replace(/按招标文件规定/gu, '按招标要求')
+      .replace(/按上述条款要求|按上述条款|按上述要求/gu, '按招标要求')
       .replace(/按上述时限/gu, '按约定时限')
       .replace(/本招标项目/gu, '本项目');
     if (next !== line) {
@@ -1278,8 +1391,8 @@ export function fixTenderMetaLanguage(markdown: string): { markdown: string; fix
 }
 
 /**
- * 条款响应重复行确定性去重（交付链兜底）：补写句（条款抄写句/商务定性句）残缺双写产生完全重复行时，
- * 识别「条款响应特征行」（规范化长度 ≥40 且含 我方/本工程/按合同约定），同规范化文本出现 ≥2 次时
+ * 条款响应重复行确定性去重（交付链兜底）：补写句（条款抄写句）残缺双写产生完全重复行时，
+ * 识别「条款响应特征行」（规范化长度 ≥40 且含 我方/本工程），同规范化文本出现 ≥2 次时
  * 仅保留首次，后续整行（含尾随空行）删除。零误伤防线：仅完全一致的整行参与判定。
  */
 export function stripDuplicateResponseLines(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
@@ -1296,7 +1409,7 @@ export function stripDuplicateResponseLines(markdown: string): { markdown: strin
       continue;
     }
     const normalized = trimmed.replace(/\s+/gu, '');
-    const isResponseLine = normalized.length >= 40 && (/我方/u.test(normalized) || /本工程/u.test(normalized) || normalized.includes('按合同约定'));
+    const isResponseLine = normalized.length >= 40 && (/我方/u.test(normalized) || /本工程/u.test(normalized));
     if (!isResponseLine) {
       out.push(line);
       continue;

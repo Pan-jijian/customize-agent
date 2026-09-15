@@ -9,7 +9,7 @@ import { PEAK_LABOR_RE, PILE_SUPPORT_LITERAL_RE, SLOPE_SUPPORT_LITERAL_RE, cnNum
 import type { SupportSystemAuthorityKind } from '../authorities/authorities';
 import { extractBasisRegulations, locateDecisionOptionAnchor, matchDecisionCategory } from '../../integratedBlueprint';
 import type { DecisionLockEntry, QuantityConflictAnchor } from '../../integratedBlueprint';
-import { COMMERCIAL_RATE_RE, COMMERCIAL_TERM_RE, CROSS_SECTION_ANCHORS, CROSS_SECTION_ANCHOR_ENTITY_RE, ENUMERATION_VALUE_RE, FINISH_THICKNESS_CONTEXT_WORD, LABOR_COUNT_RE, META_DECLARATION_RE, NEGATIVE_DECLARATION_RE, PARAGRAPH_START_RE, REPEATED_WORD_RE, SCHEDULE_NODE_ANCHORS, SIX_HUNDRED_PERCENT_ITEMS, ambiguousEitherOrIssues, cellCoverage, extractMarkdownTables, isSanctionedResponseSentence, jaccard, judgeQueryCoverage, laborGroupOf, locationGroupForMatch, PARAGRAPH_TAIL_REPEAT_MIN_CHARS, paragraphFingerprint, scanCollisionNumberedHeadings, scanInvertedDateRanges, scanPhaseLaborClaims, scanUncoveredEngineeringHeadings, sixHundredPercentLexicalHit, splitConcatenatedPhaseName, textCellsOf } from '../detectors/detectors';
+import { COMMERCIAL_RATE_RE, COMMERCIAL_TERM_RE, CROSS_SECTION_ANCHORS, CROSS_SECTION_ANCHOR_ENTITY_RE, ENUMERATION_VALUE_RE, FINISH_THICKNESS_CONTEXT_WORD, LABOR_COUNT_RE, META_DECLARATION_RE, NEGATIVE_DECLARATION_RE, PARAGRAPH_START_RE, REPEATED_WORD_RE, SCHEDULE_NODE_ANCHORS, SIX_HUNDRED_PERCENT_ITEMS, ambiguousEitherOrIssues, cellCoverage, extractMarkdownTables, jaccard, judgeQueryCoverage, laborGroupOf, locationGroupForMatch, PARAGRAPH_TAIL_REPEAT_MIN_CHARS, paragraphFingerprint, scanCollisionNumberedHeadings, scanInvertedDateRanges, scanPhaseLaborClaims, scanUncoveredEngineeringHeadings, sixHundredPercentLexicalHit, splitConcatenatedPhaseName, textCellsOf } from '../detectors/detectors';
 import type { AuthorityDomain, AuthorityIndex } from '../../authorityIndex';
 
 const PILE_WORD_TO_SLOPE: Array<[RegExp, string]> = [
@@ -787,14 +787,9 @@ export function stripCommercialDataBodyLines(markdown: string): string {
     if (/^#{1,6}\s/u.test(trimmed) || /^\s*\|/u.test(trimmed)) return line;
     if (!COMMERCIAL_TERM_RE.test(line) && !COMMERCIAL_RATE_RE.test(line)) return line;
     const parts = line.split(/(?<=[。；;])\s*/u);
+    // 零商务句口径：正文无豁免——含商务词/税率的句一律删除（商务域条款已在判定层排除，
+    // 正文任何位置不应出现商务数据；历史「定性响应句豁免」通道随 4.40.0 全链清理删除）。
     return parts.filter(part => {
-      // 系统补写器定性响应句豁免清洗（4.27.2 投标人口吻形态 + 旧条幅形态过渡，见谓词注释）——
-      // 前附表硬性条款（暂列金额/核减/清单异议/增值税）零响应补写句含商务词面，
-      // 此前因豁免正则恒不命中被本清洗删除形成「补了即被删」无效闭环；定性响应句不含商务数字参数，
-      // 与 round-27 污染的条款原文抄写句（含金额/利率数字）形态可区分，豁免不削弱污染防线。
-      // 历史 BUG 实锤（第十六版重建）：原正则以 `$` 紧贴字符类结尾，而句拆后 part 带句尾标点恒不匹配——
-      // 统一改用 isSanctionedResponseSentence（双形态 + 数字硬闸，可选句尾标点），与商务数据检测端同源豁免。
-      if (isSanctionedResponseSentence(part)) return true;
       return !(COMMERCIAL_TERM_RE.test(part) || COMMERCIAL_RATE_RE.test(part));
     }).join('');
   });

@@ -304,7 +304,7 @@ describe('skeletonFingerprintIssues / skeletonFingerprintRepairTargets / fixSkel
     return found;
   };
 
-  it('单指纹全文 >2 处 → error（上限 2 处），2 处不报', () => {
+  it('基准字形全文 >2 处 → error（上限 2 处），建议不附同义示例；2 处不报', () => {
     const md = [
       '## 甲章',
       '由技术负责人组织测量放线。',
@@ -316,6 +316,9 @@ describe('skeletonFingerprintIssues / skeletonFingerprintRepairTargets / fixSkel
     expect(issues[0].message).toContain('由技术负责人组织');
     expect(issues[0].message).toContain('3 处');
     expect(issues[0].suggestion).toContain('前 2 处');
+    // 4.40 d5e：示例即模板化源头——建议不暴露具体同义变体（历史缺陷：LLM 抄写示例变体 37 处）
+    expect(issues[0].suggestion).not.toContain('牵头');
+    expect(issues[0].suggestion).not.toContain('再行');
     expect(skeletonFingerprintIssues(['## 甲章', '由技术负责人组织测量放线。', '由技术负责人组织钢筋验收。'].join('\n'))).toEqual([]);
   });
 
@@ -331,7 +334,33 @@ describe('skeletonFingerprintIssues / skeletonFingerprintRepairTargets / fixSkel
     expect(countSkeletonFingerprint(md, fingerprintByText('由技术负责人组织'))).toBe(1);
   });
 
-  it('skeletonFingerprintRepairTargets 按章聚合超量句（跳过全文前 2 处）', () => {
+  it('变体形态全篇 >8 处 → error（前缀「由/项目部/裸」归一同形态）；建议不附具体替换示例', () => {
+    const md = [
+      '## 甲章',
+      '由技术负责人牵头组织测量放线。',
+      '项目部技术负责人牵头组织钢筋验收。',
+      '技术负责人牵头组织模板检查。',
+      '由技术负责人牵头组织隐蔽验收。',
+      '项目部技术负责人牵头组织混凝土浇筑。',
+      '技术负责人牵头组织砌体检查。',
+      '由技术负责人牵头组织防水验收。',
+      '项目部技术负责人牵头组织回填检查。',
+      '技术负责人牵头组织资料移交。',
+    ].join('\n');
+    const issues = skeletonFingerprintIssues(md);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].severity).toBe('blocker');
+    expect(issues[0].message).toContain('句式变体复读');
+    expect(issues[0].message).toContain('技术负责人牵头组织');
+    expect(issues[0].message).toContain('9 处');
+    expect(issues[0].suggestion).toContain('前 8 处');
+    expect(issues[0].suggestion).not.toContain('负责组织');
+    expect(issues[0].suggestion).not.toContain('统筹组织');
+    const eight = ['## 甲章', ...Array.from({ length: 8 }, (_, index) => `由技术负责人牵头组织第 ${index + 1} 项检查。`)].join('\n');
+    expect(skeletonFingerprintIssues(eight)).toEqual([]);
+  });
+
+  it('skeletonFingerprintRepairTargets 按章聚合超量句（跳过全文前 2 处；cap 标注保留额度）', () => {
     const md = [
       '## 甲章',
       '由技术负责人组织测量放线。',
@@ -343,12 +372,27 @@ describe('skeletonFingerprintIssues / skeletonFingerprintRepairTargets / fixSkel
     const targets = skeletonFingerprintRepairTargets(md);
     expect(targets).toHaveLength(1);
     expect(targets[0].fingerprintLabel).toBe('由技术负责人组织');
+    expect(targets[0].cap).toBe(2);
     expect(targets[0].totalCount).toBe(4);
     expect(targets[0].chapterTitle).toBe('乙章');
     expect(targets[0].sentences).toHaveLength(2);
   });
 
-  it('fixSkeletonFingerprintRepetition 保留全文前 2 处、其余轮换变体（重叠指纹对清零）', () => {
+  it('skeletonFingerprintRepairTargets 覆盖变体形态（超 8 处仅保留额度外的句子进入修复目标）', () => {
+    const md = [
+      '## 甲章',
+      ...Array.from({ length: 9 }, (_, index) => `由技术负责人牵头组织第 ${index + 1} 项检查。`),
+    ].join('\n');
+    const targets = skeletonFingerprintRepairTargets(md);
+    expect(targets).toHaveLength(1);
+    expect(targets[0].fingerprintLabel).toBe('技术负责人牵头组织');
+    expect(targets[0].cap).toBe(8);
+    expect(targets[0].totalCount).toBe(9);
+    expect(targets[0].sentences).toHaveLength(1);
+    expect(targets[0].sentences[0]).toContain('第 9 项检查');
+  });
+
+  it('fixSkeletonFingerprintRepetition 保留全文前 2 处基准、其余按形态池均衡改写（重叠指纹对清零）', () => {
     const md = [
       '## 甲章',
       '验收合格后方可进入下道工序。',
@@ -358,17 +402,63 @@ describe('skeletonFingerprintIssues / skeletonFingerprintRepairTargets / fixSkel
     ].join('\n');
     const result = fixSkeletonFingerprintRepetition(md);
     expect(result.fixedCount).toBe(4);
+    expect(result.details).toEqual([
+      { id: 'post-qualified', replaced: 2 },
+      { id: 'after-acceptance', replaced: 2 },
+    ]);
     expect(skeletonFingerprintIssues(result.markdown)).toEqual([]);
     expect(result.markdown.match(/验收合格后方可/gu)).toHaveLength(2);
+    // 负载均衡：超量句改入不同形态（不集中复用同一替换）
+    expect(result.markdown).toContain('验收通过后再行进行回填');
+    expect(result.markdown).toContain('通过验收后方能移交资料');
   });
 
-  it('变体池不变式：任一变体不命中任一指纹（替换后不复发）', () => {
+  it('fixSkeletonFingerprintRepetition 收敛变体复读（12 处牵头组织 → 保留 8 处、其余均衡改入形态池）', () => {
+    const md = [
+      '## 甲章',
+      ...Array.from({ length: 12 }, (_, index) => `由技术负责人牵头组织第 ${index + 1} 项检查。`),
+    ].join('\n');
+    const result = fixSkeletonFingerprintRepetition(md);
+    expect(result.fixedCount).toBe(4);
+    expect(result.details).toEqual([{ id: 'by-tech-lead-org', replaced: 4 }]);
+    expect(skeletonFingerprintIssues(result.markdown)).toEqual([]);
+    expect(result.markdown.match(/技术负责人牵头组织/gu)).toHaveLength(8);
+    expect(result.markdown.match(/技术负责人负责组织/gu)).toHaveLength(1);
+    expect(result.markdown.match(/技术负责人统筹组织/gu)).toHaveLength(1);
+    expect(result.markdown.match(/技术负责人统一组织/gu)).toHaveLength(1);
+  });
+
+  it('变体改写语法安全：仅替换动词短语位，宾语与事实完整保留', () => {
+    const md = [
+      '## 甲章',
+      ...Array.from({ length: 9 }, (_, index) => `由技术负责人牵头组织开展第 ${index + 1} 项班前安全交底。`),
+    ].join('\n');
+    const result = fixSkeletonFingerprintRepetition(md);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('由技术负责人负责组织开展第 9 项班前安全交底。');
+    expect(result.markdown.match(/由技术负责人牵头组织开展/gu)).toHaveLength(8);
+  });
+
+  it('修复器幂等：收敛后再运行零改动', () => {
+    const md = [
+      '## 甲章',
+      ...Array.from({ length: 12 }, (_, index) => `由技术负责人牵头组织第 ${index + 1} 项检查。`),
+    ].join('\n');
+    const once = fixSkeletonFingerprintRepetition(md);
+    const twice = fixSkeletonFingerprintRepetition(once.markdown);
+    expect(twice.fixedCount).toBe(0);
+    expect(twice.markdown).toBe(once.markdown);
+  });
+
+  it('形态池不变式：形态字形命中自身 pattern；基准改写为任一变体字形后不再命中基准', () => {
     for (const fingerprint of SKELETON_FINGERPRINTS) {
-      for (const variant of fingerprint.variants) {
-        for (const other of SKELETON_FINGERPRINTS) {
-          const probe = new RegExp(other.pattern.source, other.pattern.flags);
-          expect(probe.test(variant), `变体「${variant}」命中指纹「${other.text}」`).toBe(false);
-        }
+      for (const form of [fingerprint, ...fingerprint.variantForms]) {
+        const probe = new RegExp(form.pattern.source, form.pattern.flags);
+        expect(probe.test(form.text), `形态「${form.text}」未命中自身 pattern`).toBe(true);
+      }
+      for (const variant of fingerprint.variantForms) {
+        const probe = new RegExp(fingerprint.pattern.source, fingerprint.pattern.flags);
+        expect(probe.test(variant.text), `变体「${variant.text}」命中基准「${fingerprint.text}」`).toBe(false);
       }
     }
   });
@@ -501,6 +591,40 @@ describe('fixFlowFormRepetition（工序形式确定性轮换修复）', () => {
     const result = fixFlowFormRepetition(md);
     expect(result.fixedCount).toBe(0);
     expect(result.markdown).toBe(md);
+  });
+
+  // 4.39 实机截断根因（“……水舌3个。施工先……，最后……。”转换后「施工」遗留为无标点悬空行尾，
+  // 终检误判「句尾截断」）：序列帧前缀非空（嵌在句中）一律放弃转换；冒号引导前缀（合法引导语）保持可转换
+  it('悬空前缀保护：句中前缀的序列句放弃转换（不产生无标点悬空行尾），回溯转前块归零相邻同形式', () => {
+    const md = [
+      '## 主要分部分项工程施工方案',
+      '### 2.22 综合配套用房-安装工程',
+      '先进行配管预埋与桥架安装，再穿线敷设电缆，随后安装配电箱与末端灯具，最后进行送配电系统调试与接地电阻测试。',
+      '### 2.20 室外附属-装饰工程',
+      '零星装饰工程覆盖四栋单体。水舌3个。施工先进行基层清理与定位放线，再按设计位置开孔、安装预埋件，随后安装装饰线条与配件，最后进行缝隙封堵与表面清理。',
+    ].join('\n');
+    const result = fixFlowFormRepetition(md);
+    expect(result.fixedCount).toBe(1);
+    // 悬空前缀句放弃转换（原样保留），无「施工⏎1. 」式无标点行尾产物
+    expect(result.markdown).not.toContain('施工\n1. ');
+    expect(result.markdown).toContain('施工先进行基层清理与定位放线，再按设计位置开孔、安装预埋件，随后安装装饰线条与配件，最后进行缝隙封堵与表面清理。');
+    // 回溯转前块（前块可转换）：相邻同形式归零
+    expect(result.markdown).toContain('1. 进行配管预埋与桥架安装；');
+    expect(flowFormRepeatIssues(result.markdown)).toEqual([]);
+  });
+
+  it('冒号引导前缀保持可转换（“施工顺序：先……最后……”正常编号化）', () => {
+    const md = [
+      '## 主要分部分项工程施工方案',
+      '### 1 甲工程',
+      '先基础开挖，再垫层浇筑，随后砌筑抹面。',
+      '### 2 乙工程',
+      '施工顺序：先进行基层清理，再放线定位，最后组织验收。',
+    ].join('\n');
+    const result = fixFlowFormRepetition(md);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('施工顺序：\n1. 进行基层清理；');
+    expect(result.markdown).toContain('3. 组织验收。');
   });
 });
 

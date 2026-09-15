@@ -1310,27 +1310,6 @@ export const COMMERCIAL_TERM_RE = /暂列金额|暂估价|报价明细|综合单
 
 export const COMMERCIAL_RATE_RE = /(?:税率|增值税)[^。；;\n]{0,12}\d/u;
 
-/** 系统补写器定性响应句豁免谓词（商务词清洗 stripCommercialDataBodyLines 与商务数据检测
- * commercialDataInBodyIssues 共用单源）——合法形态两类：
- * ①过渡形态：「按招标文件约定/要求」开头单句（≤120 字窗口，历史成稿与 LLM 模仿残留）；
- * ②4.27.2 投标人口吻形态：句内含系统响应标记（本工程/我方/本公司/按合同约定/按约定时限）——
- *   商务定性响应句（「本工程…按合同约定…」）与 voice 改造后的条款抄写句均含标记。
- * 全部形态叠加「无商务数字参数」硬闸（金额/百分比/时限数字）：承载商务数据的句子一律不豁免，
- * 定性表述（无数字）才走豁免——前附表定性响应句不含商务数字参数，是技术标合法响应形态。
- * 历史 BUG：豁免正则要求 $ 紧贴字符类而句拆后 part 带句尾标点恒不命中，补写句被清洗删除「补了即被删」，
- * 检测端亦无豁免形成「补了即被阻断」——双端统一到本谓词（第十六版闭环；4.27.2 语气改造同步新形态）。 */
-const SANCTIONED_RESPONSE_LEGACY_FORM_RE = /^按招标文件(?:约定|要求)[^。；;\n]{0,120}[。；;]?$/u;
-const SANCTIONED_RESPONSE_MARKER_RE = /本工程|我方|本公司|按合同约定|按约定时限/u;
-const SANCTIONED_RESPONSE_NUMERIC_RE = /\d+(?:\.\d+)?\s*(?:%|％|万元|亿元|元|天|日|个月|年)/u;
-export function isSanctionedResponseSentence(text: string): boolean {
-  const trimmed = text.trim();
-  if (!trimmed) return false;
-  // 商务数字参数硬闸（双形态共用）：金额/百分比/时限数字出现即不豁免——数据承载句不属定性响应
-  if (SANCTIONED_RESPONSE_NUMERIC_RE.test(trimmed)) return false;
-  if (SANCTIONED_RESPONSE_LEGACY_FORM_RE.test(trimmed)) return true;
-  const body = trimmed.replace(/[。；;]$/u, '');
-  return body.length > 0 && body.length <= 200 && SANCTIONED_RESPONSE_MARKER_RE.test(body);
-}
 /** 允许入正文的项目商务事实（资料落位口径）：词面负例保护，不得误报为商务条款泄漏 */
 
 const COMMERCIAL_ALLOWED_FACT_RE = /合同估算价|合同估算价格|投资估算|估算价格|工程估算价|最高投标限价|招标控制价/u;
@@ -1374,9 +1353,6 @@ export async function commercialDataInBodyIssues(markdown: string, embedDocument
     if (!COMMERCIAL_TERM_RE.test(line) && !COMMERCIAL_RATE_RE.test(line) && !COMMERCIAL_VARIANT_HINT_RE.test(line)) continue;
     if (COMMERCIAL_RATE_RE.test(line)) hits.push('税率/增值税');
     for (const sentence of line.split(/(?<=[。；;])\s*/u)) {
-      // 系统补写器定性响应句豁免（双端对齐）：与 stripCommercialDataBodyLines 清洗豁免同源谓词——
-      // 不豁免则终检补写的定性句（含词表词面）被本检测器反向阻断（补了即被阻断的错误闭环）
-      if (isSanctionedResponseSentence(sentence)) continue;
       const terms = sentence.match(COMMERCIAL_TERM_RE) || [];
       const hasAllowed = COMMERCIAL_ALLOWED_FACT_RE.test(sentence);
       const hasVariant = COMMERCIAL_VARIANT_HINT_RE.test(sentence);
@@ -1406,7 +1382,7 @@ export async function commercialDataInBodyIssues(markdown: string, embedDocument
     owner: 'llm',
     repairability: 'llm_repairable',
     message: `正文出现商务条款数据：${unique.join('、')}`,
-    suggestion: '商务数据（暂列金额/暂估价/综合单价/税率等）不得写入施组正文：删除该句或改写为定性表述（如“按合同约定执行”），商务口径仅保留在项目信息表中。',
+    suggestion: '商务数据（暂列金额/暂估价/综合单价/税率等）不得写入施组正文：删除该句，商务口径仅保留在项目信息表中；技术内容如需保留，改写为不含商务参数的正式技术表述。',
   }];
 }
 

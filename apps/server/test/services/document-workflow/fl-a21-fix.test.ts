@@ -102,12 +102,11 @@ describe('B7 自伤句式 A21 形态', () => {
 });
 
 describe('B7 评分响应空响应句改写', () => {
-  it('价格调整条款空响应句改写为落实句', () => {
+  it('商务域主题（价格调整）无可生成分支 → 原句保留，交元语言清理器整行删除', () => {
     const md = '招标要求响应（前附表响应条款）：市场价格波动仅对《可调整价差人工和主要材料一览表》中约定的人工、主要材料进行价格调整。本施工组织设计已按上述条款要求逐项落实执行。';
     const result = fixEmptyScoringResponses(md);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown).toContain('本工程价格调整范围按《可调整价差人工和主要材料一览表》执行');
-    expect(result.markdown).not.toContain('逐项落实执行');
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe(md);
   });
 
   it('无条款语境行不动', () => {

@@ -281,6 +281,21 @@ describe('displayChapterTitle / normalizeGeneratedChapterTitle（标题规范化
     expect(displayChapterTitle('✓□质量保证措施')).toBe('质量保证措施');
     expect(displayChapterTitle('○ 施工部署')).toBe('施工部署');
   });
+
+  it('4.40 残号根治：清单/图纸条目编号随名称进入标题时整段剥离', () => {
+    // 舒城实机：图纸条目名「2.16 杭北干渠沿河人行步道改造提升工程」进 H4 标题，旧式只剥「2.」
+    // 留「16杭北…」残号，成稿出现「#### 2.1.1 16杭北干渠…」；多段编号必须整段消费
+    expect(displayChapterTitle('2.16杭北干渠沿河人行步道改造提升工程')).toBe('杭北干渠沿河人行步道改造提升工程');
+    expect(displayChapterTitle('4.2飞霞广场综合提升改造工程')).toBe('飞霞广场综合提升改造工程');
+    expect(displayChapterTitle('4.5产业园停车场提升改造工程')).toBe('产业园停车场提升改造工程');
+    expect(displayChapterTitle('4.6麻纺巷城市休闲街区建设提升工程')).toBe('麻纺巷城市休闲街区建设提升工程');
+  });
+
+  it('4.40 单位守卫：紧跟计量单位的多段数字是标题正文不剥', () => {
+    expect(displayChapterTitle('3.5米宽临时便道施工')).toBe('3.5米宽临时便道施工');
+    expect(displayChapterTitle('2.16万吨物资保障方案')).toBe('2.16万吨物资保障方案');
+    expect(displayChapterTitle('5.5㎡节点铺装做法')).toBe('5.5㎡节点铺装做法');
+  });
 });
 
 describe('isValidGeneratedChapterTitle（生成标题合法性）', () => {

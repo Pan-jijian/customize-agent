@@ -479,7 +479,8 @@ export async function repairTemplatingIssues(input: {
       }
       for (const frame of target.frames) {
         const indices = frame.sentences.map(() => { const current = anchorIndex; anchorIndex += 1; return current; });
-        parts.push(`第 ${indices.join('、')} 条目标原文含全篇复读骨架「${frame.fingerprintLabel}」（全篇 ${frame.totalCount} 处，验收上限 2 处）：逐句改写为差异化句式，保留原句全部事实信息（岗位、数值、频次不得丢失）。`);
+        // 4.40 d5e：保留额度按形态动态（基准字形 2 / 变体形态 8）；改写要求「逐句差异化」，不给同义示例（示例即模板化源头）
+        parts.push(`第 ${indices.join('、')} 条目标原文含全篇复读骨架「${frame.fingerprintLabel}」（全篇 ${frame.totalCount} 处，验收上限 ${frame.cap} 处）：逐句改写为差异化句式（每条句子的动词与语序不得雷同，禁止集中复用同一替换说法），保留原句全部事实信息（岗位、数值、频次不得丢失）。`);
       }
       for (const flow of target.flows) {
         parts.push(`第 ${anchorIndex} 条目标原文是小节标题，其所在小节「${flow.blockTitle}」的工序顺序表达当前为【${flow.currentForm}】形式且与相邻小节同形式：将该小节的工序顺序表达改写为【${flow.targetForm}】形式，内容与数值保持不变（工艺参数不得删减）。`);

@@ -10,7 +10,7 @@ import type { DepthDimension, ProfessionalDepthAnalysis } from './professionalDe
 import { documentTextLength, estimateDocumentPages } from './budget';
 import { extractEngineeringMeasureTokens, normalizeEngineeringTextForFactMatch } from './engineeringUnits';
 import { displayChapterTitle, isTenderClauseFragmentTitle } from './outline';
-import { extractGeneratedSections, mergeTableLineBreaks } from './markdownComposer';
+import { extractGeneratedSections, mergeTableLineBreaks, sectionHeadingIdentityKey } from './markdownComposer';
 import { stripTableCellInvisibleChars } from './helpers/markdownCleanup';
 import { PAIRED_PUNCTUATION_SYMBOLS } from './structureIntegrityRules';
 import type { BlueprintData } from './integratedBlueprint';
@@ -126,8 +126,11 @@ function isHardExportBlockingIssue(issue: ValidationIssue) {
 }
 
 /**
- * 同章内同名三级小节重复检测：主题块/补写链路反复追加同名 H4 小节（真实生成缺陷：1.4 出现 4 个“工程难点分析”、2.14 出现 4 个隐蔽验收主题小节），
+ * 同章内同名小节重复检测：主题块/补写链路反复追加同名 H4 小节（真实生成缺陷：1.4 出现 4 个“工程难点分析”、2.14 出现 4 个隐蔽验收主题小节），
  * 归一化去编号/空白后同章重复 ≥2 次给出合并/重命名建议。
+ * 4.40 d5d 扩展二级小节（H3）同名：LLM 把同一主题小节写两遍（舒城实测 10.1/10.5「分区落实与临时道路流线」
+ * 目录与正文重复堆叠）此前不在检测范围——同一性键与装配层 L5 同名降级/确定性合并修复器
+ * （dedupeDuplicateSectionHeadings）单源；确定性命中后本检测器只负责残留兜底。
  * round-20 S6：level warning → error——目录重复堆叠是青天规范硬扣分点（首次徽光阁实测 7 组同名 H4 仅 warning 永不修复），
  * error 化后进入交付阻断修复链（duplicate-subsection 分支）自动合并。
  */
@@ -138,7 +141,14 @@ export function headingDuplicateIssues(markdown: string): ValidationIssue[] {
     const lines = part.split(/\r?\n/u);
     const chapterTitle = (lines.shift() || '').trim();
     const counts = new Map<string, number>();
+    const sectionCounts = new Map<string, number>();
     for (const line of lines) {
+      // 4.40 d5d：二级小节（###）同名计数（带编号与无编号一律纳入——编号由出现序重排，同名即目录重复堆叠）
+      const sectionMatch = /^###\s+(.+)$/u.exec(line.trim());
+      if (sectionMatch) {
+        const sectionKey = sectionHeadingIdentityKey(sectionMatch[1]);
+        if (sectionKey.length >= 2) sectionCounts.set(sectionKey, (sectionCounts.get(sectionKey) || 0) + 1);
+      }
       const headingMatch = /^####\s+(.+)$/u.exec(line.trim());
       if (!headingMatch) continue;
       // 带编号 H4（「2.1.1 施工流程」）由编号保证目录唯一性：分项工程小节去编号后同名属正常结构，
@@ -152,6 +162,11 @@ export function headingDuplicateIssues(markdown: string): ValidationIssue[] {
       const key = numbered ? normalizeSubsectionTitleForDedup(rawName) : rawName.replace(/\s+/gu, '');
       if (key.length < 2) continue;
       counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    for (const [name, count] of sectionCounts) {
+      if (count < 2) continue;
+      issues.push({ level: 'error', message: `${chapterTitle || '某章'} 存在同名小节重复：“${name}”出现 ${count} 次`, suggestion: '同主题内容应合并为一个小节；若确为不同方面，请重命名标题以区分内容，避免目录重复堆叠。' });
+      if (issues.length >= 6) return issues;
     }
     for (const [name, count] of counts) {
       if (count < 2) continue;

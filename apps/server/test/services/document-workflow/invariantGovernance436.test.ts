@@ -79,6 +79,24 @@ describe('A2 renumberSectionHeadings 编号不变量（INV-1）', () => {
     expect(occurrenceCount(result.markdown, '### 1.2 建设规模')).toBe(1);
   });
 
+  it('无 page-break div 成稿：目录区结构驱动退出，正文缺号重排不失效（round-2 死区根治）', () => {
+    // 4.39 舒城实机根因：装配链 fixTocFromBody/ensureFormalToc 重建目录后无 page-break div，
+    // 旧实现 inToc 永真 → chapterInfos 空 → 函数提前 return → round-2 全文链重编号静默死区，
+    // 第2章 6 个节被删后的缺号（2.10-2.14/2.17）从未收敛；目录区必须结构驱动退出
+    const markdown = [
+      '## 目录',
+      '### 1.1 项目基本情况',
+      '### 1.5 建设规模',
+      '## 第1章 工程概况',
+      '### 1.1 项目基本情况',
+      '### 1.5 建设规模',
+    ].join('\n');
+    const result = renumberSectionHeadings(markdown);
+    expect(occurrenceCount(result.markdown, '### 1.5 建设规模')).toBe(1);
+    expect(occurrenceCount(result.markdown, '### 1.2 建设规模')).toBe(1);
+    expect(result.fixedCount).toBe(1);
+  });
+
   it('幂等：重放后重跑零改动且逐字节恒等', () => {
     const markdown = ['## 第1章 工程概况', '### 1.3 项目基本情况', '内容。', '### 1.5 建设规模', '内容。'].join('\n');
     const first = renumberSectionHeadings(markdown);
