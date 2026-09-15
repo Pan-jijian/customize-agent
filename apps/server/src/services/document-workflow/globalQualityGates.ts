@@ -6,7 +6,7 @@
 import type { DocumentDraftChapter, DocumentExecutionStage, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, NumericScopeConflict } from './types';
 import { displayStage, upsertProgressStage } from './progress';
 import { snapshotEmbedCacheStats } from './semanticSimilarity';
-import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, applySpanReplacements, basicInfoScheduleFieldIssues, crossProjectValueCopyIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, duplicateTableRowIssues, equipmentBatchConflicts, excavationDepthFromFacts, excavationDepthLockIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractSupportSystemAuthority, fixAdjacentPhraseDuplication, fixAmbiguousEitherOrCandidates, fixForbiddenConfigurationTerms, fixGreeningMaintenanceMismatch, fixHazardIdentificationGaps, fixHeaderlessTables, fixInternalTerminology, fixPlaceholderTableCells, fixQualityAssuranceCoverage, fixSelfUnderminingCandidates, fixSixHundredPercentCoverage, formulaResidueIssues, foundationFormResidueIssues, laborPeakConflictIssues, metaDiscourseDeclarationIssues, nodeScheduleConsistencyIssues, overviewRecapIssues, phaseLaborMixingIssues, preliminaryActionTimingIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, stripDuplicateTablesAcrossChapters, stripInternalDuplicateTableRows, supportSystemConflictIssues, tablePeakLaborWithChainFallback, waterLaborPeakAssociationIssues } from './documentIntegrityChecks';
+import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, applySpanReplacements, basicInfoScheduleFieldIssues, crossProjectValueCopyIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, duplicateTableRowIssues, equipmentBatchConflicts, excavationDepthFromFacts, excavationDepthLockIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractSupportSystemAuthority, fixAdjacentPhraseDuplication, fixAmbiguousEitherOrCandidates, fixForbiddenConfigurationTerms, fixGreeningMaintenanceMismatch, fixHeaderlessTables, fixInternalTerminology, fixPlaceholderTableCells, fixSelfUnderminingCandidates, formulaResidueIssues, foundationFormResidueIssues, laborPeakConflictIssues, metaDiscourseDeclarationIssues, nodeScheduleConsistencyIssues, overviewRecapIssues, phaseLaborMixingIssues, preliminaryActionTimingIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, stripDuplicateTablesAcrossChapters, stripInternalDuplicateTableRows, supportSystemConflictIssues, tablePeakLaborWithChainFallback, waterLaborPeakAssociationIssues } from './documentIntegrityChecks';
 import { arbitrateNumericConflicts } from './numericConflictArbiter';
 import type { BillFactLock } from './billFactLock';
 import { blueprintCitationVerdict, rebaseCitationAnchorsForChapters, type BlueprintCitationAdjudicationSummary, type BlueprintData, type QuantityConflictAnchor } from './integratedBlueprint';
@@ -72,6 +72,7 @@ export function reportBudgetTrimAudit(input: {
       `证据质量：平均噪声分 ${evidenceStats.avgNoiseScore}，平均事实密度 ${evidenceStats.avgFactDensity}`,
       `证据分层（T0 关键事实/T1 高相关片段/T2 目录索引）：T0 注入 ${evidenceStats.t0Chars || 0} 字、T1 注入 ${evidenceStats.t1Chars || 0} 字、T2 索引 ${evidenceStats.t2Lines || 0} 行、目录省略 ${evidenceStats.omittedChars || 0} 字——A2 块级增量压缩后 T1 应显著低于 T0+T2`,
       `检索：${evidenceStats.searchQueries} 组查询，耗时 ${Math.round(evidenceStats.searchMs / 1000)} 秒`,
+      `证据双通道覆盖度（P2-B 观测采集）：预分配注入 ${evidenceStats.intentEvidenceInjected ?? 0} 条（最终留存 ${evidenceStats.intentEvidenceUsed ?? 0} 条）／运行时召回注入 ${evidenceStats.retrievedEvidenceInjected ?? 0} 条（最终留存 ${evidenceStats.retrievedEvidenceUsed ?? 0} 条）`,
       `LLM：${llmStats.calls} 次调用，失败 ${llmStats.failures} 次，重试 ${llmStats.retries} 次，schema 校验失败 ${llmStats.schemaFailures} 次`,
       `LLM 上下文输入：${llmStats.inputChars || 0} 字符（system+user）${llmStats.unlayeredChars ? `（其中未分层调用 ${llmStats.unlayeredChars} 字符，占比 ${Math.round((llmStats.unlayeredChars / (llmStats.inputChars || 1)) * 10000) / 100}%）` : ''}，输入 ${llmStats.inputTokens || 0} token / 输出 ${llmStats.outputTokens || 0} token`,
       layerReport,
@@ -1290,7 +1291,6 @@ export async function runGlobalConsistencyReviewLoop(input: {
     let phraseFixCount = 0;
     let maintenanceFixCount = 0;
     let placeholderFixCount = 0;
-    let qaCoverageFixCount = 0;
     // A4 跨章重复表删除（丰乐镇实测）：同一关键节点表复制粘贴到 4 个章节时逐章去重永不命中，
     // 先全文判定再映射回章节删除（与检测器同源口径），删后不重跑逐章 stripDuplicateTables 的重复表步骤。
     const crossChapterTableDedupe = stripDuplicateTablesAcrossChapters(chapterDraftsFinal);
@@ -1300,17 +1300,15 @@ export async function runGlobalConsistencyReviewLoop(input: {
       const tableResult = stripDuplicateTables(chapter.content);
       const tableRowDupResult = stripInternalDuplicateTableRows(tableResult.markdown);
       const paraResult = stripDuplicateParagraphs(tableRowDupResult.markdown);
-      // 4.17.4 确定性清洗链：句内重复短语折叠 → 6.1 一览表套话数据填充 → 6.1 质量保障内容补全
+      // 4.17.4 确定性清洗链：句内重复短语折叠 → 6.1 一览表套话数据填充
       const phraseResult = fixAdjacentPhraseDuplication(paraResult.markdown);
       const placeholderResult = fixPlaceholderTableCells(phraseResult.markdown, { areaSummary: scaleSummary, scheduleDays: scheduleAuthority });
-      const qaCoverageResult = fixQualityAssuranceCoverage(placeholderResult.markdown);
-      const maintenanceResult = fixGreeningMaintenanceMismatch(qaCoverageResult.markdown, greeningMaintenanceAuthority);
+      const maintenanceResult = fixGreeningMaintenanceMismatch(placeholderResult.markdown, greeningMaintenanceAuthority);
       const finalLines = maintenanceResult.markdown.split(/\r?\n/u).length;
       const totalRemoved = beforeLines - finalLines;
-      const extraFixes = (phraseResult.fixedCount - 0) + placeholderResult.fixedCount + qaCoverageResult.fixedCount + maintenanceResult.fixedCount;
+      const extraFixes = (phraseResult.fixedCount - 0) + placeholderResult.fixedCount + maintenanceResult.fixedCount;
       phraseFixCount += phraseResult.fixedCount;
       placeholderFixCount += placeholderResult.fixedCount;
-      qaCoverageFixCount += qaCoverageResult.fixedCount;
       maintenanceFixCount += maintenanceResult.fixedCount;
       if (totalRemoved > 0 || extraFixes > 0) {
         removedTableLines += tableResult.removedCount + tableRowDupResult.removedCount;
@@ -1318,12 +1316,9 @@ export async function runGlobalConsistencyReviewLoop(input: {
         chapter.content = maintenanceResult.markdown;
       }
     }
-    // A6 危大/自伤/六个百分百确定性收口（丰乐镇 79 分基线对照）：三类问题 LLM 修复轮定位能力不足，
-    // 按检测器同源口径确定性改写/补写（自伤句式改写、危大辨识清单补遗漏项、扬尘六个百分百补缺项短句），
-    // 逐章执行与检测器全文判定同源，修复后由导出门禁复检自然清零
+    // A6 自伤表述确定性改写（丰乐镇 79 分基线对照）：LLM 修复轮定位能力不足，按检测器同源口径
+    // 确定性改写（只改形态不改语义），逐章执行与检测器全文判定同源，修复后由导出门禁复检自然清零
     let selfUnderminingFixCount = 0;
-    let hazardGapFixCount = 0;
-    let sixHundredFixCount = 0;
     let internalTermFixCount = 0;
     let headerlessTableFixCount = 0;
     let ambiguousEitherOrFixCount = 0;
@@ -1333,16 +1328,6 @@ export async function runGlobalConsistencyReviewLoop(input: {
       if (selfUnderminingFix.fixedCount > 0) {
         chapter.content = selfUnderminingFix.markdown;
         selfUnderminingFixCount += selfUnderminingFix.fixedCount;
-      }
-      const hazardGapFix = fixHazardIdentificationGaps(chapter.content);
-      if (hazardGapFix.fixedCount > 0) {
-        chapter.content = hazardGapFix.markdown;
-        hazardGapFixCount += hazardGapFix.fixedCount;
-      }
-      const sixHundredFix = await fixSixHundredPercentCoverage(chapter.content);
-      if (sixHundredFix.fixedCount > 0) {
-        chapter.content = sixHundredFix.markdown;
-        sixHundredFixCount += sixHundredFix.fixedCount;
       }
       // A11 内部术语清洗（「控制口径/峰值口径/工作包」后台术语进正文）
       const internalTermFix = fixInternalTerminology(chapter.content);
@@ -1370,7 +1355,7 @@ export async function runGlobalConsistencyReviewLoop(input: {
       }
     }
     globalDedupRan = true;
-    if (deterministicFix.fixedCount > 0 || postNumericFixCount > 0 || removedTableLines > 0 || removedParagraphLines > 0 || phraseFixCount > 0 || placeholderFixCount > 0 || qaCoverageFixCount > 0 || selfUnderminingFixCount > 0 || hazardGapFixCount > 0 || sixHundredFixCount > 0 || internalTermFixCount > 0 || headerlessTableFixCount > 0 || ambiguousEitherOrFixCount > 0 || forbiddenConfigFixCount > 0 || maintenanceFixCount > 0) {
+    if (deterministicFix.fixedCount > 0 || postNumericFixCount > 0 || removedTableLines > 0 || removedParagraphLines > 0 || phraseFixCount > 0 || placeholderFixCount > 0 || selfUnderminingFixCount > 0 || internalTermFixCount > 0 || headerlessTableFixCount > 0 || ambiguousEitherOrFixCount > 0 || forbiddenConfigFixCount > 0 || maintenanceFixCount > 0) {
       // 修复后重算：确定性检测快照必须用最新检测结果替换，不得合并保留已修复问题的旧快照
       //（历史缺陷：修复已生效但旧快照残留，被 finalize 包装为「跨章一致性复核」error 硬阻断导出）
       deterministicIssues = await runDeterministicConsistencyCheck();
@@ -1381,8 +1366,6 @@ export async function runGlobalConsistencyReviewLoop(input: {
         removedTableLines > 0 ? `重复表格 ${removedTableLines} 行` : '',
         removedParagraphLines > 0 ? `重复段落 ${removedParagraphLines} 行` : '',
         selfUnderminingFixCount > 0 ? `自伤表述改写 ${selfUnderminingFixCount} 处` : '',
-        hazardGapFixCount > 0 ? `危大辨识补漏 ${hazardGapFixCount} 项` : '',
-        sixHundredFixCount > 0 ? `扬尘六个百分百补写 ${sixHundredFixCount} 项` : '',
         internalTermFixCount > 0 ? `内部术语清洗 ${internalTermFixCount} 处` : '',
         headerlessTableFixCount > 0 ? `无表头表格补齐 ${headerlessTableFixCount} 处` : '',
         ambiguousEitherOrFixCount > 0 ? `两可表述归一 ${ambiguousEitherOrFixCount} 处` : '',

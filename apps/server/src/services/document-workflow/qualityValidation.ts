@@ -813,7 +813,7 @@ export function basisRegulationsCoverageIssues(markdown: string, blueprintData?:
   // 4.31 区域口径校准（丰乐镇 v6 #71）：location「安徽省合肥市肥西县」解析省级+市级两级
   // 地名，任一命中即通过——招标文件实际引用的是《合肥市公共资源交易管理条例》（市级），
   // 原「仅按首个匹配（安徽省）核对」把本项目真实引用的市级条例漏判缺失（LLM 修复轮无
-  // 数据可写的死结）；fixBasisRegulationsRegion 同源按该口径回写地方条目
+  // 数据可写的死结）；4.41 起确定性回写器已删除，缺失由写作侧编制依据要求覆盖，残留由本检测器阻断
   const location = blueprintData?.project.location || '';
   const regions = [...location.matchAll(/([\u4e00-\u9fa5]{2,10}?[省市])/gu)].map(match => match[1]);
   if (regions.length > 0) {

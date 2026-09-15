@@ -2,14 +2,13 @@
  * integrity/fixers：确定性修复器组（P4 拆分，逐字机械搬移自 documentIntegrityChecks.ts）。
  * 依赖 detectors/authorities（SURFACE_FIX_STEPS 注册表锚定侧）。
  */
-import { hasWorkInjuryInsuranceStatement, normalizeSubsectionTitleForDedup, workPackageThemeLabel } from '../../utils';
+import { normalizeSubsectionTitleForDedup, workPackageThemeLabel } from '../../utils';
 import { MARKDOWN_TABLE_DIVIDER_RE, MARKDOWN_TABLE_ROW_RE } from '../../../constants';
-import { DANGEROUS_APPLICABLE_ITEMS, extractDangerZone } from '../../dangerousApplicability';
 import { PEAK_LABOR_RE, PILE_SUPPORT_LITERAL_RE, SLOPE_SUPPORT_LITERAL_RE, cnNumberToArabic, laborPeakStageOf, tablePeakLabor } from '../authorities/authorities';
 import type { SupportSystemAuthorityKind } from '../authorities/authorities';
-import { extractBasisRegulations, locateDecisionOptionAnchor, matchDecisionCategory } from '../../integratedBlueprint';
+import { locateDecisionOptionAnchor, matchDecisionCategory } from '../../integratedBlueprint';
 import type { DecisionLockEntry, QuantityConflictAnchor } from '../../integratedBlueprint';
-import { COMMERCIAL_RATE_RE, COMMERCIAL_TERM_RE, CROSS_SECTION_ANCHORS, CROSS_SECTION_ANCHOR_ENTITY_RE, ENUMERATION_VALUE_RE, FINISH_THICKNESS_CONTEXT_WORD, LABOR_COUNT_RE, META_DECLARATION_RE, NEGATIVE_DECLARATION_RE, PARAGRAPH_START_RE, REPEATED_WORD_RE, SCHEDULE_NODE_ANCHORS, SIX_HUNDRED_PERCENT_ITEMS, ambiguousEitherOrIssues, cellCoverage, extractMarkdownTables, jaccard, judgeQueryCoverage, laborGroupOf, locationGroupForMatch, PARAGRAPH_TAIL_REPEAT_MIN_CHARS, paragraphFingerprint, scanCollisionNumberedHeadings, scanInvertedDateRanges, scanPhaseLaborClaims, scanUncoveredEngineeringHeadings, sixHundredPercentLexicalHit, splitConcatenatedPhaseName, textCellsOf } from '../detectors/detectors';
+import { COMMERCIAL_RATE_RE, COMMERCIAL_TERM_RE, CROSS_SECTION_ANCHORS, CROSS_SECTION_ANCHOR_ENTITY_RE, ENUMERATION_VALUE_RE, FINISH_THICKNESS_CONTEXT_WORD, LABOR_COUNT_RE, META_DECLARATION_RE, NEGATIVE_DECLARATION_RE, PARAGRAPH_START_RE, REPEATED_WORD_RE, SCHEDULE_NODE_ANCHORS, ambiguousEitherOrIssues, cellCoverage, extractMarkdownTables, jaccard, laborGroupOf, locationGroupForMatch, PARAGRAPH_TAIL_REPEAT_MIN_CHARS, paragraphFingerprint, scanCollisionNumberedHeadings, scanInvertedDateRanges, scanPhaseLaborClaims, scanUncoveredEngineeringHeadings, splitConcatenatedPhaseName, textCellsOf } from '../detectors/detectors';
 import type { AuthorityDomain, AuthorityIndex } from '../../authorityIndex';
 
 const PILE_WORD_TO_SLOPE: Array<[RegExp, string]> = [
@@ -606,102 +605,6 @@ export function fixFallbackPlaceholderRows(markdown: string): { markdown: string
   }
   if (remove.size === 0) return { markdown, fixedCount: 0, details: [] };
   return { markdown: lines.filter((_, lineIndex) => !remove.has(lineIndex)).join('\n'), fixedCount: remove.size, details };
-}
-
-/** 法规条目书名号内名称提取（fixer 与证据池合并器共用） */
-function regulationBookNameOf(entry: string): string {
-  return (entry.match(/《([^》]+)》/u) || [])[1] || '';
-}
-
-/** 4.32 招标文件证据池本地地方性法规补充提取（丰乐镇 v6 复测 #56 死结根治）：4.31 的
- * fixBasisRegulationsRegion 只吃蓝图 basisRegulations，而蓝图在 stageBlueprint 时点提取
- * （证据源为当刻的 writerEvidence），章级检索召回的招标文件「1.3 法律」小节
- * （《合肥市公共资源交易管理条例》）彼时尚未入池——蓝图清单无地方条目、fixer 静默、
- * 检测器「编制依据小节缺少安徽省地方性法规、条例」死结依旧。本函数在 stage5 交付前
- * 时点（全部章级证据已入池）从证据文本二次提取：复用 extractBasisRegulations 同口径
- * 书名号扫描，只保留含地方后缀（省/市/区/县/自治州/自治区）且书名号内含本项目建设
- * 地点地名的条目（防其它地区/项目法规混入），与蓝图清单去重合并——fixer 与检测器消费
- * 的仍是同一份「本地地方法规条目」口径，检测定位=修复定位不变；地点无法解析或证据
- * 为空时原样返回蓝图清单（行为与 4.31 一致）。 */
-export function collectLocalBasisRegulations(
-  blueprintRegulations: readonly string[] | undefined,
-  evidenceText: string,
-  location: string,
-): string[] {
-  const merged = [...(blueprintRegulations || [])];
-  const seen = new Set(merged.map(entry => regulationBookNameOf(entry)));
-  // 本项目建设地点区域解析（与检测器 basisRegulationsCoverageIssues 同源正则）
-  const regions = [...location.matchAll(/([\u4e00-\u9fa5]{2,10}?[省市])/gu)].map(match => match[1]!);
-  if (regions.length === 0 || !evidenceText) return merged;
-  for (const entry of extractBasisRegulations(evidenceText)) {
-    const name = regulationBookNameOf(entry);
-    if (!name || seen.has(name)) continue;
-    if (!/[\u4e00-\u9fa5]{2,10}(?:省|市|区|县|自治州|自治区)/u.test(name)) continue;
-    if (!regions.some(region => name.includes(region))) continue;
-    seen.add(name);
-    merged.push(entry);
-  }
-  return merged;
-}
-
-/** 编制依据地方性法规确定性补写（4.31 丰乐镇 v6 #71，与检测器 basisRegulationsCoverageIssues
- * 同源）：招标文件已提取到含地方后缀（省/市/区/县）的法规条目而编制依据小节未列时（LLM
- * 无源可写的死结），从蓝图 basisRegulations 照抄补写「地方法规规章」行——行内已有具体
- * 书名号条目时按顿号追加，否则用确定性清单重写类别话术尾。找不到编制依据小节或地方
- * 法规规章行时静默跳过（保持模板结构，不新增行）。 */
-export function fixBasisRegulationsRegion(
-  markdown: string,
-  basisRegulations?: readonly string[],
-): { markdown: string; fixedCount: number; details: string[] } {
-  if (!basisRegulations || basisRegulations.length === 0) return { markdown, fixedCount: 0, details: [] };
-  const bookNameOf = regulationBookNameOf;
-  const missing = basisRegulations.filter(entry => {
-    const name = bookNameOf(entry);
-    if (!name) return false;
-    if (!/[\u4e00-\u9fa5]{2,10}(?:省|市|区|县|自治州|自治区)/u.test(name)) return false;
-    if (/中华人民共和国|国务院/u.test(name)) return false;
-    return !markdown.includes(`《${name}》`);
-  });
-  if (missing.length === 0) return { markdown, fixedCount: 0, details: [] };
-  const lines = markdown.split(/\r?\n/u);
-  // 编制依据小节定位（与检测器 extractBasisRegulationSection 同口径：H2-H4 或粗体标题）
-  let sectionStart = -1;
-  let sectionLevel = 0;
-  for (let i = 0; i < lines.length; i += 1) {
-    const trimmed = lines[i]!.trim();
-    const hashHeading = /^(#{2,4})\s+(.+)$/u.exec(trimmed);
-    const boldHeading = hashHeading ? null : /^\*\*(.+)\*\*$/u.exec(trimmed);
-    if (!hashHeading && !boldHeading) continue;
-    const title = hashHeading ? hashHeading[2]! : (boldHeading?.[1] ?? '');
-    if (!/编制依据|编制说明|编制原则|编制目的/u.test(title)) continue;
-    sectionStart = i;
-    sectionLevel = hashHeading ? hashHeading[1]!.length : 0;
-    break;
-  }
-  if (sectionStart === -1) return { markdown, fixedCount: 0, details: [] };
-  let sectionEnd = lines.length;
-  for (let j = sectionStart + 1; j < lines.length; j += 1) {
-    const next = /^(#{1,4})\s+(.+)$/u.exec(lines[j]!.trim());
-    if (next && (sectionLevel === 0 || next[1]!.length <= sectionLevel)) { sectionEnd = j; break; }
-  }
-  const details: string[] = [];
-  for (let j = sectionStart + 1; j < sectionEnd; j += 1) {
-    const line = lines[j]!;
-    const labelMatch = /^(\s*[-*]?\s*)([^：:]{2,20}[：:])\s*(.*)$/u.exec(line);
-    if (!labelMatch) continue;
-    if (!/地方法规|地方性法规|地方规章/u.test(labelMatch[2]!)) continue;
-    const addEntries = missing.filter(entry => !line.includes(`《${bookNameOf(entry)}》`));
-    if (addEntries.length === 0) continue;
-    if (/《[^》]+》/u.test(labelMatch[3] || '')) {
-      lines[j] = `${line.replace(/[。；;\s]*$/u, '')}、${addEntries.join('、')}；`;
-    } else {
-      lines[j] = `${labelMatch[1]}${labelMatch[2]}${addEntries.join('、')}及工程所在地现行其他地方性法规与政府规章；`;
-    }
-    details.push(`编制依据补写地方性法规：${addEntries.join('、')}`);
-    break;
-  }
-  if (details.length === 0) return { markdown, fixedCount: 0, details: [] };
-  return { markdown: lines.join('\n'), fixedCount: details.length, details };
 }
 
 /** 埋深/覆土槽位数值错位确定性修复（4.31 丰乐镇 v6 #3，与检测器 factReconciliation D4.3
@@ -1665,67 +1568,9 @@ export function fixPlaceholderTableCells(markdown: string, options?: { areaSumma
   return { markdown: applied.markdown, fixedCount: applied.fixedCount, details: applied.details };
 }
 
-/** 6.1 施工部署块质量保障内容补全（4.17.4 合肥师范评分器高风险「内容完整」）：
- * 评审项「确保工期与质量」要求块内出现质量保障核心术语（三检/样板引路/隐蔽验收/见证取样/试块养护/分部分项报验）；
- * 6.1 以安全文明为主线时缺失 ≥4 个核心术语 → 块尾插入质量保障协同段（结合创优目标口径，非模板套话）。 */
-
-export function fixQualityAssuranceCoverage(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
-  const blockRe = /(### 6\.1\s+施工部署与施工流水组织[\s\S]*?)(?=### 6\.2|## 第[六七]章|$)/u;
-  const block = markdown.match(blockRe);
-  if (!block) return { markdown, fixedCount: 0, details: [] };
-  const body = block[0];
-  const coreTerms = ['三检', '样板引路', '隐蔽验收', '见证取样', '试块养护', '分部分项报验'];
-  const hitCount = coreTerms.filter(term => body.includes(term)).length;
-  if (hitCount >= 3) return { markdown, fixedCount: 0, details: [] };
-  const injected = `\n质量保障体系与安全文明管理同频运行：项目部实行“三检制”（自检、互检、交接检），每道工序经班组自检、质量员复检合格后报监理单位验收；推行样板引路制度，主体结构、装配式构件安装、ALC墙板安装、幕墙安装等主要分项工程在大面积施工前先做样板，经建设、监理单位验收确认后方可展开；隐蔽工程（钢筋、防水、管线预埋等）覆盖前由质量员组织隐蔽验收并留存影像记录；原材料进场按见证取样要求送检，混凝土试块按规范留置并落实标养与同条件养护；分部分项工程验收严格执行报验程序，验收资料与工程进度同步归档，确保“合格”质量标准与“确保黄山杯”创优目标逐级落实。`;
-  const insertAt = (block.index ?? 0) + body.length;
-  const next = markdown.slice(0, insertAt) + injected + markdown.slice(insertAt);
-  return { markdown: next, fixedCount: 1, details: [`6.1 施工部署块补全质量保障协同段（核心术语 ${coreTerms.length - hitCount}/${coreTerms.length} 缺失）`] };
-}
-
-/** 6.2 工伤保险缴纳表述补全（4.32 丰乐镇 v6 #60；4.36 B2 检测定位=修复定位单源）：
- * 「正文有劳务/农民工管理内容但未提及工伤保险缴纳」blocker 死结——检测器 localAdaptationKeywordIssues
- * 的 workInjury 查询由 bge 语义判定 + 4.36 字面短路（hasWorkInjuryInsuranceStatement 共用），
- * LLM 修复轮未定位到劳务管理小节。在含劳资管理锚点的段落行尾补写缴纳表述
- * （补写句逐字包含查询短语「按规定为作业人员办理工伤保险」，且与检测字面短路同源）。
- * 幂等：hasWorkInjuryInsuranceStatement（与检测字面短路共用同一函数，仅引用《工伤保险条例》
- * 书名不构成缴纳表述）为真时跳过。 */
-
-const WORK_INJURY_ANCHOR_LEVELS: RegExp[] = [
-  /农民工工资专用账户|工资专用账户|农民工工资/u,
-  /劳务用工|劳务管理|实名制|工资支付/u,
-  /农民工|劳务/u,
-  // 4.36 B2 单源兜底级：检测端词面门控词集为（劳务|农民工|工资），「工资」形态（如「按月足额
-  // 支付工资」无农民工/劳务连续词）同样触发检测——修复锚点必须同集覆盖，否则检测触发而锚点全失配 →
-  // 修复静默返回 fixedCount=0 的死结（远端 4.35.0「工伤保险表述缺失」未收敛机制之一）
-  /工资/u,
-];
-
-export function fixWorkInjuryInsurance(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
-  // 幂等判定与检测字面短路单源共用（B2）：一边判定「已覆盖」、另一边判定「需补写」，禁止两套口径
-  if (hasWorkInjuryInsuranceStatement(markdown)) return { markdown, fixedCount: 0, details: [] };
-  const lines = markdown.split('\n');
-  for (const anchorRe of WORK_INJURY_ANCHOR_LEVELS) {
-    // 取该级锚点的第一个普通正文行（劳资管理小节承载补写；标题/表格行/列表行/引用行不承载，
-    // 防锚到编制依据清单的法规引用行）
-    for (let index = 0; index < lines.length; index += 1) {
-      const line = lines[index];
-      if (/^\s*[#|<>]|^\s*[-*·]/u.test(line)) continue;
-      if (!anchorRe.test(line)) continue;
-      const injected = '项目部按规定为作业人员办理工伤保险，参保信息纳入实名制管理，发生工伤事故时按法定程序申报处理。';
-      lines[index] = /[。；;]$/u.test(line.trim()) ? `${line}${injected}` : `${line}。${injected}`;
-      return { markdown: lines.join('\n'), fixedCount: 1, details: ['劳务管理段落补写工伤保险缴纳表述'] };
-    }
-  }
-  return { markdown, fixedCount: 0, details: [] };
-}
-
-// ── A6 危大/自伤/六个百分百确定性收口（丰乐镇 79 分基线对照实测）──────────────────
-// 首轮生成残留三类阻断（LLM 修复轮定位能力不足，残留被导出门禁硬阻断）：
-// ①危大「如涉及」假设性表述（语义命中自伤候选，暴露专项方案未落实短板）；
-// ②危大辨识清单遗漏适用项（正文出现吊装/拆除工程前提但辨识区未列别名）；
-// ③扬尘六个百分百缺项（出入车辆冲洗/地面硬化仅在长句内词面出现，bge 语义稀释未过阈值）。
-// 此处按检测器同源口径确定性改写/补写（检测定位=修复定位）。
+// ── A6 自伤表述确定性收口（丰乐镇 79 分基线对照实测）：首轮生成自伤类表述（LLM 修复轮定位能力不足，
+// 残留被导出门禁硬阻断），此处按检测器同源口径确定性改写（检测定位=修复定位）；危大辨识清单
+// 补写与扬尘六个百分百补写已随「零确定性正文注入」治理删除（4.41）。
 
 /** 自伤表述确定性改写（A6/A12）：实测形态正向化改写。
  * 只改写实测锁定句式（首轮/二轮生成逐字命中），新句式变体由检测器+LLM 修复轮处理；
@@ -1852,104 +1697,7 @@ export function fixSelfUnderminingCandidates(markdown: string): { markdown: stri
   return { markdown: result, fixedCount, details };
 }
 
-/** 危大遗漏项补写句模板（含辨识别名，插入辨识区即完成词面覆盖） */
-
-const HAZARD_ITEM_FILL: Record<string, string> = {
-  '基坑支护与降水工程': '基坑支护与降水工程：基坑开挖深度达到判定线的区段按基坑支护与降水工程辨识，支护与降水方案经审批后实施。',
-  '高大模板支撑工程': '高大模板支撑工程：模板支撑搭设高度或荷载达到判定线的部位按高大模板支撑工程辨识，编制专项施工方案并组织验收。',
-  '脚手架工程': '脚手架工程：脚手架搭设高度达到判定线的部位按脚手架工程辨识，搭设与拆除执行专项施工方案。',
-  '起重吊装及安装拆卸工程': '起重吊装及安装拆卸工程：管道吊装、构件吊装等吊装作业按起重吊装及安装拆卸工程辨识，吊装专项方案经技术负责人审核后实施。',
-  '吊篮作业工程': '吊篮作业工程：外墙作业采用吊篮的区段按吊篮作业工程辨识，吊篮安拆验收合格后投入使用。',
-  '拆除工程': '拆除工程：既有建筑物、构筑物及设施拆除作业按拆除工程辨识，拆除前编制专项拆除方案并交底后实施。',
-};
-
-/** 危大辨识清单遗漏确定性补写（A6）：与 dangerousApplicabilityIssues 同源判定——
- * 正文出现适用前提（吊装/拆除工程等）但辨识区未列别名时，在危大标题行后补写遗漏项辨识句。
- * 零误伤原则：仅补写检测器同口径会报的遗漏项，不动既有清单内容。 */
-
-export function fixHazardIdentificationGaps(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
-  const applicable = DANGEROUS_APPLICABLE_ITEMS.filter(item => item.applicable(markdown));
-  if (applicable.length === 0) return { markdown, fixedCount: 0, details: [] };
-  const dangerZone = extractDangerZone(markdown);
-  if (!dangerZone) return { markdown, fixedCount: 0, details: [] };
-  const missing = applicable.filter(item => !item.aliases.some(alias => dangerZone.includes(alias)));
-  if (missing.length === 0) return { markdown, fixedCount: 0, details: [] };
-  const lines = markdown.split(/\r?\n/u);
-  // 插入锚点：第一个含「危大」的标题行（H2-H4）；无标题行时回退最后一个含「危大」的正文行
-  let anchorIndex = lines.findIndex(line => /危大/u.test(line) && /^#{2,4}\s/u.test(line.trim()));
-  if (anchorIndex < 0) {
-    for (let index = lines.length - 1; index >= 0; index -= 1) {
-      if (/危大/u.test(lines[index])) { anchorIndex = index; break; }
-    }
-  }
-  if (anchorIndex < 0) return { markdown, fixedCount: 0, details: [] };
-  const fills = missing.map(item => HAZARD_ITEM_FILL[item.name] ?? '').filter(Boolean);
-  if (fills.length === 0) return { markdown, fixedCount: 0, details: [] };
-  lines.splice(anchorIndex + 1, 0, ...fills);
-  return {
-    markdown: lines.join('\n'),
-    fixedCount: fills.length,
-    details: [`危大辨识清单补写：${missing.map(item => item.name).join('、')}`],
-  };
-}
-
-/** 六个百分百缺失项补写句模板（独立短句形态，bge 语义判定可直接命中） */
-
-const SIX_HUNDRED_PERCENT_FILL: Record<string, string> = {
-  '施工工地周边100%围挡': '施工工地周边100%围挡：施工现场沿用地红线设置连续封闭围挡，围挡立面保持整洁完好。',
-  '物料堆放100%覆盖': '物料堆放100%覆盖：易产生扬尘的砂石、水泥等散体材料堆场采用密目网全覆盖。',
-  '出入车辆100%冲洗': '出入车辆100%冲洗：出入口设置车辆冲洗设施，车辆驶离工地前冲洗干净后方可上路。',
-  '施工现场地面100%硬化': '施工现场地面100%硬化：施工便道、材料加工区及堆场地面全部硬化处理。',
-  '拆迁工地100%湿法作业': '拆迁工地100%湿法作业：拆除作业配备雾炮机同步喷淋降尘，全程湿法作业。',
-  '渣土车辆100%密闭运输': '渣土车辆100%密闭运输：渣土运输车辆加盖密闭篷布，装载高度不超过车厢挡板。',
-};
-
-/** 扬尘六个百分百缺项确定性补写（A6）：与 sixHundredPercentCoverageIssues 同源判定
- * （预筛句池 + bge 语义判定）后，对缺失项在扬尘措施段补写独立短句。
- * 首轮实测根因：出入车辆冲洗/地面硬化仅在长句内词面出现，bge 余弦被长句稀释未过 0.6 阈值。 */
-
-export async function fixSixHundredPercentCoverage(markdown: string): Promise<{ markdown: string; fixedCount: number; details: string[] }> {
-  if (!/扬尘|环保|文明施工|绿色施工/u.test(markdown)) return { markdown, fixedCount: 0, details: [] };
-  const dustSentences = [...new Set(markdown.split(/\r?\n/u).flatMap(line => {
-    const trimmed = line.trim();
-    if (!trimmed || /^#{1,6}\s/u.test(trimmed) || /^\s*\|/u.test(trimmed)) return [];
-    if (!/围挡|覆盖|堆放|冲洗|硬化|湿法|密闭|渣土|扬尘|降尘/u.test(trimmed)) return [];
-    return trimmed.split(/(?<=[。！？!?；;])/u).map(part => part.trim()).filter(sentence => sentence.length >= 8 && sentence.length <= 120);
-  }))];
-  const coverage = await judgeQueryCoverage(SIX_HUNDRED_PERCENT_ITEMS.map(item => ({ key: item.name, text: item.query })), dustSentences);
-  const demolitionExempt = /(?:本项目|本工程|该工程|该项目|本标段|本施工项目)[^。；;\n]{0,30}(?:无拆迁|不涉及拆迁|无房屋拆除|无拆除)/u.test(markdown);
-  const missing = SIX_HUNDRED_PERCENT_ITEMS
-    .filter(item => !coverage.get(item.name) && !sixHundredPercentLexicalHit(item.name, dustSentences))
-    .filter(item => !(item.name === '拆迁工地100%湿法作业' && demolitionExempt))
-    .map(item => item.name);
-  if (missing.length === 0) return { markdown, fixedCount: 0, details: [] };
-  const lines = markdown.split(/\r?\n/u);
-  // 插入锚点：第一个含「六个百分百/100%围挡/扬尘治理」的非标题非表格行之后
-  const anchorIndex = lines.findIndex(line => !/^\s*\|/u.test(line) && !/^#{1,6}\s/u.test(line.trim()) && /六个百分百|100%围挡|扬尘治理/u.test(line));
-  let insertAt = anchorIndex >= 0 ? anchorIndex + 1 : -1;
-  // 锚点失效两级兜底（P3.4）：主锚点未命中时优先定位最后一个扬尘类小节标题尾部
-  // （该小节最后一个正文行之后），其次回退环保/文明施工类标题尾部；
-  // 防补写句落到文档末尾与扬尘措施段脱节（补写后复检词面仍命中，但段落语义归属漂移）
-  if (insertAt < 0) {
-    const headingLines: Array<{ index: number; text: string }> = [];
-    for (let index = 0; index < lines.length; index += 1) {
-      if (/^#{1,6}\s/u.test(lines[index].trim())) headingLines.push({ index, text: lines[index] });
-    }
-    const dustHeading = [...headingLines].reverse().find(item => /扬尘|降尘|防尘|六个百分百/u.test(item.text));
-    const sectionHeading = dustHeading ?? [...headingLines].reverse().find(item => /环保|文明施工|绿色施工/u.test(item.text));
-    insertAt = lines.length;
-    if (sectionHeading) {
-      for (let index = sectionHeading.index + 1; index < lines.length; index += 1) {
-        if (/^#{1,6}\s/u.test(lines[index].trim())) { insertAt = index; break; }
-      }
-    }
-  }
-  const fills = missing.map(item => SIX_HUNDRED_PERCENT_FILL[item] ?? '').filter(Boolean);
-  lines.splice(insertAt, 0, ...fills);
-  return { markdown: lines.join('\n'), fixedCount: fills.length, details: [`扬尘六个百分百补写：${missing.join('、')}`] };
-}
-
-// ── A11 内部术语清洗（丰乐镇第二轮实测：LLM 将后台术语写进正式正文）──────────
+// ── A11 内部术语清洗（丰乐镇第二轮实测：LLM 将后台术语写进正式正文）────────────────
 // 阻断消息实测：「正式正文仍包含后台内部术语“控制口径”“峰值口径”」；
 // 只替换实测锁定短语（“口径”在管道口径等语境属行业术语，不得全局替换）。
 

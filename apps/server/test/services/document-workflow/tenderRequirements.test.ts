@@ -1,6 +1,6 @@
 /**
  * 招标要求层（全量条款穷举范式）测试：条款化（确定性切分）→ 逐条判定（序号对齐/重试/确定性复核）→
- * 重复合并 → 对账闭合 → 缓存 v4（对账门禁）→ 蓝图分配（唯一主责章）→ 章级验收 → 补写/清理器。
+ * 重复合并 → 对账闭合 → 缓存 v4（对账门禁）→ 蓝图分配（唯一主责章）→ 章级验收 → 确定性清理器。
  * 判定链 LLM 经 callDocumentLlmJson mock；语义相似度一律参数注入（内核不依赖真实嵌入）。
  */
 import * as fs from 'node:fs';
@@ -20,9 +20,6 @@ import {
   assignTenderRequirementsToChapters,
   emptyTenderRequirements,
   extractTenderRequirements,
-  fixEmptyScoringResponses,
-  fixScoringRequirementResponses,
-  fixScoringRequirementResponsesInFinalMarkdown,
   fixTenderMetaLanguage,
   hasTenderRequirements,
   judgeTenderClauses,
@@ -827,105 +824,7 @@ describe('requirementAcceptanceIssues 章级验收（三通道判定）', () => 
   });
 });
 
-// ═══════════════════════════ 响应补写（章级 / 终检 markdown） ═══════════════════════════
-
-describe('fixScoringRequirementResponses 章级补写（判定=修复同源，幂等）', () => {
-  it('零响应条款补写条款全文（投标人口吻）+ 差异化落实句到责任章尾', async () => {
-    const chapters = [{ title: '## 第五章 施工组织与分包管理', content: '本工程严禁转包和违法分包。' }];
-    const { fixedCount, details } = await fixScoringRequirementResponses({
-      chapters,
-      assignments: [assignment(entry('本招标项目不允许分包。', ['不允许分包'], 'respond', '禁止性要求'), '第五章 施工组织与分包管理')],
-    });
-    expect(fixedCount).toBe(1);
-    expect(chapters[0].content).toContain('本项目不允许分包。本工程全部施工任务由我公司项目部自行组织实施，严禁违法分包、转包及挂靠行为。');
-    expect(details[0]).toContain('禁止性要求');
-    // 幂等：二次调用已满足条目零触碰
-    const again = await fixScoringRequirementResponses({
-      chapters,
-      assignments: [assignment(entry('本招标项目不允许分包。', ['不允许分包'], 'respond', '禁止性要求'), '第五章 施工组织与分包管理')],
-    });
-    expect(again.fixedCount).toBe(0);
-  });
-
-  it('comply（遵守类）不补写；分配章节找不到时跳过不误写', async () => {
-    const chapters = [{ title: '## 第五章 施工组织管理', content: '本工程按计划组织施工。' }];
-    const comply = await fixScoringRequirementResponses({
-      chapters,
-      assignments: [assignment(entry('计划工期：开工之日（以开工令时间为准）起，540个日历天。', ['开工令'], 'comply', '工期进度'), '第五章 施工组织管理')],
-    });
-    expect(comply.fixedCount).toBe(0);
-    expect(chapters[0].content).toBe('本工程按计划组织施工。');
-    const missingChapter = await fixScoringRequirementResponses({
-      chapters,
-      assignments: [assignment(entry('创优目标：确保获得黄山杯。', ['黄山杯'], 'respond', '质量创优'), '第九章 不存在的章节')],
-    });
-    expect(missingChapter.fixedCount).toBe(0);
-    expect(chapters[0].content).toBe('本工程按计划组织施工。');
-  });
-
-  it('低置信分配在明细中标记（条款照常补写，主题词命中即幂等）', async () => {
-    const chapters = [{ title: '## 第五章 施工组织管理', content: '本工程按计划组织施工。' }];
-    const { fixedCount, details } = await fixScoringRequirementResponses({
-      chapters,
-      assignments: [assignment(entry('创优目标：确保获得黄山杯。', ['黄山杯'], 'respond', '质量创优'), '第五章 施工组织管理', true)],
-    });
-    expect(fixedCount).toBe(1);
-    expect(chapters[0].content).toContain('创优目标：确保获得黄山杯。');
-    expect(details[0]).toContain('（低置信分配）');
-    // 主题词已落位：二次调用幂等零触碰
-    const again = await fixScoringRequirementResponses({
-      chapters,
-      assignments: [assignment(entry('创优目标：确保获得黄山杯。', ['黄山杯'], 'respond', '质量创优'), '第五章 施工组织管理', true)],
-    });
-    expect(again.fixedCount).toBe(0);
-  });
-});
-
-describe('fixScoringRequirementResponsesInFinalMarkdown 终检补写（最终成稿行级插入）', () => {
-  it('锚点被 LLM 改写丢失后按责任章行级重插（插入位在下一章标题前，章节快照同步，幂等）', async () => {
-    const markdown = ['## 第五章 施工组织与分包管理', '本工程严禁转包和违法分包。', '', '## 第六章 质量保证措施', '质量保证体系健全。'].join('\n');
-    const chapters = [{ title: '## 第五章 施工组织与分包管理', content: '本工程严禁转包和违法分包。' }];
-    const assignments = [assignment(entry('本招标项目不允许分包。', ['不允许分包'], 'respond', '禁止性要求'), '第五章 施工组织与分包管理')];
-    const result = await fixScoringRequirementResponsesInFinalMarkdown({ markdown, chapters, assignments });
-    expect(result.fixedCount).toBe(1);
-    const inserted = result.markdown.indexOf('本项目不允许分包。本工程全部施工任务由我公司项目部自行组织实施，严禁违法分包、转包及挂靠行为。');
-    expect(inserted).toBeGreaterThan(result.markdown.indexOf('## 第五章'));
-    expect(inserted).toBeLessThan(result.markdown.indexOf('## 第六章'));
-    expect(chapters[0].content).toContain('本项目不允许分包');
-    const again = await fixScoringRequirementResponsesInFinalMarkdown({ markdown: result.markdown, chapters, assignments });
-    expect(again.fixedCount).toBe(0);
-  });
-
-  it('章节标题找不到（LLM 改写标题）→ 跳过不破坏结构', async () => {
-    const markdown = '## 第九章 其他\n内容。';
-    const result = await fixScoringRequirementResponsesInFinalMarkdown({
-      markdown,
-      chapters: [],
-      assignments: [assignment(entry('本招标项目不允许分包。', ['不允许分包'], 'respond', '禁止性要求'), '第五章 施工组织与分包管理')],
-    });
-    expect(result.fixedCount).toBe(0);
-    expect(result.markdown).toBe(markdown);
-  });
-});
-
 // ═══════════════════════════ 交付前确定性清理器 ═══════════════════════════
-
-describe('fixEmptyScoringResponses 空响应句确定性改写', () => {
-  it('空响应句改写为前文条款的技术落实句（检测定位=修复定位）', () => {
-    const input = '（隐蔽工程验收要求）：隐蔽工程验收按规范提前通知监理参加，本施工组织设计已按上述条款要求逐项落实执行。';
-    const result = fixEmptyScoringResponses(input);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown).toContain('本工程隐蔽验收按约定时限提前通知监理单位参加检查，检查合格后方可进行下道工序。');
-    expect(result.markdown).not.toContain('已按上述条款要求');
-  });
-
-  it('无可提取主题（无条款冒号上下文）保留原句，交元语言清理器兜底', () => {
-    const input = '本施工组织设计已按上述条款要求逐项落实执行。';
-    const result = fixEmptyScoringResponses(input);
-    expect(result.fixedCount).toBe(0);
-    expect(result.markdown).toBe(input);
-  });
-});
 
 describe('fixTenderMetaLanguage 招标元语言确定性清理（语气泄漏治理）', () => {
   it('条幅前缀剥离：条款正文保留并转投标人口吻（「按招标文件要求：」不再入正文）', () => {

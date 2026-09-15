@@ -2,8 +2,6 @@
  * dicSelfQATableRepeatBoundary：第二十六批（CC 组）覆盖增量（与既有基线互补、不重复）：
  *  - CC1 fixSelfUnderminingCandidates：捕获组回填产物/窗口精确边界/规则互作/多处计数/幂等
  *    （基线 B 段只测各规则单命中与变体）；
- *  - CC2 fixQualityAssuranceCoverage：六词门槛矩阵（hitCount 0/1/2/3/6）/6.2 与六七章截断/块尾插入位置
- *    （基线 I1/I2/Jc 只测单形态）；
  *  - CC3 stripDuplicateTablesAcrossChapters：三章同表/无尾换行/单章内重复/首末章同表
  *    （基线 K8 只测两章同表与无重复）；
  *  - CC4 repeatedWordIssues/collapseRepeatedWords：三连叠词单次 replace 不收敛/分项双重豁免/多词聚合/截断
@@ -14,7 +12,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  collapseRepeatedWords, fixQualityAssuranceCoverage, fixSelfUnderminingCandidates,
+  collapseRepeatedWords, fixSelfUnderminingCandidates,
   repeatedWordIssues, stripDuplicateTables, stripDuplicateTablesAcrossChapters,
 } from '@/services/document-workflow/documentIntegrityChecks';
 
@@ -96,72 +94,6 @@ describe('CC1 fixSelfUndermining 规则互作与计数', () => {
   it('CC1 规则7 产物不重匹配（含「我公司将依据」前置句不再命中）', () => {
     const once = fixSelfUnderminingCandidates('涉及危险性较大的分部分项工程，我公司将依据第37号令，在施工前单独编制专项施工方案并履行审批程序。');
     expect(fixSelfUnderminingCandidates(once.markdown).fixedCount).toBe(0);
-  });
-});
-
-// ── CC2. fixQualityAssuranceCoverage：六词门槛矩阵 ──
-
-describe('CC2 fixQualityAssurance 六词门槛矩阵', () => {
-  const BLOCK = (terms: string) => `### 6.1 施工部署与施工流水组织\n\n${terms}\n`;
-  it('CC2 hitCount=0 → 补写 details 6/6 缺失', () => {
-    const result = fixQualityAssuranceCoverage(BLOCK('本工程按流水段组织施工。'));
-    expect(result.fixedCount).toBe(1);
-    expect(result.details).toEqual(['6.1 施工部署块补全质量保障协同段（核心术语 6/6 缺失）']);
-  });
-  it('CC2 hitCount=1 → 5/6 缺失', () => {
-    const result = fixQualityAssuranceCoverage(BLOCK('本项目实行三检制。'));
-    expect(result.details[0]).toContain('核心术语 5/6 缺失');
-  });
-  it('CC2 hitCount=2 → 4/6 缺失', () => {
-    const result = fixQualityAssuranceCoverage(BLOCK('本项目实行三检制，推行样板引路制度。'));
-    expect(result.fixedCount).toBe(1);
-    expect(result.details[0]).toContain('核心术语 4/6 缺失');
-  });
-  it('CC2 hitCount=3 恰门槛 → 不补写', () => {
-    const result = fixQualityAssuranceCoverage(BLOCK('本项目实行三检制，推行样板引路制度，隐蔽工程执行隐蔽验收。'));
-    expect(result.fixedCount).toBe(0);
-    expect(result.details).toEqual([]);
-  });
-  const coreTerms = ['三检', '样板引路', '隐蔽验收', '见证取样', '试块养护', '分部分项报验'];
-  it.each(coreTerms)('CC2 单词「%s」命中 → hitCount=1 补写', (term) => {
-    const result = fixQualityAssuranceCoverage(BLOCK(`本项目落实${term}要求。`));
-    expect(result.fixedCount).toBe(1);
-  });
-  it('CC2 六词全命中 → 不补写', () => {
-    const result = fixQualityAssuranceCoverage(BLOCK('本项目实行三检制，推行样板引路制度，隐蔽工程执行隐蔽验收，原材料按见证取样送检，混凝土试块落实试块养护，严格执行分部分项报验程序。'));
-    expect(result.fixedCount).toBe(0);
-  });
-});
-
-describe('CC2 fixQualityAssurance 块边界与插入位置', () => {
-  it('CC2 6.1 块止于 6.2 标题前，插入在 6.2 之前', () => {
-    const md = '### 6.1 施工部署与施工流水组织\n\n本工程按流水段组织施工。\n\n### 6.2 施工进度计划\n\n进度内容。';
-    const result = fixQualityAssuranceCoverage(md);
-    expect(result.fixedCount).toBe(1);
-    const injectedAt = result.markdown.indexOf('质量保障体系与安全文明管理同频运行');
-    expect(injectedAt).toBeGreaterThan(-1);
-    expect(injectedAt).toBeLessThan(result.markdown.indexOf('### 6.2'));
-  });
-  it('CC2 6.1 块止于第七章标题', () => {
-    const md = '### 6.1 施工部署与施工流水组织\n\n本工程按流水段组织施工。\n\n## 第七章 确保工程质量的措施\n\n质量内容。';
-    const result = fixQualityAssuranceCoverage(md);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown.indexOf('质量保障体系与安全文明管理同频运行')).toBeLessThan(result.markdown.indexOf('## 第七章'));
-  });
-  it('CC2 6.1 块止于第六章标题', () => {
-    const md = '### 6.1 施工部署与施工流水组织\n\n本工程按流水段组织施工。\n\n## 第六章 劳动力计划\n\n计划内容。';
-    const result = fixQualityAssuranceCoverage(md);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown.indexOf('质量保障体系与安全文明管理同频运行')).toBeLessThan(result.markdown.indexOf('## 第六章'));
-  });
-  it('CC2 标题近似但不精确（施工部署与流水组织）→ 零命中', () => {
-    expect(fixQualityAssuranceCoverage('### 6.1 施工部署与流水组织\n\n本工程按流水段组织施工。').fixedCount).toBe(0);
-  });
-  it('CC2 文档尾截断（无 6.2 无第七章）→ 补写', () => {
-    const md = '### 6.1 施工部署与施工流水组织\n\n本工程按流水段组织施工。';
-    const result = fixQualityAssuranceCoverage(md);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown.endsWith('逐级落实。')).toBe(true);
   });
 });
 

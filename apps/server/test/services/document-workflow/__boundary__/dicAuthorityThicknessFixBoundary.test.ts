@@ -12,23 +12,15 @@
  * - AA5 fixSixHundredPercentCoverage：锚点三级兜底、插入位置、拆迁豁免增量
  * - AA6 stripCommercialDataBodyLines：行内删句留后句、混合行、标题/表格保留
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildSemanticSimilarity } from '@/services/document-workflow/semanticSimilarity';
+import { describe, expect, it, vi } from 'vitest';
 import {
   extractProjectScaleSummary, extractStreetLightAuthority, fixFinishThickness,
-  fixSixHundredPercentCoverage, specLocationMismatchIssues,
-  stripCommercialDataBodyLines,
+  specLocationMismatchIssues, stripCommercialDataBodyLines,
 } from '@/services/document-workflow/documentIntegrityChecks';
 import type { SpecAuthorityMap } from '@/services/document-workflow/types';
 import { factOf, factsOf } from './boundaryKit';
 
 vi.mock('@/services/document-workflow/semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
-
-/** 六项共享词模拟器（与 dicFixersBoundary 同源）：query/句共享扬尘词即 0.9 */
-const SIX_PERCENT_SIM = async (_leftTexts: string[], _rightTexts: string[]) => (left: string, right: string): number => {
-  const kw = ['围挡', '覆盖', '冲洗', '硬化', '湿法', '密闭'];
-  return kw.some(word => left.includes(word) && right.includes(word)) ? 0.9 : 0.1;
-};
 
 function specMap(entries: Record<string, Array<[string, string]>>): SpecAuthorityMap {
   const map: SpecAuthorityMap = {};
@@ -331,89 +323,6 @@ describe('AA4 specLocationMismatchIssues 豁免与模式谱系增量', () => {
     const map = specMap({ 混凝土强度等级: [['垫层', 'C15'], ['主体', 'C35']] });
     const md = Array.from({ length: 12 }, () => '垫层采用C20混凝土。').join('\n');
     expect(specLocationMismatchIssues(md, map)).toHaveLength(8);
-  });
-});
-
-describe('AA5 fixSixHundredPercentCoverage 锚点兜底增量', () => {
-  beforeEach(() => {
-    vi.mocked(buildSemanticSimilarity).mockImplementation(SIX_PERCENT_SIM);
-  });
-
-  it('AA5 无扬尘词面 → 早退', async () => {
-    const result = await fixSixHundredPercentCoverage('本工程施工管理规范。');
-    expect(result.fixedCount).toBe(0);
-  });
-  it('AA5 主锚点 100%围挡行后插入', async () => {
-    const md = '## 扬尘治理\n\n现场落实100%围挡要求。\n\n后文。';
-    const result = await fixSixHundredPercentCoverage(md);
-    const lines = result.markdown.split('\n');
-    const anchorIndex = lines.findIndex(line => line.includes('100%围挡要求'));
-    expect(lines[anchorIndex + 1]).toContain('物料堆放100%覆盖：');
-  });
-  it('AA5 锚点失效 → 扬尘标题小节尾部兜底', async () => {
-    const md = '## 文明施工\n\n### 5.1 扬尘防治措施\n\n安排专人清扫。\n\n### 5.2 噪声控制\n\n控制施工噪声。';
-    const result = await fixSixHundredPercentCoverage(md);
-    const lines = result.markdown.split('\n');
-    const noiseIndex = lines.findIndex(line => line.includes('噪声控制'));
-    const inserted = lines.slice(Math.max(0, noiseIndex - 8), noiseIndex).join('\n');
-    expect(inserted).toContain('施工工地周边100%围挡：');
-    expect(inserted).toContain('渣土车辆100%密闭运输：');
-  });
-  it('AA5 扬尘小节后无下一标题 → 文档尾插入', async () => {
-    const md = '## 环保措施\n\n扬尘控制措施。';
-    const result = await fixSixHundredPercentCoverage(md);
-    const lines = result.markdown.split('\n');
-    expect(lines[lines.length - 1]).toContain('渣土车辆100%密闭运输：');
-  });
-  it('AA5 无扬尘标题 → 环保标题兜底', async () => {
-    const md = '## 环保措施\n\n安排专人清扫。\n\n## 其他章节\n\n其他内容。';
-    const result = await fixSixHundredPercentCoverage(md);
-    const lines = result.markdown.split('\n');
-    const otherIndex = lines.findIndex(line => line.includes('其他章节'));
-    const inserted = lines.slice(Math.max(0, otherIndex - 8), otherIndex).join('\n');
-    expect(inserted).toContain('施工工地周边100%围挡：');
-  });
-  it('AA5 无扬尘无环保 → 文明施工标题兜底', async () => {
-    const md = '## 文明施工\n\n安排专人清扫。\n\n## 其他章节\n\n其他内容。';
-    const result = await fixSixHundredPercentCoverage(md);
-    const lines = result.markdown.split('\n');
-    const otherIndex = lines.findIndex(line => line.includes('其他章节'));
-    const inserted = lines.slice(Math.max(0, otherIndex - 8), otherIndex).join('\n');
-    expect(inserted).toContain('施工工地周边100%围挡：');
-  });
-  it('AA5 部分缺失补写 fixedCount=缺失数', async () => {
-    const md = '## 扬尘治理\n\n施工工地周边100%围挡、物料堆放100%覆盖。';
-    const result = await fixSixHundredPercentCoverage(md);
-    expect(result.fixedCount).toBe(4);
-    expect(result.markdown).not.toContain('施工工地周边100%围挡：');
-    expect(result.markdown).toContain('出入车辆100%冲洗：');
-  });
-  it('AA5 六项齐全不补写', async () => {
-    const md = '## 扬尘治理\n\n施工工地周边100%围挡、物料堆放100%覆盖、出入车辆100%冲洗、施工现场地面100%硬化、拆迁工地100%湿法作业、渣土车辆100%密闭运输。';
-    const result = await fixSixHundredPercentCoverage(md);
-    expect(result.fixedCount).toBe(0);
-  });
-  it('AA5 拆迁豁免（本项目无拆迁）→ 湿法项不补写', async () => {
-    const md = '## 扬尘治理\n\n本项目无拆迁。施工工地周边100%围挡、物料堆放100%覆盖、出入车辆100%冲洗、施工现场地面100%硬化、渣土车辆100%密闭运输。';
-    const result = await fixSixHundredPercentCoverage(md);
-    expect(result.fixedCount).toBe(0);
-  });
-  it('AA5 details 列出缺失项', async () => {
-    const md = '## 扬尘治理\n\n现场安排专人清扫保洁。';
-    const result = await fixSixHundredPercentCoverage(md);
-    expect(result.fixedCount).toBe(6);
-    expect(result.details[0]).toContain('扬尘六个百分百补写');
-  });
-  it('AA5 标题行与表格行不参与预筛（补写六项）', async () => {
-    const md = '## 扬尘治理\n\n### 围挡措施\n\n| 冲洗 | 硬化 |\n| --- | --- |\n| 落实 | 落实 |';
-    const result = await fixSixHundredPercentCoverage(md);
-    expect(result.fixedCount).toBe(6);
-  });
-  it('AA5 补写句不触碰既有清单内容', async () => {
-    const md = '## 扬尘治理\n\n施工工地周边100%围挡。\n既有说明文字。';
-    const result = await fixSixHundredPercentCoverage(md);
-    expect(result.markdown).toContain('既有说明文字');
-    expect(result.fixedCount).toBe(5);
   });
 });
 

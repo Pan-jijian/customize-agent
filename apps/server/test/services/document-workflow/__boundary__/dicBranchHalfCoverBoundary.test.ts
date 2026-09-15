@@ -26,7 +26,6 @@ import {
   fabricatedAwardIssues,
   fixAdjacentPhraseDuplication,
   fixQuantityAuthorityConflicts,
-  fixQualityAssuranceCoverage,
   fixTocFromBody,
   greeningMaintenanceMismatchIssues,
   resourceTriadSectionHierarchyIssues,
@@ -269,18 +268,6 @@ describe('GG17 数值单位粘连：跨单位折叠', () => {
     const result = fixAdjacentPhraseDuplication('总功率71.2kW182.5kVA。');
     expect(result.fixedCount).toBe(1);
     expect(result.markdown).toBe('总功率71.2kW。');
-  });
-});
-
-// ── GG18. fixQualityAssuranceCoverage：6.1 块非文档开头（L3726 block.index 非 0） ──
-
-describe('GG18 质量保障补全：块前有章节', () => {
-  it('GG18 6.1 块前有第一章 → insertAt 在块尾（6.2 之前）→ 注入 1 处', () => {
-    const markdown = '## 第一章 概述\n内容。\n\n### 6.1 施工部署与施工流水组织\n以安全文明为主线。\n\n### 6.2 进度计划\n内容。';
-    const result = fixQualityAssuranceCoverage(markdown);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown.indexOf('质量保障体系与安全文明管理同频运行')).toBeGreaterThan(-1);
-    expect(result.markdown.indexOf('质量保障体系与安全文明管理同频运行')).toBeLessThan(result.markdown.indexOf('### 6.2'));
   });
 });
 

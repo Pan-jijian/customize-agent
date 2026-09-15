@@ -18,7 +18,7 @@ import { cleanFormalSourcePhrases, composeDocumentMarkdown, finalizeDocumentMark
 import { isBodyTableForbidden, type BidCompositionSpec } from '../bidComposition';
 import { appendTenderAppendixSections } from '../composeAppendices';
 import { documentBudgetIssues, documentTextLength, pageTargetIssues } from '../budget';
-import { applySpecGateRules, autoSpecGateRequiredTexts, buildExportGate, headingUncoveredEngineeringItems } from '../qualityValidation';
+import { applySpecGateRules, buildExportGate, headingUncoveredEngineeringItems } from '../qualityValidation';
 import { fixTocFromBody } from '../documentIntegrityChecks';
 import { internalTerminologyAnchorIssues } from '../internalTerminologyAnchors';
 import { auditAuthorityCoverage, authorityAuditDetails, authorityAuditSummary } from '../authorityAudit';
@@ -50,124 +50,6 @@ export function sanitizeContaminationCandidates(markdown: string, summary: any) 
     if (!candidate || candidate.length < 6 || currentNames.has(candidate)) return text;
     return text.replace(new RegExp(candidate.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'gu'), '本项目工程');
   }, markdown);
-}
-
-/** 施组标准术语补写条目：每条覆盖一组模板专业规则必要术语，仅当组内任一术语缺失时整条补写。
- * 必须以编制依据正式条目形式注入——禁止「补充说明」标题与「详见本方案各保障章节」类元话语
- * （丰乐镇第 3 轮实测：「**编制依据补充说明**：…按施工进度动态配置，详见本方案各保障章节」
- * 元话语块进入正式正文被判定为内容污染；术语缺失时以正式条目兜底，保证门禁词形同时不污染正文） */
-const REQUIRED_TEXT_SUPPLEMENTS: Array<{ words: string[]; basisItem: string }> = [
-  { words: ['编制依据', '国家法律法规', '地方法规'], basisItem: '本施工组织设计的编制依据包括国家法律法规、地方法规及现行工程建设标准、规范' },
-  { words: ['工程量清单', '施工图纸', '分部分项', '项目特征', '规格', '工程量', '图纸设计说明'], basisItem: '- 工程量清单及施工图纸：本项目分部分项工程量清单（项目特征、规格及工程量）与施工图纸设计说明；' },
-  { words: ['劳动力计划', '主要施工材料', '主要施工机械'], basisItem: '- 施工组织设计文件：本工程劳动力计划、主要施工材料与主要施工机械配置计划；' },
-];
-
-/** 编制依据类别段落标题行与五类条目（总控提示词总纲要求按类别列出）：招标文件及补疑补遗/国家法律法规/
- * 国家行业地方现行规范标准/地方法规规章/企业管理体系五类；法律法规条目按公共知识列出具体法规名及文号
- * （丰乐镇实测缺陷：只写「国家现行法律、行政法规」类别话术被判内容空泛），不把工程量清单、
- * 施工图纸内容搬入编制依据正文 */
-const REQUIRED_BASIS_CATEGORIES_TITLE = '**编制依据**：本施工组织设计的编制依据按以下类别列出：';
-const REQUIRED_BASIS_CATEGORIES_ITEMS = [
-  '- 招标文件及补疑补遗：本项目招标文件及招标补疑、澄清文件（招标文件与澄清、修正文件不一致的，以澄清、修正文件为准）；',
-  '- 国家法律法规：《中华人民共和国建筑法》（2019年修正）、《中华人民共和国招标投标法》（2017年修正）、《中华人民共和国安全生产法》（2021年修正）、《中华人民共和国民法典》（2020年）、《建设工程质量管理条例》（国务院令第279号，2019年修订）、《建设工程安全生产管理条例》（国务院令第393号）、《保障农民工工资支付条例》（国务院令第724号）；',
-  '- 国家/行业/地方现行规范标准：《建筑工程施工质量验收统一标准》（GB 50300-2013）及与本工程各分部分项工程对应的现行施工验收规范、标准与规程；',
-  '- 地方法规规章：工程所在地现行地方性法规与政府规章；',
-  '- 企业管理体系：公司质量、环境、职业健康安全管理体系文件及企业施工工艺标准。',
-];
-
-/** 编制依据五类清单的类别变体正则（≥3 类命中即认定类别已列出）：精确词形匹配对 LLM 变体表述
- * 整类漏判（丰乐镇实测「招标及合同文件/国家法律法规/地方性法规与政府规章/现行工程建设标准规范/
- * 企业管理体系文件」五类全覆盖，旧精确词只命中 2 类 → 误判未列出 → 重复注入「编制依据」块，
- * 用户实测缺陷：编制依据开头结尾双现）；限定词容忍不跨句读标点，防跨句误判。 */
-const BASIS_CATEGORY_PATTERNS: RegExp[] = [
-  /招标(?:文件|及合同文件)|补疑补遗|招标澄清/u,
-  /国家[^\n，、；]{0,4}法律/u,
-  /现行[^\n，、；]{0,10}(?:规范|标准)/u,
-  /地方[^\n，、；]{0,8}(?:法规|规章)/u,
-  /企业管理体系|企业[^\n，、；]{0,8}体系/u,
-];
-
-/** 工伤保险政策合规句：正文有劳资管理内容却未提工伤保险时确定性补写（舒城第二轮实测全篇 0 处
- * 保险表述；P3.3 补挂依赖评分项摘要提及保险，未触发）。按投标响应口径写明参保义务/费用承担/凭证留存 */
-const WORK_INJURY_STATEMENT = '本项目按规定为全体作业人员办理工伤保险，保险费用由企业承担并计入投标报价，进场前完成参保手续并留存缴费凭证，务工人员工伤保险权益依法受到保障。';
-
-/** 工伤保险兜底触发条件：原始输入存在劳务/农民工/工资词形（书名号引用不计）且无保险表述 */
-const WORK_INJURY_LABOR_RE = /(?:劳务|农民工|工资)/u;
-const WORK_INJURY_COVERED_RE = /(?:工伤保险|意外伤害保险|社会保险)/u;
-
-/** 工伤保险语句锚点：优先劳资/工资类小节标题（如「5.3.1 劳动力工资支付与稳定措施」），
- * 退章级「劳动力」标题，均无则文末追加 */
-const WORK_INJURY_SECTION_ANCHOR_RE = /^(#{2,6}\s+[^\n]*(?:劳务|农民工|用工|工资)[^\n]*\n)/mu;
-const WORK_INJURY_CHAPTER_ANCHOR_RE = /^(#{2,6}\s+[^\n]*劳动力[^\n]*\n)/mu;
-
-/** 模板专业规则必要术语（编制依据/主要施工材料等施组标准术语）缺失时确定性补写：
- * Writer 只收到“质量控制点”弱建议，常遗漏这些术语；逐句补写保证术语出现在正文，不依赖 LLM 自觉 */
-function supplementTemplateAndBasisTexts(markdown: string, template: DocumentTemplate): string {
-  const missingRequiredTexts = autoSpecGateRequiredTexts(template).filter(item => !markdown.includes(item));
-  // 编制依据类别段落注入与术语缺失解耦（丰乐镇第十二轮实测）：LLM 写「编制依据」标题或只写
-  // 「包括国家法律法规、地方法规及现行规范」一句笼统话时，missingRequiredTexts 已为空 → 原逻辑
-  // 静默漏注入，总纲要求的五类清单全丢；类别词 ≥3 命中才认定类别已列出
-  const basisCategoryHit = BASIS_CATEGORY_PATTERNS.filter(pattern => pattern.test(markdown)).length;
-  // 施组类恒注入（丰乐镇第十三轮）：编制依据五类清单是总纲硬要求，LLM 零提及（无标题无词形）时
-  // 原触发条件静默跳过导致清单全丢——模板为施组类或正文已出现编制说明/工程概况章节即触发
-  const isConstructionDoc = /编制说明|工程概况|施工准备/u.test(markdown);
-  const basisTermRelevant = isConstructionDoc || missingRequiredTexts.includes('编制依据') || missingRequiredTexts.includes('国家法律法规') || missingRequiredTexts.includes('地方法规') || markdown.includes('编制依据');
-  const needBasisBlock = basisCategoryHit < 3 && basisTermRelevant;
-  if (missingRequiredTexts.length === 0 && !needBasisBlock) return markdown;
-  const supplementItems = REQUIRED_TEXT_SUPPLEMENTS
-    // 类别段落已覆盖编制依据术语时，跳过原单句兜底（避免与类别段落重复）
-    .filter(group => (needBasisBlock ? group.words[0] !== '编制依据' : true))
-    .filter(group => group.words.some(word => missingRequiredTexts.includes(word)))
-    .map(group => group.basisItem);
-  if (supplementItems.length === 0 && !needBasisBlock) return markdown;
-  const items = [...(needBasisBlock ? REQUIRED_BASIS_CATEGORIES_ITEMS : []), ...supplementItems];
-  // 条目以「；」为内部连接符，整块末尾统一句号收束（五类最后一条已句号时不命中替换）
-  const supplement = needBasisBlock
-    ? [REQUIRED_BASIS_CATEGORIES_TITLE, ...items].join('\n')
-    : items.join('\n').replace(/；$/u, '。');
-  // 锚点优先「编制依据/编制文件/依据文件」小节标题（LLM 变体标题——丰乐镇「1.1 编制文件与现场条件核验」、
-  // 舒城「1.1 依据文件与踏勘范围」——也能注入标题下），退「编制说明/编制原则」、再退「工程概况/项目概况」
-  const BASIS_ANCHOR_RES: RegExp[] = [
-    /^(?:#{2,4})\s+(?:[\d.]+[\s\u00a0]*)?[^\n#]{0,16}(?:编制依据|编制文件|依据文件)[^\n#]{0,16}$/mu,
-    /^(?:#{2,4})\s+(?:[\d.]+[\s\u00a0]*)?[^\n#]{0,16}(?:编制说明|编制原则)[^\n#]{0,16}$/mu,
-    /^(?:#{2,4})\s+(?:[\d.]+[\s\u00a0]*)?[^\n#]{0,16}(?:工程概况|项目概况)[^\n#]{0,16}$/mu,
-  ];
-  let anchor: RegExpExecArray | null = null;
-  for (const pattern of BASIS_ANCHOR_RES) {
-    anchor = pattern.exec(markdown);
-    if (anchor) break;
-  }
-  if (anchor) {
-    // 注入到编制依据/编制说明小节标题行之后
-    const insertAt = markdown.indexOf('\n', anchor.index) + 1;
-    return `${markdown.slice(0, insertAt)}${supplement}\n\n${markdown.slice(insertAt)}`;
-  }
-  // 无锚点回退：插入首个非「目录」H2 标题行之后（原实现文末追加——与依据性内容位置脱节，
-  // 用户实测缺陷：编制依据块悬浮在成稿末尾）；连 H2 都没有（罕见）才退回文末追加
-  const lines = markdown.split(/\r?\n/u);
-  const firstChapterLine = lines.findIndex(line => /^##(?!#)\s+/u.test(line.trim()) && !/目录|contents/iu.test(line));
-  if (firstChapterLine >= 0) {
-    lines.splice(firstChapterLine + 1, 0, '', supplement);
-    return lines.join('\n');
-  }
-  return `${markdown.replace(/\s+$/u, '')}\n\n${supplement}`;
-}
-
-/** 政策合规表述兜底（工伤保险）：正文存在劳资管理内容（劳务/农民工/工资词形，书名号法规引用
- * 不计）却未提工伤保险时，确定性补写合规句到劳资/工资小节标题下（退「劳动力」章标题，再退文末）。
- * 条件判定只用于原始输入——术语补写块会引用《保障农民工工资支付条例》，在补写后文本上判定会把
- * 法规引用误当劳资内容而误注入（回归 dicPipelineBasisBoundary 文末收束断言）；注入目标为补写后输出。 */
-export function supplementRequiredTexts(markdown: string, template: DocumentTemplate): string {
-  const supplemented = supplementTemplateAndBasisTexts(markdown, template);
-  const plainInput = markdown.replace(BOOK_TITLE_CITATION_RE, '');
-  if (!WORK_INJURY_LABOR_RE.test(plainInput) || WORK_INJURY_COVERED_RE.test(plainInput)) return supplemented;
-  const anchor = WORK_INJURY_SECTION_ANCHOR_RE.exec(supplemented) ?? WORK_INJURY_CHAPTER_ANCHOR_RE.exec(supplemented);
-  if (anchor) {
-    // 注入到劳资/工资小节标题行之后
-    const insertAt = anchor.index + anchor[0].length;
-    return `${supplemented.slice(0, insertAt)}${WORK_INJURY_STATEMENT}\n\n${supplemented.slice(insertAt)}`;
-  }
-  return `${supplemented.replace(/\s+$/u, '')}\n\n${WORK_INJURY_STATEMENT}`;
 }
 
 export function criticalSectionFactDensityIssues(chapters: DocumentDraftChapter[]) {
@@ -455,7 +337,7 @@ export function stageComposeFinal(session: FinalizeSession): void {
     return { ...chapter, sections: chapter.sections || [], content: finalizeChapterContentQuality(chapter.content, templateChapter) };
   });
   session.finalMarkdown = finalizeDocumentMarkdown(composeDocumentMarkdown({ templateId: session.template.id, templateName: session.template.name, title: session.template.outputTitle, requirement: session.requirement || '', projectRoot: session.projectRoot, projectId: session.projectId, exportSettings: session.template.exportSettings, generationSettings: session.template.generationSettings, facts: session.facts, structuredFacts: session.structuredFacts, factsModel: session.factsModel, chapters: session.finalChapterDrafts, sources: session.sources, missingItems: [...new Set(session.missingItems)], validation: session.validation, validationIssues: session.validationIssues, executionStages: session.executionStages, exportGate: { passed: false, blockingIssues: [], checklist: [] }, assets: session.assets, partialChapters: [], checkpointChapters: session.finalChapterDrafts, generatedAt: Date.now() }, { forbidDrawingImages: false, promptRules: session.promptDocumentRules, bodyTableForbidden, coverForbidden }), session.finalChapterDrafts, { forbidDrawingImages: false, promptRules: session.promptDocumentRules, bodyTableForbidden, coverForbidden }).markdown;
-  session.finalMarkdown = fixTocFromBody(finalizeFinalMarkdownStructure(supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(session.finalMarkdown, session.structuredFacts, { bodyTableForbidden }), session.projectMaterialSummary)))), session.template))).markdown;
+  session.finalMarkdown = fixTocFromBody(finalizeFinalMarkdownStructure(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(session.finalMarkdown, session.structuredFacts, { bodyTableForbidden }), session.projectMaterialSummary)))))).markdown;
   // 文末附表区：全部标准化管道完成后追加（不再经 normalize 管道，避免附表 H2 被当章标题处理）；
   // 数据源为一体化蓝图（appendixPlan 逐项绑定），无附表清单时不追加
   session.finalMarkdown = appendTenderAppendixSections(session.finalMarkdown, { plan: session.bidComposition?.appendixPlan || [], blueprintData: session.blueprintData });
@@ -482,7 +364,7 @@ export async function stageRebuildAndRecompute(session: FinalizeSession): Promis
   // round-19：全文重建函数（章草稿 → finalMarkdown 标准化管道）单一定义：
   // 确定性修复后重建/Final Gate 补写后重建/事实落位后重建/表格修复后重建/post-gate 重建共用同一口径，
   // 消除 5 处 300+ 字符重复表达式（历史遗留：rebuild 定义在修复循环后才出现，前面的重建只能内联复制）
-  session.rebuildFinalMarkdown = () => fixTocFromBody(finalizeFinalMarkdownStructure(supplementRequiredTexts(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(rebuildFinalMarkdown({ template: session.template, requirement: session.requirement, projectRoot: session.projectRoot, projectId: session.projectId, facts: session.facts, structuredFacts: session.structuredFacts, factsModel: session.factsModel, chapters: session.finalChapterDrafts, sources: session.sources, missingItems: session.missingItems, validation: session.validation, validationIssues: session.validationIssues, executionStages: session.executionStages, assets: session.assets, promptDocumentRules: session.promptDocumentRules, bodyTableForbidden: isBodyTableForbidden(session.bidComposition), coverForbidden: session.bidComposition?.formatRules.cover === 'forbidden', bidComposition: session.bidComposition, blueprintData: session.blueprintData }), session.structuredFacts, { bodyTableForbidden: isBodyTableForbidden(session.bidComposition) }), session.projectMaterialSummary)))), session.template))).markdown;
+  session.rebuildFinalMarkdown = () => fixTocFromBody(finalizeFinalMarkdownStructure(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(rebuildFinalMarkdown({ template: session.template, requirement: session.requirement, projectRoot: session.projectRoot, projectId: session.projectId, facts: session.facts, structuredFacts: session.structuredFacts, factsModel: session.factsModel, chapters: session.finalChapterDrafts, sources: session.sources, missingItems: session.missingItems, validation: session.validation, validationIssues: session.validationIssues, executionStages: session.executionStages, assets: session.assets, promptDocumentRules: session.promptDocumentRules, bodyTableForbidden: isBodyTableForbidden(session.bidComposition), coverForbidden: session.bidComposition?.formatRules.cover === 'forbidden', bidComposition: session.bidComposition, blueprintData: session.blueprintData }), session.structuredFacts, { bodyTableForbidden: isBodyTableForbidden(session.bidComposition) }), session.projectMaterialSummary)))))).markdown;
 
   const canonicalFacts = buildCanonicalFacts({ facts: session.structuredFacts, markdown: session.finalMarkdown });
   if (canonicalFacts.size > 0) session.executionStages.push({ type: 'fact_extraction', roleId: 'canonical-facts', status: 'success', message: `已决策可信基础事实 ${canonicalFacts.size} 项`, details: [...canonicalFacts.values()].map(fact => `${fact.label}=${fact.value}（${fact.source}，confidence=${fact.confidence}）`).slice(0, 12) });

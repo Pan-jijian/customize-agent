@@ -6,7 +6,6 @@ import {
   fixLaborPeakConflict,
   fixSelfUnderminingCandidates,
 } from '../../../src/services/document-workflow/documentIntegrityChecks';
-import { fixEmptyScoringResponses } from '../../../src/services/document-workflow/tenderRequirements';
 import { buildTenderBidScores } from '../../../src/services/document-workflow/tenderBidScoring';
 import type { ValidationIssue } from '../../../src/services/document-workflow/types';
 
@@ -98,21 +97,6 @@ describe('B7 自伤句式 A21 形态', () => {
     const result = fixSelfUnderminingCandidates(md);
     expect(result.fixedCount).toBe(1);
     expect(result.markdown).not.toContain('安排1个日历天');
-  });
-});
-
-describe('B7 评分响应空响应句改写', () => {
-  it('商务域主题（价格调整）无可生成分支 → 原句保留，交元语言清理器整行删除', () => {
-    const md = '招标要求响应（前附表响应条款）：市场价格波动仅对《可调整价差人工和主要材料一览表》中约定的人工、主要材料进行价格调整。本施工组织设计已按上述条款要求逐项落实执行。';
-    const result = fixEmptyScoringResponses(md);
-    expect(result.fixedCount).toBe(0);
-    expect(result.markdown).toBe(md);
-  });
-
-  it('无条款语境行不动', () => {
-    const md = '本施工组织设计已按上述条款要求逐项落实执行。';
-    const result = fixEmptyScoringResponses(md);
-    expect(result.fixedCount).toBe(0);
   });
 });
 

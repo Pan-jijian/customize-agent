@@ -1,13 +1,12 @@
 /**
- * 边界矩阵（P1 第 33 批 · TT 组 · 权威口径提取器 + 危大缺口修复器）
+ * 边界矩阵（P1 第 33 批 · TT 组 · 权威口径提取器）
  * 断言按探测锁定的真实行为推导（probeTT/probeTT2 已删）。
  *  - T1 extractScheduleAuthority：schedule 卡与 canonical.schedule 双源谱系
  *  - T2 extractAssemblyRateAuthority：project/bills/preciseFacts 三源谱系
  *  - T3 extractProjectScaleSummary：面积卡 + 层数 JSON 全量提取谱系
- *  - T4 fixHazardIdentificationGaps：适用判定边界 × 辨识别名窗口 × 插入锚点谱系
  */
 import { describe, expect, it } from 'vitest';
-import { extractAssemblyRateAuthority, extractProjectScaleSummary, extractScheduleAuthority, fixHazardIdentificationGaps } from '@/services/document-workflow/documentIntegrityChecks';
+import { extractAssemblyRateAuthority, extractProjectScaleSummary, extractScheduleAuthority } from '@/services/document-workflow/documentIntegrityChecks';
 import type { DocumentFactsModel } from '@/services/document-workflow/types';
 
 const factOf = (key: string, value: string, fieldName = ''): any => ({ key, value, fieldName, fieldId: '', sourceFile: 's', roleId: 'r' });
@@ -131,119 +130,5 @@ describe('T3 工程规模摘要提取：面积卡 + 层数全量提取', () => {
   it('T3 多面积卡取首张', () => {
     const model = { project: [factOf('单体建筑面积', '1000㎡'), factOf('建设规模', '2000㎡')], drawings: [], tables: [] } as unknown as DocumentFactsModel;
     expect(extractProjectScaleSummary(model)).toBe('建筑面积1000平方米');
-  });
-});
-
-// ── T4. fixHazardIdentificationGaps 谱系 ──
-// 窗口语义：zone = 每个含「危大」行前后 6 行；前提词在窗口内时若与别名同词面即视为命中。
-
-const gapBody = (premise: string): string => [
-  premise,
-  '', '', '', '', '', '', '', '',
-  '## 危大工程辨识清单',
-  '- 既有条目：',
-].join('\n');
-
-describe('T4 危大缺口补写：适用判定边界（前提在窗口外）', () => {
-  it.each([
-    { premise: '基坑开挖深度2.9m。', expect: 0 },
-    { premise: '基坑开挖深度3.0m。', expect: 1 },
-    { premise: '模板支撑搭设高度7.9m。', expect: 0 },
-    { premise: '模板支撑搭设高度8.0m。', expect: 1 },
-    { premise: '施工总荷载9.9kN。', expect: 0 },
-    { premise: '施工总荷载10kN。', expect: 1 },
-    { premise: '落地式钢管脚手架搭设高度14.9m。', expect: 0 },
-    { premise: '落地式钢管脚手架搭设高度15m。', expect: 1 },
-  ] as const)('T4 「$premise」→ 补 $expect 条', ({ premise, expect: exp }) => {
-    const result = fixHazardIdentificationGaps(gapBody(premise));
-    expect(result.fixedCount).toBe(exp as number);
-  });
-  it.each(['高支模方案编制', '高大模板专项论证', '悬挑式脚手架搭设', '塔吊基础施工', '吊篮进场验收', '拆除工程专项方案', '爆破拆除作业'])('T4 词面前提「%s」（窗口外）→ 补 1 条', (premise) => {
-    expect(fixHazardIdentificationGaps(gapBody(premise)).fixedCount).toBe(1);
-  });
-  it('T4 前提词含别名同词面且词在窗口内 → 命中不补', () => {
-    const markdown = ['本项目采用吊篮作业。', '## 危大工程辨识清单', '- 基坑支护与降水工程：'].join('\n');
-    expect(fixHazardIdentificationGaps(markdown).fixedCount).toBe(0);
-  });
-  it('T4 基坑前提在窗口内但清单别名未列 → 仍补（前提词面非别名）', () => {
-    const markdown = ['基坑开挖深度5m。', '## 危大工程辨识清单', '- 脚手架工程：'].join('\n');
-    expect(fixHazardIdentificationGaps(markdown).fixedCount).toBe(1);
-  });
-});
-
-describe('T4 危大缺口补写：窗口边界与锚点谱系', () => {
-  it('T4 前提距「危大」行 6 行（窗口内含）→ 词面命中不补', () => {
-    const markdown = ['吊篮进场验收。', '', '', '', '', '', '## 危大工程辨识清单', '- 既有条目：'].join('\n');
-    expect(fixHazardIdentificationGaps(markdown).fixedCount).toBe(0);
-  });
-  it('T4 前提距「危大」行 7 行（窗口外）→ 补 1 条', () => {
-    const markdown = ['吊篮进场验收。', '', '', '', '', '', '', '## 危大工程辨识清单', '- 既有条目：'].join('\n');
-    expect(fixHazardIdentificationGaps(markdown).fixedCount).toBe(1);
-  });
-  it('T4 无「危大」字样 → 0 条', () => {
-    expect(fixHazardIdentificationGaps('本项目采用吊篮作业。\n## 施工方案').fixedCount).toBe(0);
-  });
-  it('T4 无适用前提 → 0 条', () => {
-    expect(fixHazardIdentificationGaps('## 危大工程辨识清单\n- 既有条目：').fixedCount).toBe(0);
-  });
-  it.each(['## 危大工程辨识', '### 危大清单', '#### 危大分部'])('T4 锚点 H2-H4 标题「%s」→ 补写插标题行后', (heading) => {
-    const result = fixHazardIdentificationGaps(gapBody('基坑开挖深度5m。').replace('## 危大工程辨识清单', heading));
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown).toContain(`${heading}\n基坑支护与降水工程：`);
-  });
-  it('T4 H5 标题不算锚点 → 回退最后一个含「危大」正文行后插入', () => {
-    const markdown = ['基坑开挖深度5m。', '', '', '', '', '', '', '', '##### 危大分部', '危大工程辨识清单如下。', '- 既有条目：'].join('\n');
-    const result = fixHazardIdentificationGaps(markdown);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown).toContain('危大工程辨识清单如下。\n基坑支护与降水工程：');
-  });
-  it('T4 H1 标题不算锚点 → 回退正文行', () => {
-    const markdown = ['基坑开挖深度5m。', '', '', '', '', '', '', '', '# 危大分部', '危大工程辨识清单如下。'].join('\n');
-    const result = fixHazardIdentificationGaps(markdown);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown).toContain('危大工程辨识清单如下。\n基坑支护与降水工程：');
-  });
-  it('T4 多适用项全缺（前提全窗口外）→ 补 6 条按固定顺序', () => {
-    const markdown = [
-      '基坑开挖深度5m。支撑高度10m。',
-      '脚手架搭设高度20m。塔吊。吊篮。拆除工程。',
-      '', '', '', '', '', '',
-      '## 危大工程辨识清单',
-      '- 既有条目：',
-    ].join('\n');
-    const result = fixHazardIdentificationGaps(markdown);
-    expect(result.fixedCount).toBe(6);
-    expect(result.markdown).toContain('基坑支护与降水工程：');
-    expect(result.markdown).toContain('高大模板支撑工程：');
-    expect(result.markdown).toContain('脚手架工程：');
-    expect(result.markdown).toContain('起重吊装及安装拆卸工程：');
-    expect(result.markdown).toContain('吊篮作业工程：');
-    expect(result.markdown).toContain('拆除工程：');
-  });
-  it('T4 部分别名命中 → 只补缺失项', () => {
-    const markdown = [
-      '基坑开挖深度5m。支撑高度10m。',
-      '', '', '', '', '', '',
-      '## 危大工程辨识清单',
-      '- 基坑支护与降水工程：',
-      '- 高大模板支撑工程：',
-    ].join('\n');
-    const result = fixHazardIdentificationGaps(markdown);
-    expect(result.fixedCount).toBe(0);
-  });
-  it('T4 清单内列别名但前提在窗口外且别名不在清单 → 补 1 条', () => {
-    const markdown = [
-      '基坑开挖深度5m。',
-      '', '', '', '', '', '', '',
-      '## 危大工程辨识清单',
-      '- 脚手架工程：',
-    ].join('\n');
-    const result = fixHazardIdentificationGaps(markdown);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown).toContain('基坑支护与降水工程：');
-  });
-  it('T4 details 文案含缺失项名', () => {
-    const result = fixHazardIdentificationGaps(gapBody('基坑开挖深度5m。'));
-    expect(result.details[0]).toContain('基坑支护与降水工程');
   });
 });

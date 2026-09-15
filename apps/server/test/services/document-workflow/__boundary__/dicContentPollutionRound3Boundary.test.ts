@@ -3,55 +3,22 @@
  * 1. 本项目没有的工程出现在主要施工内容（清单章节套名「墙、柱面装饰与隔断、幕墙工程」照抄为标题）
  *    → headingUncoveredEngineeringItems 检测器（标题工程词必须在小节正文命中）
  * 2. 不能进入正文的内容进入正文（编制依据补充说明元话语块 + 资料未提供的图集编号引用）
- *    → supplementRequiredTexts 正式条目化（无「补充说明」标题/元话语）+ stripAtlasReferencePhrases 短语清洗
+ *    → stripAtlasReferencePhrases 图集编号短语清洗（4.41 起 supplementRequiredTexts 已删除）
  * 3. 基本信息表污染（计划工期「90日历天2.9」编号粘连、质量标准「不流于形式、奖」残句、建设规模截断）
  *    → 事实值编号粘连截断 + rule 型 confidence 钳制 + 创优目标提取顿号排斥 + 规模类字段允许分号
  *
  * 原则：每条用例独立断言意义；真实实现行为一律锁定，不迎合用例改实现。
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import type { DocumentEvidence, DocumentFact, DocumentTemplate } from '@/services/document-workflow/types';
 
-vi.mock('@/services/document-workflow/qualityValidation', async importOriginal => {
-  const actual = await importOriginal<typeof import('@/services/document-workflow/qualityValidation')>();
-  return { ...actual, autoSpecGateRequiredTexts: vi.fn() };
-});
-
-import { supplementRequiredTexts } from '@/services/document-workflow/finalize/rebuildAndRecompute';
-import { autoSpecGateRequiredTexts, headingUncoveredEngineeringItems } from '@/services/document-workflow/qualityValidation';
+import { headingUncoveredEngineeringItems } from '@/services/document-workflow/qualityValidation';
 import { projectBasicInfoTableMarkdown, stripAtlasReferencePhrases } from '@/services/document-workflow/documentGeneratorHelpers';
 import { buildCanonicalFacts } from '@/services/document-workflow/factGovernance';
 import { extractStructuredFacts, fieldExtractionPattern } from '@/services/document-workflow/factsModel';
 
-const mockedRequiredTexts = vi.mocked(autoSpecGateRequiredTexts);
-const TEMPLATE = { id: 'tpl-round3', name: '施工组织设计', category: '房建', outputTitle: '', description: '' } as unknown as DocumentTemplate;
-
 const fact = (extra: Partial<DocumentFact>): DocumentFact => ({
   key: 'k', value: 'v', sourceFile: '招标文件正文', roleId: 'r', confidence: 0.9, ...extra,
-});
-
-describe('A supplementRequiredTexts 术语补写正式条目化（丰乐镇第 3 轮）', () => {
-  beforeEach(() => {
-    mockedRequiredTexts.mockReset();
-    mockedRequiredTexts.mockReturnValue([]);
-  });
-
-  it('「图纸设计说明」缺失：注入工程量清单及施工图纸正式条目，无补充说明块', () => {
-    mockedRequiredTexts.mockReturnValue(['图纸设计说明']);
-    const result = supplementRequiredTexts('正文内容。', TEMPLATE);
-    expect(result).toContain('工程量清单及施工图纸：本项目分部分项工程量清单（项目特征、规格及工程量）与施工图纸设计说明');
-    expect(result).not.toContain('编制依据补充说明');
-    expect(result).not.toContain('以招标工程量清单及图纸设计说明为准');
-  });
-
-  it('多组术语缺失：条目全部注入且整块句号收束', () => {
-    mockedRequiredTexts.mockReturnValue(['图纸设计说明', '劳动力计划']);
-    const result = supplementRequiredTexts('正文内容。', TEMPLATE);
-    expect(result).toContain('工程量清单及施工图纸：');
-    expect(result).toContain('施工组织设计文件：本工程劳动力计划、主要施工材料与主要施工机械配置计划');
-    expect(result).toContain('主要施工机械配置计划。');
-    expect(result).not.toContain('主要施工机械配置计划；');
-  });
 });
 
 describe('B stripAtlasReferencePhrases 图集/国标编号引用清洗（丰乐镇第 3 轮）', () => {

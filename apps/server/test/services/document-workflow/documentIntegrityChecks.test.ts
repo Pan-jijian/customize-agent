@@ -4,7 +4,7 @@
  * 无不可用降级路径。语义通道全部 mock（避免测试加载 Transformers.js 重依赖）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, invertedDateRangeIssues, paragraphTailRepeatIssues, scanParagraphTailRepeats, collisionNumberedHeadingIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixInvertedDateRanges, fixParagraphOpeningRepeats, fixParagraphTailRepeats, fixCollisionNumberedHeadings, fixPlaceholderTableCells, fixQualityAssuranceCoverage, fixSixHundredPercentCoverage, fixTruncatedSentenceArtifacts, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
+import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, invertedDateRangeIssues, paragraphTailRepeatIssues, scanParagraphTailRepeats, collisionNumberedHeadingIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixInvertedDateRanges, fixParagraphOpeningRepeats, fixParagraphTailRepeats, fixCollisionNumberedHeadings, fixPlaceholderTableCells, fixTruncatedSentenceArtifacts, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
 import { markdownTableQualityIssues } from '@/services/document-workflow/qualityValidation';
 import { repairTableBlockLines } from '@/services/document-workflow/tableRepairHelpers';
 import { splitMarkdownTableLine, stripTableCellInvisibleChars } from '@/services/document-workflow/helpers/markdownCleanup';
@@ -139,54 +139,6 @@ describe('sixHundredPercentCoverageIssues（W2 纯语义判定）', () => {
     const issues = await sixHundredPercentCoverageIssues(markdown);
     expect(issues.length).toBe(1);
     expect(issues[0].message).toContain('拆迁工地100%湿法作业');
-  });
-});
-
-describe('fixSixHundredPercentCoverage（A6 补写锚点与词面对齐）', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it('主锚点命中：补写句插入「六个百分百」锚点行之后', async () => {
-    mockSimilarity(0.1);
-    const markdown = '## 环境保护与文明施工\n\n### 扬尘治理措施\n\n严格执行扬尘治理六个百分百要求。\n\n### 噪声控制\n\n施工噪声达标排放。';
-    const { markdown: fixed, fixedCount } = await fixSixHundredPercentCoverage(markdown);
-    expect(fixedCount).toBe(6);
-    const anchorPos = fixed.indexOf('严格执行扬尘治理六个百分百要求。') + '严格执行扬尘治理六个百分百要求。'.length;
-    expect(fixed.slice(anchorPos, anchorPos + 30)).toContain('施工工地周边100%围挡');
-  });
-
-  it('锚点失效兜底：补写句插入最后一个扬尘小节尾部（下一标题之前）', async () => {
-    mockSimilarity(0.1);
-    const markdown = '## 环境保护与文明施工\n\n### 噪声控制\n\n施工噪声达标排放。\n\n### 扬尘治理措施\n\n施工现场加强扬尘管控。\n\n### 水土保持\n\n表土剥离集中堆放。';
-    const { markdown: fixed, fixedCount } = await fixSixHundredPercentCoverage(markdown);
-    expect(fixedCount).toBe(6);
-    const keepIndex = fixed.indexOf('### 水土保持');
-    const fillIndex = fixed.indexOf('施工工地周边100%围挡：');
-    expect(fillIndex).toBeGreaterThan(-1);
-    expect(fillIndex).toBeLessThan(keepIndex);
-  });
-
-  it('锚点失效二级兜底：无扬尘标题时回退环保/文明施工标题尾部', async () => {
-    mockSimilarity(0.1);
-    const markdown = '## 环境保护与文明施工\n\n施工现场加强环保管理。\n\n## 安全保证措施\n\n安全目标：零事故。';
-    const { markdown: fixed, fixedCount } = await fixSixHundredPercentCoverage(markdown);
-    expect(fixedCount).toBe(6);
-    const safetyIndex = fixed.indexOf('## 安全保证措施');
-    const fillIndex = fixed.indexOf('施工工地周边100%围挡：');
-    expect(fillIndex).toBeGreaterThan(-1);
-    expect(fillIndex).toBeLessThan(safetyIndex);
-  });
-
-  it('词面对齐复检：补写后 sixHundredPercentCoverageIssues 复检零缺失（R8 根因防护）', async () => {
-    // 语义通道恒低分（0.1）模拟 bge 长句稀释场景：补写句必须靠自身词面命中检测器词面正则
-    // 才能通过复检，防止「补写后复检仍缺失 → 修复轮死循环」复发
-    mockSimilarity(0.1);
-    const markdown = '## 环境保护与文明施工\n\n### 扬尘治理措施\n\n施工现场加强扬尘管控。';
-    const { markdown: fixed, fixedCount } = await fixSixHundredPercentCoverage(markdown);
-    expect(fixedCount).toBe(6);
-    const recheck = await sixHundredPercentCoverageIssues(fixed);
-    expect(recheck).toEqual([]);
   });
 });
 
@@ -673,20 +625,6 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
     expect(fix.markdown).not.toContain('按施工图设计文件确定');
   });
 
-  it('4.17.4 fixQualityAssuranceCoverage：6.1 块缺失质量保障术语时补全协同段', () => {
-    const markdown = '### 6.1 施工部署与施工流水组织\n安全文明生产管理体系以施工部署和流水组织为运行载体。\n### 6.2 后续小节\n内容。';
-    const fix = fixQualityAssuranceCoverage(markdown);
-    expect(fix.fixedCount).toBe(1);
-    expect(fix.markdown).toContain('三检制');
-    expect(fix.markdown).toContain('样板引路');
-    expect(fix.markdown).toContain('见证取样');
-  });
-
-  it('4.17.4 fixQualityAssuranceCoverage：术语已覆盖时不动', () => {
-    const markdown = '### 6.1 施工部署与施工流水组织\n实行三检制、样板引路制度、隐蔽验收与见证取样管理。\n### 6.2 后续小节\n内容。';
-    const fix = fixQualityAssuranceCoverage(markdown);
-    expect(fix.fixedCount).toBe(0);
-  });
 });
 
 describe('foundationFormResidueIssues（h13 桩基表述残留）', () => {

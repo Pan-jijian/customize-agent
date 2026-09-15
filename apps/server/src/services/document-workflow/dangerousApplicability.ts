@@ -15,7 +15,7 @@ const extractNumberNear = (body: string, pattern: RegExp): number | undefined =>
   return Number.isFinite(value) && value > 0 ? value : undefined;
 };
 
-/** 危大工程封闭集项：适用前提判定 + 辨识别名（导出供确定性修复器 fixHazardIdentificationGaps 同源复用） */
+/** 危大工程封闭集项：适用前提判定 + 辨识别名（检测器 dangerousApplicabilityIssues 消费；4.41 起确定性补写器已删除） */
 export const DANGEROUS_APPLICABLE_ITEMS = [
   {
     name: '基坑支护与降水工程',

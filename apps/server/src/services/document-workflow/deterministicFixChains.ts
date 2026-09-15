@@ -9,7 +9,6 @@
 import {
   collapseRepeatedWords,
   fixAmbiguousEitherOrCandidates,
-  fixBasisRegulationsRegion,
   fixCollisionNumberedHeadings,
   fixDuplicateBasicInfoTables,
   fixFallbackPlaceholderRows,
@@ -27,7 +26,6 @@ import {
   fixSelfUnderminingCandidates,
   fixSlotDepthValue,
   fixTruncatedSentenceArtifacts,
-  fixWorkInjuryInsurance,
   mergeTableLineResidues,
   stripDuplicateTables,
   stripInternalDuplicateTableRows,
@@ -38,7 +36,7 @@ import { cleanStructureDefects, renumberSectionHeadings } from './structureInteg
 import { dedupeDuplicateSectionHeadings, dedupeTertiaryH4Titles } from './markdownComposer';
 import { fixInternalTermHeadingPhrases } from './internalTerminologyAnchors';
 import { stripAtlasReferencePhrases } from './documentGeneratorHelpers';
-import { fixEmptyScoringResponses, fixTenderMetaLanguage, stripDuplicateResponseLines } from './tenderRequirements';
+import { fixTenderMetaLanguage, stripDuplicateResponseLines } from './tenderRequirements';
 import { fixFlowFormRepetition, fixSentenceLikeHeadingSplit, fixSkeletonFingerprintRepetition, fixTemplatedLabels, fixTruncatedTitleCompletion } from './templatingGovernance';
 import type { DecisionLockEntry } from './integratedBlueprint';
 
@@ -61,9 +59,6 @@ export interface SurfaceFixerContext {
   plannedSectionTitles?: readonly string[];
   /** V5 P4b-2 阶段劳动力权威（phase-labor-values 消费：蓝图 byPhase 推导投影；缺失时该步静默） */
   phaseLaborAuthorities?: Array<{ phase: string; value: number; trace?: string }>;
-  /** 4.31 招标文件引用法规清单（basis-regulation-region 消费：蓝图 basisRegulations 照抄源；
-   * 缺失时该步静默——#71 LLM 无源可写死结的确定性回写） */
-  basisRegulations?: readonly string[];
 }
 
 export interface SurfaceFixStep {
@@ -134,24 +129,15 @@ export const SURFACE_FIX_STEPS: readonly SurfaceFixStep[] = [
   // 4.36 D3：注册表裁决层——「A或B」命中决策类目时按决策锁归一（有锁）/转缺口（无锁）；
   // 与检测器 ambiguous-either-or 同源（supportForm 权威映射支护体系选定侧，残留缺口记入 details）
   { key: 'ambiguous-either-or', stage5: true, round2: true, fix: (markdown, ctx) => { const r = fixAmbiguousEitherOrCandidates(markdown, { supportForm: ctx.supportFormAuthority, decisionLock: ctx.decisionLockEntries }); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
-  { key: 'empty-scoring-response', stage5: true, round2: true, fix: markdown => { const r = fixEmptyScoringResponses(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
-  // 4.27.2 招标元语言确定性清理（语气泄漏治理 P0）：紧随 empty-scoring-response（空响应句先按
-  // 条款语义改写为实义句，本步再清理其余「按招标文件要求/约定」条幅与「按上述条款」调用式元语言）
+  // 4.27.2 招标元语言确定性清理（语气泄漏治理 P0）：清理「按招标文件要求/约定」条幅与
+  // 「按上述条款」调用式元语言（4.41 起前置的空响应句改写已删除，本步仅做形态清理）
   { key: 'tender-meta-language', stage5: true, round2: true, fix: markdown => { const r = fixTenderMetaLanguage(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   // 4.32 配置禁用词确定性清洗（丰乐镇 v6 #59：正文「按设计要求确定」触发模板 forbiddenTexts
   // 「配置要求不得出现：按设计要求」 blocker）：修复器 4.31 已实现但未接入两条链，注册即生效；
   // 「按设计要求/按图纸/见图纸」类责任模糊留白改写为具体出处，与门禁 containsForbiddenText 同豁免口径
   { key: 'forbidden-configuration', stage5: true, round2: true, fix: markdown => { const r = fixForbiddenConfigurationTerms(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
-  // 4.31 编制依据地方性法规确定性补写（丰乐镇 v6 #71：招标文件引用的《合肥市公共资源交易
-  // 管理条例》LLM 无源可写）：与检测器 basisRegulationsCoverageIssues 同源，从蓝图
-  // basisRegulations 照抄补写「地方法规规章」行（标签行缺失时静默）
-  { key: 'basis-regulation-region', stage5: true, round2: true, fix: (markdown, ctx) => { const r = fixBasisRegulationsRegion(markdown, ctx.basisRegulations); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
-  // 4.32 工伤保险缴纳表述补写（丰乐镇 v6 #60：检测器 localAdaptationKeywordIssues workInjury
-  // 查询由 bge 语义判定，LLM 修复轮未定位到劳务管理小节）：劳资管理锚点段落尾补写缴纳表述，
-  // 补写句逐字包含检测查询短语（检测定位=修复定位）
-  { key: 'work-injury-insurance', stage5: true, round2: true, fix: markdown => { const r = fixWorkInjuryInsurance(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
-  // 4.27.2 条款响应重复行去重（重复补写治理 P0）：紧随元语言清理（条幅剥离后行形态归一，
-  // 重复判定口径与清理器输出同帧——两补写器历史重复插入的交付前最终兜底）
+  // 4.27.2 条款响应重复行去重（重复行治理 P0）：紧随元语言清理（条幅剥离后行形态归一，
+  // 重复判定口径与清理器输出同帧——LLM 轮次间重复插入行的交付前最终兜底）
   { key: 'duplicate-response-line', stage5: true, round2: true, fix: markdown => { const r = stripDuplicateResponseLines(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   // 4.36.2 复查修正：文件头治理目标「round-2 曾缺图集引用清洗」的遗留漂移——stage5 之后的 LLM 补写轮
   // （数值/要求定向 patch）可再引入「做法参照XX图集」类非法引用，此前 round-2 链无确定性收敛点（门禁硬阻断死区）；

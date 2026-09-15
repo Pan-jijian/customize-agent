@@ -11,11 +11,11 @@ export const WORK_PACKAGE_SECTION_RE = /项目主要施工内容|主要分部分
 export const BOOK_TITLE_CITATION_RE = /《[^》]*》/gu;
 
 /** 工伤保险缴纳表述判定（4.36 B2 检测定位=修复定位单源）：检测端 localAdaptationKeywordIssues
- * 的 workInjury 字面短路与修复端 fixWorkInjuryInsurance 的幂等判定共用本函数——
+ * 的 workInjury 字面短路使用本函数——
  * 「工伤保险」邻近（±8 字）出现办理/缴纳/参保/缴费/投保类动词即构成缴纳表述；
  * 判定前剥离书名号引用（《工伤保险条例》书名引用不构成缴纳表述）。
- * 字面短路解决两个历史死结：①修复补写句落在 bge 句级采样窗口外时检测残留；
- * ②检测 bge 语义判定与修复幂等正则两套口径导致的「已修仍报/该修不修」摇摆。 */
+ * 字面短路解决历史死结：检测 bge 语义判定与修复幂等正则两套口径导致的「该修不修」摇摆
+ *（4.41 起修复端已删除，判定仍为检测器词面门控）。 */
 export function hasWorkInjuryInsuranceStatement(text: string): boolean {
   const stripped = text.replace(/《[^》]*》/gu, '');
   return /(?:办理|缴纳|参保|缴费|投保).{0,8}工伤保险|工伤保险.{0,8}(?:办理|缴纳|参保|缴费|投保)/u.test(stripped);

@@ -8,7 +8,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   applyNumericConsistencyDeterministicFixes, commercialDataInBodyIssues,
-  fixPlaceholderTableCells, fixQualityAssuranceCoverage,
+  fixPlaceholderTableCells,
 } from '@/services/document-workflow/documentIntegrityChecks';
 
 // ── F. 商务条款数据入正文检测（commercialDataInBodyIssues）──
@@ -223,71 +223,5 @@ describe('H2 fixPlaceholderTableCells 工期套话', () => {
     const md = '| 计划工期 | 450个日历天 |';
     const result = fixPlaceholderTableCells(md, { scheduleDays: 450 });
     expect(result.markdown).toBe(md);
-  });
-});
-
-// ── I. 6.1 施工部署块质量保障补全（fixQualityAssuranceCoverage）──
-
-const QA_BLOCK_HEAD = '### 6.1 施工部署与施工流水组织';
-
-describe('I1 fixQualityAssuranceCoverage 补全注入', () => {
-  it('I1 缺全部核心术语 → 注入', () => {
-    const md = `${QA_BLOCK_HEAD}\n本工程按流水段组织施工，合理划分施工区段。\n### 6.2 施工进度计划\n后续内容。`;
-    const result = fixQualityAssuranceCoverage(md);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown).toContain('质量保障体系与安全文明管理同频运行');
-  });
-  it('I1 注入段含全部核心术语（试块/报验与养护分置形态）', () => {
-    const md = `${QA_BLOCK_HEAD}\n本工程按流水段组织施工。`;
-    const result = fixQualityAssuranceCoverage(md);
-    for (const term of ['三检', '样板引路', '隐蔽验收', '见证取样']) {
-      expect(result.markdown).toContain(term);
-    }
-    expect(result.markdown).toContain('试块');
-    expect(result.markdown).toContain('养护');
-    expect(result.markdown).toContain('分部分项');
-    expect(result.markdown).toContain('报验');
-  });
-  it('I1 注入位置在块尾（6.2 标题前）', () => {
-    const md = `${QA_BLOCK_HEAD}\n本工程按流水段组织施工。\n### 6.2 施工进度计划\n后续内容。`;
-    const result = fixQualityAssuranceCoverage(md);
-    const injectedIndex = result.markdown.indexOf('质量保障体系');
-    const nextHeadingIndex = result.markdown.indexOf('### 6.2');
-    expect(injectedIndex).toBeGreaterThan(0);
-    expect(injectedIndex).toBeLessThan(nextHeadingIndex);
-  });
-  it('I1 details 记录缺失数', () => {
-    const md = `${QA_BLOCK_HEAD}\n本工程按流水段组织施工。`;
-    const result = fixQualityAssuranceCoverage(md);
-    expect(result.details[0]).toContain('6/6');
-  });
-});
-
-describe('I2 fixQualityAssuranceCoverage 门槛与边界', () => {
-  it('I2 命中3个核心术语 → 不动', () => {
-    const md = `${QA_BLOCK_HEAD}\n执行三检制度与样板引路要求，隐蔽验收留存影像记录。`;
-    expect(fixQualityAssuranceCoverage(md).fixedCount).toBe(0);
-  });
-  it('I2 命中2个核心术语 → 注入', () => {
-    const md = `${QA_BLOCK_HEAD}\n执行三检制度与样板引路要求。`;
-    expect(fixQualityAssuranceCoverage(md).fixedCount).toBe(1);
-  });
-  it('I2 无 6.1 块 → 不动', () => {
-    expect(fixQualityAssuranceCoverage('本工程按流水段组织施工。').fixedCount).toBe(0);
-  });
-  it('I2 标题不完全匹配 → 不动', () => {
-    expect(fixQualityAssuranceCoverage('### 6.1 施工部署\n本工程按流水段组织施工。').fixedCount).toBe(0);
-  });
-  it('I2 块到文档尾（$ 边界）→ 注入', () => {
-    const md = `${QA_BLOCK_HEAD}\n本工程按流水段组织施工。`;
-    const result = fixQualityAssuranceCoverage(md);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown.startsWith(md)).toBe(true);
-  });
-  it('I2 第七章标题截断块区间', () => {
-    const md = `${QA_BLOCK_HEAD}\n本工程按流水段组织施工。\n## 第七章 质量保证措施\n后续内容。`;
-    const result = fixQualityAssuranceCoverage(md);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown.indexOf('质量保障体系')).toBeLessThan(result.markdown.indexOf('## 第七章'));
   });
 });

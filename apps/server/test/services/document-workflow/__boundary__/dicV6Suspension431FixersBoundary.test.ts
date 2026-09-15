@@ -1,16 +1,14 @@
 /**
  * 4.31 丰乐镇 v6 悬起整改批（90 条清单）确定性修复器行为锁定：
  * #63/64 阶段名连写拆分（fixPhaseLaborValues ambiguity 扩展）、#70 基础信息表重复合并、
- * #86/87 兜底话术表行删除、#71 编制依据地方性法规补写、#3 埋深槽位数值删除、
+ * #86/87 兜底话术表行删除、#3 埋深槽位数值删除、
  * #90 标题工程类别未覆盖改名——每个 fixer 与其锚定检测器同源（检测定位=修复定位），
  * 用例独立断言行为，不迎合实现。
- * 4.32 续：D2 组 collectLocalBasisRegulations（v6 复测 #56 死结根治——蓝图时点证据池
- * 不含章级召回的地方条例，交付前从全量证据二次提取本地地方条目）；
- * G 组 #59 配置禁用词清洗（注册即生效）、H 组 #60 工伤保险缴纳表述补写；
+ * 4.32 续：G 组 #59 配置禁用词清洗（注册即生效）；
  * I 组 #57/#58 泛类规则适用面收窄（布置类/劳动力专章证据豁免）。
  */
 import { describe, expect, it } from 'vitest';
-import { collectLocalBasisRegulations, fixBasisRegulationsRegion, fixDuplicateBasicInfoTables, fixFallbackPlaceholderRows, fixForbiddenConfigurationTerms, fixHeadingUncoveredItems, fixPhaseLaborValues, fixSlotDepthValue, fixWorkInjuryInsurance } from '@/services/document-workflow/documentIntegrityChecks';
+import { fixDuplicateBasicInfoTables, fixFallbackPlaceholderRows, fixForbiddenConfigurationTerms, fixHeadingUncoveredItems, fixPhaseLaborValues, fixSlotDepthValue } from '@/services/document-workflow/documentIntegrityChecks';
 import { SURFACE_FIX_STEPS } from '@/services/document-workflow/deterministicFixChains';
 import { professionalContentIssues } from '@/services/document-workflow/qualityValidation';
 import type { ProfessionalDepthAnalysis } from '@/services/document-workflow/professionalDepthClassifier';
@@ -109,82 +107,6 @@ describe('C fixFallbackPlaceholderRows 兜底话术表行删除（v6 #86/87）',
   });
 });
 
-describe('D fixBasisRegulationsRegion 编制依据地方性法规补写（v6 #71）', () => {
-  const markdown = [
-    '### 1.1 编制依据',
-    '**编制依据**：本施工组织设计的编制依据按以下类别列出：',
-    '- 招标文件及补疑补遗：本项目招标文件；',
-    '- 国家法律法规：《中华人民共和国建筑法》、《建设工程质量管理条例》；',
-    '- 国家/行业现行规范标准：《建筑工程施工质量验收统一标准》（GB 50300-2013）；',
-    '- 地方法规规章：工程所在地现行地方性法规与政府规章；',
-    '',
-    '### 1.2 其他',
-    '',
-    '正文。',
-  ].join('\n');
-
-  it('蓝图地点类法规条目照抄进「地方法规规章」行（类别话术重写）', () => {
-    const regulations = ['《中华人民共和国建筑法》', '《建设工程质量管理条例》', '《保障农民工工资支付条例》（国令第724号）', '《合肥市公共资源交易管理条例》'];
-    const result = fixBasisRegulationsRegion(markdown, regulations);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown).toContain('- 地方法规规章：《合肥市公共资源交易管理条例》及工程所在地现行其他地方性法规与政府规章；');
-  });
-
-  it('地方法规缺失时静默（无条目可写不新增行）', () => {
-    const result = fixBasisRegulationsRegion(markdown, ['《中华人民共和国建筑法》']);
-    expect(result.fixedCount).toBe(0);
-    expect(result.markdown).toBe(markdown);
-  });
-
-  it('正文已含该书名条目时不动（幂等）', () => {
-    const withBook = markdown.replace('工程所在地现行地方性法规与政府规章；', '《合肥市公共资源交易管理条例》；');
-    const result = fixBasisRegulationsRegion(withBook, ['《合肥市公共资源交易管理条例》']);
-    expect(result.fixedCount).toBe(0);
-    expect(result.markdown).toBe(withBook);
-  });
-});
-
-describe('D2 collectLocalBasisRegulations 交付前证据池本地地方法规补充（v6 #56 死结根治）', () => {
-  const blueprintRegs = ['《中华人民共和国招标投标法》', '《中华人民共和国建筑法》', '《建设工程质量管理条例》', '《城镇道路路面设计规范》'];
-  const evidence = [
-    '### 1.3法律',
-    '适用于合同的其他规范性文件：《中华人民共和国民法典》《中华人民共和国建筑法》',
-    '《建设工程质量管理条例》《建设工程安全生产管理条例》《合肥市公共资源交易管理条例》等国家及工程所在地现行有效的法律法规和规章。',
-    '根据《中华人民共和国建筑法》《合肥市公共资源交易管理条例》《电子招标投标办法》等有关规定制定本规程。',
-  ].join('\n');
-
-  it('章级召回的本地地方条目与蓝图清单合并（4.31 蓝图无地方条目→合并后有）', () => {
-    const merged = collectLocalBasisRegulations(blueprintRegs, evidence, '安徽省合肥市肥西县');
-    expect(merged).toContain('《合肥市公共资源交易管理条例》');
-    expect(merged).toContain('《中华人民共和国招标投标法》');
-    expect(merged).toHaveLength(blueprintRegs.length + 1);
-  });
-
-  it('其它地区/项目法规不得混入（地域过滤）', () => {
-    const merged = collectLocalBasisRegulations(blueprintRegs, '依据《上海市城市道路管理条例》与《合肥市公共资源交易管理条例》执行。', '安徽省合肥市肥西县');
-    expect(merged).toContain('《合肥市公共资源交易管理条例》');
-    expect(merged).not.toContain('《上海市城市道路管理条例》');
-  });
-
-  it('蓝图已有同条目时不重复（去重）', () => {
-    const merged = collectLocalBasisRegulations(['《合肥市公共资源交易管理条例》'], evidence, '安徽省合肥市肥西县');
-    expect(merged.filter(entry => entry.includes('合肥市公共资源交易管理条例'))).toHaveLength(1);
-  });
-
-  it('地点无法解析时原样返回蓝图清单（不回退全量证据）', () => {
-    expect(collectLocalBasisRegulations(blueprintRegs, evidence, '')).toEqual([...blueprintRegs]);
-    expect(collectLocalBasisRegulations(undefined, evidence, '安徽省合肥市肥西县')).toEqual(['《合肥市公共资源交易管理条例》']);
-  });
-
-  it('端到端：合并清单喂 fixBasisRegulationsRegion，类别话术行重写为具体条例', () => {
-    const md = '### 1.1 编制依据\n- 地方法规规章：工程所在地现行地方性法规与政府规章；\n\n### 1.2 其他\n正文。';
-    const merged = collectLocalBasisRegulations(blueprintRegs, evidence, '安徽省合肥市肥西县');
-    const result = fixBasisRegulationsRegion(md, merged);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown).toContain('- 地方法规规章：《合肥市公共资源交易管理条例》及工程所在地现行其他地方性法规与政府规章；');
-  });
-});
-
 describe('E fixSlotDepthValue 埋深槽位数值错位删除（v6 #3）', () => {
   it('「埋深不小于 23.45m」（长度口径误塞）整段删除，残标点收敛', () => {
     const markdown = '接地母线沿基础外侧敷设，埋深不小于 23.45m，回填土为素土并分层夯实。';
@@ -260,48 +182,6 @@ describe('G fixForbiddenConfigurationTerms 配置禁用词清洗（v6 #59，注�
     const step = SURFACE_FIX_STEPS.find(item => item.key === 'forbidden-configuration');
     expect(step?.stage5).toBe(true);
     expect(step?.round2).toBe(true);
-  });
-});
-
-describe('H fixWorkInjuryInsurance 工伤保险缴纳表述补写（v6 #60）', () => {
-  it('农民工工资专用账户段落尾补写，补写句逐字含检测查询短语', () => {
-    const markdown = [
-      '### 5.4 劳务用工实名制闭环',
-      '',
-      '项目部严格执行农民工工资专用账户制度，依法与招用的农民工签订劳动合同，并按规定及时足额支付工资。',
-      '',
-      '后续正文。',
-    ].join('\n');
-    const result = fixWorkInjuryInsurance(markdown);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown).toContain('并按规定及时足额支付工资。项目部按规定为作业人员办理工伤保险，参保信息纳入实名制管理，发生工伤事故时按法定程序申报处理。');
-    expect(result.markdown).toContain('后续正文。');
-  });
-
-  it('已含办理类表述时不动（幂等）', () => {
-    const markdown = '项目部按规定为作业人员办理工伤保险，参保信息纳入实名制管理。';
-    const result = fixWorkInjuryInsurance(markdown);
-    expect(result.fixedCount).toBe(0);
-  });
-
-  it('编制依据仅引用《工伤保险条例》书名不构成缴纳表述，正文仍有劳资管理时补写', () => {
-    const markdown = [
-      '### 编制依据',
-      '',
-      '- 国家法律法规：《工伤保险条例》、《保障农民工工资支付条例》；',
-      '',
-      '实名制管理按劳务管理规定执行。',
-    ].join('\n');
-    const result = fixWorkInjuryInsurance(markdown);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown).toContain('实名制管理按劳务管理规定执行。项目部按规定为作业人员办理工伤保险');
-  });
-
-  it('无劳资管理锚点时静默（不新增无关表述）', () => {
-    const markdown = '### 一、总则\n\n本项目按施工图纸组织施工。';
-    const result = fixWorkInjuryInsurance(markdown);
-    expect(result.fixedCount).toBe(0);
-    expect(result.markdown).toBe(markdown);
   });
 });
 

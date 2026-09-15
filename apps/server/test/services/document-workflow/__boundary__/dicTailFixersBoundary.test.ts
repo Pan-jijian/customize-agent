@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest';
 import {
   extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary,
   extractScheduleAuthority, extractStreetLightAuthority, extractSupportSystemAuthority,
-  fixAmbiguousEitherOrCandidates, fixForbiddenConfigurationTerms, fixHazardIdentificationGaps,
+  fixAmbiguousEitherOrCandidates, fixForbiddenConfigurationTerms,
   fixHeaderlessTables, fixInternalTerminology, fixSelfUnderminingCandidates, fixTocFromBody,
   stripDuplicateTablesAcrossChapters,
 } from '@/services/document-workflow/documentIntegrityChecks';
@@ -171,38 +171,6 @@ describe('dicTailFixersBoundary · K 组：末尾修复器族', () => {
       const md = '## 目录\n\n第一章 施工总体部署\n  1.1 工程概况\n\n<div class="page-break"></div>\n\n## 第一章 施工总体部署\n\n### 1.1 工程概况\n\n## 第十一章 竣工清理验收移交与保修\n\n### 11.1 保修措施';
       const result = fixTocFromBody(md);
       expect(result.markdown).toContain('第十一章 竣工清理验收移交与保修\n  11.1 保修措施');
-      expect(result.fixedCount).toBe(1);
-    });
-  });
-
-  describe('K6 fixHazardIdentificationGaps 危大遗漏项补写', () => {
-    it('K6 适用前提命中且辨识区缺别名 → 在危大标题行后补写', () => {
-      const md = '## 危大工程辨识清单\n\n1. 脚手架工程\n2. 起重吊装及安装拆卸工程\n\n基坑开挖深度为5m。';
-      const result = fixHazardIdentificationGaps(md);
-      expect(result.markdown).toContain('基坑支护与降水工程：基坑开挖深度达到判定线的区段按基坑支护与降水工程辨识');
-      expect(result.fixedCount).toBe(1);
-      expect(result.details[0]).toContain('基坑支护与降水工程');
-    });
-
-    it('K6 无适用前提 → 原样（不制造义务）', () => {
-      const md = '## 危大工程辨识清单\n\n1. 脚手架工程\n\n本项目无基坑开挖内容。';
-      const result = fixHazardIdentificationGaps(md);
-      expect(result.markdown).toBe(md);
-      expect(result.fixedCount).toBe(0);
-    });
-
-    it('K6 辨识区别名已覆盖 → 不补写', () => {
-      const md = '## 危大工程辨识清单\n\n1. 基坑支护与降水工程\n\n基坑开挖深度为5m。';
-      const result = fixHazardIdentificationGaps(md);
-      expect(result.markdown).toBe(md);
-      expect(result.fixedCount).toBe(0);
-    });
-
-    it('K6 无危大标题 → 回退最后一个含危大正文行后补写', () => {
-      const md = '本工程基坑开挖深度为5m，属危大工程管控范围。\n后续段落内容。';
-      const result = fixHazardIdentificationGaps(md);
-      expect(result.markdown.indexOf('基坑支护与降水工程：')).toBeGreaterThan(0);
-      expect(result.markdown.indexOf('基坑支护与降水工程：')).toBeLessThan(result.markdown.indexOf('后续段落内容'));
       expect(result.fixedCount).toBe(1);
     });
   });

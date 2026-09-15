@@ -318,16 +318,11 @@ export const DETERMINISTIC_FIXER_ANCHORS: readonly FixerEntry[] = [
   { id: 'self-undermining', kind: 'deterministic', anchoredTo: 'self-undermining-candidate', giveUpOnFailure: true },
   // A4 关键设计决策两可表述唯一化（4.27.0）：与检测器 ambiguous-either-or 同源（supportSystem 权威）
   { id: 'ambiguous-either-or', kind: 'deterministic', anchoredTo: 'ambiguous-either-or', authorities: ['supportSystem'], giveUpOnFailure: true },
-  { id: 'empty-scoring-response', kind: 'deterministic', anchoredTo: 'requirements-coverage', giveUpOnFailure: true },
   // 4.27.2 招标元语言确定性清理（语气泄漏治理）：与检测器 formal-style（文风泄漏/后台话术）同源锚定——
   // 「按招标文件要求/约定」条幅与调用式元语言属正式文风失分面，检测定位=修复定位
   { id: 'tender-meta-language', kind: 'deterministic', anchoredTo: 'formal-style', giveUpOnFailure: true },
   // 4.32 配置禁用词确定性清洗（丰乐镇 v6 #59）：与门禁检测器 formal-text-gate（forbiddenTexts 阻断词）同源
   { id: 'forbidden-configuration', kind: 'deterministic', anchoredTo: 'formal-text-gate', giveUpOnFailure: true },
-  // 4.31 编制依据地方性法规补写（丰乐镇 v6 #71）：与检测器 basis-regulations-coverage 同源（blueprint 权威）
-  { id: 'basis-regulation-region', kind: 'deterministic', anchoredTo: 'basis-regulations-coverage', authorities: ['blueprint'], giveUpOnFailure: true },
-  // 4.32 工伤保险缴纳表述补写（丰乐镇 v6 #60）：与检测器 local-adaptation-keyword（workInjury 语义查询）同源
-  { id: 'work-injury-insurance', kind: 'deterministic', anchoredTo: 'local-adaptation-keyword', giveUpOnFailure: true },
   // 4.27.2 条款响应重复行去重：与检测器 duplicate-paragraph 同源（整行完全重复的重复段落族）
   { id: 'duplicate-response-line', kind: 'deterministic', anchoredTo: 'duplicate-paragraph', giveUpOnFailure: true },
   { id: 'atlas-reference', kind: 'deterministic', anchoredTo: 'drawing-reference', giveUpOnFailure: true },

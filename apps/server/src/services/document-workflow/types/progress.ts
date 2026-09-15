@@ -43,7 +43,12 @@ export interface DocumentGenerationDiagnostics {
     /** P25 patchGuard 按修复轮分组统计：键为修复轮 id（对齐 LLM_PATCH_REPAIR_ROUNDS），值为该轮 hits/rejects 计数（P12 扩展 rollbacks：withPatchRollback 回滚计数按轮分组） */
     patchGuardStats?: Record<string, { hits: number; rejects: number; rollbacks?: number }> };
     semantic: { embedCacheHits: number; embedCacheMisses: number };
-  evidence: { raw: number; used: number; filteredNoise: number; budgetDropped: number; avgNoiseScore: number; avgFactDensity: number; searchQueries: number; searchMs: number; contextChars: number; t0Chars: number; t1Chars: number; t2Lines: number; omittedChars: number };
+  evidence: { raw: number; used: number; filteredNoise: number; budgetDropped: number; avgNoiseScore: number; avgFactDensity: number; searchQueries: number; searchMs: number; contextChars: number; t0Chars: number; t1Chars: number; t2Lines: number; omittedChars: number;
+    /** P2-B 证据双通道覆盖度观测（可选字段：4.41 采集→4.42 收敛决策依据）：预分配意图证据（source=project-intelligence）注入/最终留存条数；运行时召回（KB keyword/vector/hybrid + 深召回 deep-retrieval/required-fact-evidence）注入/最终留存条数——实机数据用于验证「删除运行时召回是否掉质量」 */
+    intentEvidenceInjected?: number;
+    intentEvidenceUsed?: number;
+    retrievedEvidenceInjected?: number;
+    retrievedEvidenceUsed?: number };
   quality: { blockingCount: number; importantCount: number; minorCount: number; repairedCount: number };
   /** 1.1 事实净化门计数（本地事实池出口脏值截断/丢弃/编号回源补全，进度页后台诊断展示） */
   factSanitize?: { truncated: number; dropped: number; repaired: number };

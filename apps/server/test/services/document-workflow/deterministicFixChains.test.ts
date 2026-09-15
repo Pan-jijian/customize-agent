@@ -47,13 +47,10 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'formula-residue',
       'self-undermining',
       'ambiguous-either-or',
-      'empty-scoring-response',
-      // 4.27.2 招标元语言清理 + 重复响应行去重（紧随空响应句改写，条幅剥离后重复判定同帧）
+      // 4.27.2 招标元语言清理 + 重复响应行去重（条幅剥离后重复判定同帧）
       'tender-meta-language',
-      // 4.32 配置禁用词清洗 + 编制依据法规补写 + 工伤保险表述补写（丰乐镇 v6 #59/#71/#60）
+      // 4.32 配置禁用词清洗（丰乐镇 v6 #59）
       'forbidden-configuration',
-      'basis-regulation-region',
-      'work-injury-insurance',
       'duplicate-response-line',
       'atlas-reference',
       // 4.31 internal-term-heading 启用 stage5（丰乐镇 v6 #66/#88 表格行替换）
@@ -94,13 +91,10 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'formula-residue',
       'self-undermining',
       'ambiguous-either-or',
-      'empty-scoring-response',
       // 4.27.2 招标元语言清理 + 重复响应行去重
       'tender-meta-language',
-      // 4.32 配置禁用词清洗 + 编制依据法规补写 + 工伤保险表述补写（丰乐镇 v6 #59/#71/#60）
+      // 4.32 配置禁用词清洗（丰乐镇 v6 #59）
       'forbidden-configuration',
-      'basis-regulation-region',
-      'work-injury-insurance',
       'duplicate-response-line',
       // 4.36.2 复查修正：图集引用清洗补接 round-2 链（stage5 后 LLM 补写轮可再引入）
       'atlas-reference',
