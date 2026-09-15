@@ -1,8 +1,8 @@
 /**
- * 第十三批边界矩阵（Q 组）：蓝图 L2 造价锚定 + 公式值化 + 权威源回填（丰乐镇第 3 轮根治）。
- * 覆盖：单位混加拦截（Q1）、造价锚定窗口 1100 万 → [80,229]（Q2）、无交集以造价锚定为准（Q3）、
- * 1222 超窗校验拦截（Q4）、柴油机械临电剔除与降级定性（Q5）、milestones 权重 0 兜底（Q6）、
- * byPhase 五阶段产出（Q7）、渲染层公式符号断言与 byTrade 单值（Q8）、
+ * 第十三批边界矩阵（Q 组）：蓝图 L2 工效推导 + 公式值化 + 权威源回填（丰乐镇第 3 轮根治）。
+ * 覆盖：单位混加拦截（Q1）、峰值推导无自编系数（直接工效算术，上界口径）（Q2）、
+ * 篡改峰值超推导区间校验拦截（Q4）、柴油机械临电剔除与降级定性（Q5）、milestones 权重 0 下限（Q6）、
+ * byPhase 阶段产出（Q7）、渲染层公式符号断言与 byTrade 单值（Q8）、
  * 设备单位校验（路灯安装「项」不入高空作业车「套」）（Q9）、
  * blueprintLaborPeakAuthority 权威源回填（Q10）。
  * 原则：每条用例独立断言意义；真实实现行为一律锁定，不迎合用例改实现。
@@ -11,7 +11,6 @@ import { describe, expect, it } from 'vitest';
 import {
   buildBlueprintData,
   buildBlueprintOutline,
-  deriveCostAnchoredLaborWindow,
   deriveLaborFromBoq,
   deriveMilestonesFromBoq,
   deriveTempUtilitiesFromBoq,
@@ -19,6 +18,7 @@ import {
   validateBlueprint,
 } from '@/services/document-workflow/integratedBlueprint';
 import { blueprintLaborPeakAuthority } from '@/services/document-workflow/authorityIndex';
+import { villageMunicipalStrategy } from '@/services/document-workflow/blueprintDerivationStrategies';
 import type { BlueprintEquipmentItem, IntegratedBlueprint } from '@/services/document-workflow/integratedBlueprint';
 import type { BillOfQuantitiesResult, BoqEntry } from '@/services/document-workflow/billOfQuantitiesParser';
 
@@ -72,7 +72,7 @@ describe('Q1 单位混加拦截（m² 条目不入 m³ 组）', () => {
       entry(1, '级配碎石垫层', '1．垫层：级配碎石', 'm2', 5000),
       entry(2, 'C20混凝土垫层', '1．混凝土强度等级：C20', 'm3', 100),
     ]);
-    const labor = deriveLaborFromBoq(boq, 90, 1100, []);
+    const labor = deriveLaborFromBoq(boq, 90, [], villageMunicipalStrategy);
     const concrete = labor.byTrade.find(item => item.trade === '混凝土工');
     expect(concrete).toBeDefined();
     expect(concrete?.basis).toContain('100m3');
@@ -82,56 +82,48 @@ describe('Q1 单位混加拦截（m² 条目不入 m³ 组）', () => {
   });
 });
 
-describe('Q2 造价锚定窗口计算（1100 万 → [80, 229]）', () => {
-  it('deriveCostAnchoredLaborWindow(1100, 77) 确定性输出 [80, 229]', () => {
-    expect(deriveCostAnchoredLaborWindow(1100, 77)).toEqual({
-      min: 80,
-      max: 229,
-      detail: '合同估算价 1100 万元 × 人工费占比 15%~25% ÷ 综合工日单价 250~350 元 ÷ 有效工期 77 天 × 峰值系数 1.3~1.6',
-    });
-  });
-});
-
-describe('Q3 工程量推导与造价锚定无交集（400000 m³ 土方）', () => {
-  it('普工区间 {405, 1122} 与锚定 [80, 229] 无交集 → 以造价锚定为准，peakValue = 155', () => {
+describe('Q2 峰值推导无自编系数（直接工效算术，上界口径）', () => {
+  it('400000 m³ 土方 → 普工区间 = 工程量 × 经验工效 ÷ 工期（无系数放大压缩）', () => {
     const boq = boqOf([entry(1, '挖一般土方', '1．部位：村庄道路 2．土壤类别：三类土', 'm3', 400000)]);
-    const labor = deriveLaborFromBoq(boq, 90, 1100, []);
-    expect(labor.peakValue).toBe(155);
-    expect(labor.peakBasis).toContain('无交集');
-    expect(labor.peakBasis).toContain('以造价锚定区间为准');
-    expect(labor.peak).toEqual({ min: 80, max: 229 });
+    const labor = deriveLaborFromBoq(boq, 90, [], villageMunicipalStrategy);
+    // 土方工程经验工效 0.08~0.15 工日/m³：32000~60000 工日 ÷ 90 天 = 356~667 人
+    const worker = labor.byTrade.find(item => item.trade === '普工');
+    expect(worker).toEqual(expect.objectContaining({ min: 356, max: 667 }));
+    expect(labor.peak).toEqual({ min: 356, max: 667 });
+    expect(labor.peakValue).toBe(512);
+    expect(labor.peakBasis).toContain('上界口径');
   });
 });
 
-describe('Q4 1222 超窗值校验拦截（造价锚定量级校验）', () => {
+describe('Q4 篡改峰值超推导区间校验拦截（内部一致性）', () => {
   function buildBlueprint() {
     const boq = boqOf([entry(1, '挖一般土方', '1．部位：村庄道路', 'm3', 400000)]);
     const basicFacts = '项目名称：测试村建设项目 计划工期：90日历天 质量标准：合格 计价依据：合造价〔2018〕13号文 合同估算价：1100万元';
-    const { data } = buildBlueprintData({ boq, basicFacts, projectName: '测试村建设项目' });
+    const { data } = buildBlueprintData({ boq, basicFacts, projectName: '测试村建设项目', strategy: villageMunicipalStrategy });
     const outline = buildBlueprintOutline({ chapterTitles: FULL_CHAPTER_TITLES, boq, docType: '单位工程施工组织设计' });
     const blueprint: IntegratedBlueprint = {
       meta: { version: '2.0.0', docType: '单位工程施工组织设计', createdAt: '2026-09-06', sourceMaterials: ['fixture.xls'] },
       data,
       outline,
       validation: { passed: false, checks: [] },
-      diagnostics: { stage: '阶段 D', standardBlocksLoaded: 0, standardBlockGaps: [], laborDerivationBasis: '', llmCalls: 0, fallbackUsed: [], warnings: [], durationMs: 0 },
+      diagnostics: { stage: '阶段 D', laborDerivationBasis: '', llmCalls: 0, fallbackUsed: [], warnings: [], durationMs: 0 },
     };
     return { blueprint, boq };
   }
 
-  it('构造蓝图通过四道校验（正常峰值 155 在量级窗口内）', () => {
+  it('构造蓝图通过四道校验（正常峰值在推导区间内）', () => {
     const { blueprint, boq } = buildBlueprint();
     const report = validateBlueprint(blueprint, boq);
     expect(report.passed).toBe(true);
   });
 
-  it('篡改 peakValue = 1222 → 内部一致性校验失败且报造价锚定超窗', () => {
+  it('篡改 peakValue = 1222 → 内部一致性校验失败且报超出推导区间', () => {
     const { blueprint, boq } = buildBlueprint();
     blueprint.data.resources.labor.peakValue = 1222;
     const report = validateBlueprint(blueprint, boq);
     const consistency = report.checks.find(check => check.name === '4. 内部一致性校验');
     expect(consistency?.passed).toBe(false);
-    expect(consistency?.message).toContain('造价锚定');
+    expect(consistency?.message).toContain('超出推导区间');
     expect(consistency?.message).toContain('1222');
   });
 });
@@ -144,10 +136,10 @@ describe('Q5 临时用电柴油机械剔除与降级定性', () => {
     { name: '洒水车', spec: '', min: 1, max: 2, basis: '' },
     { name: '高空作业车', spec: '', min: 1, max: 2, basis: '' },
   ];
-  const labor = deriveLaborFromBoq(boqOf([entry(1, '挖一般土方', '1．部位：村庄道路', 'm3', 400000)]), 90, 1100, []);
+  const labor = deriveLaborFromBoq(boqOf([entry(1, '挖一般土方', '1．部位：村庄道路', 'm3', 400000)]), 90, [], villageMunicipalStrategy);
 
   it('纯柴油机械 → 定性表述不编数值（3168kW 类荒谬值根治）', () => {
-    const result = deriveTempUtilitiesFromBoq(dieselOnly, labor);
+    const result = deriveTempUtilitiesFromBoq(dieselOnly, labor, villageMunicipalStrategy);
     expect(result.powerLoad).toContain('柴油机械不计入用电负荷');
     expect(result.powerLoad).toContain('临时用电以村庄既有电源分散接入为主');
     expect(result.powerLoad).not.toMatch(/\d/u);
@@ -155,17 +147,17 @@ describe('Q5 临时用电柴油机械剔除与降级定性', () => {
   });
 
   it('加蛙式打夯机（3kW 电动机具）→ 只计电动机具，用电负荷约 2 kW 无公式符号', () => {
-    const result = deriveTempUtilitiesFromBoq([...dieselOnly, { name: '蛙式打夯机', spec: '', min: 1, max: 2, basis: '' }], labor);
+    const result = deriveTempUtilitiesFromBoq([...dieselOnly, { name: '蛙式打夯机', spec: '', min: 1, max: 2, basis: '' }], labor, villageMunicipalStrategy);
     expect(result.powerLoad).toContain('用电负荷约 2 kW');
     expect(result.powerLoad).toContain('电动机具总功率约 3 kW');
     expect(result.powerLoad).not.toContain('挖掘机');
     expect(result.powerLoad).not.toMatch(FORMULA_SYMBOL_RE);
   });
 
-  it('临时用水值化：引用劳动力峰值 155 人，高峰日生活用水量约 9.3 m³', () => {
-    const result = deriveTempUtilitiesFromBoq(dieselOnly, labor);
-    expect(result.waterUsage).toContain('高峰人数 155 人');
-    expect(result.waterUsage).toContain('高峰日生活用水量约 9.3 m³');
+  it('临时用水值化：引用劳动力峰值 512 人，高峰日生活用水量约 30.7 m³', () => {
+    const result = deriveTempUtilitiesFromBoq(dieselOnly, labor, villageMunicipalStrategy);
+    expect(result.waterUsage).toContain('高峰人数 512 人');
+    expect(result.waterUsage).toContain('高峰日生活用水量约 30.7 m³');
     expect(result.waterUsage).not.toMatch(FORMULA_SYMBOL_RE);
   });
 });
@@ -173,7 +165,7 @@ describe('Q5 临时用电柴油机械剔除与降级定性', () => {
 describe('Q6 milestones 权重 0 → 2 天下限兜底', () => {
   it('无任何分部匹配条目 → 非 prep 阶段 duration 全部 ≥ 2', () => {
     const boq = boqOf([entry(1, '其他项目', '1．描述：无', '项', 1)]);
-    const milestones = deriveMilestonesFromBoq(boq, 90);
+    const milestones = deriveMilestonesFromBoq(boq, 90, villageMunicipalStrategy);
     expect(milestones).toHaveLength(5);
     for (const milestone of milestones.slice(1)) {
       expect(milestone.duration).toBeGreaterThanOrEqual(2);
@@ -191,7 +183,7 @@ describe('Q7 byPhase 五阶段产出（分阶段计划表数据源）', () => {
   ]);
 
   it('五个阶段全部产出且每阶段 min ≤ max', () => {
-    const labor = deriveLaborFromBoq(boq, 90, 1100, []);
+    const labor = deriveLaborFromBoq(boq, 90, [], villageMunicipalStrategy);
     expect(labor.byPhase.map(item => item.phase)).toEqual([
       '施工准备与清杂拆除',
       '污水管网工程',
@@ -215,23 +207,23 @@ describe('Q8 渲染层公式值化与 byTrade 单值', () => {
     entry(5, '路灯安装', '1．光源：LED', '项', 1),
   ]);
   const basicFacts = '项目名称：测试村建设项目 计划工期：90日历天 质量标准：合格 计价依据：合造价〔2018〕13号文 合同估算价：1100万元';
-  const { data } = buildBlueprintData({ boq, basicFacts, projectName: '测试村建设项目' });
+  const { data } = buildBlueprintData({ boq, basicFacts, projectName: '测试村建设项目', strategy: villageMunicipalStrategy });
   const text = renderBlueprintDataText(data);
 
   it('渲染文本不含任何公式符号（P =/Σ/cosφ/K1/K2/q =/×）', () => {
     expect(text).not.toMatch(FORMULA_SYMBOL_RE);
   });
 
-  it('劳动力峰值行：155 人 + 造价锚定口径唯一峰值声明', () => {
-    expect(text).toContain('- 劳动力峰值：155 人（造价锚定口径唯一峰值，各章必须引用该值，不得自设其他峰值）');
+  it('劳动力峰值行：36 人 + 清单工效推导口径唯一峰值声明', () => {
+    expect(text).toContain('- 劳动力峰值：36 人（清单工效推导口径唯一峰值，各章必须引用该值，不得自设其他峰值）');
   });
 
-  it('工种构成行归一化（合计=峰值 155，写作层唯一口径；区间中值之和与峰值脱节是丰乐镇三套矛盾口径根因）', () => {
-    expect(text).toContain('工种构成（合计=155 人');
-    expect(text).toContain('瓦工 123 人');
-    expect(text).toContain('管道工 12 人');
-    expect(text).toContain('绿化工 17 人');
-    expect(text).toContain('电工 3 人');
+  it('工种构成行归一化（合计=峰值 36，写作层唯一口径；区间中值之和与峰值脱节是丰乐镇三套矛盾口径根因）', () => {
+    expect(text).toContain('工种构成（合计=36 人');
+    expect(text).toContain('瓦工 28 人');
+    expect(text).toContain('管道工 3 人');
+    expect(text).toContain('绿化工 3 人');
+    expect(text).toContain('电工 2 人');
     expect(text).not.toContain('不另设工种数值');
   });
 });
@@ -243,7 +235,7 @@ describe('Q9 设备单位一致性（「项」条目不入「套」设备桶）'
       entry(2, '栽植乔木', '1．苗木规格：胸径10cm', 'm2', 3000),
     ]);
     const basicFacts = '项目名称：测试村建设项目 计划工期：90日历天 质量标准：合格 计价依据：合造价〔2018〕13号文 合同估算价：1100万元';
-    const { data } = buildBlueprintData({ boq, basicFacts, projectName: '测试村建设项目' });
+    const { data } = buildBlueprintData({ boq, basicFacts, projectName: '测试村建设项目', strategy: villageMunicipalStrategy });
     expect(data.resources.equipment.find(item => item.name === '高空作业车')).toBeUndefined();
     expect(data.resources.equipment.find(item => item.name === '洒水车')).toBeDefined();
   });
@@ -259,8 +251,8 @@ describe('Q10 blueprintLaborPeakAuthority 权威源回填', () => {
       entry(5, '路灯安装', '1．光源：LED', '项', 1),
     ]);
     const basicFacts = '项目名称：测试村建设项目 计划工期：90日历天 质量标准：合格 计价依据：合造价〔2018〕13号文 合同估算价：1100万元';
-    const { data } = buildBlueprintData({ boq, basicFacts, projectName: '测试村建设项目' });
-    expect(data.resources.labor.peakValue).toBe(155);
-    expect(blueprintLaborPeakAuthority(data)).toBe(155);
+    const { data } = buildBlueprintData({ boq, basicFacts, projectName: '测试村建设项目', strategy: villageMunicipalStrategy });
+    expect(data.resources.labor.peakValue).toBe(36);
+    expect(blueprintLaborPeakAuthority(data)).toBe(36);
   });
 });

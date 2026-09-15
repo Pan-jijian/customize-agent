@@ -392,7 +392,7 @@ const DOMAIN_RENDERERS: Record<AuthorityDomain, (entries: AuthorityEntry[]) => s
   labor: entries => {
     const rows: string[] = [];
     const peak = entries.find(entry => entry.label === '劳动力峰值');
-    if (peak) rows.push(`- 劳动力峰值：${peak.value} 人（造价锚定口径唯一峰值，各章必须引用该值，不得自设其他峰值）`);
+    if (peak) rows.push(`- 劳动力峰值：${peak.value} 人（清单工效推导口径唯一峰值，各章必须引用该值，不得自设其他峰值）`);
     const phases = entries.filter(entry => entry.label.startsWith('阶段劳动力:'));
     if (phases.length > 0) rows.push(`- 分阶段劳动力投入（各阶段同时在场人数，分阶段计划表数据源）：${phases.map(entry => `${stripLabelPrefix(entry.label, '阶段劳动力:')} ${entry.value} 人`).join('、')}`);
     const trades = entries.filter(entry => entry.label.startsWith('工种区间:'));

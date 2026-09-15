@@ -20,6 +20,9 @@ export async function stagePostReviewSurface(session: FinalizeSession): Promise<
   const plannedSectionFixFinal = await enforcePlannedSectionCompleteness({
     chapterDraftsFinal: session.finalChapterDrafts, template: session.template, repairPromptTexts: session.repairPromptTexts,
     requirement: session.requirement, signal: session.signal, generationDiagnostics: session.generationDiagnostics, progressStages: session.progressStages, emitProgress: session.emitProgress, withProgressHeartbeat: session.withProgressHeartbeat,
+    finalGateRepairStages: session.finalGateRepairStages,
+    // 标书编制规格（暗标禁表）：交付前补写链与写作链同口径
+    bidComposition: session.bidComposition,
   });
   if (plannedSectionFixFinal.plannedSectionFixApplied) {
     session.finalMarkdown = session.rebuildFinalMarkdown();
@@ -36,6 +39,10 @@ export async function stagePostReviewSurface(session: FinalizeSession): Promise<
   if (cleanedCommercialMarkdown !== session.finalMarkdown) {
     session.finalMarkdown = cleanedCommercialMarkdown;
     await session.recomputeFinalValidationBundle();
+    // 4.36.2 复查修正（诊断可见性）：清洗器修改最终成稿后此前无任何事件，复盘不可见——补事件并双写
+    const commercialStripStage = displayStage({ type: 'validation', roleId: 'commercial-strip', status: 'success', message: '商务条款数据交付前兜底清洗：正文商务条款数据句已删除' }, { subtitle: '评审后兜底' });
+    upsertProgressStage(session.progressStages, commercialStripStage);
+    upsertProgressStage(session.finalGateRepairStages, commercialStripStage);
   }
   // 表格空单元格交付前确定性修复（round-19 R5）：表格专轮之后的 LLM patch（全维度评审轮修复）可能重写表格
   // 引入空单元格（徽光阁实测危险源辨识表“高处作业坠落”行末两列空且最终校验持续报 error），
@@ -45,6 +52,9 @@ export async function stagePostReviewSurface(session: FinalizeSession): Promise<
   if (repairedTableMarkdown.markdown !== session.finalMarkdown) {
     session.finalMarkdown = repairedTableMarkdown.markdown;
     await session.recomputeFinalValidationBundle();
+    const tableDeterministicStage = displayStage({ type: 'validation', roleId: 'table-deterministic-repair', status: 'success', message: repairedTableMarkdown.removed > 0 ? `表格空单元格交付前确定性修复：删除 ${repairedTableMarkdown.removed} 块` : '表格空单元格交付前确定性修复：合计行填充类修复已落地' }, { subtitle: '评审后兜底' });
+    upsertProgressStage(session.progressStages, tableDeterministicStage);
+    upsertProgressStage(session.finalGateRepairStages, tableDeterministicStage);
   }
   // B6 评审轮后表面修复兜底（丰乐镇第六轮实测）：全维度评审轮 patch 重写章节会再引入
   // 表格断行残片（「优先保障关键村 |」独立残行），stage5 修复链早于评审轮覆盖不到；
@@ -58,6 +68,10 @@ export async function stagePostReviewSurface(session: FinalizeSession): Promise<
   if (surfaceFixRound2Result.markdown !== session.finalMarkdown) {
     session.finalMarkdown = surfaceFixRound2Result.markdown;
     await session.recomputeFinalValidationBundle();
+    // 4.36.2 复查修正（诊断可见性）：round-2 链修改正文后此前无任何事件，复盘不可见——补事件并双写
+    const postReviewSurfaceStage = displayStage({ type: 'validation', roleId: 'post-review-surface', status: 'success', message: `评审轮后表面修复兜底：确定性清洗 ${surfaceFixRound2Result.fixedCount} 处` }, { subtitle: '评审后兜底' });
+    upsertProgressStage(session.progressStages, postReviewSurfaceStage);
+    upsertProgressStage(session.finalGateRepairStages, postReviewSurfaceStage);
   }
   // 内部术语句子确定性删除兜底（round-19 R3 已实现未接线，丰乐镇第 2 轮实测：
   // 「落位」「控制口径」「峰值口径」「数据口径」经 LLM 修复轮仍残留 4 词，检测器报 error blocker；
@@ -67,6 +81,9 @@ export async function stagePostReviewSurface(session: FinalizeSession): Promise<
   if (strippedTerminologyMarkdown !== session.finalMarkdown) {
     session.finalMarkdown = strippedTerminologyMarkdown;
     await session.recomputeFinalValidationBundle();
+    const terminologyStripStage = displayStage({ type: 'validation', roleId: 'terminology-strip', status: 'success', message: '内部术语句子确定性删除兜底：正文残留内部术语已删除' }, { subtitle: '评审后兜底' });
+    upsertProgressStage(session.progressStages, terminologyStripStage);
+    upsertProgressStage(session.finalGateRepairStages, terminologyStripStage);
   }
   // B2 目录与正文一致性兜底：目录按最终正文 H2/H3 实际结构重建（fixTocFromBody 无改动时零成本），
   // 修复后再重算校验组，保证交付门禁与评分基于目录一致的最终成稿
@@ -74,6 +91,9 @@ export async function stagePostReviewSurface(session: FinalizeSession): Promise<
   if (tocConsistencyFix.fixedCount > 0) {
     session.finalMarkdown = tocConsistencyFix.markdown;
     await session.recomputeFinalValidationBundle();
+    const tocConsistencyStage = displayStage({ type: 'validation', roleId: 'toc-consistency', status: 'success', message: `目录与正文一致性兜底：按正文实际结构重建目录 ${tocConsistencyFix.fixedCount} 处` }, { subtitle: '评审后兜底' });
+    upsertProgressStage(session.progressStages, tocConsistencyStage);
+    upsertProgressStage(session.finalGateRepairStages, tocConsistencyStage);
   }
   // 第十六版 B 闭环终检（丰乐镇 4.26.0 实测）：前附表条款补写句在 stage5 之后仍可能被 LLM 修复轮
   // 改写丢失（「不允许分包」→「严禁转包和违法分包」丢失锚点字面），商务清洗也只作用于 markdown

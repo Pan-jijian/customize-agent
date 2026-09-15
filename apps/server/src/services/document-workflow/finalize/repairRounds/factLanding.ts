@@ -75,6 +75,8 @@ export async function stageFactLanding(session: FinalizeSession): Promise<void> 
             promptTexts: factLandingInstruction,
             requirement: session.requirement,
             forbidDrawingImages: false,
+            // 标书编制规格（暗标禁表）：修复链 system 口径同步
+            bidComposition: session.bidComposition,
             diagnostics: session.generationDiagnostics,
             signal: session.signal,
             patchGuard: repairPatchGuard('fact-landing', session.generationDiagnostics),

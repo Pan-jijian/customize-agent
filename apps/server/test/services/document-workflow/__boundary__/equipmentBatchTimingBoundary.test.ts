@@ -121,9 +121,9 @@ describe('equipmentBatchTimingBoundary · N 组：前期动作时限矛盾', () 
 });
 
 describe('equipmentBatchTimingBoundary · P 组：阶段劳动力确定性修复（写时对齐同源）', () => {
-  const phaseAuthorities = [{ phase: '污水管网工程', value: 35, trace: '按造价折算' }];
+  const phaseAuthorities = [{ phase: '污水管网工程', value: 35, trace: '按工效推导' }];
   const roadAuthorities = [
-    { phase: '污水管网工程', value: 35, trace: '按造价折算' },
+    { phase: '污水管网工程', value: 35, trace: '按工效推导' },
     { phase: '道路铺装工程', value: 68 },
   ];
 

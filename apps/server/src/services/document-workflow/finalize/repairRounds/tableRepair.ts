@@ -9,9 +9,34 @@ import { markdownTableQualityIssues } from '../../qualityValidation';
 import { tuningProfile } from '../../tuningProfile';
 import { finalizeChapterContentQuality } from '../../documentGeneratorHelpers';
 import { extractTableBlockByAnchor, repairTableBlockDeterministically } from '../../tableRepairHelpers';
+import { isBodyTableForbidden } from '../../bidComposition';
+import { repairTableExecutionGaps } from '../../globalQualityGates';
 import type { FinalizeSession } from '../finalizeSession';
 
 export async function stageTableRepair(session: FinalizeSession): Promise<void> {
+  // 暗标禁表（标书编制规格 bodyTablePolicy=forbidden）：表格修复轮反转为拆表轮——
+  // 正文残留表格改写为段落式叙述（与生成期全局轮同一实现 repairTableExecutionGaps 的拆表分支），
+  // 不做单元格修复（暗标正文不应存在表格，补全单元格只会让违规表格更完整）
+  if (isBodyTableForbidden(session.bidComposition)) {
+    const { tableFixApplied } = await repairTableExecutionGaps({
+      effectiveChapters: session.effectiveChapters,
+      chapterDraftsFinal: session.finalChapterDrafts,
+      template: session.template,
+      repairPromptTexts: session.repairPromptTexts,
+      requirement: session.requirement,
+      signal: session.signal,
+      generationDiagnostics: session.generationDiagnostics,
+      progressStages: session.progressStages,
+      emitProgress: session.emitProgress,
+      withProgressHeartbeat: session.withProgressHeartbeat,
+      bidComposition: session.bidComposition,
+    });
+    if (tableFixApplied) {
+      session.finalMarkdown = session.rebuildFinalMarkdown();
+      await session.recomputeFinalValidationBundle();
+    }
+    return;
+  }
   // 表格数据完整性修复轮（T1-2）：空单元格/占位符/列数不一致等表格 error 硬阻断导出（十度实测缺陷：
   // 竣工清理计划表末列为空、临时用电表“—/若干/约82kW”占位）。修复链路：定位章节 → 注入缺陷表格原文 patch 修复
   // → 确定性兜底（4.17.8 删除升级指令二修：每缺陷单次尝试，失败即放弃）。

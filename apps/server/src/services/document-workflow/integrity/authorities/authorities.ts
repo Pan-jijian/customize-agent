@@ -450,4 +450,37 @@ export function flexNamePattern(name: string): string {
   }).join('');
 }
 
+/** 名称弹性匹配模式（省略形态）：括号段可整体省略
+ * （「路床(槽)碾压检验」↔「路床碾压检验」——真实产物实测全角变体 63 次、去括号写法数十次）。
+ * 与 flexNamePattern（严格形态）配合两轮匹配：严格形态先占位，省略形态只补漏。
+ * 省略仅在「下一位不是开括号」时成立——括号段位于名称末尾时防抢占
+ * （「1#生态池（2T/D)」的省略形态不得占用「1#生态池（3T/D)」的全名匹配位置）。 */
+
+export function flexNameOptionalPattern(name: string): string {
+  const escapeChar = (ch: string): string => (/[.*+?^${}()|[\]\\]/u.test(ch) ? `\\${ch}` : ch);
+  let pattern = '';
+  let index = 0;
+  while (index < name.length) {
+    const ch = name[index]!;
+    if (ch === '(' || ch === '（') {
+      // 配对识别：取最近的闭括号（半/全角任一）为括号段终点；无配对时退化为单字符双态
+      let close = -1;
+      for (let cursor = index + 1; cursor < name.length; cursor += 1) {
+        if (name[cursor] === ')' || name[cursor] === '）') { close = cursor; break; }
+      }
+      if (close > index) {
+        const content = name.slice(index + 1, close).split('').map(escapeChar).join('');
+        pattern += `(?:[（(]?${content}[）)]?|(?![（(]))`;
+        index = close + 1;
+        continue;
+      }
+    }
+    if (ch === '(' || ch === '（') { pattern += '[（(]?'; index += 1; continue; }
+    if (ch === ')' || ch === '）') { pattern += '[）)]?'; index += 1; continue; }
+    pattern += escapeChar(ch);
+    index += 1;
+  }
+  return pattern;
+}
+
 /** A2 总入口：跨章数值/支护体系矛盾确定性修复（劳动力峰值 → 节点工期 → 材料/设备数量 → 支护体系，顺序执行互不重叠） */

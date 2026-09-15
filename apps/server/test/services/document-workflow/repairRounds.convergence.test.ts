@@ -1,7 +1,7 @@
 /**
  * V5 P4c 收敛修复边界矩阵（C2/C3 修复轮）：
  * stageNumericVerification——单轮失败即放弃 → ≤2 轮收敛：残留数下降才继续下一轮、
- * 清零即通过、不降即停、修复变差回滚保留原文、全合法零修复且不进修复轮；
+ * 清零即通过、不降即停、修复变差回滚保留原文、全合法零修复且不进修复轮（通过事件双写 parity）；
  * stageRequirementVerification——修复落地后复验、复验通过即闭环、复验残留下降才进第 2 轮、
  * 未落地（空修复/回滚）不追加复验直接转 warning、达 2 轮上限停止且末次复验残留转 warning。
  * LLM 与 repairChapterByQuality 全 mock（确定性判定，无网络依赖）。
@@ -107,12 +107,15 @@ describe('repairRounds.convergence · C2 数值核对收敛修复', () => {
   });
 
   it('全部数值均有来源：零修复且不进入修复轮', async () => {
-    const { session, progressStages } = makeSession([{ id: 'ch1', title: '工程概况', content: '最大管径DN300，养护龄期7d。' }]);
+    const { session, progressStages, finalGateRepairStages } = makeSession([{ id: 'ch1', title: '工程概况', content: '最大管径DN300，养护龄期7d。' }]);
     await stageNumericVerification(session);
     expect(repairMock).not.toHaveBeenCalled();
     const stage = stageOf(progressStages, 'numeric-verification');
     expect(stage?.status).toBe('success');
     expect(stage?.message).toContain('核对通过');
+    // 4.36.2 双写 parity：核对通过事件必须同入 finalGateRepairStages
+    // （finalStages=executionStages 快照(早于修复轮)+finalGateRepairStages，单写事件在持久化 executionStages 中不可见）
+    expect(stageOf(finalGateRepairStages, 'numeric-verification')?.status).toBe('success');
   });
 });
 

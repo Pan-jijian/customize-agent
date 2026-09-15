@@ -3,7 +3,7 @@
  * 断言按源码规则推导（hasProcessSequenceExpression/workPackage 三要素/标题去重族）。
  */
 import { describe, expect, it } from 'vitest';
-import { dedupeRepeatedSubsections, findDuplicateH4Titles, findExtraneousBlockTitles, hasProcessSequenceExpression, looseTitleFamilyMatch, normalizeSubsectionTitleForDedup, removeExtraneousBlockSections, stripExtraneousBlockHeadings, workPackageContentElementFlags, workPackageContentElementsComplete, workPackageElementsMeetLenientGate } from '@/services/document-workflow/utils';
+import { dedupeRepeatedSubsections, findDuplicateH4Titles, findExtraneousBlockTitles, hasProcessSequenceExpression, looseTitleFamilyMatch, normalizeSubsectionTitleForDedup, removeExtraneousBlockSections, stripExtraneousBlockHeadings, workPackageContentElementFlags, workPackageContentElementsComplete } from '@/services/document-workflow/utils';
 
 // ── W1. hasProcessSequenceExpression 谱系 ──
 
@@ -59,7 +59,6 @@ describe('W2 工作包三要素逐维判定', () => {
     const flags = workPackageContentElementFlags('施工概况：本工程为道路工程，工程量约5000㎡。\n施工流程：清表→开挖→回填。\n施工方法：分层摊铺碾压，验收标准按规范。');
     expect(flags).toEqual({ scope: true, process: true, method: true });
     expect(workPackageContentElementsComplete('施工概况：本工程为道路工程，工程量约5000㎡。\n施工流程：清表→开挖→回填。\n施工方法：分层摊铺碾压，验收标准按规范。')).toBe(true);
-    expect(workPackageElementsMeetLenientGate('施工概况：本工程为道路工程，工程量约5000㎡。\n施工流程：清表→开挖→回填。\n施工方法：分层摊铺碾压，验收标准按规范。')).toBe(true);
   });
   it.each([
     ['作业对象：路基土方'],

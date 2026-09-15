@@ -4,7 +4,7 @@
  * fixHazardIdentificationGaps（危大遗漏补写）/ fixSixHundredPercentCoverage（六个百分百补写）/
  * fixInternalTerminology（内部术语清洗）/ fixHeaderlessTables（无表头表格）/
  * fixAmbiguousEitherOrCandidates（两可归一）/ fixForbiddenConfigurationTerms（禁止词清洗）/
- * fixTocFromBody（目录重建）/ fixQuantityAuthorityConflicts（清单工程量五重豁免）/
+ * fixTocFromBody（目录重建）/ fixQuantityAuthorityConflicts（判定层锚点直连，S5 豁免全废）/
  * applyNumericConsistencyDeterministicFixes（五步管线：峰值→节点→材料设备→支护→清单）
  * 原则：每条用例独立断言意义；真实实现行为一律锁定，不迎合用例改实现。
  */
@@ -17,6 +17,7 @@ import {
   fixQualityAssuranceCoverage, fixQuantityAuthorityConflicts,
   fixSelfUnderminingCandidates, fixSixHundredPercentCoverage, fixTocFromBody,
 } from '@/services/document-workflow/documentIntegrityChecks';
+import type { QuantityConflictAnchor } from '@/services/document-workflow/integratedBlueprint';
 import { buildSemanticSimilarity } from '@/services/document-workflow/semanticSimilarity';
 import { fixtureIndex } from '../authorityFixture';
 
@@ -1222,203 +1223,226 @@ describe('I3 不动场景', () => {
   });
 });
 
-// ── J. fixQuantityAuthorityConflicts 清单工程量五重豁免 ──
+// ── J. fixQuantityAuthorityConflicts 判定层锚点直连（S5：豁免全废，只做坐标替换） ──
 
-describe('J1 基础校正与单位变体', () => {
-  it('J1 正文漂移值 → 权威值替换', () => {
-    const result = fixQuantityAuthorityConflicts('级配碎石18949.52m³。', [{ name: '级配碎石', value: 20931.02, unit: 'm³' }]);
+/** 锚点构造：按正文字面值定位坐标（生产由判定层裁决产出：值 == 权威不入候选） */
+function anchorAt(markdown: string, name: string, value: number, authorityValue: number, unit = ''): QuantityConflictAnchor {
+  const at = markdown.indexOf(String(value));
+  return { name, value, unit, authorityValue, start: at, end: at + String(value).length };
+}
+
+describe('J1 锚点直连替换与切片校验', () => {
+  it('J1 判定冲突锚点 → 冲突值替换为权威值；名称/单位不参与匹配', () => {
+    const md = '级配碎石18949.52m³。';
+    const result = fixQuantityAuthorityConflicts(md, [anchorAt(md, '级配碎石', 18949.52, 20931.02, 'm³')]);
     expect(result.markdown).toBe('级配碎石20931.02m³。');
     expect(result.fixedCount).toBe(1);
     expect(result.details[0]).toContain('20931.02');
+    expect(result.details[0]).toContain('以工程量清单汇总值为准');
   });
-  it.each(['㎡', 'm²', 'm2'])('J1 单位变体“%s”互配', (unit) => {
-    const result = fixQuantityAuthorityConflicts(`栽植色带90${unit}。`, [{ name: '栽植色带', value: 120, unit: '㎡' }]);
+  it.each(['㎡', 'm²', 'm2', 'M2'])('J1 单位变体“%s”不影响坐标替换（无单位匹配）', (unit) => {
+    const md = `栽植色带90${unit}。`;
+    const result = fixQuantityAuthorityConflicts(md, [anchorAt(md, '栽植色带', 90, 120, '㎡')]);
     expect(result.markdown).toBe(`栽植色带120${unit}。`);
   });
-  it.each(['m³', 'm3'])('J1 体积单位变体“%s”互配', (unit) => {
-    const result = fixQuantityAuthorityConflicts(`挖方4040.45${unit}。`, [{ name: '挖方', value: 4187.38, unit: 'm³' }]);
-    expect(result.markdown).toBe(`挖方4187.38${unit}。`);
-  });
-  it.each(['吨', 't'])('J1 重量单位变体“%s”互配', (unit) => {
-    const result = fixQuantityAuthorityConflicts(`钢筋32${unit}。`, [{ name: '钢筋', value: 45.5, unit: 't' }]);
-    expect(result.markdown).toBe(`钢筋45.5${unit}。`);
-  });
-  it('J1 大写单位兼容（i 标志）', () => {
-    const result = fixQuantityAuthorityConflicts('混凝土面积50M2。', [{ name: '混凝土', value: 80, unit: '㎡' }]);
-    expect(result.markdown).toBe('混凝土面积80M2。');
-  });
-  it('J1 无权威列表 → 不动', () => {
-    const result = fixQuantityAuthorityConflicts('级配碎石18949.52m³。');
-    expect(result.markdown).toBe('级配碎石18949.52m³。');
-    expect(result.fixedCount).toBe(0);
-  });
-});
-
-describe('J2 名称弹性匹配（括号三态）', () => {
-  it.each(['栽植色带（生态池外围一圈）', '栽植色带(生态池外围一圈)'])('J2 正文名称“%s”匹配权威条目', (bodyName) => {
-    const result = fixQuantityAuthorityConflicts(`${bodyName}90m²。`, [{ name: '栽植色带（生态池外围一圈）', value: 120, unit: '㎡' }]);
-    expect(result.markdown).toBe(`${bodyName}120m²。`);
-  });
-  it('J2 无括号形态不匹配括号权威 → 锁定不动', () => {
-    // flexNamePattern 括号 [（(]? 可省略但括号内容必填：权威条目含括号内容时，
-    // 正文无括号形态不构成弹性匹配 → fixedCount 0
-    const md = '栽植色带90m²。';
-    const result = fixQuantityAuthorityConflicts(md, [{ name: '栽植色带（生态池外围一圈）', value: 120, unit: '㎡' }]);
+  it('J1 切片漂移校验：坐标处文本 ≠ 锚点值 → 跳过（错位坐标绝不替换）', () => {
+    const md = '级配碎石18949.52m³。';
+    const stale: QuantityConflictAnchor = { name: '级配碎石', value: 20931.02, unit: 'm³', authorityValue: 20931.02, start: 4, end: 12 };
+    const result = fixQuantityAuthorityConflicts(md, [stale]);
     expect(result.markdown).toBe(md);
     expect(result.fixedCount).toBe(0);
   });
-  it('J2 名称部分匹配（子串命中）', () => {
-    const result = fixQuantityAuthorityConflicts('人行道板安砌114.8m。', [{ name: '人行道板', value: 150, unit: 'm' }]);
-    expect(result.markdown).toBe('人行道板安砌150m。');
-  });
-});
-
-describe('J3 最长条目名优先', () => {
-  it('J3 长短条目并存 → 长条目命中不误改', () => {
-    const result = fixQuantityAuthorityConflicts('塑料管铺设8205.53m。', [
-      { name: '塑料管铺设', value: 8205.53, unit: 'm' },
-      { name: '塑料管', value: 7525.01, unit: 'm' },
-    ]);
-    expect(result.markdown).toBe('塑料管铺设8205.53m。');
-    expect(result.fixedCount).toBe(0);
-  });
-  it('J3 长条目漂移 → 长条目权威校正', () => {
-    const result = fixQuantityAuthorityConflicts('塑料管铺设7000m。', [
-      { name: '塑料管铺设', value: 8205.53, unit: 'm' },
-      { name: '塑料管', value: 7525.01, unit: 'm' },
-    ]);
-    expect(result.markdown).toBe('塑料管铺设8205.53m。');
-  });
-  it('J3 短条目独占命中（无更长条目时照常修复）', () => {
-    const result = fixQuantityAuthorityConflicts('级配碎石基层18949.52m³。', [{ name: '级配碎石', value: 20931.02, unit: 'm³' }]);
-    expect(result.markdown).toBe('级配碎石基层20931.02m³。');
-  });
-});
-
-describe('J4 表格行豁免', () => {
-  it('J4 表格行数值不校正', () => {
-    const md = '| 分部 | 级配碎石 | m³ | 18949.52 |';
-    const result = fixQuantityAuthorityConflicts(md, [{ name: '级配碎石', value: 20931.02, unit: 'm³' }]);
+  it('J1 越界坐标/非数值切片/空锚点列表 → 一律不动', () => {
+    const md = '级配碎石18949.52m³。';
+    const outOfRange: QuantityConflictAnchor = { name: '级配碎石', value: 18949.52, unit: 'm³', authorityValue: 20931.02, start: 100, end: 108 };
+    expect(fixQuantityAuthorityConflicts(md, [outOfRange]).fixedCount).toBe(0);
+    const textSlice: QuantityConflictAnchor = { name: '级配碎石', value: 100, unit: 'm³', authorityValue: 200, start: 0, end: 2 };
+    expect(fixQuantityAuthorityConflicts(md, [textSlice]).fixedCount).toBe(0);
+    const result = fixQuantityAuthorityConflicts(md);
     expect(result.markdown).toBe(md);
     expect(result.fixedCount).toBe(0);
   });
 });
 
-describe('J5 村名/分部语境豁免', () => {
-  it.each(['郢', '庄', '岗', '塘', '圩', '坝', '池', '井'])('J5 名称前 12 字含“%s”豁免（D2 收紧词表）', (hint) => {
-    const md = `马老${hint}分项级配碎石18949.52m³。`;
-    const result = fixQuantityAuthorityConflicts(md, [{ name: '级配碎石', value: 20931.02, unit: 'm³' }]);
-    expect(result.markdown).toBe(md);
-  });
-  it.each(['村', '组', '集', '区', '段', '栋', '楼'])('J5 收紧剔除词“%s”12 字内 → 不再豁免 → 替换（D2 反漂移）', (hint) => {
-    const md = `马老${hint}分项级配碎石18949.52m³。`;
-    const result = fixQuantityAuthorityConflicts(md, [{ name: '级配碎石', value: 20931.02, unit: 'm³' }]);
-    expect(result.markdown).toBe(`马老${hint}分项级配碎石20931.02m³。`);
+describe('J2 名称不参与匹配（括号名/远距离值/名称仅作说明）', () => {
+  it('J2 括号名称形态照常替换（无名称弹性匹配层）', () => {
+    const md = '栽植色带（生态池外围一圈）90m²。';
+    const result = fixQuantityAuthorityConflicts(md, [anchorAt(md, '栽植色带（生态池外围一圈）', 90, 120, '㎡')]);
+    expect(result.markdown).toBe('栽植色带（生态池外围一圈）120m²。');
     expect(result.fixedCount).toBe(1);
   });
-  it('J5 段落级村名豁免（村名距条目名超 12 字）', () => {
-    const md = '本段落涉及殷郢组等多个自然村。本分项工程量为：级配碎石18949.52m³。';
-    const result = fixQuantityAuthorityConflicts(md, [{ name: '级配碎石', value: 20931.02, unit: 'm³' }]);
-    expect(result.markdown).toBe(md);
-  });
-  it('J5 段落级豁免字符集外的词不豁免', () => {
-    // 前缀 12 字不得含豁免字符集（村郢组庄岗塘圩集坝分区段栋号楼池）任一字符
-    const md = '依据本条。级配碎石18949.52m³。';
-    const result = fixQuantityAuthorityConflicts(md, [{ name: '级配碎石', value: 20931.02, unit: 'm³' }]);
+  it('J2 名称后远距离数值照常替换（无 24 字窗口启发）', () => {
+    const md = '级配碎石基层厚度200mm，累计验收工程量统计后为18949.52m³。';
+    const result = fixQuantityAuthorityConflicts(md, [anchorAt(md, '级配碎石', 18949.52, 20931.02, 'm³')]);
     expect(result.markdown).toContain('20931.02');
-  });
-});
-
-describe('J6 规格限定词豁免', () => {
-  it('J6 前置规格（直径450）豁免', () => {
-    const md = '直径450塑料检查井40座。';
-    const result = fixQuantityAuthorityConflicts(md, [{ name: '塑料检查井', value: 555, unit: '座' }]);
-    expect(result.markdown).toBe(md);
-  });
-  it.each(['DN200', 'DN110', 'Φ16', 'φ10'])('J6 后置规格“%s”豁免', (spec) => {
-    const md = `钢带PE增强螺旋波纹管${spec}铺设2170m。`;
-    const result = fixQuantityAuthorityConflicts(md, [{ name: '波纹管', value: 3000, unit: 'm' }]);
-    expect(result.markdown).toBe(md);
-  });
-  it('J6 规格词在 8 字窗口外不豁免', () => {
-    const md = '直径450管道采用波纹管铺设2170m。';
-    const result = fixQuantityAuthorityConflicts(md, [{ name: '波纹管', value: 3000, unit: 'm' }]);
-    expect(result.markdown).toContain('3000');
-  });
-});
-
-describe('J7 24 字窗口截断', () => {
-  it('J7 名称后紧跟列举分隔符截断窗口（无候选不动）', () => {
-    const md = '主要工程量包括墙面彩绘、小微菜园围栏、生态菜园等内容。';
-    const result = fixQuantityAuthorityConflicts(md, [{ name: '墙面彩绘', value: 20931.02, unit: 'm' }]);
-    expect(result.markdown).toBe(md);
-    expect(result.fixedCount).toBe(0);
-  });
-  it('J7 窗口内差异最小候选胜出', () => {
-    const md = '级配碎石基层厚度200mm且总工程量18949.52m³。';
-    const result = fixQuantityAuthorityConflicts(md, [{ name: '级配碎石', value: 20931.02, unit: 'm³' }]);
-    expect(result.markdown).toBe('级配碎石基层厚度200mm且总工程量20931.02m³。');
-  });
-});
-
-describe('J8 阈值与跳过', () => {
-  it('J8 D2 零豁免：差异 0.87% 四舍五入口径差替换', () => {
-    const result = fixQuantityAuthorityConflicts('级配碎石20750m³。', [{ name: '级配碎石', value: 20931.02, unit: 'm³' }]);
-    expect(result.markdown).toBe('级配碎石20931.02m³。');
     expect(result.fixedCount).toBe(1);
   });
-  it('J8 与权威相等跳过', () => {
-    const result = fixQuantityAuthorityConflicts('级配碎石20931.02m³。', [{ name: '级配碎石', value: 20931.02, unit: 'm³' }]);
-    expect(result.fixedCount).toBe(0);
-  });
-  it('J8 数值左边界（1e3 不截取 3）', () => {
-    const result = fixQuantityAuthorityConflicts('换算系数1e3。', [{ name: '换算系数', value: 1000, unit: 'm' }]);
-    expect(result.markdown).toBe('换算系数1e3。');
-  });
-  it('J8 千分位数值校正', () => {
-    const result = fixQuantityAuthorityConflicts('石方开挖1,500m³。', [{ name: '石方开挖', value: 2000, unit: 'm³' }]);
-    expect(result.markdown).toBe('石方开挖2000m³。');
+  it('J2 名称与锚点无关也不影响（先到先得/最长名优先为检测层职责）', () => {
+    const md = '塑料管铺设7000m。';
+    const result = fixQuantityAuthorityConflicts(md, [anchorAt(md, '塑料管铺设', 7000, 8205.53, 'm')]);
+    expect(result.markdown).toBe('塑料管铺设8205.53m。');
+    expect(result.details[0]).toContain('塑料管铺设');
   });
 });
 
-describe('J9 句级口径豁免', () => {
-  it('J9 句内全不一致无总量锚点 → 不豁免 → 全部按清单归一', () => {
-    const md = '本句挖一般土方146.93m³、级配碎石480.5m³、水泥混凝土572.3m³。';
-    const result = fixQuantityAuthorityConflicts(md, [
-      { name: '挖一般土方', value: 800, unit: 'm³' },
-      { name: '级配碎石', value: 2000, unit: 'm³' },
-      { name: '水泥混凝土', value: 1800, unit: 'm³' },
-    ]);
-    expect(result.markdown).toBe('本句挖一般土方800m³、级配碎石2000m³、水泥混凝土1800m³。');
-    expect(result.fixedCount).toBe(3);
+describe('J3 锚点直连零豁免（裁决在判定层）', () => {
+  it('J3 村名/分部语境句照常替换（原词表豁免已删）', () => {
+    const md = '马老郢分项级配碎石18949.52m³。';
+    const result = fixQuantityAuthorityConflicts(md, [anchorAt(md, '级配碎石', 18949.52, 20931.02, 'm³')]);
+    expect(result.markdown).toBe('马老郢分项级配碎石20931.02m³。');
+    expect(result.fixedCount).toBe(1);
   });
-  it('J9 句内大漂移与小差异并存 → 不触发豁免（大漂移仍修）', () => {
-    const md = '拆除路面633m³，级配碎石18949.52m³。';
-    const result = fixQuantityAuthorityConflicts(md, [
-      { name: '拆除路面', value: 2134, unit: 'm³' },
-      { name: '级配碎石', value: 20931.02, unit: 'm³' },
-    ]);
-    expect(result.fixedCount).toBeGreaterThan(0);
+  it('J3 规格句照常替换（原规格窗口豁免已删）', () => {
+    const md = '直径450塑料检查井38座。';
+    const result = fixQuantityAuthorityConflicts(md, [anchorAt(md, '塑料检查井', 38, 555, '座')]);
+    expect(result.markdown).toBe('直径450塑料检查井555座。');
+    expect(result.fixedCount).toBe(1);
+  });
+  it('J3 表格行照常替换（表内锚点在检测层掩码排除，修复层无二次判断）', () => {
+    const md = '| 分部 | 级配碎石 | m³ | 18949.52 |';
+    const at = md.indexOf('18949.52');
+    const result = fixQuantityAuthorityConflicts(md, [{ name: '级配碎石', value: 18949.52, unit: 'm³', authorityValue: 20931.02, start: at, end: at + '18949.52'.length }]);
+    expect(result.markdown).toBe('| 分部 | 级配碎石 | m³ | 20931.02 |');
+    expect(result.fixedCount).toBe(1);
   });
 });
 
-describe('J10 组合与统计', () => {
-  it('J10 多条目同文校正（occupied 防重叠）', () => {
+describe('J4 多锚点安全拼接', () => {
+  it('J4 多锚点同文校正（升序坐标安全拼接）', () => {
     const md = '拆除路面633m³，级配碎石18949.52m³。';
     const result = fixQuantityAuthorityConflicts(md, [
-      { name: '拆除路面', value: 2134, unit: 'm³' },
-      { name: '级配碎石', value: 20931.02, unit: 'm³' },
+      anchorAt(md, '拆除路面', 633, 2134, 'm³'),
+      anchorAt(md, '级配碎石', 18949.52, 20931.02, 'm³'),
     ]);
     expect(result.markdown).toBe('拆除路面2134m³，级配碎石20931.02m³。');
     expect(result.fixedCount).toBe(2);
   });
-  it('J10 名称完全重叠时先到先得（occupied）', () => {
-    const result = fixQuantityAuthorityConflicts('塑料管铺设8205.53m。', [
-      { name: '塑料管铺设', value: 9000, unit: 'm' },
-      { name: '塑料管', value: 7525.01, unit: 'm' },
+  it('J4 同名多处冲突全部替换（逐处锚点，不合并）', () => {
+    const md = '塑料管铺设7000m。另处塑料管铺设7000m。';
+    const first = md.indexOf('7000');
+    const second = md.lastIndexOf('7000');
+    const result = fixQuantityAuthorityConflicts(md, [
+      { name: '塑料管铺设', value: 7000, unit: 'm', authorityValue: 8205.53, start: first, end: first + 4 },
+      { name: '塑料管铺设', value: 7000, unit: 'm', authorityValue: 8205.53, start: second, end: second + 4 },
     ]);
-    expect(result.markdown).toBe('塑料管铺设9000m。');
+    expect(result.markdown).toBe('塑料管铺设8205.53m。另处塑料管铺设8205.53m。');
+    expect(result.fixedCount).toBe(2);
+  });
+  it('J4 同坐标重复锚点只应用一次（重叠 span 防错位）', () => {
+    const md = '级配碎石18949.52m³。';
+    const at = md.indexOf('18949.52');
+    const anchor: QuantityConflictAnchor = { name: '级配碎石', value: 18949.52, unit: 'm³', authorityValue: 20931.02, start: at, end: at + '18949.52'.length };
+    const result = fixQuantityAuthorityConflicts(md, [anchor, { ...anchor }]);
+    expect(result.markdown).toBe('级配碎石20931.02m³。');
     expect(result.fixedCount).toBe(1);
+  });
+});
+
+describe('J5 统计与幂等', () => {
+  it('J5 details 逐条说明（名称/值/权威值/口径）', () => {
+    const md = '拆除路面633m³，级配碎石18949.52m³。';
+    const result = fixQuantityAuthorityConflicts(md, [
+      anchorAt(md, '拆除路面', 633, 2134, 'm³'),
+      anchorAt(md, '级配碎石', 18949.52, 20931.02, 'm³'),
+    ]);
+    expect(result.details).toHaveLength(2);
+    expect(result.details[0]).toContain('拆除路面 633m³→2134m³');
+    expect(result.details[1]).toContain('级配碎石 18949.52m³→20931.02m³');
+  });
+  it('J5 修复后重复应用零变化（旧坐标失配自然幂等）', () => {
+    const md = '级配碎石18949.52m³。';
+    const anchor = anchorAt(md, '级配碎石', 18949.52, 20931.02, 'm³');
+    const first = fixQuantityAuthorityConflicts(md, [anchor]);
+    const second = fixQuantityAuthorityConflicts(first.markdown, [anchor]);
+    expect(second.markdown).toBe(first.markdown);
+    expect(second.fixedCount).toBe(0);
+  });
+});
+
+describe('J6 无阈值与数值解析边界', () => {
+  it('J6 小差异（0.87%）同样替换（判定层已裁决，修复层无阈值）', () => {
+    const md = '级配碎石20750m³。';
+    const result = fixQuantityAuthorityConflicts(md, [anchorAt(md, '级配碎石', 20750, 20931.02, 'm³')]);
+    expect(result.markdown).toBe('级配碎石20931.02m³。');
+    expect(result.fixedCount).toBe(1);
+  });
+  it('J6 千分位切片：数值解析校验通过 → 替换（替换后为纯数值形态）', () => {
+    const md = '石方开挖1,500m³。';
+    const at = md.indexOf('1,500');
+    const result = fixQuantityAuthorityConflicts(md, [{ name: '石方开挖', value: 1500, unit: 'm³', authorityValue: 2000, start: at, end: at + '1,500'.length }]);
+    expect(result.markdown).toBe('石方开挖2000m³。');
+    expect(result.fixedCount).toBe(1);
+  });
+  it('J6 锚点值 == 权威值（重复应用形态）→ 文本不变', () => {
+    const md = '级配碎石20931.02m³。';
+    const result = fixQuantityAuthorityConflicts(md, [anchorAt(md, '级配碎石', 20931.02, 20931.02, 'm³')]);
+    expect(result.markdown).toBe(md);
+  });
+});
+
+describe('J7 管线接入（applyNumericConsistencyDeterministicFixes）', () => {
+  it('J7 quantityAnchors 经管线 step 消费（其余步骤无权威时静默跳过）', () => {
+    const md = '级配碎石18949.52m³。';
+    const result = applyNumericConsistencyDeterministicFixes(md, { quantityAnchors: [anchorAt(md, '级配碎石', 18949.52, 20931.02, 'm³')] });
+    expect(result.markdown).toBe('级配碎石20931.02m³。');
+    expect(result.fixedCount).toBeGreaterThanOrEqual(1);
+  });
+  it('J7 未提供 quantityAnchors → 工程量校正静默跳过（无锚点零变化）', () => {
+    const md = '级配碎石18949.52m³。';
+    const result = applyNumericConsistencyDeterministicFixes(md);
+    expect(result.markdown).toBe(md);
+    expect(result.fixedCount).toBe(0);
+  });
+});
+
+describe('J8 名称含编号/单位异构的锚点直连', () => {
+  it('J8 名称含编号（DN200）不影响坐标替换', () => {
+    const md = '混凝土管道DN200 总长240m。';
+    const at = md.indexOf('240');
+    const result = fixQuantityAuthorityConflicts(md, [{ name: '混凝土管道DN200', value: 240, unit: 'm', authorityValue: 50, start: at, end: at + 3 }]);
+    expect(result.markdown).toBe('混凝土管道DN200 总长50m。');
+    expect(result.fixedCount).toBe(1);
+  });
+  it('J8 名称文本本身含数字形态时锚点只认坐标（不重匹配名称）', () => {
+    const md = '马老郢等片区塑料检查井555座。';
+    const result = fixQuantityAuthorityConflicts(md, [anchorAt(md, '塑料检查井', 555, 60, '座')]);
+    expect(result.markdown).toBe('马老郢等片区塑料检查井60座。');
+    expect(result.fixedCount).toBe(1);
+  });
+});
+
+describe('J9 章级坐标契约', () => {
+  it('J9 章内坐标（rebase 后）直接替换', () => {
+    const chapter = '塑料管铺设7.8m。';
+    const result = fixQuantityAuthorityConflicts(chapter, [{ name: '塑料管铺设', value: 7.8, unit: 'm', authorityValue: 8205.53, start: 5, end: 8 }]);
+    expect(result.markdown).toBe('塑料管铺设8205.53m。');
+    expect(result.fixedCount).toBe(1);
+  });
+  it('J9 全文章坐标用于章文本 → 切片失配跳过（rebase 契约由切片校验兜底）', () => {
+    const chapter = '塑料管铺设7.8m。';
+    const wrong: QuantityConflictAnchor = { name: '塑料管铺设', value: 7.8, unit: 'm', authorityValue: 8205.53, start: 1, end: 4 };
+    const result = fixQuantityAuthorityConflicts(chapter, [wrong]);
+    expect(result.markdown).toBe(chapter);
+    expect(result.fixedCount).toBe(0);
+  });
+});
+
+describe('J10 组合收口', () => {
+  it('J10 混合形态一次性收口（村名语境 + 表格行，全部按坐标替换）', () => {
+    const md = '马老郢分项级配碎石18949.52m³。\n| 汇总 | 拆除路面 | m³ | 633 |';
+    const at = md.indexOf('18949.52');
+    const tableAt = md.indexOf('633');
+    const result = fixQuantityAuthorityConflicts(md, [
+      { name: '级配碎石', value: 18949.52, unit: 'm³', authorityValue: 20931.02, start: at, end: at + 8 },
+      { name: '拆除路面', value: 633, unit: 'm³', authorityValue: 2134, start: tableAt, end: tableAt + 3 },
+    ]);
+    expect(result.markdown).toBe('马老郢分项级配碎石20931.02m³。\n| 汇总 | 拆除路面 | m³ | 2134 |');
+    expect(result.fixedCount).toBe(2);
+  });
+  it('J10 空列表/未提供 → 零变化零统计', () => {
+    const md = '级配碎石18949.52m³。';
+    expect(fixQuantityAuthorityConflicts(md, []).fixedCount).toBe(0);
+    expect(fixQuantityAuthorityConflicts(md).markdown).toBe(md);
   });
 });
 
@@ -1786,16 +1810,18 @@ describe('K10 第4步 支护体系（fixSupportSystemConflicts）管线集成', 
   });
 });
 
-describe('K11 第5步 清单工程量与管线聚合', () => {
-  it('K11 quantityAuthorities 管线内生效', () => {
-    const result = applyNumericConsistencyDeterministicFixes('级配碎石18949.52m³。', { authorityIndex: fixtureIndex({ quantity: [{ label: '级配碎石', value: 20931.02, unit: 'm³' }] }) });
+describe('K11 工程量锚点步骤与管线聚合', () => {
+  it('K11 quantityAnchors 管线内生效（判定层锚点直连）', () => {
+    const md = '级配碎石18949.52m³。';
+    const result = applyNumericConsistencyDeterministicFixes(md, { quantityAnchors: [anchorAt(md, '级配碎石', 18949.52, 20931.02, 'm³')] });
     expect(result.markdown).toBe('级配碎石20931.02m³。');
   });
-  it('K11 五步管线顺序执行互不重叠（峰值+设备+清单同文）', () => {
+  it('K11 管线顺序执行互不重叠（工程量锚点最先消费，峰值/设备步骤正则定位）', () => {
     const md = '高峰期总人数68人。现场配置塔吊2台。级配碎石18949.52m³。';
     const result = applyNumericConsistencyDeterministicFixes(md, {
       laborPeakAuthority: 186,
-      authorityIndex: fixtureIndex({ equipment: [{ label: '塔吊', value: 1 }], quantity: [{ label: '级配碎石', value: 20931.02, unit: 'm³' }] }),
+      authorityIndex: fixtureIndex({ equipment: [{ label: '塔吊', value: 1 }] }),
+      quantityAnchors: [anchorAt(md, '级配碎石', 18949.52, 20931.02, 'm³')],
     });
     expect(result.markdown).toBe('高峰期总人数186人。现场配置塔吊1台。级配碎石20931.02m³。');
     expect(result.fixedCount).toBe(3);
@@ -1805,7 +1831,8 @@ describe('K11 第5步 清单工程量与管线聚合', () => {
     const result = applyNumericConsistencyDeterministicFixes(md, {
       laborPeakAuthority: 186,
       scheduleAuthority: 210,
-      authorityIndex: fixtureIndex({ equipment: [{ label: '塔吊', value: 1 }], slackDays: 25, quantity: [{ label: '级配碎石', value: 20931.02, unit: 'm³' }] }),
+      authorityIndex: fixtureIndex({ equipment: [{ label: '塔吊', value: 1 }], slackDays: 25 }),
+      quantityAnchors: [anchorAt(md, '级配碎石', 18949.52, 20931.02, 'm³')],
     });
     expect(result.details.length).toBeLessThanOrEqual(12);
   });

@@ -34,12 +34,13 @@ import {
 } from './documentIntegrityChecks';
 import type { DeterministicFixOutcome } from './documentIntegrityChecks';
 import { fixResourceBreakdownNumbers, type ResourceBreakdownAuthority } from './resourceBreakdownNumbers';
-import { cleanStructureDefects } from './structureIntegrityRules';
+import { cleanStructureDefects, renumberSectionHeadings } from './structureIntegrityRules';
 import { dedupeTertiaryH4Titles } from './markdownComposer';
 import { fixInternalTermHeadingPhrases } from './internalTerminologyAnchors';
 import { stripAtlasReferencePhrases } from './documentGeneratorHelpers';
 import { fixEmptyScoringResponses, fixTenderMetaLanguage, stripDuplicateResponseLines } from './tenderRequirements';
 import { fixFlowFormRepetition, fixSentenceLikeHeadingSplit, fixSkeletonFingerprintRepetition, fixTemplatedLabels, fixTruncatedTitleCompletion } from './templatingGovernance';
+import type { DecisionLockEntry } from './integratedBlueprint';
 
 /** 修复器权威口径上下文（与检测器同源：laborPeakAuthority 由蓝图决策锁定，greeningMaintenanceAuthority 由清单事实抽取，
  * resourceBreakdownAuthority 由蓝图资源清单推导，supportFormAuthority 由支护体系权威映射（放坡/钢板桩）） */
@@ -50,6 +51,11 @@ export interface SurfaceFixerContext {
   resourceBreakdownAuthority?: ResourceBreakdownAuthority;
   /** A4 支护形式选定值（'放坡'/'钢板桩'；缺失时两可表述按正文主流侧默认归一） */
   supportFormAuthority?: string;
+  /** 4.36 D3 决策锁条目（蓝图决策锁；两可表述归一按锁定值裁决——有锁归一/无锁缺口，与检测器同源） */
+  decisionLockEntries?: readonly DecisionLockEntry[];
+  /** 4.36 A2 章片段重放章号（stage5 逐章链按章序注入：章片段无「## 第N章」行，section-renumber
+   * 按此章号整段重放；round-2 全文链不设置，走「## 第N章」行解析） */
+  chapterNumber?: number;
   /** 规划小节标题全集（句化标题切分 sentence-like-heading-split 消费：标题前缀匹配还原规划标题；
    * 缺失时该步静默跳过——零配置零误伤） */
   plannedSectionTitles?: readonly string[];
@@ -125,8 +131,9 @@ export const SURFACE_FIX_STEPS: readonly SurfaceFixStep[] = [
   { key: 'formula-residue', stage5: true, round2: true, fix: markdown => { const r = fixFormulaResidues(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'self-undermining', stage5: true, round2: true, fix: markdown => { const r = fixSelfUnderminingCandidates(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   // A4 关键设计决策两可表述唯一化（4.27.0）：句式表命中即按选定值/默认侧硬归一；
+  // 4.36 D3：注册表裁决层——「A或B」命中决策类目时按决策锁归一（有锁）/转缺口（无锁）；
   // 与检测器 ambiguous-either-or 同源（supportForm 权威映射支护体系选定侧，残留缺口记入 details）
-  { key: 'ambiguous-either-or', stage5: true, round2: true, fix: (markdown, ctx) => { const r = fixAmbiguousEitherOrCandidates(markdown, { supportForm: ctx.supportFormAuthority }); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
+  { key: 'ambiguous-either-or', stage5: true, round2: true, fix: (markdown, ctx) => { const r = fixAmbiguousEitherOrCandidates(markdown, { supportForm: ctx.supportFormAuthority, decisionLock: ctx.decisionLockEntries }); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'empty-scoring-response', stage5: true, round2: true, fix: markdown => { const r = fixEmptyScoringResponses(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   // 4.27.2 招标元语言确定性清理（语气泄漏治理 P0）：紧随 empty-scoring-response（空响应句先按
   // 条款语义改写为实义句，本步再清理其余「按招标文件要求/约定」条幅与「按上述条款」调用式元语言）
@@ -146,7 +153,10 @@ export const SURFACE_FIX_STEPS: readonly SurfaceFixStep[] = [
   // 4.27.2 条款响应重复行去重（重复补写治理 P0）：紧随元语言清理（条幅剥离后行形态归一，
   // 重复判定口径与清理器输出同帧——两补写器历史重复插入的交付前最终兜底）
   { key: 'duplicate-response-line', stage5: true, round2: true, fix: markdown => { const r = stripDuplicateResponseLines(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
-  { key: 'atlas-reference', stage5: true, round2: false, fix: markdown => { const r = stripAtlasReferencePhrases(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
+  // 4.36.2 复查修正：文件头治理目标「round-2 曾缺图集引用清洗」的遗留漂移——stage5 之后的 LLM 补写轮
+  // （数值/要求定向 patch）可再引入「做法参照XX图集」类非法引用，此前 round-2 链无确定性收敛点（门禁硬阻断死区）；
+  // stripAtlasReferencePhrases 窄正则/标题表格豁免/短语级零丢失/幂等，补接零风险（其后的 toc-consistency 轮重同步目录）
+  { key: 'atlas-reference', stage5: true, round2: true, fix: markdown => { const r = stripAtlasReferencePhrases(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'tertiary-h4-dedupe', stage5: false, round2: true, fix: markdown => dedupeTertiaryH4Titles(markdown) },
   // 4.31 内部术语替换扩展至表格行（丰乐镇 v6 #66/#88：「作业面落位」表头行 blocker 死区），
   // stage5 逐章链同样启用：替换为确定性词面安全替换，越早收敛越好
@@ -165,6 +175,14 @@ export const SURFACE_FIX_STEPS: readonly SurfaceFixStep[] = [
   // 续写句已被正文覆盖则丢弃、未覆盖部分转正文行（内容零丢失）；装配层 markdownComposer 同源前缀
   // 匹配在更早环节收敛；切分后标题结构变化由后续 toc-consistency 轮重同步目录
   { key: 'sentence-like-heading-split', stage5: false, round2: true, fix: (markdown, ctx) => { const r = fixSentenceLikeHeadingSplit(markdown, ctx.plannedSectionTitles); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
+  // 4.36 A2 小节编号重放（结构事务化 · 编号不变量 INV-1）：链尾原子重放——清洗层删除重复 H3 行
+  // （fixCollisionNumberedHeadings / 降级合并 / 直接删行类修复器）后编号出现空档时，按 H3 出现顺序
+  // 重排「章序.节序」（章号=章标题解析值/前缀多数派，与终检 sectionNumberingIssues 同源），
+  // H4 三段编号父前缀同步；「编号被分配又被删除」的历史缺陷（远端 4.35.0 缺 1.12/1.13/1.15 同签名）
+  // 在此必然收敛；位于双链末尾——其后 stage5 链由 toc-consistency 重建目录消费新编号。
+  // 接线（4.36 复查修正）：stage5 逐章链输入为章片段（无「## 第N章」行），经 ctx.chapterNumber
+  // 注入章序走片段模式；round-2 全文链不注入（走「## 第N章」解析）
+  { key: 'section-renumber', stage5: true, round2: true, fix: (markdown, ctx) => { const r = renumberSectionHeadings(markdown, { chapterNumber: ctx.chapterNumber }); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
 ];
 
 /** stage5 逐章链修复步骤（注册表顺序过滤） */

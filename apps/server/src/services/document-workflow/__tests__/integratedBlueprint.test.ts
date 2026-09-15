@@ -5,12 +5,14 @@ import type { DocumentEvidence, DocumentFact } from '../types';
 import {
   alignChapterContentToBlueprint,
   blueprintCitationConsistencyIssues,
+  blueprintCitationVerdict,
   buildBlueprintData,
   buildBlueprintDecisionLock,
   buildBlueprintOutline,
   buildChapterStructureFromBlueprint,
   buildIntegratedBlueprint,
   buildWorkPackageFromBoqSection,
+  collectBlueprintCitationCandidates,
   decisionLockCategoryMeta,
   decisionMentionNegated,
   deriveEarthworkBalanceFromBoq,
@@ -18,6 +20,7 @@ import {
   deriveMaterialsPlanFromBoq,
   deriveMilestonesFromBoq,
   deriveSpecAuthoritiesFromBoq,
+  estimateChapterMinFeasibleWords,
   extractBasisRegulations,
   extractContractFromFacts,
   extractDecisionLockEntries,
@@ -26,7 +29,7 @@ import {
   extractVillageCount,
   fallbackWorkPackagesFromExisting,
   findBlueprintChapter,
-  judgeHazardousWorks,
+  rebaseCitationAnchorsForChapters,
   renderBlueprintChapterAuthorityCard,
   renderBlueprintChapterSlice,
   renderBlueprintDataText,
@@ -35,9 +38,34 @@ import {
   validateBlueprint,
 } from '../integratedBlueprint';
 import type { BlueprintRedLineFact } from '../integratedBlueprint';
+import type { AdjudicationConclusion, AdjudicationRecord, CitationAdjudicationCandidate, CitationAdjudicator } from '../semanticAdjudication';
 import { buildAuthorityIndex } from '../authorityIndex';
 import { deriveRepairAuthorities } from '../integrity/fixers/fixers';
 import { majorConstructionSkeletonNames, scopeEngineeringNames } from '../chapterPostProcessing';
+import { villageMunicipalStrategy } from '../blueprintDerivationStrategies';
+
+/** S5 判定层 mock 记录构造（三态注入共用：调用方候选 → 判定记录表） */
+function recordsFor(candidates: CitationAdjudicationCandidate[], conclusion: AdjudicationConclusion, rationale: string): Map<string, AdjudicationRecord> {
+  const records = new Map<string, AdjudicationRecord>();
+  for (const candidate of candidates) records.set(candidate.id, { id: candidate.id, conclusion, rationale });
+  return records;
+}
+
+/** S5 判定层 mock：全部候选判 conflict（确以项目级口径陈述且与权威不一致） */
+const conflictAll: CitationAdjudicator = async candidates => ({
+  records: recordsFor(candidates, 'conflict', '以项目级口径陈述且与权威不一致'),
+});
+
+/** S5 判定层 mock：全部候选判 consistent（非项目级口径陈述：规格/分区/单体/分部量口径） */
+const consistentAll: CitationAdjudicator = async candidates => ({
+  records: recordsFor(candidates, 'consistent', '非项目级口径陈述'),
+});
+
+/** S5 判定层 mock：判定不可用（全 uncertain + unavailable 原因） */
+const unavailableAll: CitationAdjudicator = async candidates => ({
+  records: recordsFor(candidates, 'uncertain', '判定不可用'),
+  unavailable: '模型未配置',
+});
 
 /** 构造 markdown 表格清单 chunk fixture（马老郢村，工作表 1.1，共 3 页） */
 function buildMarkdownChunks(): BoqChunkRow[] {
@@ -269,6 +297,7 @@ describe('L1a 红线事实确定性提取', () => {
       boq,
       basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 《建设工程质量管理条例》（国务院令第279号）',
       projectName: '丰乐镇建设项目',
+      strategy: villageMunicipalStrategy,
     });
     const outline = buildBlueprintOutline({ chapterTitles: ['工程概况'], boq, docType: '单位工程施工组织设计' });
     const card = renderBlueprintChapterAuthorityCard(outline.chapters[0]!, data);
@@ -290,6 +319,7 @@ describe('L1a 红线事实确定性提取', () => {
       boq,
       basicFacts: '项目名称：丰乐镇建设项目 建设地点：安徽省合肥市肥西县 工期：360日历天',
       projectName: '丰乐镇建设项目',
+      strategy: villageMunicipalStrategy,
     });
     const outline = buildBlueprintOutline({ chapterTitles: ['编制说明与工程概况'], boq, docType: '单位工程施工组织设计' });
     const card = renderBlueprintChapterAuthorityCard(outline.chapters[0]!, data);
@@ -311,7 +341,7 @@ describe('L1a 红线事实确定性提取', () => {
 
 describe('L2 计划推导（确定性区间，不硬锁具体值）', () => {
   it('劳动力：峰值区间表达（min ≤ max），唯一口径峰值 = 区间中值收敛', () => {
-    const labor = deriveLaborFromBoq(parseFixture(), 360);
+    const labor = deriveLaborFromBoq(parseFixture(), 360, [], villageMunicipalStrategy);
     expect(labor.peak.min).toBeGreaterThan(0);
     expect(labor.peak.min).toBeLessThanOrEqual(labor.peak.max);
     expect(labor.peakValue).toBeGreaterThanOrEqual(labor.peak.min);
@@ -324,7 +354,7 @@ describe('L2 计划推导（确定性区间，不硬锁具体值）', () => {
   });
 
   it('劳动力工种构成：合计恒等于峰值（写作层工种表唯一口径，不得自设构成）', () => {
-    const labor = deriveLaborFromBoq(parseFixture(), 360);
+    const labor = deriveLaborFromBoq(parseFixture(), 360, [], villageMunicipalStrategy);
     expect(labor.composition.length).toBeGreaterThan(0);
     const sum = labor.composition.reduce((acc, item) => acc + item.count, 0);
     expect(sum).toBe(labor.peakValue);
@@ -334,16 +364,23 @@ describe('L2 计划推导（确定性区间，不硬锁具体值）', () => {
     }
   });
 
-  it('劳动力分阶段投入：各阶段同时在场人数 ≤ 峰值，亮化收尾阶段兜底存在', () => {
-    const labor = deriveLaborFromBoq(parseFixture(), 360);
+  it('劳动力分阶段投入：各阶段同时在场人数 ≤ 峰值；无工效条目阶段不产出（缺口显式化，不兜底不编造）', () => {
+    const labor = deriveLaborFromBoq(parseFixture(), 360, [], villageMunicipalStrategy);
     expect(labor.byPhase.length).toBeGreaterThan(0);
     for (const item of labor.byPhase) {
       const mid = Math.round(((item.min ?? 0) + (item.max ?? item.min ?? 0)) / 2);
       expect(mid).toBeLessThanOrEqual(labor.peakValue); // 阶段人数不得超峰值
       expect((item.max ?? 0)).toBeLessThanOrEqual(labor.peakValue);
     }
-    // 亮化分部量少不达劳动桶门槛时，收尾阶段按峰值 20% 兜底（阶段表不缺收尾行）
-    expect(labor.byPhase.some(item => item.phase.includes('亮化'))).toBe(true);
+    // 亮化分部无工效可推导条目 → 该阶段不产出（信息缺口由蓝图警告显式暴露，不编造人数）
+    expect(labor.byPhase.some(item => item.phase.includes('亮化'))).toBe(false);
+    const { diagnostics } = buildBlueprintData({
+      boq: parseFixture(),
+      basicFacts: '项目名称：马老郢村建设项目 计划工期：360日历天 质量标准：合格',
+      projectName: '马老郢村建设项目',
+      strategy: villageMunicipalStrategy,
+    });
+    expect(diagnostics.warnings.some(warning => warning.includes('分阶段劳动力缺「亮化与收尾工程」行'))).toBe(true);
   });
 
   it('劳动力阶段封顶：推导超峰值的阶段收敛到峰值（丰乐镇景观绿化 1119 人荒谬值根因）', () => {
@@ -359,7 +396,7 @@ describe('L2 计划推导（确定性区间，不硬锁具体值）', () => {
       ].join('\n'),
     }];
     const boq = parseBillOfQuantities({ chunks, sourceFile: '清单.xls' });
-    const labor = deriveLaborFromBoq(boq, 360);
+    const labor = deriveLaborFromBoq(boq, 360, [], villageMunicipalStrategy);
     const landscape = labor.byPhase.find(item => item.phase.includes('景观'));
     expect(landscape).toBeDefined();
     expect(landscape!.max).toBe(labor.peakValue); // 封顶后阶段上限 = 峰值
@@ -367,7 +404,7 @@ describe('L2 计划推导（确定性区间，不硬锁具体值）', () => {
   });
 
   it('里程碑：分部工程量权重分配，总和 ≤ 总工期', () => {
-    const milestones = deriveMilestonesFromBoq(parseFixture(), 360);
+    const milestones = deriveMilestonesFromBoq(parseFixture(), 360, villageMunicipalStrategy);
     expect(milestones.length).toBeGreaterThan(0);
     const sum = milestones.reduce((acc, item) => acc + (item.duration || 0), 0);
     expect(sum).toBeLessThanOrEqual(360);
@@ -378,40 +415,6 @@ describe('L2 计划推导（确定性区间，不硬锁具体值）', () => {
     const balance = deriveEarthworkBalanceFromBoq(parseFixture());
     expect(balance.excavation).toBe(180.5);
     expect(balance.disposal).toBeGreaterThanOrEqual(0);
-  });
-});
-
-describe('L1b 危大工程判定（37 号令阈值规则）', () => {
-  it('证据给出开挖深度 4.5m → 判定危大工程（专项方案）', () => {
-    const judgment = judgeHazardousWorks(parseFixture(), '沟槽开挖深度4.5m，放坡开挖');
-    expect(judgment.gap).toBe(false);
-    expect(judgment.conclusion).toContain('危大工程');
-    expect(judgment.conclusion).toContain('4.5');
-  });
-
-  it('证据深度 ≥5m → 超过一定规模须专家论证', () => {
-    const judgment = judgeHazardousWorks(parseFixture(), '基坑深度5.2m');
-    expect(judgment.conclusion).toContain('专家论证');
-  });
-
-  it('无深度数据 → 标记待人工确认，不静默判定', () => {
-    const judgment = judgeHazardousWorks(parseFixture(), '');
-    expect(judgment.gap).toBe(true);
-    expect(judgment.conclusion).toContain('待人工确认');
-  });
-
-  it('清单无开挖条目 → 判定不涉及', () => {
-    const chunks: BoqChunkRow[] = [
-      {
-        chunkIndex: 0,
-        sectionTitle: '表格数据',
-        content: '工程名称：马老郢等 标段： 工作表：1.1 第1页 共1页\n| 序号 | 项目编码 | COL3 | 项目名称 | 项目特征描述 | 计量单位 | COL7 | 工程量 | 金额 |\n| 1 | 050102001001 |  | 绿化养护 | 1．养护等级：二级养护两年 | m2 |  | 500 |\n第1页 共1页',
-      },
-    ];
-    const boq = parseBillOfQuantities({ chunks, sourceFile: '清单.xls' });
-    const judgment = judgeHazardousWorks(boq, '');
-    expect(judgment.gap).toBe(false);
-    expect(judgment.conclusion).toContain('不涉及');
   });
 });
 
@@ -429,7 +432,7 @@ describe('阶段 D 四道校验（蓝图冻结前门禁）', () => {
 
   function buildValidatedBlueprint() {
     const boq = parseFixture();
-    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格 计价依据：合造价〔2018〕13号文', projectName: '丰乐镇建设项目' });
+    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格 计价依据：合造价〔2018〕13号文', projectName: '丰乐镇建设项目', strategy: villageMunicipalStrategy });
     const outline = buildBlueprintOutline({ chapterTitles: FULL_CHAPTER_TITLES, boq, docType: '单位工程施工组织设计' });
     const blueprint = {
       meta: { version: '2.0.0', docType: '单位工程施工组织设计', createdAt: '2026-09-06', sourceMaterials: ['丰乐镇工程量清单.xls'] },
@@ -437,13 +440,13 @@ describe('阶段 D 四道校验（蓝图冻结前门禁）', () => {
       outline,
       validation: { passed: false, checks: [] as Array<{ name: string; passed: boolean; message: string }> },
       diagnostics: {
-        stage: '阶段 D', standardBlocksLoaded: 0, standardBlockGaps: [], laborDerivationBasis: '', llmCalls: 0, fallbackUsed: [], warnings: [], durationMs: 0,
+        stage: '阶段 D', laborDerivationBasis: '', llmCalls: 0, fallbackUsed: [], warnings: [], durationMs: 0,
       },
     };
     return { blueprint, boq };
   }
 
-  it('全链路通过：Schema/事实锚定/覆盖（条目零丢失+十项评审承接）/内部一致性', () => {
+  it('全链路通过：四道阻断校验 + 规格承接审计（第 5 道恒 passed）', () => {
     const { blueprint, boq } = buildValidatedBlueprint();
     const report = validateBlueprint(blueprint, boq);
     expect(report.passed).toBe(true);
@@ -452,6 +455,7 @@ describe('阶段 D 四道校验（蓝图冻结前门禁）', () => {
       '2. 事实锚定校验',
       '3. 覆盖校验',
       '4. 内部一致性校验',
+      '5. 标书编制规格承接',
     ]);
   });
 
@@ -492,7 +496,7 @@ describe('回退路径（任何失败不阻断生成）', () => {
     expect(resolution.warning).toContain('未识别到工程量清单');
   });
 
-  it('buildIntegratedBlueprint 清单解析失败 → 降级空参数桶蓝图（不 throw，四道校验仍可运行）', () => {
+  it('buildIntegratedBlueprint 清单解析失败 → 降级空参数桶蓝图（不 throw，校验仍可运行）', () => {
     const blueprint = buildIntegratedBlueprint({
       projectRoot: '/tmp/nonexistent-project',
       boundFilePaths: ['招标文件.pdf'],
@@ -503,7 +507,7 @@ describe('回退路径（任何失败不阻断生成）', () => {
     expect(blueprint.meta.version).toBe('2.0.0');
     expect(blueprint.data.quantities).toEqual({});
     expect(blueprint.diagnostics.warnings.length).toBeGreaterThan(0);
-    expect(blueprint.validation.checks).toHaveLength(4);
+    expect(blueprint.validation.checks).toHaveLength(5);
   });
 
   it('fallbackWorkPackagesFromExisting：无有效输入不 throw，返回数组', () => {
@@ -542,7 +546,7 @@ describe('物资计划规格提取（材料型号规格是清单事实数据，�
 
   it('参数桶物资计划行携带规格：名称（规格）数量单位', () => {
     const boq = parseFixture();
-    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目' });
+    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目', strategy: villageMunicipalStrategy });
     const text = renderBlueprintDataText(data);
     const materialLine = text.split('\n').find(line => line.includes('物资计划'))!;
     expect(materialLine).toBeDefined();
@@ -593,7 +597,7 @@ describe('工作包参数提取（清单特征留白不进入参数管线，舒�
 describe('渲染函数（执行层输入）', () => {
   it('参数桶渲染：金额类红线事实只进「商务禁区」行，不进正文口径行', () => {
     const boq = parseFixture();
-    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目' });
+    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目', strategy: villageMunicipalStrategy });
     const text = renderBlueprintDataText(data);
     expect(text).toContain('评审红线事实');
     expect(text).toContain('二级养护');
@@ -709,7 +713,7 @@ describe('渲染函数（执行层输入）', () => {
       },
     ];
     const boq = parseBillOfQuantities({ chunks, sourceFile: '清单.xls' });
-    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天', projectName: '丰乐镇建设项目' });
+    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天', projectName: '丰乐镇建设项目', strategy: villageMunicipalStrategy });
     const outline = buildBlueprintOutline({
       chapterTitles: ['主要分部分项工程施工方案', '物资与机械劳动力配置计划', '质量保证措施', '安全保证措施', '工期保证措施', '文明施工与环境保护', '施工总平面布置', '重难点分析及保证措施'],
       boq,
@@ -720,7 +724,7 @@ describe('渲染函数（执行层输入）', () => {
       data,
       outline,
       validation: { passed: false, checks: [] },
-      diagnostics: { stage: '阶段 D', standardBlocksLoaded: 0, standardBlockGaps: [], laborDerivationBasis: '', llmCalls: 0, fallbackUsed: [], warnings: [], durationMs: 0 },
+      diagnostics: { stage: '阶段 D', laborDerivationBasis: '', llmCalls: 0, fallbackUsed: [], warnings: [], durationMs: 0 },
     };
     const report = validateBlueprint(blueprint, boq);
     const coverage = report.checks.find(check => check.name === '3. 覆盖校验');
@@ -731,7 +735,7 @@ describe('渲染函数（执行层输入）', () => {
 describe('二期蓝图接管（执行层切换）', () => {
   function buildChapterSliceWithData() {
     const boq = parseFixture();
-    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目' });
+    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目', strategy: villageMunicipalStrategy });
     const outline = buildBlueprintOutline({ chapterTitles: ['主要分部分项工程施工方案'], boq, docType: '单位工程施工组织设计' });
     const chapter = outline.chapters[0]!;
     // 人工修订口径：章级补挂总工期 must_cite（对齐函数对修订后蓝图同样生效）
@@ -747,19 +751,20 @@ describe('二期蓝图接管（执行层切换）', () => {
     expect(findBlueprintChapter(blueprint as never, '不存在的章')).toBeUndefined();
   });
 
-  it('蓝图引用对齐：must_cite+strict 数值不一致时确定性回填（总工期/清单工程量）', () => {
+  it('蓝图引用对齐：must_cite+strict 窄语境数值不一致时确定性回填（总工期）；工程量不写时直替', () => {
     const { chapter, data } = buildChapterSliceWithData();
     const markdown = '## 主要分部分项工程施工方案\n\n### 排水工程\n\n混凝土管道DN200 总长 2400m，采用人机配合下管。\n\n本项目总工期为 300 日历天。';
     const aligned = alignChapterContentToBlueprint(markdown, chapter, data);
-    expect(aligned.markdown).toContain('混凝土管道DN200 总长 50m');
+    // 工程量引用不在写时直替（名称后首个「数值+单位」无法区分工程量/检测频次/分工程明细，
+    // 实测频次被改破坏）——不一致引用交 S5 判定链统一裁决
+    expect(aligned.markdown).toContain('混凝土管道DN200 总长 2400m');
     expect(aligned.markdown).toContain('总工期为 360 日历天');
-    expect(aligned.fixed).toEqual(expect.arrayContaining([
-      expect.objectContaining({ anchor: '混凝土管道DN200', from: '2400m', to: '50m' }),
+    expect(aligned.fixed).toEqual([
       expect.objectContaining({ anchor: '总工期', from: '300天', to: '360天' }),
-    ]));
+    ]);
   });
 
-  it('蓝图引用对齐：DN200 规格内数字不误伤（名称后第一个数字是规格 200 而非工程量）', () => {
+  it('蓝图引用对齐：工程量引用不做写时直替（DN200 规格数字与正文原样保留）', () => {
     const { chapter, data } = buildChapterSliceWithData();
     const markdown = '混凝土管道DN200 长度 50m。';
     const aligned = alignChapterContentToBlueprint(markdown, chapter, data);
@@ -767,12 +772,13 @@ describe('二期蓝图接管（执行层切换）', () => {
     expect(aligned.fixed).toHaveLength(0);
   });
 
-  it('蓝图引用对齐：正文未引用 must_cite 数值 → missing 缺口报告（不阻断不回填）', () => {
+  it('蓝图引用对齐：正文未引用窄语境 must_cite 数值 → missing 缺口报告（工程量已退出写时对齐）', () => {
     const { chapter, data } = buildChapterSliceWithData();
     const markdown = '### 道路工程\n\n村庄道路施工有序推进。';
     const aligned = alignChapterContentToBlueprint(markdown, chapter, data);
     expect(aligned.fixed).toHaveLength(0);
-    expect(aligned.missing.length).toBeGreaterThan(0);
+    expect(aligned.missing).toContain('总工期 360 日历天');
+    expect(aligned.missing.some(item => item.includes('混凝土管道DN200'))).toBe(false);
     expect(aligned.markdown).toBe(markdown);
   });
 
@@ -800,7 +806,7 @@ describe('二期蓝图接管（执行层切换）', () => {
 describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用一致性 / 决策锁同源', () => {
   function buildData() {
     const boq = parseFixture();
-    return buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目' }).data;
+    return buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目', strategy: villageMunicipalStrategy }).data;
   }
 
   it('修复权威派生（V5 P4）：里程碑→节点工期权威、设备实体词→锚点 key 台数（区间取中值）', () => {
@@ -817,22 +823,6 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
     expect(plan.crossSectionAuthorities.rebarBender).toBe(3); // quantity 优先
     // V5：实体词自动对接（20 个锚点实体词表），挖掘机不再依赖 key 白名单——自动获得修复通道
     expect(plan.crossSectionAuthorities.excavator).toBe(3); // round((2+3)/2)
-  });
-
-  it('修复权威派生：清单条目 → quantityAuthorities（G3 工程量权威全量投影）', () => {
-    const data = buildData();
-    data.quantities = {
-      '级配碎石': { value: 20931.02, unit: 'm²' },
-      '挖一般土方': { value: 4187.38, unit: 'm³' },
-      '公厕入口内墙涂料': { value: 5.2, unit: 'm²' },
-      'LED 灯具': { value: 118, unit: '套' },
-    };
-    const plan = deriveRepairAuthorities(buildAuthorityIndex(data));
-    expect(plan.quantityAuthorities).toEqual([
-      { name: '级配碎石', value: 20931.02, unit: 'm²' },
-      { name: '挖一般土方', value: 4187.38, unit: 'm³' },
-    ]);
-    // 值 <10 的零星量与 <3 汉字的台/套条目不入工程量权威
   });
 
   it('buildChapterStructureFromBlueprint：蓝图章切片 → 每 sub_section 一个主题块、工作包为 H4 要点', () => {
@@ -873,7 +863,7 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
 
   it('4.19.5 回归：分部章容器块不展开任何骨架名（保持单要点总述块，含中文编号形态骨架名）', () => {
     const structure = buildChapterStructureFromBlueprint({
-      blueprintChapter: { id: '2', title: '主要施工方法', isActive: true, requiredParams: [], scoredItems: [], subSections: [{ id: '2.5', title: '绿化工程', requiredParams: [], scoredItems: [], tablePlans: [], workPackages: [{ name: '绿化工程', kind: 'major', quantities: {}, processChain: [], methods: [], params: [], acceptance: [], standards: [], source: 'boq', coveredSeqs: [] }] }] },
+      blueprintChapter: { id: '2', title: '主要施工方法', isActive: true, requiredParams: [], subSections: [{ id: '2.5', title: '绿化工程', requiredParams: [], tablePlans: [], workPackages: [{ name: '绿化工程', kind: 'major', quantities: {}, processChain: [], methods: [], params: [], acceptance: [], standards: [], source: 'boq', coveredSeqs: [] }] }] },
       inputSections: ['绿化工程', '主要分部分项工程施工方案'],
       chapterTitle: '主要施工方法',
       targetWords: 6000,
@@ -900,6 +890,79 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
     expect(structure.blocks.reduce((sum, block) => sum + block.targetWords, 0)).toBe(12000);
     expect(structure.blocks.every(block => block.targetWords <= 4500)).toBe(true);
     expect(structure.blocks.every(block => block.targetWords > 0)).toBe(true);
+  });
+
+  it('4.35 归并密度封顶：相邻块合并超 6 要点强制分块（块数允许超块数上限、Σ 守恒）', () => {
+    // 6 个 subSection 各 6 工作包 → 初始 6 块各 6 点；章目标 3600（块数上限 floor(3600/1800)=2）
+    // 旧行为：归并按点数均衡（targetPerGroup=18）产出 2 块 18 点（每块 1800 字 → 每要点 100 字，
+    // 骨架质检物理不可达）；新行为：6+6 > 6 强制分块——6 块全部独立保留，块数超上限由软下限
+    //（floorValue=min(1800, 3600/6)=600）与 Σ 守恒收口吸收
+    const workPackage = (name: string) => ({ name, kind: 'major' as const, quantities: {}, processChain: [], methods: [], params: [], acceptance: [], standards: [], source: 'boq' as const, coveredSeqs: [] });
+    const subSections = Array.from({ length: 6 }, (_, sectionIndex) => ({
+      id: `3.${sectionIndex + 1}`,
+      title: `分部工程${sectionIndex + 1}`,
+      requiredParams: [], tablePlans: [],
+      workPackages: Array.from({ length: 6 }, (_, packageIndex) => workPackage(`工作包${sectionIndex + 1}-${packageIndex + 1}`)),
+    }));
+    const structure = buildChapterStructureFromBlueprint({ blueprintChapter: { id: '3', title: '施工方案', isActive: true, requiredParams: [], subSections }, inputSections: [], chapterTitle: '施工方案', targetWords: 3600 });
+    expect(structure.blocks.length).toBe(6);
+    // 密度封顶（≤6 要点/块）+ 超密度守卫（要点数 × 300 ≤ 块预算）双不变量
+    expect(structure.blocks.every(block => block.subPoints.length <= 6)).toBe(true);
+    expect(structure.blocks.every(block => block.subPoints.length <= Math.max(1, Math.floor(block.targetWords / 300)))).toBe(true);
+    expect(structure.blocks.reduce((sum, block) => sum + block.targetWords, 0)).toBe(3600);
+    // 工作包原名零丢失（归并/守卫合并均保留 sources）
+    const carried = new Set(structure.blocks.flatMap(block => block.subPoints.flatMap(point => [point.title, ...point.sources])));
+    for (let sectionIndex = 1; sectionIndex <= 6; sectionIndex += 1) {
+      for (let packageIndex = 1; packageIndex <= 6; packageIndex += 1) expect(carried.has(`工作包${sectionIndex}-${packageIndex}`)).toBe(true);
+    }
+  });
+
+  it('4.35 块内超密度守卫：超密度要点合并为 brief 概览点（sources 全量保留、配额下发）', () => {
+    // 6 工作包 / 章目标 1500：块预算 1500 < 6×300 → 保留前 cap-1=4 个详写要点，
+    // 其余 2 个合并为「其他分部分项工程施工要点」概览点（tier=brief，sources 全量保留——
+    // 覆盖校验/清单外白名单不受影响；复用容器块降级模式，不引入新语义）
+    const workPackage = (name: string) => ({ name, kind: 'major' as const, quantities: {}, processChain: [], methods: [], params: [], acceptance: [], standards: [], source: 'boq' as const, coveredSeqs: [] });
+    const packageNames = ['土方开挖与回填', '基础垫层浇筑', '砌体砌筑', '钢筋制作安装', '混凝土浇筑', '模板支设'];
+    const structure = buildChapterStructureFromBlueprint({
+      blueprintChapter: { id: '4', title: '施工方案', isActive: true, requiredParams: [], subSections: [{ id: '4.1', title: '主体结构施工', requiredParams: [], tablePlans: [], workPackages: packageNames.map(workPackage) }] },
+      inputSections: [],
+      chapterTitle: '施工方案',
+      targetWords: 1500,
+    });
+    expect(structure.blocks.length).toBe(1);
+    const points = structure.blocks[0]!.subPoints;
+    expect(points.length).toBe(5);
+    expect(points.slice(0, 4).map(point => point.title)).toEqual(packageNames.slice(0, 4));
+    expect(points[4]!.title).toBe('其他分部分项工程施工要点');
+    expect(points[4]!.sources).toEqual(packageNames.slice(4));
+    expect(points[4]!.tier).toBe('brief');
+    // 配额随块预算下发（合并点也参与点配额分配）
+    expect(points.every(point => (point.quotaWords ?? 0) > 0)).toBe(true);
+    expect(structure.blocks.reduce((sum, block) => sum + block.targetWords, 0)).toBe(1500);
+  });
+
+  it('4.35 estimateChapterMinFeasibleWords：要点数 = 工作包数 + 未覆盖模板小节数，下限 = ceil(点数/6)×1800', () => {
+    const workPackage = (name: string) => ({ name, kind: 'major' as const, quantities: {}, processChain: [], methods: [], params: [], acceptance: [], standards: [], source: 'boq' as const, coveredSeqs: [] });
+    const blueprintChapter = {
+      id: '2', title: '主要施工方法', isActive: true, requiredParams: [],
+      subSections: Array.from({ length: 13 }, (_, sectionIndex) => ({
+        id: `2.${sectionIndex + 1}`,
+        title: sectionIndex === 0 ? '公共广场提升改造工程' : `分部工程${sectionIndex + 1}`,
+        requiredParams: [], tablePlans: [],
+        workPackages: Array.from({ length: sectionIndex < 5 ? 8 : 7 }, (_, packageIndex) => workPackage(`工作包${sectionIndex + 1}-${packageIndex + 1}`)),
+      })),
+    };
+    // 舒城形态：96 工作包 + 7 个未被蓝图覆盖的模板小节 → 103 点 → ceil(103/6)=18 块 × 1800 = 32400
+    const uncoveredSections = ['市政工程专项施工工艺', '工期保障专项安排', '质量通病防治措施', '安全风险分级管控', '扬尘噪声控制措施', '劳务实名制管理', '材料设备调配计划'];
+    const estimate = estimateChapterMinFeasibleWords(blueprintChapter, uncoveredSections);
+    expect(estimate.points).toBe(103);
+    expect(estimate.minFeasibleWords).toBe(32400);
+    // 被蓝图覆盖的模板小节（subSection 标题/工作包名 去空白互相包含）不计入未覆盖数
+    expect(estimateChapterMinFeasibleWords(blueprintChapter, ['公共广场提升改造工程']).points).toBe(96);
+    // 无蓝图切片：全模板小节近似；空输入下限 0
+    expect(estimateChapterMinFeasibleWords(undefined, ['a', 'b', 'c']).points).toBe(3);
+    expect(estimateChapterMinFeasibleWords(undefined, []).minFeasibleWords).toBe(0);
+    expect(estimateChapterMinFeasibleWords(blueprintChapter, []).points).toBe(96);
   });
 
   it('buildBlueprintOutline：机械章不再误挂清单分部（「主要施工」泛匹配串章根因）', () => {
@@ -949,8 +1012,8 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
     expect(empty.blocks.length).toBe(1);
     expect(empty.blocks[0].title).toBe('工程概况');
     expect(empty.blocks[0].subPoints).toEqual([]);
-    // 块目标=整章目标（封顶单块输出安全区 4500 字）——单块成稿字数预算覆盖整章
-    expect(empty.blocks[0].targetWords).toBe(4500);
+    // 块目标=整章目标（封顶单块输出安全区 2800 字——模型自然输出区间上沿，4.35 校准）——单块成稿预算覆盖整章
+    expect(empty.blocks[0].targetWords).toBe(2800);
     // 空要点块（无可拆单元）恒为单块：容量拆分的颗粒度是 H4 要点
     expect(empty.blocks.length).toBe(1);
     // sectionCount=1：单小节归并为一个主题块
@@ -969,40 +1032,43 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
       expect(structure.coveredSections).toEqual(expect.arrayContaining(sections));
       expect(structure.fallbackSections).toEqual([]);
     }
-    // sectionCount=30：大章全量成块、块目标不越界（1200~4000）
+    // sectionCount=30：大章全量成块、块目标不越界（1800~4500）
     const many = Array.from({ length: 30 }, (_, index) => `质量控制点位检查与验收要求第${'一二三四五六七八九十'[index % 10]}类`);
     const large = buildChapterStructureFromBlueprint({ blueprintChapter: undefined, inputSections: many, chapterTitle: '施工管理措施', targetWords: 12000 });
     expect(large.blocks.length).toBeGreaterThanOrEqual(1);
-    expect(large.blocks.every(block => block.targetWords >= 1200 && block.targetWords <= 4500)).toBe(true);
+    expect(large.blocks.every(block => block.targetWords >= 1800 && block.targetWords <= 4500)).toBe(true);
     expect(large.coveredSections.length).toBe(30);
   });
 
-  it('blueprintCitationConsistencyIssues：工期/工程量与蓝图不一致 → error；红线事实缺失 → warning', () => {
+  it('blueprintCitationConsistencyIssues：工期/工程量与蓝图不一致 → error；红线事实缺失 → warning', async () => {
     const data = buildData();
-    const wrongDays = blueprintCitationConsistencyIssues('本项目总工期为 300 日历天。', data);
+    const wrongDays = await blueprintCitationConsistencyIssues('本项目总工期为 300 日历天。', data, { adjudicate: conflictAll });
     expect(wrongDays.some(issue => issue.level === 'error' && issue.message.includes('蓝图引用冲突'))).toBe(true);
-    const wrongQuantity = blueprintCitationConsistencyIssues('混凝土管道DN200 总长 240m。', data);
+    const wrongQuantity = await blueprintCitationConsistencyIssues('混凝土管道DN200 总长 240m。', data, { adjudicate: conflictAll });
     expect(wrongQuantity.some(issue => issue.level === 'error' && issue.message.includes('工程量'))).toBe(true);
     // 一致口径零 error 冲突（红线事实缺失仍产生 warning 缺口观测）
-    expect(blueprintCitationConsistencyIssues('本项目总工期为 360 日历天。', data).filter(issue => issue.level === 'error')).toEqual([]);
+    const consistent = await blueprintCitationConsistencyIssues('本项目总工期为 360 日历天。', data, { adjudicate: conflictAll });
+    expect(consistent.filter(issue => issue.level === 'error')).toEqual([]);
     // 非金额红线事实未体现 → warning（缺口观测不阻断）；金额类红线不参与
-    const missing = blueprintCitationConsistencyIssues('村庄道路施工有序推进。', data);
+    const missing = await blueprintCitationConsistencyIssues('村庄道路施工有序推进。', data);
     expect(missing.some(issue => issue.level === 'warning' && issue.message.includes('蓝图红线事实缺口'))).toBe(true);
   });
 
-  it('D1 分项计划工期豁免：分项工程「计划工期2天」不报冲突；「总工期」显式前缀句错值仍拦', () => {
+  it('D1 分项计划工期：收集层零豁免入候选，判定层 consistent 放行；「总工期」错值判定 conflict 仍拦', async () => {
     const data = buildData();
-    // 丰乐镇 4.27.0 实测误报形态：分项工程（亮化）的计划工期 2 天被当总工期报冲突 → 补豁免后零 error
-    const planDays = blueprintCitationConsistencyIssues('亮化工程安排在道路铺装工程完成、路基与面层强度形成后进行，计划工期2天。', data);
+    const planText = '亮化工程安排在道路铺装工程完成、路基与面层强度形成后进行，计划工期2天。';
+    // 收集层（词表豁免全废）：分项计划工期同样入候选，语义裁决交判定层
+    expect(collectBlueprintCitationCandidates(planText, data).candidates.some(candidate => candidate.kind === 'total-days' && candidate.value === 2)).toBe(true);
+    const planDays = await blueprintCitationConsistencyIssues(planText, data, { adjudicate: consistentAll });
     expect(planDays.filter(issue => issue.level === 'error')).toEqual([]);
-    // 「总工期/施工工期/合同工期」显式前缀句不参与「计划/安排」豁免：错值仍拦
-    expect(blueprintCitationConsistencyIssues('计划总工期为 120 天。', data).some(issue => issue.level === 'error' && issue.message.includes('蓝图引用冲突'))).toBe(true);
-    expect(blueprintCitationConsistencyIssues('本项目总工期为 300 天。', data).some(issue => issue.level === 'error' && issue.message.includes('蓝图引用冲突'))).toBe(true);
+    // 「总工期/施工工期/合同工期」显式前缀句：判定层 conflict → 错值仍拦
+    expect((await blueprintCitationConsistencyIssues('计划总工期为 120 天。', data, { adjudicate: conflictAll })).some(issue => issue.level === 'error' && issue.message.includes('蓝图引用冲突'))).toBe(true);
+    expect((await blueprintCitationConsistencyIssues('本项目总工期为 300 天。', data, { adjudicate: conflictAll })).some(issue => issue.level === 'error' && issue.message.includes('蓝图引用冲突'))).toBe(true);
   });
 
   it('buildBlueprintDecisionLock：数据口径条目锁定总工期/劳动力峰值/自然村数量/核心工程量', () => {
     const boq = parseFixture();
-    const labor = deriveLaborFromBoq(boq, 360);
+    const labor = deriveLaborFromBoq(boq, 360, [], villageMunicipalStrategy);
     const lock = buildBlueprintDecisionLock({ contract: { totalDays: 360, qualityStandard: '合格', pricingFile: '' }, labor, boq, villageCount: 20 });
     expect(lock.entries.find(entry => entry.id === 'contract_days')?.values).toEqual(['360 日历天']);
     expect(lock.entries.find(entry => entry.id === 'labor_peak')?.values).toEqual([`${labor.peakValue} 人`]);
@@ -1022,14 +1088,14 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
     expect(villageFact?.value).toBe('1 个自然村');
   });
 
-  it('P2.3 蓝图引用一致性：正文村数与蓝图不符 → error，一致 → 零 error', () => {
+  it('P2.3 蓝图引用一致性：正文村数与蓝图不符 → error，一致 → 零 error', async () => {
     const data = buildData();
-    const wrong = blueprintCitationConsistencyIssues('本项目涉及 9 个自然村，分散施工。', data);
+    const wrong = await blueprintCitationConsistencyIssues('本项目涉及 9 个自然村，分散施工。', data, { adjudicate: conflictAll });
     expect(wrong.some(issue => issue.level === 'error' && issue.message.includes('自然村数量'))).toBe(true);
-    const consistent = blueprintCitationConsistencyIssues('本项目涉及 1 个自然村，村内流水施工。', data);
+    const consistent = await blueprintCitationConsistencyIssues('本项目涉及 1 个自然村，村内流水施工。', data, { adjudicate: conflictAll });
     expect(consistent.filter(issue => issue.level === 'error')).toEqual([]);
-    // 「自然村分组」清单分组口径不参与村数校验
-    const scoped = blueprintCitationConsistencyIssues('清单按 3 个自然村分组编制。', data);
+    // 「自然村分组」为作业组织概念（非村数陈述）→ 收集层不入候选（概念边界），判定层零调用
+    const scoped = await blueprintCitationConsistencyIssues('清单按 3 个自然村分组编制。', data, { adjudicate: conflictAll });
     expect(scoped.filter(issue => issue.level === 'error')).toEqual([]);
   });
 
@@ -1048,7 +1114,7 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
 
   it('修复权威派生：机动工期 = 总工期 − 里程碑总和，自然村数量取红线事实', () => {
     const boq = parseFixture();
-    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目' });
+    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目', strategy: villageMunicipalStrategy });
     const plan = deriveRepairAuthorities(buildAuthorityIndex(data));
     const milestoneSum = data.milestones.reduce((sum, item) => sum + (item.duration || 0), 0);
     expect(plan.crossSectionAuthorities.slackDays).toBe(360 - milestoneSum);
@@ -1056,11 +1122,11 @@ describe('三期收口：蓝图权威 / 章规划确定性转换 / 蓝图引用�
     expect(plan.codeAuthorities).toEqual({});
   });
 
-  it('蓝图引用一致性：正文劳动力峰值与蓝图唯一口径不一致 → error，一致 → 零 error', () => {
+  it('蓝图引用一致性：正文劳动力峰值与蓝图唯一口径不一致 → error，一致 → 零 error', async () => {
     const data = buildData();
-    const wrong = blueprintCitationConsistencyIssues(`劳动力峰值为 ${data.resources.labor.peakValue + 5} 人。`, data);
+    const wrong = await blueprintCitationConsistencyIssues(`劳动力峰值为 ${data.resources.labor.peakValue + 5} 人。`, data, { adjudicate: conflictAll });
     expect(wrong.some(issue => issue.level === 'error' && issue.message.includes('劳动力峰值'))).toBe(true);
-    const consistent = blueprintCitationConsistencyIssues(`本项目劳动力峰值为 ${data.resources.labor.peakValue} 人，各工种高峰期叠加控制在该峰值以内。`, data);
+    const consistent = await blueprintCitationConsistencyIssues(`本项目劳动力峰值为 ${data.resources.labor.peakValue} 人，各工种高峰期叠加控制在该峰值以内。`, data, { adjudicate: conflictAll });
     expect(consistent.filter(issue => issue.level === 'error')).toEqual([]);
   });
 
@@ -1131,7 +1197,7 @@ describe('P3.6 源头修复（A1 工期锚点 / A2 村数正则 / A3 序号前�
 
   it('A4 参数桶渲染不泄漏区间端点：工种构成渲染单值人数、机械台数只渲染单值', () => {
     const boq = parseFixture();
-    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目' });
+    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目', strategy: villageMunicipalStrategy });
     const text = renderBlueprintDataText(data);
     const tradeLine = text.split('\n').find(line => line.includes('工种构成'))!;
     expect(tradeLine).toBeDefined();
@@ -1148,7 +1214,7 @@ describe('P3.6 源头修复（A1 工期锚点 / A2 村数正则 / A3 序号前�
 
   it('A4b 章锚点卡：劳动力章注入工种构成锚点，物资章注入主要材料锚点（含规格）', () => {
     const boq = parseFixture();
-    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目' });
+    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目', strategy: villageMunicipalStrategy });
     const outline = buildBlueprintOutline({ chapterTitles: ['劳动力、机械设备及主要材料资源配置计划'], boq, docType: '单位工程施工组织设计' });
     const card = renderBlueprintChapterAuthorityCard(outline.chapters[0]!, data);
     expect(card).toContain('工种构成（合计=');
@@ -1158,14 +1224,14 @@ describe('P3.6 源头修复（A1 工期锚点 / A2 村数正则 / A3 序号前�
 
   it('A5 决策锁数据条目完备性硬检查：删掉 contract_days 锁条目 → 内部一致性校验失败（空壳锁根治）', () => {
     const boq = parseFixture();
-    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格 计价依据：合造价〔2018〕13号文', projectName: '丰乐镇建设项目' });
+    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格 计价依据：合造价〔2018〕13号文', projectName: '丰乐镇建设项目', strategy: villageMunicipalStrategy });
     const outline = buildBlueprintOutline({ chapterTitles: ['主要分部分项工程施工方案', '质量保证措施', '安全保证措施', '工期保证措施', '文明施工与环境保护', '施工总平面布置', '重难点分析及保证措施', '物资与机械劳动力配置计划'], boq, docType: '单位工程施工组织设计' });
     const blueprint = {
       meta: { version: '2.0.0', docType: '单位工程施工组织设计', createdAt: '2026-09-06', sourceMaterials: ['丰乐镇工程量清单.xls'] },
       data: { ...data, decisionLock: { entries: data.decisionLock.entries.filter(entry => entry.id !== 'contract_days') } },
       outline,
       validation: { passed: false, checks: [] as Array<{ name: string; passed: boolean; message: string }> },
-      diagnostics: { stage: '阶段 D', standardBlocksLoaded: 0, standardBlockGaps: [], laborDerivationBasis: '', llmCalls: 0, fallbackUsed: [], warnings: [], durationMs: 0 },
+      diagnostics: { stage: '阶段 D', laborDerivationBasis: '', llmCalls: 0, fallbackUsed: [], warnings: [], durationMs: 0 },
     };
     const report = validateBlueprint(blueprint, boq);
     const consistency = report.checks.find(check => check.name === '4. 内部一致性校验');
@@ -1174,10 +1240,10 @@ describe('P3.6 源头修复（A1 工期锚点 / A2 村数正则 / A3 序号前�
   });
 });
 
-describe('blueprintCitationConsistencyIssues：蓝图引用一致性（D2 零漂移豁免同源 + 误报豁免）', () => {
+describe('blueprintCitationVerdict：蓝图引用一致性（S5 语义判定版，词表豁免全废）', () => {
   function citationData() {
     const boq = parseFixture();
-    const data = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：90日历天 质量标准：合格', projectName: '丰乐镇建设项目' }).data;
+    const data = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：90日历天 质量标准：合格', projectName: '丰乐镇建设项目', strategy: villageMunicipalStrategy }).data;
     data.contract.totalDays = 90;
     data.resources.labor.peakValue = 176;
     data.redLineFacts = [{ key: '自然村数量', value: '20个', source: '清单' }];
@@ -1193,50 +1259,125 @@ describe('blueprintCitationConsistencyIssues：蓝图引用一致性（D2 零漂
     };
     return data;
   }
-  it('劳动力峰值不一致（199 vs 176，11.6% 微漂移）→ error', () => {
-    const issues = blueprintCitationConsistencyIssues('施工高峰期投入199人。', citationData());
-    expect(issues.some(item => item.message.includes('劳动力峰值'))).toBe(true);
+  it('收集层：值 == 权威的引用不入候选（判定层零调用）', async () => {
+    let calls = 0;
+    const spy: CitationAdjudicator = async candidates => {
+      calls += 1;
+      return { records: recordsFor(candidates, 'conflict', 'spy 不应被调用') };
+    };
+    expect(await blueprintCitationConsistencyIssues('施工高峰期投入176人。', citationData(), { adjudicate: spy })).toEqual([]);
+    expect(await blueprintCitationConsistencyIssues('本项目总工期为 90 日历天。', citationData(), { adjudicate: spy })).toEqual([]);
+    expect(await blueprintCitationConsistencyIssues('本项目涉及 20 个自然村。', citationData(), { adjudicate: spy })).toEqual([]);
+    expect(await blueprintCitationConsistencyIssues('塑料管铺设 8205.53m。', citationData(), { adjudicate: spy })).toEqual([]);
+    expect(calls).toBe(0);
   });
-  it('劳动力峰值一致 → 零报告', () => {
-    expect(blueprintCitationConsistencyIssues('施工高峰期投入176人。', citationData())).toEqual([]);
+
+  it('收集层零豁免：规格/分区/单体/子集句全部入候选；概念边界与单位右边界在结构层排除', () => {
+    const data = citationData();
+    // 规格句（原词表豁免形态）：「围墙立柱间距不大于1200mm」
+    const spec = collectBlueprintCitationCandidates('围墙立柱间距不大于1200mm。', data).candidates;
+    expect(spec.some(candidate => candidate.kind === 'quantity' && candidate.subject === '立柱' && candidate.value === 1200 && candidate.authority === 2400)).toBe(true);
+    // 分区数学句（原数学豁免形态）：「每个片区包含4个自然村」
+    const division = collectBlueprintCitationCandidates('项目部将20个自然村划分为5个施工片区，每个片区包含4个自然村。', data).candidates;
+    expect(division.some(candidate => candidate.kind === 'village-count' && candidate.value === 4 && candidate.authority === 20)).toBe(true);
+    // 村名/单体语境句（原语境豁免形态）：「塑料管铺设7.8m」
+    const entity = collectBlueprintCitationCandidates('公厕室外管网工程包括整体化粪池2座、砌筑检查井2座、塑料管铺设7.8m。', data).candidates;
+    expect(entity.some(candidate => candidate.kind === 'quantity' && candidate.subject === '塑料管铺设' && candidate.value === 7.8)).toBe(true);
+    // 子集拆分句（原锚点求和豁免形态）：句内一致条目不入候选、不一致条目全部入候选
+    const subset = collectBlueprintCitationCandidates('主要工程量包括塑料管铺设8205.53m、级配碎石480.5m²、水泥混凝土572.3m²。', data).candidates.map(candidate => candidate.subject);
+    expect(subset).toHaveLength(2);
+    expect(new Set(subset)).toEqual(new Set(['级配碎石', '水泥混凝土']));
+    // 概念边界（结构定位非豁免）：「自然村分组」为作业组织概念，不入村数候选
+    expect(collectBlueprintCitationCandidates('清单按 3 个自然村分组编制。', data).candidates).toEqual([]);
+    // 单位右边界：「公厕塑料管铺设直径不小于10mm」的 m 子串不误匹配
+    expect(collectBlueprintCitationCandidates('公厕塑料管铺设直径不小于10mm。', data).candidates).toEqual([]);
   });
-  it('分区数学豁免：「每个片区包含4个自然村」不报村数冲突', () => {
-    const issues = blueprintCitationConsistencyIssues('项目部将20个自然村划分为5个施工片区，每个片区包含4个自然村。', citationData());
-    expect(issues.some(item => item.message.includes('自然村数量'))).toBe(false);
+
+  it('收集层括号形态：半/全角互配、省略形态与防抢占（路床检验 / 生态池 T/D 条目对）', async () => {
+    const data = citationData();
+    data.quantities = {
+      ...data.quantities,
+      '路床(槽)碾压检验': { value: 19930.52, unit: 'm²' },
+      '1#生态池（2T/D)': { value: 5, unit: '座' },
+      '1#生态池（3T/D)': { value: 5, unit: '座' },
+      '喷播植草（灌木）籽': { value: 19400, unit: 'm²' },
+    };
+    const subjects = (text: string) => collectBlueprintCitationCandidates(text, data).candidates.map(item => `${item.subject} ${item.value}${item.unit}`);
+    // 全角写法（蓝图半角括号）互配
+    expect(subjects('路床（槽）碾压检验 18000m²。')).toContain('路床(槽)碾压检验 18000m²');
+    // 省略形态（去括号写法）
+    expect(subjects('路床碾压检验 18000m²。')).toContain('路床(槽)碾压检验 18000m²');
+    expect(subjects('喷播植草灌木籽 15000m²。')).toContain('喷播植草（灌木）籽 15000m²');
+    // 省略形态不抢占同前缀兄弟条目全名：「1#生态池」前缀不能占「1#生态池（3T/D)」位置
+    const pool = collectBlueprintCitationCandidates('1#生态池（3T/D）共计4座。', data).candidates;
+    expect(pool).toHaveLength(1);
+    expect(pool[0]!.subject).toBe('1#生态池（3T/D)');
+    // 一致引用（含全角/省略形态）不入候选
+    expect(collectBlueprintCitationCandidates('路床（槽）碾压检验 19930.52m²。', data).candidates).toEqual([]);
+    expect(collectBlueprintCitationCandidates('路床碾压检验 19930.52m²。', data).candidates).toEqual([]);
+    // 锚点坐标用实际匹配长度（省略写法与名称字面长度不等）：起点切片仍为数值本体
+    const verdict = await blueprintCitationVerdict('路床碾压检验 18000m²。', data, { adjudicate: conflictAll });
+    expect(verdict.anchors).toHaveLength(1);
+    expect(verdict.anchors[0]!.name).toBe('路床(槽)碾压检验');
+    expect('路床碾压检验 18000m²。'.slice(verdict.anchors[0]!.start, verdict.anchors[0]!.end)).toBe('18000');
   });
-  it('真实村数冲突仍报：本项目涉及9个自然村', () => {
-    const issues = blueprintCitationConsistencyIssues('本项目涉及9个自然村。', citationData());
-    expect(issues.some(item => item.message.includes('自然村数量'))).toBe(true);
+
+  it('判定 conflict：峰值/工期/村数报 error，工程量冲突同产修复锚点（坐标直连修复器）', async () => {
+    const data = citationData();
+    const peak = await blueprintCitationVerdict('施工高峰期投入199人。', data, { adjudicate: conflictAll });
+    expect(peak.issues.some(item => item.level === 'error' && item.message.includes('劳动力峰值 199'))).toBe(true);
+    const days = await blueprintCitationVerdict('总工期为7日历天。', data, { adjudicate: conflictAll });
+    expect(days.issues.some(item => item.level === 'error' && item.message.includes('工期表述 7 日历天'))).toBe(true);
+    const village = await blueprintCitationVerdict('本项目涉及9个自然村。', data, { adjudicate: conflictAll });
+    expect(village.issues.some(item => item.level === 'error' && item.message.includes('自然村数量 9 个'))).toBe(true);
+    const markdown = '本分项工程量为塑料管铺设7.8m。';
+    const verdict = await blueprintCitationVerdict(markdown, data, { adjudicate: conflictAll });
+    expect(verdict.issues.some(item => item.level === 'error' && item.message.includes('工程量 塑料管铺设 7.8m'))).toBe(true);
+    expect(verdict.anchors).toHaveLength(1);
+    expect(verdict.anchors[0]!.name).toBe('塑料管铺设');
+    expect(markdown.slice(verdict.anchors[0]!.start, verdict.anchors[0]!.end)).toBe('7.8');
+    expect(verdict.anchors[0]!.authorityValue).toBe(8205.53);
+    expect(verdict.summary).toMatchObject({ total: 1, conflicts: 1, consistent: 0, uncertain: 0 });
   });
-  it('阶段细分豁免：「总工期按施工准备与清杂拆除7天」不报工期冲突', () => {
-    const issues = blueprintCitationConsistencyIssues('总工期按施工准备与清杂拆除7天、管网施工30天、道路面层施工20天。', citationData());
-    expect(issues.some(item => item.message.includes('工期'))).toBe(false);
+
+  it('判定 consistent：规格/分区/单体/子集/阶段细分句全部放行；同批句子 conflict 判定下全部拦下（豁免由判定层裁决）', async () => {
+    const data = citationData();
+    const sentences = [
+      '围墙立柱间距不大于1200mm。',
+      '项目部将20个自然村划分为5个施工片区，每个片区包含4个自然村。',
+      '公厕室外管网工程包括整体化粪池2座、砌筑检查井2座、塑料管铺设7.8m。',
+      '主要工程量包括塑料管铺设8205.53m、级配碎石480.5m²、水泥混凝土572.3m²。',
+      '总工期按施工准备与清杂拆除7天、管网施工30天、道路面层施工20天。',
+    ];
+    for (const sentence of sentences) {
+      const soft = await blueprintCitationConsistencyIssues(sentence, data, { adjudicate: consistentAll });
+      expect(soft.filter(issue => issue.level === 'error')).toEqual([]);
+      const strict = await blueprintCitationConsistencyIssues(sentence, data, { adjudicate: conflictAll });
+      expect(strict.some(issue => issue.level === 'error')).toBe(true);
+    }
   });
-  it('真实工期冲突仍报：总工期为7日历天', () => {
-    const issues = blueprintCitationConsistencyIssues('总工期为7日历天。', citationData());
-    expect(issues.some(item => item.message.includes('工期'))).toBe(true);
+
+  it('判定不可用：候选按未决显式暴露（warning），不回退词表猜测', async () => {
+    const issues = await blueprintCitationConsistencyIssues('本分项工程量为塑料管铺设7.8m。', citationData(), { adjudicate: unavailableAll });
+    expect(issues.some(item => item.level === 'warning' && item.message.includes('蓝图引用未决'))).toBe(true);
+    expect(issues.some(item => item.level === 'warning' && item.message.includes('蓝图引用语义判定不可用'))).toBe(true);
+    expect(issues.filter(item => item.level === 'error')).toEqual([]);
   });
-  it('句级豁免收紧：全句多数条目大幅差异且无一致锚点 → 逐条报工程量冲突（不同名称全部上报）', () => {
+
+  it('判定 conflict 逐条上报：不同名称全部报工程量冲突（判定位去重只按同名）', async () => {
     const markdown = '景观工程主要工程量包括挖一般土方146.93m³、级配碎石480.5m²、水泥混凝土572.3m²、人行道板安砌114.8m²。';
-    const issues = blueprintCitationConsistencyIssues(markdown, citationData());
+    const issues = await blueprintCitationConsistencyIssues(markdown, citationData(), { adjudicate: conflictAll });
     expect(issues.filter(item => item.message.includes('工程量')).length).toBe(4);
   });
-  it('总量锚点+分部量句豁免：句内一致条目与不一致分部量并存 → 整句不报', () => {
-    const markdown = '主要工程量包括塑料管铺设8205.53m、级配碎石480.5m²、水泥混凝土572.3m²。';
-    expect(blueprintCitationConsistencyIssues(markdown, citationData())).toEqual([]);
-  });
-  it('村名/分部语境豁免：化粪池语境下塑料管铺设7.8m 不报（与修复器同源）', () => {
-    const markdown = '公厕室外管网工程包括整体化粪池2座、砌筑检查井2座、塑料管铺设7.8m。';
-    expect(blueprintCitationConsistencyIssues(markdown, citationData())).toEqual([]);
-  });
-  it('规格句豁免：围墙立柱间距不大于1200mm 不报工程量冲突', () => {
-    expect(blueprintCitationConsistencyIssues('围墙立柱间距不大于1200mm。', citationData())).toEqual([]);
-  });
-  it('单位右边界：公厕塑料管铺设直径不小于10mm 的 m 子串不误匹配', () => {
-    expect(blueprintCitationConsistencyIssues('公厕塑料管铺设直径不小于10mm。', citationData())).toEqual([]);
-  });
-  it('真实工程量冲突仍报：孤立句塑料管铺设7.8m', () => {
-    const issues = blueprintCitationConsistencyIssues('本分项工程量为塑料管铺设7.8m。', citationData());
-    expect(issues.some(item => item.message.includes('工程量'))).toBe(true);
+
+  it('rebaseCitationAnchorsForChapters：全文锚点按章重定位为章内坐标（与章拼装同源的段间偏移）', async () => {
+    const markdown = ['第一章正文。', '塑料管铺设7.8m。'].join('\n\n');
+    const verdict = await blueprintCitationVerdict(markdown, citationData(), { adjudicate: conflictAll });
+    const batches = rebaseCitationAnchorsForChapters(verdict.anchors, ['第一章正文。', '塑料管铺设7.8m。']);
+    expect(batches[0]).toEqual([]);
+    expect(batches[1]).toHaveLength(1);
+    expect(batches[1]![0]!.start).toBe('塑料管铺设'.length);
+    expect('塑料管铺设7.8m。'.slice(batches[1]![0]!.start, batches[1]![0]!.end)).toBe('7.8');
+    expect(batches[1]![0]!.authorityValue).toBe(8205.53);
   });
 });

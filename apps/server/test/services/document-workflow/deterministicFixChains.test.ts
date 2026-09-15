@@ -58,6 +58,8 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'atlas-reference',
       // 4.31 internal-term-heading 启用 stage5（丰乐镇 v6 #66/#88 表格行替换）
       'internal-term-heading',
+      // 4.36 A2 小节编号重放（结构事务化 · 编号不变量 INV-1：链尾原子重放，清洗层删 H3 行后的编号空档在此收敛）
+      'section-renumber',
     ]);
   });
 
@@ -98,6 +100,8 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'basis-regulation-region',
       'work-injury-insurance',
       'duplicate-response-line',
+      // 4.36.2 复查修正：图集引用清洗补接 round-2 链（stage5 后 LLM 补写轮可再引入）
+      'atlas-reference',
       'tertiary-h4-dedupe',
       'internal-term-heading',
       // WS4 骨架指纹确定性兜底（round-2 链末尾、终检前最后一道）
@@ -108,6 +112,8 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'truncated-title-completion',
       // 4.27.2 句化标题切分（标题合并治理 · round-2 链最后：标题还原规划标题+续写句转正文）
       'sentence-like-heading-split',
+      // 4.36 A2 小节编号重放（结构事务化 · 编号不变量 INV-1：链尾原子重放，H4 父前缀同步）
+      'section-renumber',
     ]);
   });
 });

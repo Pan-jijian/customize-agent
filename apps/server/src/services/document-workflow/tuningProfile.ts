@@ -31,6 +31,8 @@ export interface TuningProfile {
   persistEvidenceMaxItems?: number;
   persistEvidenceItemChars?: number;
   repairEvidenceChars?: number;
+  /** 4.35 容量密度可行性闭环：章预算可行性重校准开关（0=应急关闭；缺省开启） */
+  capacityFeasibilityRecalibration?: number;
   // 蓝图块级聚焦族（s1-slim 单块输入瘦身：quantity/material 条目级筛选封顶 + 块级切片封顶）
   blueprintBlockQuantityCap?: number;
   blueprintBlockMaterialCap?: number;
@@ -44,7 +46,7 @@ const TUNING_PROFILE_KEYS: readonly (keyof TuningProfile)[] = [
   'writingTaskConcurrency', 'projectGraphDomainConcurrency', 'writingTaskMaxWords', 'blockEvidenceChars',
   'chapterPoolChars', 'evidenceBudgetRatio', 'evidenceBudgetCeiling', 'evidenceCatalogMaxLines',
   'factCoverageCap', 'factExtractionMaxChars', 'factExtractionMaxItems', 'outlineEvidenceChars',
-  'persistEvidenceMaxItems', 'persistEvidenceItemChars', 'repairEvidenceChars',
+  'persistEvidenceMaxItems', 'persistEvidenceItemChars', 'repairEvidenceChars', 'capacityFeasibilityRecalibration',
   'blueprintBlockQuantityCap', 'blueprintBlockMaterialCap', 'blueprintBlockSliceCap',
 ];
 

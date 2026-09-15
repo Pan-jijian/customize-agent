@@ -3,7 +3,7 @@
  * - 一期：resolveDerivationStrategy 双信号解析、气候区域表、里程碑均分兜底、村域行为锁定；
  * - 二期：桥隧/公路/水利策略组判别与参数完整性；
  * - 三期：定额知识库接入点（laborQuotaTable 命中替换经验区间）与未命中降级的机制验证。
- * 原则：策略组为确定性常量，行为锁定；六策略组一律不内置定额数据（防编造），村域组（丰乐镇口径）缺省零变化。
+ * 原则：策略组为确定性常量，行为锁定；六策略组一律不内置定额数据（防编造），村域组（丰乐镇口径）行为零变化。
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -291,7 +291,7 @@ describe('定额知识库接入点机制（laborQuotaTable 命中替换经验区
   };
 
   it('命中定额行 → basis 标注定额工效（子目名+编号+工日区间）并替换经验区间', () => {
-    const labor = deriveLaborFromBoq(buildingBoq(), 90, 0, [], fixtureStrategy);
+    const labor = deriveLaborFromBoq(buildingBoq(), 90, [], fixtureStrategy);
     const rebar = labor.byTrade.find(item => item.trade === '钢筋工');
     const concrete = labor.byTrade.find(item => item.trade === '混凝土工');
     expect(rebar?.basis).toContain('定额工效（钢筋制安 FJ-01');
@@ -301,7 +301,7 @@ describe('定额知识库接入点机制（laborQuotaTable 命中替换经验区
 
   it('定额未覆盖条目 → 降级经验区间表达（无定额命中形态）', () => {
     const boq = boqOf([entry(1, '挤塑板保温', '1．厚度：30mm', 'm2', 500)]);
-    const labor = deriveLaborFromBoq(boq, 90, 0, [], fixtureStrategy);
+    const labor = deriveLaborFromBoq(boq, 90, [], fixtureStrategy);
     const insulation = labor.byTrade.find(item => item.trade === '保温工');
     expect(insulation).toBeDefined();
     expect(insulation?.basis).toContain('经验工效区间');
@@ -310,11 +310,11 @@ describe('定额知识库接入点机制（laborQuotaTable 命中替换经验区
   });
 
   it('生产策略组未配置定额表 → 全部条目走经验区间（编造数据零进入）', () => {
-    const labor = deriveLaborFromBoq(buildingBoq(), 90, 0, [], buildingStrategy);
+    const labor = deriveLaborFromBoq(buildingBoq(), 90, [], buildingStrategy);
     for (const item of labor.byTrade) {
       expect(item.basis).not.toContain('定额工效（');
     }
-    const bridgeLabor = deriveLaborFromBoq(bridgeBoq(), 90, 0, [], bridgeTunnelStrategy);
+    const bridgeLabor = deriveLaborFromBoq(bridgeBoq(), 90, [], bridgeTunnelStrategy);
     for (const item of bridgeLabor.byTrade) {
       expect(item.basis).not.toContain('定额工效（');
     }
@@ -339,7 +339,7 @@ describe('房建组端到端（二期 fixture：机械/部署/重难点）', () 
     expect(difficulties.map(item => item.name)).toContain('垂直运输组织');
   });
 
-  it('buildBlueprintData（房建策略）：钢筋工经验区间口径（无定额表）+ 气候 central 兜底 + 无警告', () => {
+  it('buildBlueprintData（房建策略）：钢筋工经验区间口径（无定额表）+ 气候 central 兜底 + 缺口显式警告', () => {
     const result = buildBlueprintData({
       boq: buildingBoq(),
       basicFacts: '项目名称：XX安置房项目 计划工期：360日历天 质量标准：合格',
@@ -353,7 +353,9 @@ describe('房建组端到端（二期 fixture：机械/部署/重难点）', () 
     expect(rebar?.basis).not.toContain('FJ-');
     expect(result.data.climate).toEqual({ rainySeason: '6-8月', highTemp: '7-8月', winter: '12-2月' });
     expect(result.data.keyDifficulties.map(item => item.name)).toContain('垂直运输组织');
-    expect(result.diagnostics.warnings).toHaveLength(0);
+    // 尾组「安装与收尾工程」无工效条目 → 缺行显式警告（不兜底不编造），全量仅此 1 条
+    expect(result.diagnostics.warnings).toHaveLength(1);
+    expect(result.diagnostics.warnings[0]).toContain('分阶段劳动力缺「安装与收尾工程」行');
   });
 
   it('buildBlueprintData（general 无地点）：气候置空 + 诊断警告（宁缺毋错）', () => {
@@ -448,15 +450,16 @@ describe('村域行为锁定（丰乐镇口径零变化回归）', () => {
       [entry(1, '挖沟槽土方', '1．开挖深度：2m', 'm3', 100)],
       Array.from({ length: 20 }, (_, index) => villageOf(`第${index + 1}村`, 1)),
     );
-    const difficulties = deriveKeyDifficulties(boq);
+    const difficulties = deriveKeyDifficulties(boq, villageMunicipalStrategy);
     expect(difficulties[0]?.name).toBe('20 个自然村分散施工组织协调');
   });
 
-  it('buildBlueprintData 缺省策略（村域）：气候保持历史硬编码 east 值', () => {
+  it('buildBlueprintData 显式村域策略：气候保持历史硬编码 east 值', () => {
     const result = buildBlueprintData({
       boq: villageBoq(),
       basicFacts: '项目名称：测试村建设项目 计划工期：90日历天 质量标准：合格',
       projectName: '测试村建设项目',
+      strategy: villageMunicipalStrategy,
     });
     expect(result.data.climate).toEqual({ rainySeason: '6-8月', highTemp: '7-8月', winter: '12-2月' });
     // 村域组未配置定额表：工种 basis 保持经验区间表达（三期不改变村域行为）

@@ -1,17 +1,22 @@
 /**
  * dicCrossProjectCopy：V5 P4b 跨工程同值复制 / 阶段人数混用检测边界矩阵（K/L 组）。
- * 覆盖：crossProjectValueCopyIssues（K1-K9）——判定 B（单组语境值恰为其他工程明细值）、
- * 判定 A（同值出现在 ≥2 工程对象语境且明细值不同）、表格行/无组/多组语境/明细值全同豁免；
+ * 覆盖：crossProjectValueCopyIssues（K1-K13）——S5 语义判定层接入：结构定位（表格行/无组/
+ * 多组语境/明细值全同豁免）不变，配对经判定层过滤（consistent 撤配对、conflict/uncertain
+ * 保留）后进入数学判定：判定 B（单组语境值恰为其他工程明细值）、判定 A（同值出现在 ≥2
+ * 工程对象语境且明细值不同）；
  * phaseLaborMixingIssues（L1-L12）——阶段名命中值不符、值相符、阶段名不匹配、表格行、
  * 部分命中（施工准备↔施工准备与清杂拆除）、负向声明豁免、多命中取最长、枚举列举通道
  * （12:33 评审 P0-1：引导语超 12 字窗口的列举句命中/全对不报）、阶段名拼接歧义、枚举豁免；
  * 权威查询 helper（H1-H3）——blueprintQuantityGroupAuthorities / blueprintPhaseLaborAuthorities
- * 与蓝图数据的同源投影契约。全部用例为确定性判定，无语义/网络依赖。
+ * 与蓝图数据的同源投影契约。判定器全部以 mock 注入（无网络依赖），判定通道语义独立锁定。
  */
 import { describe, expect, it } from 'vitest';
 import { crossProjectValueCopyIssues, phaseLaborMixingIssues } from '@/services/document-workflow/documentIntegrityChecks';
 import { blueprintPhaseLaborAuthorities, blueprintQuantityGroupAuthorities } from '@/services/document-workflow/authorityIndex';
 import type { BlueprintData } from '@/services/document-workflow/integratedBlueprint';
+import type {
+  AdjudicationConclusion, AdjudicationRecord, CitationAdjudicationCandidate, CitationAdjudicator,
+} from '@/services/document-workflow/semanticAdjudication';
 
 const quantityAuthorities = [{
   name: '挖沟槽土方',
@@ -23,9 +28,22 @@ const quantityAuthorities = [{
   ],
 }];
 
+function recordsFor(candidates: CitationAdjudicationCandidate[], conclusion: AdjudicationConclusion, rationale: string): Map<string, AdjudicationRecord> {
+  const records = new Map<string, AdjudicationRecord>();
+  for (const candidate of candidates) records.set(candidate.id, { id: candidate.id, conclusion, rationale });
+  return records;
+}
+
+/** 判定层全 conflict/uncertain：配对保留进数学判定（锁定 K 组数学判定通道与改造前语义一致） */
+const conflictAll: CitationAdjudicator = async candidates => ({ records: recordsFor(candidates, 'conflict', '语境以分工程口径陈述且与明细不一致') });
+/** 判定层全 consistent：配对全部撤销（语义裁决为非检测口径） */
+const consistentAll: CitationAdjudicator = async candidates => ({ records: recordsFor(candidates, 'consistent', '非本检测口径陈述') });
+/** 判定层不可用：整批 uncertain + 原因（不兜底为 consistent，仍进数学判定） */
+const uncertainAll: CitationAdjudicator = async candidates => ({ records: recordsFor(candidates, 'uncertain', '判定不可用'), unavailable: '模型未配置' });
+
 describe('dicCrossProjectCopy · K 组：跨工程同值复制检测', () => {
-  it('K1 单组语境值恰为其他工程明细值（判定 B）→ blocker', () => {
-    const issues = crossProjectValueCopyIssues('白鸥观澜公厕挖沟槽土方213.99m³施工完成。', quantityAuthorities);
+  it('K1 单组语境值恰为其他工程明细值（判定 B）→ blocker', async () => {
+    const issues = await crossProjectValueCopyIssues('白鸥观澜公厕挖沟槽土方213.99m³施工完成。', quantityAuthorities, { adjudicate: conflictAll });
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('跨工程同值复制');
     expect(issues[0].message).toContain('白鸥观澜公厕');
@@ -35,60 +53,85 @@ describe('dicCrossProjectCopy · K 组：跨工程同值复制检测', () => {
     expect(issues[0].severity).toBe('blocker');
   });
 
-  it('K2 分工程各项取正确明细值 → 0 条', () => {
-    const issues = crossProjectValueCopyIssues('白鸥观澜公厕挖沟槽土方838.81m³、青青家园挖沟槽土方213.99m³。', quantityAuthorities);
+  it('K2 分工程各项取正确明细值 → 0 条', async () => {
+    const issues = await crossProjectValueCopyIssues('白鸥观澜公厕挖沟槽土方838.81m³、青青家园挖沟槽土方213.99m³。', quantityAuthorities, { adjudicate: conflictAll });
     expect(issues).toHaveLength(0);
   });
 
-  it('K3 两组同写错值（判定 A：同值跨组出现且明细值不同）→ blocker', () => {
-    const issues = crossProjectValueCopyIssues('白鸥观澜公厕挖沟槽土方999m³。青青家园挖沟槽土方999m³。', quantityAuthorities);
+  it('K3 两组同写错值（判定 A：同值跨组出现且明细值不同）→ blocker', async () => {
+    const issues = await crossProjectValueCopyIssues('白鸥观澜公厕挖沟槽土方999m³。青青家园挖沟槽土方999m³。', quantityAuthorities, { adjudicate: conflictAll });
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('同时出现在');
     expect(issues[0].message).toContain('999');
   });
 
-  it('K4 同一数值出现在两组语境（判定 B 优先报单点复制）→ blocker', () => {
-    const issues = crossProjectValueCopyIssues('白鸥观澜公厕挖沟槽土方213.99m³。青青家园挖沟槽土方213.99m³。', quantityAuthorities);
+  it('K4 同一数值出现在两组语境（判定 B 优先报单点复制）→ blocker', async () => {
+    const issues = await crossProjectValueCopyIssues('白鸥观澜公厕挖沟槽土方213.99m³。青青家园挖沟槽土方213.99m³。', quantityAuthorities, { adjudicate: conflictAll });
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('跨工程同值复制');
   });
 
-  it('K5 表格行（分村分表合法承载）→ 0 条', () => {
-    const issues = crossProjectValueCopyIssues('| 白鸥观澜公厕 | 挖沟槽土方 | 213.99 | m³ |', quantityAuthorities);
+  it('K5 表格行（分村分表合法承载）→ 0 条', async () => {
+    const issues = await crossProjectValueCopyIssues('| 白鸥观澜公厕 | 挖沟槽土方 | 213.99 | m³ |', quantityAuthorities, { adjudicate: conflictAll });
     expect(issues).toHaveLength(0);
   });
 
-  it('K6 无组语境总述句 → 0 条', () => {
-    const issues = crossProjectValueCopyIssues('本工程挖沟槽土方1052.8m³，其中分村实施。', quantityAuthorities);
+  it('K6 无组语境总述句 → 0 条', async () => {
+    const issues = await crossProjectValueCopyIssues('本工程挖沟槽土方1052.8m³，其中分村实施。', quantityAuthorities, { adjudicate: conflictAll });
     expect(issues).toHaveLength(0);
   });
 
-  it('K7 多组语境列举句（语境不唯一）→ 0 条', () => {
-    const issues = crossProjectValueCopyIssues('白鸥观澜公厕、青青家园挖沟槽土方1052.8m³。', quantityAuthorities);
+  it('K7 多组语境列举句（语境不唯一）→ 0 条', async () => {
+    const issues = await crossProjectValueCopyIssues('白鸥观澜公厕、青青家园挖沟槽土方1052.8m³。', quantityAuthorities, { adjudicate: conflictAll });
     expect(issues).toHaveLength(0);
   });
 
-  it('K8 单组语境值非任何明细值（普通漂移走修复器通道）→ 0 条', () => {
-    const issues = crossProjectValueCopyIssues('白鸥观澜公厕挖沟槽土方999m³。', quantityAuthorities);
+  it('K8 单组语境值非任何明细值（普通漂移走修复器通道）→ 0 条', async () => {
+    const issues = await crossProjectValueCopyIssues('白鸥观澜公厕挖沟槽土方999m³。', quantityAuthorities, { adjudicate: conflictAll });
     expect(issues).toHaveLength(0);
   });
 
-  it('K9 明细值全同条目复制同值不构成跨工程错误 → 0 条', () => {
+  it('K9 明细值全同条目复制同值不构成跨工程错误 → 0 条', async () => {
     const sameValue = [{ name: '栽植色带', value: 200, unit: 'm²', groups: [{ group: '甲村', value: 100 }, { group: '乙村', value: 100 }] }];
-    const issues = crossProjectValueCopyIssues('甲村栽植色带100m²、乙村栽植色带100m²。', sameValue);
+    const issues = await crossProjectValueCopyIssues('甲村栽植色带100m²、乙村栽植色带100m²。', sameValue, { adjudicate: conflictAll });
     expect(issues).toHaveLength(0);
   });
 
-  it('K10 单位变体（m² 与 ㎡）照常解析 → blocker', () => {
+  it('K10 单位变体（m² 与 ㎡）照常解析 → blocker', async () => {
     const area = [{ name: '栽植色带', value: 300, unit: 'm²', groups: [{ group: '甲村', value: 200 }, { group: '乙村', value: 100 }] }];
-    const issues = crossProjectValueCopyIssues('甲村栽植色带100㎡种植完成。', area);
+    const issues = await crossProjectValueCopyIssues('甲村栽植色带100㎡种植完成。', area, { adjudicate: conflictAll });
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('乙村');
+  });
+
+  it('K11 判定层 consistent 撤销配对（语义裁决为非检测口径）→ 0 条', async () => {
+    const issues = await crossProjectValueCopyIssues('白鸥观澜公厕挖沟槽土方213.99m³施工完成。', quantityAuthorities, { adjudicate: consistentAll });
+    expect(issues).toHaveLength(0);
+  });
+
+  it('K12 判定层不可用（uncertain + unavailable）→ 不兜底为 consistent，仍进数学判定报 blocker', async () => {
+    const issues = await crossProjectValueCopyIssues('白鸥观澜公厕挖沟槽土方213.99m³施工完成。', quantityAuthorities, { adjudicate: uncertainAll });
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('跨工程同值复制');
+  });
+
+  it('K13 判定候选契约：subject/value/unit/authority 取本组明细 + facts 携带分工程明细投影', async () => {
+    let seen: CitationAdjudicationCandidate[] = [];
+    const spy: CitationAdjudicator = async candidates => {
+      seen = candidates;
+      return { records: recordsFor(candidates, 'conflict', '记录候选契约') };
+    };
+    await crossProjectValueCopyIssues('白鸥观澜公厕挖沟槽土方213.99m³施工完成。', quantityAuthorities, { adjudicate: spy });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ kind: 'quantity', subject: '挖沟槽土方（白鸥观澜公厕）', value: 213.99, unit: 'm³', authority: 838.81 });
+    expect(seen[0].sentence).toContain('白鸥观澜公厕');
+    expect(seen[0].facts?.[0]).toContain('白鸥观澜公厕 838.81');
+    expect(seen[0].facts?.[0]).toContain('青青家园 213.99');
   });
 });
 
 const phaseAuthorities = [
-  { phase: '污水管网工程', value: 35, trace: '按造价折算' },
+  { phase: '污水管网工程', value: 35, trace: '按工效推导' },
   { phase: '道路铺装工程', value: 68 },
 ];
 
@@ -194,9 +237,9 @@ function makeBlueprint(): BlueprintData {
       labor: {
         peak: { min: 140, max: 160 },
         peakValue: 150,
-        peakBasis: '造价锚定',
+        peakBasis: '清单工效推导',
         byPhase: [
-          { phase: '污水管网工程', min: 30, max: 40, basis: '按造价折算' },
+          { phase: '污水管网工程', min: 30, max: 40, basis: '按工效推导' },
           { phase: '道路铺装工程', min: 60, max: 76, basis: '推导' },
         ],
         byTrade: [],
@@ -234,7 +277,7 @@ describe('dicCrossProjectCopy · H 组：权威查询 helper 契约', () => {
   it('H2 blueprintPhaseLaborAuthorities 投影「阶段劳动力:X」为 phase/value（midValue 收敛）', () => {
     const phases = blueprintPhaseLaborAuthorities(makeBlueprint());
     expect(phases).toHaveLength(2);
-    expect(phases[0]).toEqual({ phase: '污水管网工程', value: 35, trace: '按造价折算' });
+    expect(phases[0]).toEqual({ phase: '污水管网工程', value: 35, trace: '按工效推导' });
     expect(phases[1].value).toBe(68);
   });
 
@@ -243,8 +286,8 @@ describe('dicCrossProjectCopy · H 组：权威查询 helper 契约', () => {
     expect(blueprintPhaseLaborAuthorities(undefined)).toEqual([]);
   });
 
-  it('H4 helper→检测器端到端：蓝图分组明细直接支撑同值复制判定', () => {
-    const issues = crossProjectValueCopyIssues('白鸥观澜公厕挖沟槽土方213.99m³。', blueprintQuantityGroupAuthorities(makeBlueprint()));
+  it('H4 helper→检测器端到端：蓝图分组明细直接支撑同值复制判定', async () => {
+    const issues = await crossProjectValueCopyIssues('白鸥观澜公厕挖沟槽土方213.99m³。', blueprintQuantityGroupAuthorities(makeBlueprint()), { adjudicate: conflictAll });
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('青家园');
   });

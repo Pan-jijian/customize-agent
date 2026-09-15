@@ -4,7 +4,7 @@ import type { FactTokenScopeClassifier } from './factTokenClassifier';
 import type { ProfessionalDepthAnalysis, ProfessionalDepthClassifier } from './professionalDepthClassifier';
 import { boqDivisionCoverageIssues, boqRowTraceIssues, buildBoqRowTraces } from './documentFactTrace';
 import { chapterDependencyIssues, documentDeliveryScoreIssues, evidenceUsageCoverageIssues, paragraphGenericIssues } from './documentDeliveryReport';
-import { plannedStructureIssues, promptDocumentRuleIssues, tertiaryHeadingIssues } from './markdownComposer';
+import { bodyCompositionTableIssues, plannedStructureIssues, promptDocumentRuleIssues, tertiaryHeadingIssues } from './markdownComposer';
 import { webEvidenceLeakageIssues } from './webResearchService';
 import { constructionOrgChapterDataCoverageIssues, constructionOrgConsistencyIssues } from './constructionOrgConsistency';
 import { constructionOrgBonusModuleIssues, constructionOrgControlLoopIssues, constructionOrgDivisionSectionIssues, constructionOrgGenericLanguageIssues, constructionOrgMajorContentIssues, constructionOrgProfessionalChainIssues } from './constructionOrgQualityRules';
@@ -124,6 +124,10 @@ export async function buildStandardFinalValidationIssues(input: {
   professionalDepthClassifier: ProfessionalDepthClassifier;
   /** 一体化蓝图参数桶（生成前锁定口径）：蓝图引用冲突终检兑底（实时 finalMarkdown 重跑，替除生成阶段全卷快照） */
   blueprintData?: BlueprintData;
+  /** 标书编制规格：正文禁表（暗标纯文字口径）——缺表类门禁豁免与正文残留表格反向阻断依据 */
+  bodyTableForbidden?: boolean;
+  /** 标书编制规格：封面口径（招标「不设内封面」优先于提示词要求） */
+  coverForbidden?: boolean;
   /** B1 清单事实锁（4.27.0 A1）：参数口径冲突组多值分别命中不同清单条目时判误报降级 info（不阻断） */
   billFactLock?: BillFactLock;
 }): Promise<ValidationIssue[]> {
@@ -183,10 +187,10 @@ export async function buildStandardFinalValidationIssues(input: {
     // 4.19.9 蓝图引用冲突终检兑底（与 globalQualityGates 生成阶段同源检测器的实时 finalMarkdown 重跑）：
     // 生成阶段全卷快照消息已在 recomputeFinalValidationBundle 中剔除，终稿蓝图口径冲突由本实时版唯一报告
     //（第五轮实测：终稿已把塑料管拆为 DN200 污水管 8205.53m / DN110 雨水管 7525.01m 两口径后，旧快照仍报单一蓝图冲突）
-    ...det('blueprint-citation-consistency', () => input.blueprintData ? blueprintCitationConsistencyIssues(input.markdown, input.blueprintData).filter(issue => issue.level === 'error') : []),
+    ...await detSafe('blueprint-citation-consistency', async () => input.blueprintData ? (await blueprintCitationConsistencyIssues(input.markdown, input.blueprintData)).filter(issue => issue.level === 'error') : []),
     // V5 P4b 跨工程同值复制终检兑底：多村/多标段清单条目分组明细（groups）与正文分工程语境比对
     // （值恰为其他工程明细值 / 同值出现在多个工程对象语境且明细值不同）——与生成阶段检测器同源
-    ...det('cross-project-value-copy', () => crossProjectValueCopyIssues(input.markdown, blueprintQuantityGroupAuthorities(input.blueprintData))),
+    ...await detSafe('cross-project-value-copy', () => crossProjectValueCopyIssues(input.markdown, blueprintQuantityGroupAuthorities(input.blueprintData))),
     // V5 P4b 阶段人数混用终检兑底：正文「XX阶段 + N 人」vs byPhase 推导权威（阶段名命中但数值不符）
     ...det('phase-labor-mixing', () => phaseLaborMixingIssues(input.markdown, blueprintPhaseLaborAuthorities(input.blueprintData))),
     // 批2-1 机械分批求和终检兑底：句内「首批/剩余补充」分批台数并存但无组合等于权威总数
@@ -311,8 +315,10 @@ export async function buildStandardFinalValidationIssues(input: {
     ...det('prompt-example-leak', () => promptExampleLeakIssues(input.markdown, input.promptBindings)),
     ...det('degenerate-content', () => degenerateContentIssues(input.markdown, input.chapters)),
     ...det('planned-auto-spec-gate', () => plannedAutoSpecGateIssues(input.markdown, input.template)),
-    ...det('planned-structure', () => plannedStructureIssues(input.markdown, input.template)),
-    ...await det('prompt-document-rule', () => promptDocumentRuleIssues(input.markdown, input.promptDocumentRules)),
+    // 暗标正文禁表（标书编制规格）：缺表类门禁豁免（正文缺表不再缺陷）+ 残留表格反向阻断（正文纯文字，图表仅限文末附表区）
+    ...det('bid-composition-body-table', () => bodyCompositionTableIssues(input.markdown, input.bodyTableForbidden)),
+    ...det('planned-structure', () => plannedStructureIssues(input.markdown, input.template, input.bodyTableForbidden)),
+    ...await det('prompt-document-rule', () => promptDocumentRuleIssues(input.markdown, input.promptDocumentRules, undefined, { bodyTableForbidden: input.bodyTableForbidden, coverForbidden: input.coverForbidden })),
     // round-18 E11：安徽省属地适配与政策合规（创优目标/四节一环保量化/工伤保险），
     // 排在末尾使修复循环 slice 截断时让位高优先级 blocker；round-20 S1 已加语义判定（async）
     ...await det('local-adaptation-keyword', () => localAdaptationKeywordIssues(input.markdown, input.factsModel)),

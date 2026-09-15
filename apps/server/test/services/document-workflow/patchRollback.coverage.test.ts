@@ -1,6 +1,6 @@
 /**
  * withPatchRollback 接入覆盖防回归（P12）：
- * 源码 grep 式断言——7 个 LLM patch 轮全部必须接入 withPatchRollback（修复后同源复检 + 变差回滚）。
+ * 源码 grep 式断言——8 个 LLM patch 轮全部必须接入 withPatchRollback（修复后同源复检 + 变差回滚）。
  * 新增修复轮若未接入回滚保护，本测试直接失败。
  */
 import { readFileSync } from 'node:fs';
@@ -36,23 +36,25 @@ function rollbackCallBlocks(source: string): string[] {
 }
 
 describe('withPatchRollback 全链接入防回归（P12）', () => {
-  it('7 个修复轮全部接入 withPatchRollback（全链接入，无声明保留轮）', () => {
+  it('8 个修复轮全部接入 withPatchRollback（全链接入，无声明保留轮）', () => {
     const allBlocks = ROLLBACK_FILES.flatMap(file => rollbackCallBlocks(readFileSync(path.join(SRC_DIR, file), 'utf8')));
-    // 7 个调用点：fact-landing / table-repair（finalize/repairRounds）+ 5 处（globalQualityGates）
-    expect(allBlocks).toHaveLength(7);
+    // 8 个调用点：fact-landing / table-repair（finalize/repairRounds）+ 6 处（globalQualityGates：
+    // 补表/拆表同域 table-execution-repair 双闭环——补表（非暗标缺表）与暗标拆表（bodyTablePolicy=forbidden）互斥）
+    expect(allBlocks).toHaveLength(8);
     allBlocks.forEach((block, index) => {
       expect(block, `第 ${index + 1} 个 withPatchRollback 调用点缺少 recheck 同源复检`).toMatch(/recheck\s*:/u);
       expect(block, `第 ${index + 1} 个 withPatchRollback 调用点缺少 repairRound 分组声明`).toMatch(/repairRound\s*:/u);
     });
   });
 
-  it('7 个接入轮的 repairRound 声明与修复轮 id 一一对应', () => {
+  it('8 个接入轮的 repairRound 声明与修复轮 id 一一对应（table-execution-repair 双闭环）', () => {
     const sources = ROLLBACK_FILES.map(file => readFileSync(path.join(SRC_DIR, file), 'utf8'));
     const rounds = sources.flatMap(source => [...source.matchAll(/repairRound\s*:\s*'([\w-]+)'/gu)].map(match => match[1])).sort();
     expect(rounds).toEqual([
       'fact-landing',
       'global-consistency-repair',
       'planned-section-repair',
+      'table-execution-repair',
       'table-execution-repair',
       'table-repair',
       'templating-repair',

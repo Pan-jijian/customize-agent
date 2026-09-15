@@ -1292,9 +1292,11 @@ function applyForbiddenTermReplacements(markdown: string, rules?: PromptDocument
   return next;
 }
 
-export function applyPromptDocumentRules(markdown: string, rules?: PromptDocumentRuleSet) {
+export function applyPromptDocumentRules(markdown: string, rules?: PromptDocumentRuleSet, bodyTableForbidden?: boolean) {
   if (!rules) return applyForbiddenTermReplacements(markdown);
-  let next = ensureRequiredTables(markdown, rules);
+  // 暗标正文禁表（标书编制规格 bodyTablePolicy=forbidden）：关闭提示词必需表格的确定性兜底插入——
+  // 表格需求已裁定收敛入终稿文末附表区，正文一律纯文字，不插表
+  let next = bodyTableForbidden ? markdown : ensureRequiredTables(markdown, rules);
   if (rules.forbidCover) {
     next = removeCoverBlock(next);
   }
@@ -1373,6 +1375,37 @@ function hasMarkdownTable(markdown: string) {
   return /\|[^\n]+\|\s*\n\s*\|\s*:?-{3,}:?\s*\|/u.test(markdown);
 }
 
+/** Markdown 表格块计数（分隔线行计数，与 hasMarkdownTable 同口径；用于暗标正文禁表反向门禁与拆表修复同源复检） */
+export function countMarkdownTables(markdown: string) {
+  return markdown.split(/\r?\n/u).filter(line => /^\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*$/u.test(line)).length;
+}
+
+/**
+ * Markdown 表格块原文提取（表头行 + 分隔行开头的连续表格行，与 composeAppendices 表块提取同口径）：
+ * 供暗标拆表修复的锚点直连原文清单——系统从正文精确摘录，LLM 不复述只输出段落式改写。
+ */
+export function extractMarkdownTableTextBlocks(markdown: string): string[] {
+  const lines = markdown.split(/\r?\n/u);
+  const blocks: string[] = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = (lines[index] || '').trim();
+    const next = (lines[index + 1] || '').trim();
+    if (line.startsWith('|') && /^\|\s*:?-{3,}/u.test(next)) {
+      const block: string[] = [lines[index], lines[index + 1]];
+      index += 2;
+      while (index < lines.length && (lines[index] || '').trim().startsWith('|')) {
+        block.push(lines[index]);
+        index += 1;
+      }
+      blocks.push(block.join('\n'));
+      continue;
+    }
+    index += 1;
+  }
+  return blocks;
+}
+
 function tableNearTitle(markdown: string, title: string) {
   const titleIndex = markdown.search(new RegExp(escapedRegExp(title), 'u'));
   if (titleIndex < 0) return false;
@@ -1383,6 +1416,11 @@ function normalizePlannedSectionTitle(title: string) {
   return displayChapterTitle(title.replace(/^\s*\d+(?:\.\d+)*(?:[.．、]|\s)+/u, ''))
     .replace(/^第[一二三四五六七八九十百千万\d]+[章节篇部分]\s*/u, '')
     .replace(/[（）]/gu, match => match === '（' ? '(' : ')')
+    // 4.36 标题同一性单源（A1）：剥离尾部防撞名括号后缀（「公厕工程（1）」→「公厕工程」——仅数字/中文数字，
+    // 「公厕（改造）」等语义括号不受影响）。历史缺陷：本函数删括号字符保留内容（→「公厕工程1」），而清洗层
+    // normalizeSubsectionTitleForDedup 剥整个括号（→「公厕工程」）——同一小节两个身份键，装配层判为新小节
+    // 分配独立 H3 编号，清洗层判为同名删行，编号被分配又被删除 → 成稿小节缺号（远端 4.35.0 缺 1.12/1.13/1.15 同签名）
+    .replace(/(?:\s*\(\s*(?:\d{1,3}|[一二三四五六七八九十]{1,3})\s*\))+\s*$/u, '')
     .replace(/[\s:：.。；;,，、]+$/gu, '')
     .replace(/的(?=保障体系|管理体系|控制体系|措施|方案|计划|要求)/gu, '')
     .replace(/[\s()（）:：.。；;,，、-]/gu, '')
@@ -1399,7 +1437,7 @@ export function plannedStructurePrompt(template: DocumentTemplate) {
   ].filter(Boolean).join('\n')).join('\n');
 }
 
-export async function promptDocumentRuleIssues(markdown: string, rules?: PromptDocumentRuleSet, embedDocuments?: (texts: string[]) => Promise<number[][]>): Promise<ValidationIssue[]> {
+export async function promptDocumentRuleIssues(markdown: string, rules?: PromptDocumentRuleSet, embedDocuments?: (texts: string[]) => Promise<number[][]>, compositionGate?: { bodyTableForbidden?: boolean; coverForbidden?: boolean }): Promise<ValidationIssue[]> {
   if (!rules) return [];
   const issues: ValidationIssue[] = [];
   // 指令型标题检测：强句式（INSTRUCTION_HEADING_RE）确定性命中 + 弱词根召回语义复核（semanticGate 统一入口），
@@ -1420,11 +1458,13 @@ export async function promptDocumentRuleIssues(markdown: string, rules?: PromptD
   if (instructionHeadings.length > 0) issues.push({ level: 'error', message: `正文存在疑似提示词指令标题：${instructionHeadings.slice(0, 5).join('、')}`, suggestion: '请删除或改写为正式施工组织设计小节标题。' });
   const hasCover = /document-cover|^#\s+/mu.test(markdown);
   const hasToc = /^##\s+目录\s*$/mu.test(markdown);
-  if (rules.coverPolicy === 'required' && !hasCover) issues.push({ level: 'error', message: '正文缺少提示词要求的封面', suggestion: '用户明确要求封面时，应保留封面内容。' });
+  // 暗标封面口径（标书编制规格 formatRules.cover=forbidden）：招标不设封面优先于提示词要求，不再报「缺少提示词要求的封面」
+  if (rules.coverPolicy === 'required' && !hasCover && !compositionGate?.coverForbidden) issues.push({ level: 'error', message: '正文缺少提示词要求的封面', suggestion: '用户明确要求封面时，应保留封面内容。' });
   if (rules.tocPolicy === 'required' && !hasToc) issues.push({ level: 'error', message: '正文缺少提示词要求的目录', suggestion: '用户明确要求目录时，应基于最终合法正文标题生成目录。' });
   if (rules.forbidCover && hasCover) issues.push({ level: 'error', message: '正文残留封面内容', suggestion: '总控提示词禁止封面时，正式正文必须直接进入第一章。' });
   if (rules.forbidToc && hasToc) issues.push({ level: 'error', message: '正文残留目录内容', suggestion: '总控提示词禁止目录时，正式正文不得生成目录或导航页。' });
-  const missingTables = (rules.requiredTables || []).filter(title => !new RegExp(escapedRegExp(title), 'u').test(markdown) || !tableNearTitle(markdown, title));
+  // 暗标正文禁表（标书编制规格）：提示词必需表格已裁定收敛入终稿文末附表区，正文缺表不再作为缺陷
+  const missingTables = compositionGate?.bodyTableForbidden ? [] : (rules.requiredTables || []).filter(title => !new RegExp(escapedRegExp(title), 'u').test(markdown) || !tableNearTitle(markdown, title));
   if (missingTables.length > 0) issues.push({ level: 'error', message: `正文缺少总控提示词要求的正式表格：${missingTables.join('、')}`, suggestion: '请在对应章节补齐表名、表头、分隔线和数据行，不得只写表名或空表。' });
   const missingKeywords = (rules.requiredKeywords || []).filter(keyword => keyword && !new RegExp(escapedRegExp(keyword), 'u').test(markdown));
   if (missingKeywords.length > 0) issues.push({ level: 'warning', message: `正文缺少提示词要求覆盖的关键词：${missingKeywords.join('、')}`, suggestion: '请在相关章节自然补齐这些要点，避免堆砌关键词。' });
@@ -1451,7 +1491,7 @@ export async function promptDocumentRuleIssues(markdown: string, rules?: PromptD
   return issues.map(issue => issue.level === 'warning' && /提示词|禁止|禁用|必含关键词|必需表格|主体表达/u.test(issue.message) ? { ...issue, level: 'error' as const, severity: issue.severity || ('blocker' as const) } : issue);
 }
 
-export function plannedStructureIssues(markdown: string, template: DocumentTemplate): ValidationIssue[] {
+export function plannedStructureIssues(markdown: string, template: DocumentTemplate, bodyTableForbidden?: boolean): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   for (const chapter of template.chapters) {
     const block = findChapterBlock(markdown, chapter.title);
@@ -1460,9 +1500,32 @@ export function plannedStructureIssues(markdown: string, template: DocumentTempl
       continue;
     }
     const body = block.heading + block.body;
-    if (chapter.tableSections?.length && !hasMarkdownTable(body)) issues.push({ level: 'warning', category: 'table', message: `${chapter.title} 缺少必要的正式表格`, suggestion: '建议按模板 tableSections/tableRequirements 在对应小节补充正式 Markdown 表格。' });
+    // 暗标正文禁表（标书编制规格）：模板法定表格小节已裁定移入文末附表区，正文缺表不再作为缺陷
+    if (!bodyTableForbidden && chapter.tableSections?.length && !hasMarkdownTable(body)) issues.push({ level: 'warning', category: 'table', message: `${chapter.title} 缺少必要的正式表格`, suggestion: '建议按模板 tableSections/tableRequirements 在对应小节补充正式 Markdown 表格。' });
   }
   return issues;
+}
+
+/**
+ * 暗标正文禁表反向门禁（标书编制规格 bodyTablePolicy=forbidden）：扫描正文区域残留 Markdown 表格，
+ * 残留即 blocker 进修复/导出门禁——正文表格违反招标暗标编制要求（正文应纯文字，图表入文末附表区）。
+ * 文末附表区（## 附表N）与封面块不属正文口径，不在阻断范围。
+ */
+export function bodyCompositionTableIssues(markdown: string, bodyTableForbidden?: boolean): ValidationIssue[] {
+  if (!bodyTableForbidden) return [];
+  const appendixIndex = markdown.search(/^##\s+附表\s*[一二三四五六七八九十\d]{1,3}/mu);
+  const bodyMarkdown = (appendixIndex >= 0 ? markdown.slice(0, appendixIndex) : markdown).replace(/<div class="document-cover">[\s\S]*?<\/div>/gu, '');
+  const tables = countMarkdownTables(bodyMarkdown);
+  if (tables === 0) return [];
+  return [{
+    level: 'error',
+    severity: 'blocker',
+    category: 'structure',
+    owner: 'llm',
+    repairability: 'llm_repairable',
+    message: `正文残留 Markdown 表格 ${tables} 处（招标暗标编制要求正文纯文字，图表仅限文末附表区）`,
+    suggestion: '请把表格承载的数据改写为段落式连贯叙述（数值、口径保持不变），删除表格表头与分隔线结构；不得新增或删除其它正文内容。',
+  }];
 }
 
 function promoteSameTitleWrapperSections(markdown: string) {
@@ -1529,17 +1592,20 @@ function sortChapterSectionsByNumber(markdown: string) {
   return result.replace(/\n{3,}/gu, '\n\n').trim();
 }
 
-export function finalizeDocumentMarkdown<T extends Pick<DocumentDraftChapter, 'title' | 'sections' | 'content'>>(markdown: string, chapters: T[], options: { forbidDrawingImages?: boolean; promptRules?: PromptDocumentRuleSet } = {}) {
-  const cleanedMarkdown = applyPromptDocumentRules(removeUnwantedDrawingImages(markdown, Boolean(options.forbidDrawingImages)), options.promptRules);
+export function finalizeDocumentMarkdown<T extends Pick<DocumentDraftChapter, 'title' | 'sections' | 'content'>>(markdown: string, chapters: T[], options: { forbidDrawingImages?: boolean; promptRules?: PromptDocumentRuleSet; bodyTableForbidden?: boolean; coverForbidden?: boolean } = {}) {
+  const cleanedMarkdown = applyPromptDocumentRules(removeUnwantedDrawingImages(markdown, Boolean(options.forbidDrawingImages)), options.promptRules, options.bodyTableForbidden);
+  // 封面口径：coverForbidden（招标「不设内封面/不得有扉页」）优先于提示词 coverPolicy=required（招标文件 > 用户提示词 > 系统默认）
   const policyMarkdown = options.promptRules
-    ? options.promptRules.coverPolicy === 'required'
+    ? options.promptRules.coverPolicy === 'required' && !options.coverForbidden
       ? options.promptRules.tocPolicy === 'required'
         ? cleanedMarkdown
         : removeTocBlock(cleanedMarkdown)
       : options.promptRules.tocPolicy === 'required'
         ? removeCoverBlock(cleanedMarkdown)
         : removeCoverBlock(removeTocBlock(cleanedMarkdown))
-    : cleanedMarkdown;
+    : options.coverForbidden
+      ? removeCoverBlock(cleanedMarkdown)
+      : cleanedMarkdown;
   // 4.19 归一单次化：主链显式归一一次（normalizeFormalChapterHeadings 已幂等），infer/ensureFormalToc
   // 内部归一是幂等重放不再产生漂移；目录源与成稿正文同一次归一结果
   const normalizedMarkdown = sortChapterSectionsByNumber(promoteSameTitleWrapperSections(normalizeTertiaryHeadings(sanitizeFormalMarkdown(normalizeFormalChapterHeadings(policyMarkdown, chapters)))));
@@ -1555,11 +1621,11 @@ export function finalizeDocumentMarkdown<T extends Pick<DocumentDraftChapter, 't
   // 目录确定性：只要未明确禁止目录，一律用确定性目录替换正文目录页（含 LLM 写的脏目录）——
   // 历史缺陷：仅 tocPolicy==='required' 时替换，unspecified 场景下 LLM 目录原样保留（目录与正文标题不一致）
   const tocAppliedMarkdown = options.promptRules?.tocPolicy !== 'forbidden' ? ensureFormalToc(normalizedMarkdown, finalizedChapters) : normalizeFormalChapterHeadings(normalizedMarkdown, finalizedChapters);
-  const finalizedMarkdown = applyPromptDocumentRules(sortChapterSectionsByNumber(normalizeTertiaryHeadings(sanitizeFormalMarkdown(tocAppliedMarkdown))), options.promptRules);
+  const finalizedMarkdown = applyPromptDocumentRules(sortChapterSectionsByNumber(normalizeTertiaryHeadings(sanitizeFormalMarkdown(tocAppliedMarkdown))), options.promptRules, options.bodyTableForbidden);
   return { markdown: finalizedMarkdown, chapters: finalizedChapters };
 }
 
-export function composeDocumentMarkdown(draft: Omit<GeneratedDocumentDraft, 'markdown'>, options: { forbidDrawingImages?: boolean; promptRules?: PromptDocumentRuleSet } = {}): string {
+export function composeDocumentMarkdown(draft: Omit<GeneratedDocumentDraft, 'markdown'>, options: { forbidDrawingImages?: boolean; promptRules?: PromptDocumentRuleSet; bodyTableForbidden?: boolean; coverForbidden?: boolean } = {}): string {
   const cleanChapters = draft.chapters.map(chapter => ({ ...chapter, sections: cleanTocSections(chapter.sections || []) }));
   const normalizedChapterBlocks = cleanChapters.map((chapter, index) => normalizeChapterDraftContent(chapter, index));
   const chapterMarkdown = normalizedChapterBlocks

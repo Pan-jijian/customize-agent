@@ -17,6 +17,7 @@
  * - 空小节（2.11.2）
  * - 完全重复行（≥40 字，L186/L192 工程量清单条款）与相邻同句连发（2.10.4 质检句 ×2）
  * - 标点断裂漂移句（7.1.1「报验。、公厕砌筑」）
+ * - 全角括号/书名号成对性破坏（4.36 C1 写时块级熔断：内容丢失拼接的确定性信号，零误伤）
  */
 
 export type StructureDefectKind =
@@ -33,7 +34,8 @@ export type StructureDefectKind =
   | 'duplicate-sentence-adjacent'
   | 'truncated-line'
   | 'empty-subsection'
-  | 'sentence-fracture';
+  | 'sentence-fracture'
+  | 'punctuation-unbalanced';
 
 export interface StructureDefect {
   kind: StructureDefectKind;
@@ -66,6 +68,13 @@ const BULLET_ITEM_RE = /^([ \u3000]*)([-*+])\s+\S/u;
 const HEADING_RE = /^(#{1,6})\s+\S/u;
 const TOC_DOT_LEADER_RE = /(?:\.{2,}|…{2,})\s*\d+\s*$/u;
 const FRACTURE_RE = /。、|，、|；、|。，|，。|。。/u;
+/** 全角成对标点（4.36 C1）：成对性破坏=内容丢失拼接的确定性信号（零误伤强信号）；
+ * 写时块级扫描（本模块 scanPunctuationBalance）与终检 punctuationArtifactIssues 共用同一定义，
+ * 防两处符号对/口径漂移（历史缺陷：终检文档级计数才能发现，写时无拦截→残缺带病进入后续链路） */
+export const PAIRED_PUNCTUATION_SYMBOLS = [
+  { open: '（', close: '）', label: '全角括号' },
+  { open: '《', close: '》', label: '书名号' },
+] as const;
 const SENTENCE_SPLIT_RE = /(?<=[。；！？])/u;
 /** 悬挂虚词/连接词结尾（正常句子不以它们收尾）：强截断信号，无需后续边界证据（3.1 实测「…含基础9套按」） */
 const DANGLING_TAIL_RE = /[的与和及或在于是对从向把被将按并而则如若等共约达须应需可要能以由使让]/u;
@@ -532,6 +541,25 @@ function scanSentenceFractures(lines: string[], result: StructureScanResult): vo
   }
 }
 
+/** 全角括号/书名号成对性（4.36 C1 写时块级熔断）：块内开放数与闭合数不等即内容丢失/拼接信号，
+ * 无法确定性恢复（不知缺在哪）→ blocking 拦截重写，不等终检——终检全文计数会被其他块的相反偏差
+ * 掩盖，块级计数才能定位到真实残缺块；标题行/表格行一并计数（正式正文任何位置的成对性都不可破坏） */
+function scanPunctuationBalance(lines: string[], result: StructureScanResult): void {
+  const text = lines.join('\n');
+  for (const { open, close, label } of PAIRED_PUNCTUATION_SYMBOLS) {
+    const openCount = text.split(open).length - 1;
+    const closeCount = text.split(close).length - 1;
+    if (openCount === closeCount) continue;
+    const locateIndex = lines.findIndex(line => (line.split(open).length - 1) !== (line.split(close).length - 1));
+    result.blocking.push({
+      kind: 'punctuation-unbalanced',
+      line: Math.max(1, locateIndex + 1),
+      excerpt: excerptOf(lines[locateIndex] ?? ''),
+      message: `${label}不闭合（开 ${openCount} 处、闭 ${closeCount} 处，疑似内容丢失/拼接残留）`,
+    });
+  }
+}
+
 /** 全量扫描：cleanable（确定性清理域）+ blocking（阻断重写域） */
 export function scanStructureDefects(markdown: string): StructureScanResult {
   const lines = markdown.replace(/\r\n?/gu, '\n').split('\n');
@@ -544,6 +572,7 @@ export function scanStructureDefects(markdown: string): StructureScanResult {
   scanDuplicateLines(lines, result);
   scanAdjacentDuplicateSentences(lines, result);
   scanSentenceFractures(lines, result);
+  scanPunctuationBalance(lines, result);
   return result;
 }
 
@@ -648,6 +677,7 @@ const KIND_SUGGESTIONS: Record<StructureDefectKind, string> = {
   'truncated-line': '句尾截断须补全该句后重写；不得交付截断内容。',
   'empty-subsection': '空小节必须补写与该小节相关的正文内容，不得只留标题。',
   'sentence-fracture': '句读断裂须重写该句；不得交付句段拼接残留。',
+  'punctuation-unbalanced': '全角括号/书名号不闭合须重写所在语句；成对性破坏是内容丢失信号，补齐或删除残缺部分，不得带病交付。',
 };
 
 /** 终检检测器包装：cleanable 默认也报（若残留说明清理器未收敛，暴露问题不静默） */
@@ -666,4 +696,135 @@ export function structureIntegrityIssues(markdown: string, options?: { includeCl
     message: `结构完整性缺陷：${defect.message}（第 ${defect.line} 行）`,
     suggestion: KIND_SUGGESTIONS[defect.kind],
   }));
+}
+
+/** 章号解析：阿拉伯数字直接返回；中文数字支持「一~九十九」形态；其他（含「零/〇」）返回 undefined 表示不可判定 */
+function parseChapterNumber(raw: string): number | undefined {
+  if (/^\d+$/u.test(raw)) return Number(raw);
+  const digits: Record<string, number> = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  if (raw === '十') return 10;
+  if (raw.length === 1) return digits[raw];
+  if (raw.startsWith('十')) return 10 + (digits[raw[1] as string] ?? 0);
+  if (raw.endsWith('十')) return (digits[raw[0] as string] ?? 0) * 10;
+  const tenIndex = raw.indexOf('十');
+  if (tenIndex > 0 && tenIndex === raw.length - 2) return (digits[raw[0] as string] ?? 0) * 10 + (digits[raw[tenIndex + 1] as string] ?? 0);
+  return undefined;
+}
+
+/**
+ * 4.36 A2 小节编号重放（结构事务化：编号不变量 INV-1）——与终检 sectionNumberingIssues 同源口径：
+ * 每章内 `### X.Y` 的章号 X 取【章标题解析值 → 章内 H3 已有前缀多数派】两源判定（与检测器
+ * 「章号=章序」在全文/章片段下同值）；节号 Y 按 H3 出现顺序重放为 1..N（连续单调无缺号）；
+ * `#### X.Y.Z` 的父前缀同步、末位按出现序重放；无编号 H3 一并纳入编号体系（异常形态归一）。
+ * 使用场景：清洗层删除重复 H3 行（fixCollisionNumberedHeadings 等）或降级合并后编号出现空档时，
+ * 在 stage5/round-2 链尾原子重放——「编号被分配又被删除」的历史缺陷（远端 4.35.0 缺 1.12/1.13/1.15
+ * 同签名）在此必然收敛。保护域：代码围栏内、目录区（## 目录 至 page-break）、非「第N章」容器
+ * （附录等）之后的标题、带缩进异常行不改动；仅重写编号前缀不改标题文本；无编号 H4（「（一）」式）保持原样；幂等。
+ * 章片段模式（4.36 A2 接线修复）：stage5 逐章链输入为章节正文（章标题行「## X」由写作侧带出、
+ * 装配层成文时才替换为「## 第N章」，正文内不得依赖其解析章号），调用方经 options.chapterNumber
+ * 传入章序后整段按该章号重放（章序=装配层「第N章」编号=终检 sectionNumberingIssues 口径，
+ * 三源同值）；片段内残留的「## 第N章」/未编号 H2 行均不清除权威章号（≤1 条章标题行才启用，
+ * 防全文文档误传章序劫持各章）；未传章序时维持「宁缺不假」直接返回，防无章号硬编号写错章前缀。
+ */
+export function renumberSectionHeadings(markdown: string, options?: { chapterNumber?: number }): { markdown: string; fixedCount: number } {
+  const normalized = markdown.replace(/\r\n?/gu, '\n');
+  const rawLines = normalized.split('\n');
+  // ── 第一遍：按章收集章号（章标题解析值，缺失时回退章内 H3 前缀多数派）──
+  const chapterInfos: Array<{ declared?: number; prefixCounts: Map<number, number> }> = [];
+  {
+    let inFence = false;
+    let inToc = false;
+    let current: (typeof chapterInfos)[number] | undefined;
+    for (const rawLine of rawLines) {
+      const line = rawLine.trim();
+      if (/^```/u.test(line)) { inFence = !inFence; continue; }
+      if (inFence) continue;
+      if (/^##\s+目录\s*$/u.test(line)) { inToc = true; continue; }
+      if (inToc) {
+        if (/^<div class="page-break"><\/div>$/u.test(line)) inToc = false;
+        continue;
+      }
+      const chapter = /^##\s+第([一二三四五六七八九十百千万\d]+)章\s+/u.exec(line);
+      if (chapter) {
+        current = { declared: parseChapterNumber(chapter[1] || ''), prefixCounts: new Map() };
+        chapterInfos.push(current);
+        continue;
+      }
+      if (/^##\s+/u.test(line)) { current = undefined; continue; }
+      const section = /^###\s+(\d+)\.(\d+)\s+/u.exec(line);
+      if (section && current) {
+        const prefix = Number(section[1]);
+        current.prefixCounts.set(prefix, (current.prefixCounts.get(prefix) || 0) + 1);
+      }
+    }
+  }
+  const requestedChapter = options?.chapterNumber;
+  // 章序号头行容差（≤1 条）：片段内写作侧带出的陈旧章标题行（「## 第N章」/未编号「## X」）不覆盖调用方章序
+  const fragmentNumber = typeof requestedChapter === 'number' && Number.isInteger(requestedChapter) && requestedChapter > 0 && chapterInfos.length <= 1 ? requestedChapter : undefined;
+  if (chapterInfos.length === 0 && fragmentNumber === undefined) return { markdown, fixedCount: 0 };
+  // 章号判定：章标题解析值优先（与检测器「章号=章序」在全文/章片段下同值），缺失时用章内 H3 前缀多数派
+  // （正文事实），两源均无 → undefined（该章不重排，宁缺不假）
+  const chapterNumbers = chapterInfos.map(info => {
+    if (info.declared !== undefined) return info.declared;
+    const majority = [...info.prefixCounts.entries()].sort((left, right) => right[1] - left[1] || left[0] - right[0])[0];
+    return majority?.[0];
+  });
+  // ── 第二遍：按出现顺序重放编号（章号不可判定的章不重排；缩进异常行不改写）──
+  let inFence = false;
+  let inToc = false;
+  let chapterSeq = 0;
+  // 章片段模式：起始即持有调用方章序（章正文内「## 第N章」行仅重置节序，不覆盖权威章号——
+  // 内嵌行是写作侧文本，章节重排后可能陈旧；章序与终检检测器「章号=章序」口径同源）
+  let activeNumber: number | undefined = fragmentNumber;
+  let sectionSeq = 0;
+  let tertiarySeq = 0;
+  let fixedCount = 0;
+  const lines = rawLines.map(rawLine => {
+    const trimmed = rawLine.trim();
+    if (/^```/u.test(trimmed)) { inFence = !inFence; return rawLine; }
+    if (inFence) return rawLine;
+    if (/^##\s+目录\s*$/u.test(trimmed)) { inToc = true; return rawLine; }
+    if (inToc) {
+      if (/^<div class="page-break"><\/div>$/u.test(trimmed)) inToc = false;
+      return rawLine;
+    }
+    if (/^##\s+第[一二三四五六七八九十百千万\d]+章\s+/u.test(trimmed)) {
+      activeNumber = fragmentNumber ?? chapterNumbers[chapterSeq];
+      if (fragmentNumber === undefined) chapterSeq += 1;
+      sectionSeq = 0;
+      tertiarySeq = 0;
+      return rawLine;
+    }
+    if (/^##\s+/u.test(trimmed)) {
+      // 章片段模式（4.36 A2 接线）：写作侧未编号章标题行（「## 工程概况」——装配层成文时才替换为
+      // 「## 第N章」）不得清除权威章号，否则片段内全部 H3/H4 重放静默失效；全文模式维持保护语义
+      // （非「第N章」容器如附录之后的标题不改动）
+      if (fragmentNumber === undefined) activeNumber = undefined;
+      return rawLine;
+    }
+    if (!activeNumber) return rawLine;
+    if (rawLine !== trimmed) return rawLine;
+    const h3 = /^###\s+(.*)$/u.exec(trimmed);
+    if (h3) {
+      sectionSeq += 1;
+      tertiarySeq = 0;
+      const body = (h3[1] || '').replace(/^\d+(?:\.\d+)*\s+/u, '').trim();
+      if (!body) return rawLine;
+      const next = `### ${activeNumber}.${sectionSeq} ${body}`;
+      if (next !== rawLine) fixedCount += 1;
+      return next;
+    }
+    const h4 = /^####\s+(.*)$/u.exec(trimmed);
+    if (h4) {
+      const numbered = /^\d+\.\d+\.(\d+)\s+(.*)$/u.exec(h4[1] || '');
+      if (!numbered) return rawLine;
+      tertiarySeq += 1;
+      const next = `#### ${activeNumber}.${sectionSeq}.${tertiarySeq} ${(numbered[2] || '').trim()}`;
+      if (next !== rawLine) fixedCount += 1;
+      return next;
+    }
+    return rawLine;
+  });
+  if (fixedCount === 0) return { markdown, fixedCount: 0 };
+  return { markdown: lines.join('\n'), fixedCount };
 }

@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { buildChapterStructureFromBlueprint, fallbackStructureForSections } from '../../../src/services/document-workflow/integratedBlueprint';
+import { buildChapterStructureFromBlueprint, estimateChapterMinFeasibleWords, fallbackStructureForSections } from '../../../src/services/document-workflow/integratedBlueprint';
 import { extractAppendixTables, previewPromptRules } from '../../../src/services/document-workflow/promptRuleExtraction';
-import { documentBudgetIssues, explicitLengthTargets } from '../../../src/services/document-workflow/budget';
+import { documentBudgetIssues, explicitLengthTargets, reanchorChapterTargetsByFeasibility } from '../../../src/services/document-workflow/budget';
 import type { DocumentBudget } from '../../../src/services/document-workflow/budget';
+import type { DocumentTemplateChapter } from '../../../src/services/document-workflow/types';
 import { appendTenderAppendixSections, composeTenderAppendixMarkdown } from '../../../src/services/document-workflow/composeAppendices';
+import type { BidAppendixEntry } from '../../../src/services/document-workflow/bidComposition';
+import type { BlueprintData } from '../../../src/services/document-workflow/integratedBlueprint';
 
 /**
  * 4.33 三问修复回归（用户实测反馈）：
@@ -136,184 +139,205 @@ describe('4.33 minimum 模式软上限告警（documentBudgetIssues）', () => {
   });
 });
 
-describe('4.33 文末附表区组装（composeTenderAppendixMarkdown / appendTenderAppendixSections）', () => {
+describe('文末附表区：appendixPlan 蓝图直出（composeTenderAppendixMarkdown / appendTenderAppendixSections）', () => {
   const bodyMarkdown = [
     '## 第三章 主要施工方案',
     '',
-    '### 3.1 机械设备投入计划',
-    '',
-    '| 序号 | 设备名称 | 型号规格 | 数量 | 国别产地 | 制造年份 | 额定功率（kW） | 生产能力 | 用于施工部位 | 备注 |',
-    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
-    '| 1 | 挖掘机 | PC200 | 2 | 中国 | 2022 | 110 | 良好 | 土方开挖 | 完好 |',
-    '',
-    '### 3.2 其它内容',
-    '',
     '正文段落。',
   ].join('\n');
+  const entry = (over: Partial<BidAppendixEntry>): BidAppendixEntry => ({ no: '一', title: '附表一 测试表', kind: 'table', dataSource: 'manual', ...over });
+  const bp = (over: Record<string, unknown>): BlueprintData => ({
+    resources: { equipment: [], labor: { peak: { min: 0, max: 0 }, peakValue: 0, peakBasis: '', byPhase: [], byTrade: [], composition: [] } },
+    ...over,
+  } as unknown as BlueprintData);
+  const blueprintData = bp({
+    resources: {
+      equipment: [
+        { name: '挖掘机', spec: 'PC200', quantity: 2, basis: '工程量清单' },
+        { name: '汽车起重机', spec: 'QY25', min: 1, max: 2, basis: '施工方案推导' },
+      ],
+      labor: {
+        peak: { min: 80, max: 90 },
+        peakValue: 85,
+        peakBasis: '阶段工程量',
+        byPhase: [{ phase: '基础阶段', min: 80, max: 90, basis: '阶段工程量' }],
+        byTrade: [],
+        composition: [{ trade: '电工', count: 32, basis: '工种工程量比例' }],
+      },
+    },
+  });
 
-  it('表类附表从正文同类表格确定性归集；图类附表输出图位说明；无数据附表跳过（不造数据）', () => {
-    const titles = ['附表一 拟投入本标段的主要施工设备表', '附表四 计划开、竣工日期和施工进度网络图', '附表六 临时用地表'];
-    const section = composeTenderAppendixMarkdown(bodyMarkdown, titles);
+  it('设备表/劳动力表从蓝图直出：数量口径（quantity 优先、min-max 区间），备注列承载蓝图依据', () => {
+    const plan = [
+      entry({ no: '一', title: '附表一 拟投入本标段的主要施工设备表', dataSource: 'blueprint.equipment' }),
+      entry({ no: '三', title: '附表三 劳动力计划表', dataSource: 'blueprint.labor' }),
+    ];
+    const section = composeTenderAppendixMarkdown(plan, blueprintData);
     expect(section).toContain('## 附表一 拟投入本标段的主要施工设备表');
-    expect(section).toContain('| 挖掘机 |');
-    // 4.35：图类附表由编制人绘制后附，但标题与图件说明必须出现在文末附表区（招标六张附表全覆盖）
-    expect(section).toContain('## 附表四 计划开、竣工日期和施工进度网络图');
-    expect(section).toContain('图件');
-    // 正文无同类表格（设施名称/选址位置/占地面积）的附表六跳过，不造数据
-    expect(section).not.toContain('附表六');
-  });
-
-  it('append 幂等：重复追加不重复生成；无数据/无附表时不改动正文', () => {
-    const titles = ['附表一 拟投入本标段的主要施工设备表'];
-    const once = appendTenderAppendixSections(bodyMarkdown, { titles });
-    expect(once.startsWith(bodyMarkdown)).toBe(true);
-    expect(once).toContain('<div class="page-break"></div>');
-    expect(appendTenderAppendixSections(once, { titles })).toBe(once);
-    expect(appendTenderAppendixSections(bodyMarkdown, undefined)).toBe(bodyMarkdown);
-    expect(appendTenderAppendixSections(bodyMarkdown, { titles: ['附表六 临时用地表'] })).toBe(bodyMarkdown);
-  });
-
-  it('4.35 多表归集：设备去重合并 / 仪器表 / 劳动力双表 / 临建列转换', () => {
-    const markdown = [
-      '## 第六章 施工设备计划',
-      '',
-      '| 设备名称 | 规格型号 | 数量 | 主要作业内容 | 投入阶段 |',
-      '| --- | --- | --- | --- | --- |',
-      '| 挖掘机 | PC200 | 3 | 土方开挖 | 基础阶段 |',
-      '| 自卸汽车 | 15t | 6 | 土方运输 | 全过程 |',
-      '',
-      '## 第四章 测量与检测',
-      '',
-      '| 仪器设备名称 | 型号规格 | 数量 | 检测参数 | 使用工序 |',
-      '| --- | --- | --- | --- | --- |',
-      '| 全站仪 | TS09 | 2 | 坐标放样 | 测量放线 |',
-      '| 水准仪 | DSZ2 | 3 | 高程控制 | 抄平 |',
-      '',
-      '现场配备回弹仪进行混凝土强度检测。',
-      '',
-      '## 第九章 机电安装',
-      '',
-      '| 机械设备名称 | 规格型号 | 数量 | 额定功率 | 使用部位 |',
-      '| --- | --- | --- | --- | --- |',
-      '| 挖掘机 | PC210 | 2 | 132kW | 电缆沟开挖 |',
-      '| 汽车起重机 | QY25 | 1 | 162kW | 立杆吊装 |',
-      '',
-      '## 第五章 劳动力配置',
-      '',
-      '| 劳动力工种 | 配置人数 | 主要作业内容 |',
-      '| --- | --- | --- |',
-      '| 电工 | 32 | 强电安装 |',
-      '',
-      '| 施工阶段 | 计划用时 | 同时在场人数 | 主要投入工种 |',
-      '| --- | --- | --- | --- |',
-      '| 基础阶段 | 30天 | 86 | 普工、钢筋工 |',
-      '',
-      '## 第十章 临时设施',
-      '',
-      '| 设施名称 | 选址位置 | 占地面积 |',
-      '| --- | --- | --- |',
-      '| 办公区 | 场地东侧 | 300m² |',
-      '| 材料堆场 | 随施工段移动布置 | 600m² |',
-    ].join('\n');
-    const section = composeTenderAppendixMarkdown(markdown, [
-      '附表一 拟投入本标段的主要施工设备表',
-      '附表二 拟配备本标段的试验和检测仪器设备表',
-      '附表三 劳动力计划表',
-      '附表六 临时用地表',
-    ]);
-    // 设备表：跨章两张表归集，同名设备去重且取首个非空属性（PC210 不覆盖 PC200）
     expect(section).toContain('| 序号 | 设备名称 | 型号规格 | 数量 | 国别产地 | 制造年份 | 额定功率（kW） | 生产能力 | 用于施工部位 | 备注 |');
-    expect(section).toContain('| 挖掘机 | PC200 |');
-    expect(section).toContain('| 汽车起重机 |');
-    expect(section).not.toContain('| 挖掘机 | PC210 |');
-    // 仪器表：正文仪器表格归集 + 白名单实词补充（回弹仪），数量不臆造
-    expect(section).toContain('## 附表二 拟配备本标段的试验和检测仪器设备表');
-    expect(section).toContain('| 序号 | 仪器设备名称 | 型号规格 | 数量 | 国别产地 | 制造年份 | 已使用台时数 | 用途 | 备注 |');
-    expect(section).toContain('| 全站仪 | TS09 |');
-    expect(section).toContain('| 回弹仪 |');
-    // 劳动力：双表归档
+    expect(section).toContain('| 1 | 挖掘机 | PC200 | 2 |');
+    expect(section).toContain('| 2 | 汽车起重机 | QY25 | 1-2 |');
+    expect(section).toContain('工程量清单');
+    expect(section).toContain('## 附表三 劳动力计划表');
     expect(section).toContain('**（一）劳动力工种配置**');
     expect(section).toContain('| 电工 | 32 |');
     expect(section).toContain('**（二）分阶段劳动力投入计划**');
-    expect(section).toContain('| 基础阶段 | 30天 | 86 |');
-    // 临建：列转换 + 需用时间语义判定
-    expect(section).toContain('| 用途 | 面积（平方米） | 位置 | 需用时间 |');
-    expect(section).toContain('| 办公区 | 300 | 场地东侧 | 施工全过程 |');
-    expect(section).toContain('| 材料堆场 | 600 | 随施工段移动布置 | 随施工段使用 |');
+    expect(section).toContain('| 基础阶段 | 80-90 |');
   });
 
-  it('4.35b 工程安装清单不入施工设备表 / 机械表仪器行分流附表二 / 断词空格清理', () => {
-    const markdown = [
-      '## 第三章 主要施工方案',
-      '',
-      '| 设备名称 | 规格型号 | 安装方式 | 安装高度或位置 | 数量 | 技术参数要求 |',
-      '| --- | --- | --- | --- | --- | --- |',
-      '| 高清网络球形摄像机 | 含云台功能 | 杆件抱箍安装 | 监控杆件上部 | 8台 | 全景水平视场角不小于190° |',
-      '',
-      '## 第九章 机电安装',
-      '',
-      '| 机械设备名称 | 规格型号 | 数量 | 额定功率 | 使用部位 |',
-      '| --- | --- | --- | --- | --- |',
-      '| 高空作业车 | 作业高度12m | 2台 | 55kW | 杆件顶部设备安装、信 号灯安装 |',
-      '| 绝缘电阻测试仪 | ZC25-3 | 2台 | 0.01kW | 电缆、线路绝缘检测 |',
-      '',
-      '| 设备名称 | 规格型号 | 数量 | 主要作业内容 | 投入阶段 |',
-      '| --- | --- | --- | --- | --- |',
-      '| 挖掘机 | 0.6~1.0m³ | 5台 | 沟槽开挖、一般土方 开挖、清表 | 全过程 |',
-      '',
-      '## 第四章 测量与检测',
-      '',
-      '| 仪器设备名称 | 规格型号 | 数量 | 检测参数 | 使用工序 |',
-      '| --- | --- | --- | --- | --- |',
-      '| 全站仪 | TS09 | 1台 | 杆件垂直度、基础定位 | 监控杆件基础放样 |',
-    ].join('\n');
-    const section = composeTenderAppendixMarkdown(markdown, [
-      '附表一 拟投入本标段的主要施工设备表',
-      '附表二 拟配备本标段的试验和检测仪器设备表',
-    ]);
-    // 工程安装设备清单（摄像机）不入施工设备表；机械表仪器行（绝缘电阻测试仪）不入附表一
-    expect(section).not.toContain('高清网络球形摄像机');
-    const equipment = section.split('## 附表二')[0];
-    expect(equipment).toContain('| 高空作业车 |');
-    expect(equipment).toContain('| 挖掘机 | 0.6~1.0m³ |');
-    expect(equipment).not.toContain('绝缘电阻测试仪');
-    // 机械表混编仪器行带数据转入附表二（ZC25-3 型号不丢）
-    const instrument = section.split('## 附表二')[1];
-    expect(instrument).toContain('| 绝缘电阻测试仪 | ZC25-3 |');
-    expect(instrument).toContain('| 全站仪 | TS09 |');
-    // 断词空格清理（“信 号灯安装”“一般土方 开挖”等 CJK 语境空格）
-    expect(section).toContain('信号灯安装');
-    expect(section).toContain('一般土方开挖');
-    expect(section).not.toContain('信 号灯');
-    expect(section).not.toContain('土方 开挖');
+  it('无数据源附表输出招标表头骨架 + 显性缺口标注（不造数据）；图类附表输出图位说明', () => {
+    const plan = [
+      entry({ no: '二', title: '附表二 拟配备本标段的试验和检测仪器设备表', dataSource: 'blueprint.testInstruments' }),
+      entry({ no: '六', title: '附表六 临时用地表', dataSource: 'blueprint.tempLand' }),
+      entry({ no: '四', title: '附表四 计划开、竣工日期和施工进度网络图', kind: 'figure', dataSource: 'manual' }),
+    ];
+    const section = composeTenderAppendixMarkdown(plan, blueprintData);
+    expect(section).toContain('## 附表二 拟配备本标段的试验和检测仪器设备表');
+    expect(section).toContain('> 本表数据源（试验检测仪器配置）未在项目资料与一体化蓝图中确认');
+    expect(section).toContain('| 序号 | 仪器设备名称 | 型号规格 | 数量 | 国别产地 | 制造年份 | 已使用台时数 | 用途 | 备注 |');
+    expect(section).toContain('## 附表六 临时用地表');
+    expect(section).toContain('| 用途 | 面积（平方米） | 位置 | 需用时间 |');
+    expect(section).toContain('## 附表四 计划开、竣工日期和施工进度网络图');
+    expect(section).toContain('图件');
+  });
+
+  it('append 幂等：重复追加不重复生成；空清单/未定义时不改动正文', () => {
+    const plan = [entry({ no: '一', title: '附表一 拟投入本标段的主要施工设备表', dataSource: 'blueprint.equipment' })];
+    const once = appendTenderAppendixSections(bodyMarkdown, { plan, blueprintData });
+    expect(once.startsWith(bodyMarkdown)).toBe(true);
+    expect(once).toContain('<div class="page-break"></div>');
+    expect(appendTenderAppendixSections(once, { plan, blueprintData })).toBe(once);
+    expect(appendTenderAppendixSections(bodyMarkdown, undefined)).toBe(bodyMarkdown);
+    expect(appendTenderAppendixSections(bodyMarkdown, { plan: [] })).toBe(bodyMarkdown);
   });
 });
 
 /**
- * 容量规划回归（替代 4.34 事后压缩）：要点不在写作后折叠/压缩——块数在规划层归并到
- * 章目标/1200 上限内、块预算 Σ 精确守恒于章目标、点配额随块预算下发（写作/检测/修复三层同源）。
+ * 容量规划回归（替代 4.34 事后压缩）：要点不在写作后折叠/压缩——块数在规划层按密度约束归并
+ *（4.35 容量密度可行性闭环：块内要点 ≤6 硬封顶，块数允许超「章目标/1800」上限，
+ *由软下限 floorValue=min(1800, T/块数) 与 Σ 守恒收口吸收）、块预算 Σ 精确守恒于章目标、
+ *点配额随块预算下发（写作/检测/修复三层同源）。
  * 历史病灶：折叠后多源组又被 LLM 逐源展开导致超产仍在，且与写作/检测/修复口径互相冲突。
  */
 describe('容量规划（替代 4.34 章结构容量压缩）', () => {
-  it('接线：buildChapterStructureFromBlueprint 对 13 subSections/96 工作包的章容量守恒（归并/配额，无事后折叠）', () => {
+  it('接线：buildChapterStructureFromBlueprint 对 13 subSections/96 工作包的章容量守恒（归并/配额/密度封顶）', () => {
     const workPackage = (name: string) => ({ name, kind: 'major' as const, quantities: {}, processChain: [], methods: [], params: [], acceptance: [], standards: [], source: 'boq' as const, coveredSeqs: [] });
     const subSections = Array.from({ length: 13 }, (_, sectionIndex) => ({
       id: `2.${sectionIndex + 1}`,
       title: `分部工程${sectionIndex + 1}`,
-      requiredParams: [], scoredItems: [], tablePlans: [],
+      requiredParams: [], tablePlans: [],
       workPackages: Array.from({ length: sectionIndex < 5 ? 8 : 7 }, (_, packageIndex) => workPackage(`工作包${sectionIndex + 1}-${packageIndex + 1}`)),
     }));
-    const structure = buildChapterStructureFromBlueprint({ blueprintChapter: { id: '2', title: '主要施工方法', isActive: true, requiredParams: [], scoredItems: [], subSections }, inputSections: [], chapterTitle: '主要施工方法', targetWords: 16178 });
-    // 块数归并到容量上限内、单块预算不超输出安全区、Σ 精确守恒于章目标
-    expect(structure.blocks.length).toBeLessThanOrEqual(Math.floor(16178 / 1200));
+    const structure = buildChapterStructureFromBlueprint({ blueprintChapter: { id: '2', title: '主要施工方法', isActive: true, requiredParams: [], subSections }, inputSections: [], chapterTitle: '主要施工方法', targetWords: 16178 });
+    // 4.35 密度封顶：块数不再归并回「章目标/1800」上限（旧断言 ≤floor(16178/1800)=8）——
+    // 本 fixture 初始 26 块（13 个 6 点块 + 5 个 2 点块 + 8 个 1 点块，[6,2]/[6,1] 交替），
+    // 相邻任两块合并即超 6 要点 → 全部独立保留（归并不丢点）；旧行为会产出 8~12 要点超密度块
+    //（12 要点块 1800 字 → 每要点 150 字 < 最小可写量 300 → 骨架质检物理不可达 → 块必败）
+    expect(structure.blocks.length).toBe(26);
+    // 密度封顶硬约束：任何路径不产出 >6 要点块；超密度守卫后每块「要点数 × 300 ≤ 块预算」
+    expect(structure.blocks.every(block => block.subPoints.length <= 6)).toBe(true);
+    expect(structure.blocks.every(block => block.subPoints.length <= Math.max(1, Math.floor(block.targetWords / 300)))).toBe(true);
+    // 单块预算不超输出安全区、Σ 精确守恒于章目标（软下限公平份额 622 = floor(16178/26)）
     expect(structure.blocks.every(block => block.targetWords <= 4500)).toBe(true);
     const total = structure.blocks.reduce((sum, block) => sum + block.targetWords, 0);
     expect(total).toBe(16178);
-    // 工作包原名零丢失（归并不丢点）+ 点配额随块预算下发
+    // 工作包原名零丢失（归并/守卫合并均不丢点——sources 全量保留）+ 点配额随块预算下发
     const carried = new Set(structure.blocks.flatMap(block => block.subPoints.flatMap(point => [point.title, ...point.sources])));
     for (let sectionIndex = 1; sectionIndex <= 13; sectionIndex += 1) {
       for (let packageIndex = 1; packageIndex <= (sectionIndex <= 5 ? 8 : 7); packageIndex += 1) expect(carried.has(`工作包${sectionIndex}-${packageIndex}`)).toBe(true);
     }
     expect(structure.blocks.flatMap(block => block.subPoints).every(point => (point.quotaWords ?? 0) > 0)).toBe(true);
+  });
+
+  it('舒城形态回归（4.34「主要施工方法」章阻断 → 4.35 密度闭环）：96 工作包 + 7 模板小节 / 章预算重校准 15603 → 32400', () => {
+    // 真实数据 fixture（逐字取自 4.34 自测 tpl-1789004430748 落盘蓝图与规划小节）：
+    // 4.34 阻断链：「主要施工方法」章预算 15603（按模板小节数加权）→ maxBlocks=8、targetPerGroup=ceil(103/8)=13
+    // → 「公共广场提升改造工程」的 [4,2,6] 三个主题域块（步道/广场/停车场市政 4 + 土方/模板结构 2 +
+    // 其他专项 6）被归并吸收为 1 块 12 要点 × 1800 字 → 每要点 150 字 < 最小可写量 300（骨架 H4 三要素
+    // 物理不可达）→ 块必败（905 字兜底、缺 12 个工作包 H4）→ 章阻断。
+    // 4.35 闭环：minFeasible = ceil(103/6) × 1800 = 32400 → reanchor 抬升章预算（Σ=T 精确守恒）；
+    // 归并密度封顶保证任何块 ≤6 要点；超密度守卫保证「要点数 × 300 ≤ 块预算」——物理可达。
+    const workPackage = (name: string) => ({ name, kind: 'major' as const, quantities: {}, processChain: [], methods: [], params: [], acceptance: [], standards: [], source: 'boq' as const, coveredSeqs: [] });
+    const subSectionSpecs: Array<{ title: string; packages: string[] }> = [
+      { title: '公共广场提升改造工程', packages: ['2.16杭北干渠沿河人行步道改造提升工程', '4.2飞霞广场综合提升改造工程', '4.4新雅大酒店门前停车场', '4.5产业园停车场提升改造工程', '土方工程', '其他项目', '4.6麻纺巷城市休闲街区建设提升工程', '4.7城区闲置地块提升工程', '栽植花木', '4.8城区街角空间整治提升', '宣传制作', '模板与脚手架工程'] },
+      { title: '公共广场提升改造工程-安装工程', packages: ['杭北干渠沿河人行步道改造提升工程', '新雅大酒店门前停车场', '产业园停车场提升改造工程', '麻纺巷城市休闲街区建设提升工程', '闲置地块提升工程', '城区街角空间整治提升'] },
+      { title: '白鸥观澜配套仁和路道路提升项目工程', packages: ['老路拆除部分', '土方工程', '路基处理', '车行道结构层新建', '新建人行道', '侧石工程', '现状构筑物改造'] },
+      { title: '排水工程', packages: ['产业园停车场-排水工程', '白鸥观澜停车场-排水工程', '青青家园停车场', '白鸥观澜仁和路排水工程'] },
+      { title: '交通工程', packages: ['高清监控系统（交警）', '信号灯控制系统', '电子警察综合系统', '后台设备', '管线手井', '其他费用', '违停抓拍监控', '梅河东路通信排管工程'] },
+      { title: '综合配套用房-土建工程', packages: ['土石方工程', '砌筑工程', '混凝土工程', '门窗工程', '屋面及防水工程', '保温、隔热、防腐工程', '楼地面装饰工程', '墙柱面装饰工程', '天棚工程', '油漆、涂料、裱糊工程', '零星装饰工程', '模板与脚手架工程'] },
+      { title: '白鸥观澜公厕-土建工程', packages: ['土石方工程', '砌筑工程', '混凝土工程', '门窗工程', '屋面及防水工程', '楼地面装饰工程', '墙柱面装饰工程', '天棚工程', '油漆、涂料、裱糊工程', '零星装饰工程', '模板与脚手架工程'] },
+      { title: '青青家园公厕-土建装饰', packages: ['土石方工程', '砌筑工程', '混凝土工程', '门窗工程', '屋面及防水工程', '楼地面装饰工程', '墙柱面装饰工程', '天棚工程', '油漆、涂料、裱糊工程', '零星装饰工程', '模板与脚手架工程'] },
+      { title: '门卫-土建工程', packages: ['土石方工程', '砌筑工程', '混凝土工程', '门窗工程', '屋面及防水工程', '保温、隔热、防腐工程', '楼地面装饰工程', '墙柱面装饰工程', '天棚工程', '油漆、涂料、裱糊工程', '零星装饰工程', '模板与脚手架工程'] },
+      { title: '综合配套用房-安装工程', packages: ['电气', '给排水系统', '消防', '通风', '零星工程'] },
+      { title: '白鸥观澜公厕-安装工程', packages: ['电气', '给排水系统', '零星工程'] },
+      { title: '青青家园公厕-安装工程', packages: ['电气', '给排水系统', '零星工程'] },
+      { title: '门卫-安装工程', packages: ['电气', '雨水系统'] },
+    ];
+    const templateSections = ['拆除改造与清运施工方法', '填方压实与场平作业工序', '雨水污水管线敷设方法', '检查井与防坠网施工', '道路提升与破路恢复工艺', '公厕及门卫土建施工方法', '安装工程与设备调试方法'];
+    const blueprintChapter = {
+      id: '2', title: '主要施工方法', isActive: true, requiredParams: [],
+      subSections: subSectionSpecs.map((spec, index) => ({ id: `2.${index + 1}`, title: spec.title, requiredParams: [], tablePlans: [], workPackages: spec.packages.map(workPackage) })),
+    };
+
+    // 1) 可行性估算：96 工作包 + 7 未覆盖模板小节 = 103 要点 → 18 块 × 1800 = 32400
+    const estimate = estimateChapterMinFeasibleWords(blueprintChapter, templateSections);
+    expect(estimate).toEqual({ points: 103, minFeasibleWords: 32400 });
+
+    // 2) 章预算重校准：main 15603 → 32400（其余 10 章按需求归一化缩减，Σ=140000 精确守恒）
+    const chapter = (id: string, title: string, sections: string[]): DocumentTemplateChapter => ({ id, title, purpose: '', queries: [], requiredFacts: [], sections });
+    const chapters: DocumentTemplateChapter[] = [
+      chapter('main', '主要施工方法', templateSections),
+      ...Array.from({ length: 10 }, (_, index) => chapter(`c${index + 1}`, `第${index + 2}章 质量保证措施`, ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8'])),
+    ];
+    const beforeTargets = new Map<string, number>([['main', 15603], ...chapters.slice(1).map(item => [item.id, 12440] as [string, number])]);
+    const { chapterTargets, adjustments, compressed } = reanchorChapterTargetsByFeasibility({
+      chapters,
+      targetChars: 140000,
+      floorOf: () => 0,
+      feasibilityFloorOf: item => (item.id === 'main' ? estimate.minFeasibleWords : 0),
+      currentTargets: beforeTargets,
+    });
+    expect(compressed).toBe(false);
+    expect(chapterTargets.get('main')).toBe(32400);
+    expect([...chapterTargets.values()].reduce((sum, value) => sum + value, 0)).toBe(140000);
+    // 调整报告：main 抬升 from → to；其余 10 章缩减且不低于最低可写预算（800）
+    expect(adjustments.find(item => item.id === 'main')).toEqual({ id: 'main', title: '主要施工方法', from: 15603, to: 32400 });
+    expect(adjustments.filter(item => item.id !== 'main').every(item => item.to < item.from && item.to >= 800)).toBe(true);
+
+    // 3) 按重校准预算构建结构（写作层收到的最终结构 = 规划层一次成型产物）
+    const structure = buildChapterStructureFromBlueprint({ blueprintChapter, inputSections: templateSections, chapterTitle: '主要施工方法', targetWords: chapterTargets.get('main')! });
+    // 密度双不变量：任何块 ≤6 要点（封顶）；超密度守卫后「要点数 × 300 ≤ 块预算」（骨架质检物理可达）
+    expect(structure.blocks.every(block => block.subPoints.length <= 6)).toBe(true);
+    expect(structure.blocks.every(block => block.subPoints.length <= Math.max(1, Math.floor(block.targetWords / 300)))).toBe(true);
+    // 块数实测 18（方案预测 18 = ceil(103/6)）：6 点密度封顶 + 保序贪心在真实块序下的确定性结果
+    expect(structure.blocks.length).toBe(18);
+    // 每块预算：公平份额 floor(32400/18)=1800 恰为单块可写下限 → 全块贴下限均分（Σ 精确守恒）；
+    // 6 点 × 300 字/点 = 1800 恰好达到密度达标线，无超密度守卫裁剪
+    expect(structure.blocks.every(block => block.targetWords >= 1700 && block.targetWords <= 4500)).toBe(true);
+    expect(structure.blocks.reduce((sum, block) => sum + block.targetWords, 0)).toBe(32400);
+    // 4.34 阻断块形态不可再现：「公共广场提升改造工程」12 个工作包在任何单块内 ≤6
+    const squarePackages = subSectionSpecs[0]!.packages;
+    const worstCoverage = Math.max(...structure.blocks.map(block => squarePackages.filter(name => block.subPoints.some(point => point.title === name || point.sources.includes(name))).length));
+    expect(worstCoverage).toBeLessThanOrEqual(6);
+    // 96 工作包要点零丢失（归并/守卫合并均不丢源——sources 全量保留，名字可在标题或 sources 中命中）
+    const carried = new Set(structure.blocks.flatMap(block => block.subPoints.flatMap(point => [point.title, ...point.sources])));
+    for (const spec of subSectionSpecs) for (const name of spec.packages) expect(carried.has(name)).toBe(true);
+    // 模板小节覆盖为既有 fallback 边界（非本方案引入）：语义域聚合块被容量规划拆为单点块时保留父块标题，
+    // append 阶段同题去重丢弃后块——「检查井与防坠网施工 / 道路提升与破路恢复工艺 / 公厕及门卫土建施工方法 /
+    // 雨水污水管线敷设方法」4 小节不进结构；下方反向对照按 4.34 原预算实测同界同集（4.35 未改变覆盖行为）。
+    // estimateChapterMinFeasibleWords 按 7 小节计点（103）相对实际结构点数（99）为高估——预算偏充足，安全侧
+    //（近似边界已在函数注释声明）。
+    for (const section of ['拆除改造与清运施工方法', '填方压实与场平作业工序', '安装工程与设备调试方法']) expect(carried.has(section)).toBe(true);
+    for (const section of ['雨水污水管线敷设方法', '检查井与防坠网施工', '道路提升与破路恢复工艺', '公厕及门卫土建施工方法']) expect(carried.has(section)).toBe(false);
+    expect(structure.blocks.flatMap(block => block.subPoints).every(point => (point.quotaWords ?? 0) > 0)).toBe(true);
+
+    // 反向对照（4.34 原始预算 15603、未重校准）：密度封顶 + 守卫保证不失败——最坏情况降级为 brief 概览合并
+    const legacy = buildChapterStructureFromBlueprint({ blueprintChapter, inputSections: templateSections, chapterTitle: '主要施工方法', targetWords: 15603 });
+    expect(legacy.blocks.every(block => block.subPoints.length <= 6)).toBe(true);
+    expect(legacy.blocks.every(block => block.subPoints.length <= Math.max(1, Math.floor(block.targetWords / 300)))).toBe(true);
+    expect(legacy.blocks.reduce((sum, block) => sum + block.targetWords, 0)).toBe(15603);
+    // 模板小节覆盖行为与重校准后完全一致（同界同集——本方案不改变既有覆盖边界）
+    const legacyCarried = new Set(legacy.blocks.flatMap(block => block.subPoints.flatMap(point => [point.title, ...point.sources])));
+    for (const section of templateSections) expect(legacyCarried.has(section)).toBe(carried.has(section));
   });
 });

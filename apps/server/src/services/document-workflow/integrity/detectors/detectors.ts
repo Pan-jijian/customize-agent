@@ -2,13 +2,16 @@
  * integrity/detectors：确定性检测器组（P4 拆分，逐字机械搬移自 documentIntegrityChecks.ts）。
  * 依赖 authorities（权威口径）；被 fixers 依赖（修复器锚定检测器）。
  */
-import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel, SpecAuthorityMap, TenderRequirementModel, ValidationIssue } from '../../types';
+import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel, DocumentGenerationDiagnostics, SpecAuthorityMap, TenderRequirementModel, ValidationIssue } from '../../types';
 import { documentTextLength } from '../../budget';
-import { BOOK_TITLE_CITATION_RE, stableHash, stringifyFactValue } from '../../utils';
+import { BOOK_TITLE_CITATION_RE, hasWorkInjuryInsuranceStatement, stableHash, stringifyFactValue } from '../../utils';
 import { buildSemanticSimilarity, SEMANTIC_COVERAGE_THRESHOLD } from '../../semanticSimilarity';
 import { buildSemanticGate } from '../../semanticGate';
 import { isQualificationSectionTitle } from '../../evidenceContentSafety';
 import { LABOR_STAGE_LIMIT_WORDS, PEAK_LABOR_RE, PILE_SUPPORT_LITERAL_RE, TRADE_WORKER_WORD_RE, cnNumberToArabic, collectLaborTableBlocks, excavationDepthFromFacts, extractGreeningMaintenanceAuthority, extractStreetLightAuthority, flexNamePattern, laborPeakStageOf, quantityUnitVariants } from '../authorities/authorities';
+import { matchDecisionCategory } from '../../integratedBlueprint';
+import { buildCitationSentenceContext, defaultCitationAdjudicator } from '../../semanticAdjudication';
+import type { CitationAdjudicationCandidate, CitationAdjudicator } from '../../semanticAdjudication';
 import type { SupportSystemAuthorityKind } from '../authorities/authorities';
 import { longestCommonHanSubstring, longestCommonHanSubstringSpan } from '../../numericalConsistency';
 
@@ -274,7 +277,7 @@ function chainPeaksOf(line: string): Array<{ peak: number; start: number; end: n
 
 export function resourceConsistencyIssues(markdown: string, options?: { laborPeakAuthority?: number }): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
-  // D1 三层锚点优先级：蓝图 labor.peakValue（造价锚定）> 分阶段投入明细表峰值 > 正文表述。
+  // D1 三层锚点优先级：蓝图 labor.peakValue（清单工效推导）> 分阶段投入明细表峰值 > 正文表述。
   // 蓝图权威存在时正文峰值对齐蓝图即为合法终态，与表峰值的差异不再互斥——否则检测器会把
   // 确定性修复器刚对齐的蓝图值再拉回表峰值，形成「蓝图检测 ↔ 表格互查」修复循环拉扯
   const laborPeakAuthority = options?.laborPeakAuthority;
@@ -393,7 +396,7 @@ export function resourceConsistencyIssues(markdown: string, options?: { laborPea
     ? Math.max(...tableBlocks.filter(block => !block.hasTradeCol).map(block => block.peak))
     : undefined;
   if (tablePeak !== undefined && maxBodyPeak > 0) {
-    // D1 蓝图权威豁免：正文峰值已对齐蓝图劳动力峰值时不与表峰值互查——蓝图是造价锚定最高权威，
+    // D1 蓝图权威豁免：正文峰值已对齐蓝图劳动力峰值时不与表峰值互查——蓝图是清单工效推导最高权威，
     // 表峰值与蓝图的差异属表格口径问题（确定性修复器以蓝图值为准统一正文），
     // 若继续互查会把已对齐的正文再拉回表峰值，与蓝图引用检测形成修复循环
     const alignedToBlueprint = laborPeakAuthority !== undefined && laborPeakAuthority > 0 && maxBodyPeak === laborPeakAuthority;
@@ -858,7 +861,10 @@ export async function localAdaptationKeywordIssues(markdown: string, factsModel:
   // 词面门控先剥离书名号引用：编制依据类别清单引用《保障农民工工资支付条例》等法规名，
   // 引用法规名称不构成「正文存在劳资管理内容」，剥离后纯引用文档不误报
   const laborContentText = markdown.replace(BOOK_TITLE_CITATION_RE, '');
-  if (/(?:劳务|农民工|工资)/u.test(laborContentText) && !coverage.get('workInjury')) {
+  // 4.36 B2 检测定位=修复定位单源：字面短路（hasWorkInjuryInsuranceStatement，与修复器幂等共用）——
+  // bge 句级采样（400 句均匀采样）下修复补写句可能落在采样窗口外造成「已修仍报」死循环；
+  // 「工伤保险」邻近办理/缴纳类动词的字面表述即构成覆盖，不再依赖采样命中
+  if (/(?:劳务|农民工|工资)/u.test(laborContentText) && !coverage.get('workInjury') && !hasWorkInjuryInsuranceStatement(markdown)) {
     issues.push({
       level: 'error',
       severity: 'blocker',
@@ -2256,16 +2262,23 @@ export function ambiguousEitherOrIssues(markdown: string): ValidationIssue[] {
   const hits = new Set<string>();
   // 形态 A：关键参数斜杠并列两可（「支护桩/放坡」「桩基础/独立基础」）；
   // 数字枚举由归一化后不含数字单位判定天然豁免（50mm/70mm 两侧词 <2 汉字不入枚举）
+  // 4.36 D3：判定升级为「词族白名单 ∪ 决策项注册表」双轨——选项词命中决策类目（matchDecisionCategory，
+  // 与决策锁/语义矛盾检测器单一事实源）时不再依赖硬编码词族，「筏板基础/独立基础」类决策列亦命中
   const slashRe = /([一-龥]{2,8})\/([一-龥]{2,8})/gu;
   for (const match of normalized.matchAll(slashRe)) {
-    if (!DESIGN_PARAM_WORD_RE.test(match[1]) && !DESIGN_PARAM_WORD_RE.test(match[2])) continue;
+    const wordFamilyHit = DESIGN_PARAM_WORD_RE.test(match[1]) || DESIGN_PARAM_WORD_RE.test(match[2]);
+    const decisionCategory = matchDecisionCategory(match[1], match[2]);
+    if (!wordFamilyHit && !decisionCategory) continue;
     const start = Math.max(0, (match.index || 0) - 12);
     const end = Math.min(normalized.length, (match.index || 0) + match[0].length + 12);
     const window = normalized.slice(start, end);
     // 管线保护语境豁免（4.19.3 真实回归：管线挡护措施「钢板桩/槽钢挡护」非主支护体系决策）
     if (/管线|管道|电缆|给水|排水/u.test(window)) continue;
-    // 决策语境要求：附近有决策动词（「采用桩基础/独立基础」是决策，「主体结构木工/钢筋工」不是）
-    if (!/采用|形式|方式|方案|选用|拟用|拟采用|为/u.test(window)) continue;
+    // 决策语境要求：附近有决策动词（「采用桩基础/独立基础」是决策，「主体结构木工/钢筋工」不是）；
+    // D3 决策注册表命中时放宽（选项词即具体设计术语），但禁止/否定语境豁免（「不得同步或分段浇筑」是约束非决策）
+    if (!/采用|形式|方式|方案|选用|拟用|拟采用|为/u.test(window)) {
+      if (!decisionCategory || /不得|禁止|不应|不宜|避免|严禁|无需/u.test(window)) continue;
+    }
     hits.add(`“${match[1]}/${match[2]}”`);
   }
   // 形态 B：括号悬置决策「（或…按图纸实施）」：括号内「或」+ 悬置词（按图纸/待定/另行…），
@@ -2285,13 +2298,20 @@ export function ambiguousEitherOrIssues(markdown: string): ValidationIssue[] {
   // 无决策词的并列工序（「土方开挖或回填前」）与词族外枚举（「集水井或排水沟」）均豁免
   const eitherOrRe = /([一-龥]{2,8})或([一-龥]{2,8})/gu;
   for (const match of normalized.matchAll(eitherOrRe)) {
-    if (!DESIGN_PARAM_WORD_RE.test(match[1]) && !DESIGN_PARAM_WORD_RE.test(match[2])) continue;
+    const wordFamilyHit = DESIGN_PARAM_WORD_RE.test(match[1]) || DESIGN_PARAM_WORD_RE.test(match[2]);
+    // 4.36 D3：决策项注册表命中（「减振吊架或减振基础」「同步或分段浇筑」「柔性或半刚性」类
+    // 远端报错实锤——词族白名单射程外的设计决策形态由注册表选项词兜底）
+    const decisionCategory = matchDecisionCategory(match[1], match[2]);
+    if (!wordFamilyHit && !decisionCategory) continue;
     const start = Math.max(0, (match.index || 0) - 12);
     // 窗口只到左组末尾：右组吞并的「按」（「…施工顺序按现场进度」）不是决策语境，不纳入
     const window = normalized.slice(start, (match.index || 0) + match[1].length);
     // 管线保护语境豁免（4.19.3 真实回归：管线挡护措施「钢板桩或槽钢挡护」非主支护体系决策）
     if (/管线|管道|电缆|给水|排水/u.test(window)) continue;
-    if (!/按|采用|选用|拟用|拟采用|方案|为/u.test(window)) continue;
+    if (!/按|采用|选用|拟用|拟采用|方案|为/u.test(window)) {
+      // D3 决策注册表命中时放宽决策词窗口，但禁止/否定语境豁免（「不得同步或分段浇筑」是约束非决策）
+      if (!decisionCategory || /不得|禁止|不应|不宜|避免|严禁|无需/u.test(window)) continue;
+    }
     // 4.32 扩围（丰乐镇复测「支护或放缓坡率」「基础或立杆」误报）：
     // ①临时设施/措施二选一（「设置临时支护或放缓坡率」的「临时」在匹配前 6 字或左组内）属施工措施选择，
     // 永久工程设计决策（基础形式/支护形式）判定不覆盖「临时+措施」组合；
@@ -3083,26 +3103,29 @@ export function resourceTriadSectionHierarchyIssues(markdown: string): Validatio
   return issues;
 }
 
-// ── V5 P4b. 跨工程同值复制 / 阶段人数混用检测（groups 同源，替代村名特征字启发式）──
+// ── V5 P4b. 跨工程同值复制 / 阶段人数混用检测（groups 同源；S5 判定层过滤）──
 
-/** 跨工程同值复制检测（V5 P4b，P3.2 原设计）：多村/多标段合并项目清单条目携带分工程明细
+/** 跨工程同值复制检测（V5 P4b，S5 语义判定版）：多村/多标段合并项目清单条目携带分工程明细
  * （groups=villageGroup∥section 原值），正文把 A 工程的明细值写到 B 工程语境（复制粘贴同值）
- * 是 LLM 写作高频错误——修复器 fixQuantityAuthorityConflicts 对「值 ∈ 分组值集」精确豁免
- * （分村分表合法量不归一），该豁免放过的同值复制错误由本检测器接手（与修复器同源 groups）。
+ * 是 LLM 写作高频错误。
  *
- * 确定性判定（零误伤，两条）：
- * A. 同一条目的同一数值出现在 ≥2 个工程对象（组）语境，且这些组在清单中明细值不全相同——
- *    数值不可能同时等于两个不同的明细值，至少一处是复制错误（P3.2 原设计字面判定）；
- * B. 单组语境中，数值恰等于「其他组」的明细值（≠本组明细值）——直接复制了他家工程的数值。
- * 组语境由名称前窗口（到句边界且 ≤24 字）内分工程明细名「唯一命中」确定——多组/无组语境
- * 跳过（总述句合计值/跨工程列举句不建立配对）；表格行（分村分表合法承载）跳过；
- * 名称/单位匹配复用修复器同源 helper（检测定位=修复定位）；每条目只报一条防刷屏。 */
-export function crossProjectValueCopyIssues(
+ * 结构定位（零词表豁免）：组语境由名称前窗口（到句边界且 ≤24 字）内分工程明细名「唯一命中」
+ * 确定——多组/无组语境跳过；表格行（分村分表合法承载）跳过；名称/单位匹配复用权威层同源
+ * helper；子型号代号结构检查保留（名称与数值间为纯字母代号属枚举量，非条目口径）。
+ * 语义过滤（判定层）：配对值交三态裁决——consistent（规格/频次/分区/枚举等非该组数据口径）
+ * 撤配对；conflict/uncertain 保留进入 A/B 数学判定（判定不可用不静默放行，不回退词表猜测）。
+ * 确定性判定（A/B 数学形态）：A. 同一条目的同一数值出现在 ≥2 个工程对象（组）语境，且这些组
+ * 在清单中明细值不全相同；B. 单组语境中数值恰等于「其他组」明细值（≠本组明细值）。
+ * 每条目只报一条防刷屏；上限 8 条。 */
+export async function crossProjectValueCopyIssues(
   markdown: string,
   quantityAuthorities: Array<{ name: string; value: number; unit: string; groups?: Array<{ group: string; value: number }> }>,
-): ValidationIssue[] {
+  options: { adjudicate?: CitationAdjudicator; diagnostics?: DocumentGenerationDiagnostics; signal?: AbortSignal } = {},
+): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = [];
   const matchesValue = (left: number, right: number) => Math.abs(left - right) < 1e-6;
+  interface Pairing { group: string; value: number; excerpt: string; sentence: string; flatIndex: number; }
+  const perAuthority: Array<{ authority: { name: string; value: number; unit: string }; detail: Array<{ group: string; value: number }>; pairings: Pairing[] }> = [];
   for (const authority of quantityAuthorities) {
     const detail = authority.groups ?? [];
     if (detail.length < 2) continue;
@@ -3110,7 +3133,7 @@ export function crossProjectValueCopyIssues(
     if (new Set(detail.map(item => Math.round(item.value * 100))).size < 2) continue;
     const nameRe = new RegExp(flexNamePattern(authority.name), 'gu');
     const unitRe = new RegExp(`(?<![\\dA-Za-z])(\\d(?:[\\d,]*(?:\\.\\d+)?))\\s*${quantityUnitVariants(authority.unit)}(?![0-9a-zA-Z])`, 'gui');
-    const pairings: Array<{ group: string; value: number; excerpt: string }> = [];
+    const pairings: Pairing[] = [];
     for (const nameMatch of markdown.matchAll(nameRe)) {
       const ns = nameMatch.index ?? 0;
       const ne = ns + nameMatch[0].length;
@@ -3134,8 +3157,6 @@ export function crossProjectValueCopyIssues(
       const window = rawWindow.slice(0, splitAt);
       let best: { offset: number; value: number; raw: string } | null = null;
       for (const valueMatch of window.matchAll(unitRe)) {
-        // 规格句豁免（与修复器同源）：规格限定词紧邻尾随的数值是规格非工程量
-        if (/(?:间距|不大于|不小于|≥|≤|宽度|厚度|高度|深度|坡度)[^0-9]*$/u.test(window.slice(0, valueMatch.index ?? 0))) continue;
         const raw = valueMatch[1];
         const value = Number(raw.replace(/,/gu, ''));
         if (!Number.isFinite(value) || value <= 0) continue;
@@ -3144,21 +3165,46 @@ export function crossProjectValueCopyIssues(
         }
       }
       if (!best) continue;
-      // V5 P6 误报收口（run1 实测）：「综合配套用房-安装工程投入配电箱AF 1台、照明配电箱AL1 1台、
-      // 照明配电箱AL2 1台」的名称与数值之间是子型号代号（AF/AL1/AL2）——数值属该对象子型号枚举量
-      // （1+1+1 恰为该工程条目明细值 3），非条目总量口径，与分工程明细不可比；正常量词为汉字
-      // （「共42台」的「共」）不被豁免，真复制形态（名称紧邻数值）不受影响
+      // 子型号代号结构检查（V5 P6 误报收口）：「配电箱AF 1台、照明配电箱AL1 1台」的名称与数值
+      // 之间是纯字母子型号代号（枚举量非条目口径）；正常量词为汉字（「共42台」的「共」）不被豁免
       const between = markdown.slice(ne, best.offset);
       if (/[A-Za-z]/u.test(between) && !/[\u4e00-\u9fa5]/u.test(between)) continue;
-      pairings.push({ group: contextGroup.group, value: best.value, excerpt: markdown.slice(ns, best.offset + best.raw.length) });
+      pairings.push({ group: contextGroup.group, value: best.value, excerpt: markdown.slice(ns, best.offset + best.raw.length), sentence: buildCitationSentenceContext(markdown, ns, best.offset + best.raw.length - ns), flatIndex: -1 });
     }
     if (pairings.length === 0) continue;
+    perAuthority.push({ authority: { name: authority.name, value: authority.value, unit: authority.unit }, detail, pairings });
+  }
+  if (perAuthority.length === 0) return issues.slice(0, 8);
+  // 判定层统一过滤（一次批量调用；同内容候选跨检测点缓存复用）：consistent 撤配对，
+  // conflict/uncertain 保留进入数学判定
+  const candidates: CitationAdjudicationCandidate[] = [];
+  for (const entry of perAuthority) {
+    for (const pairing of entry.pairings) {
+      pairing.flatIndex = candidates.length;
+      const own = entry.detail.find(item => item.group === pairing.group);
+      candidates.push({
+        id: `xp${pairing.flatIndex}`,
+        kind: 'quantity',
+        subject: `${entry.authority.name}（${pairing.group}）`,
+        value: pairing.value,
+        unit: entry.authority.unit,
+        authority: own?.value ?? entry.authority.value,
+        sentence: pairing.sentence,
+        facts: [`该条目清单分工程明细：${entry.detail.map(item => `${item.group} ${item.value}${entry.authority.unit}`).join('、')}`],
+      });
+    }
+  }
+  const adjudicate = options.adjudicate ?? defaultCitationAdjudicator;
+  const outcome = await adjudicate(candidates, { diagnostics: options.diagnostics, signal: options.signal });
+  for (const entry of perAuthority) {
+    const activePairings = entry.pairings.filter(pairing => outcome.records.get(`xp${pairing.flatIndex}`)?.conclusion !== 'consistent');
+    if (activePairings.length === 0) continue;
     let issuePushed = false;
     // 判定 B：单组语境中值恰为其他组明细值（该值 ≠ 本组明细值）——直接复制了他家数值
-    for (const pairing of pairings) {
-      const own = detail.find(item => item.group === pairing.group);
+    for (const pairing of activePairings) {
+      const own = entry.detail.find(item => item.group === pairing.group);
       if (!own || matchesValue(own.value, pairing.value)) continue;
-      const other = detail.find(item => item.group !== pairing.group && matchesValue(item.value, pairing.value));
+      const other = entry.detail.find(item => item.group !== pairing.group && matchesValue(item.value, pairing.value));
       if (!other) continue;
       issues.push({
         level: 'error',
@@ -3166,8 +3212,8 @@ export function crossProjectValueCopyIssues(
         category: 'fact_consistency',
         owner: 'llm',
         repairability: 'llm_repairable',
-        message: `跨工程同值复制：“${pairing.excerpt.slice(0, 40)}”在“${pairing.group}”语境处取值 ${pairing.value}${authority.unit}，该值是“${other.group}”的清单明细值（${pairing.group} 的清单明细值为 ${own.value}${authority.unit}）`,
-        suggestion: `以工程量清单分工程明细为准修正“${pairing.group}”语境：应为 ${own.value}${authority.unit}，不得沿用“${other.group}”的明细值 ${pairing.value}${authority.unit}；修复后全文该条目分工程取值必须与清单明细逐一对应。`,
+        message: `跨工程同值复制：“${pairing.excerpt.slice(0, 40)}”在“${pairing.group}”语境处取值 ${pairing.value}${entry.authority.unit}，该值是“${other.group}”的清单明细值（${pairing.group} 的清单明细值为 ${own.value}${entry.authority.unit}）`,
+        suggestion: `以工程量清单分工程明细为准修正“${pairing.group}”语境：应为 ${own.value}${entry.authority.unit}，不得沿用“${other.group}”的明细值 ${pairing.value}${entry.authority.unit}；修复后全文该条目分工程取值必须与清单明细逐一对应。`,
       });
       issuePushed = true;
       break;
@@ -3175,7 +3221,7 @@ export function crossProjectValueCopyIssues(
     if (issuePushed) continue;
     // 判定 A：同值出现在 ≥2 组语境且这些组明细值不同（数值不可能同时等于两个不同明细值）
     const groupsByValue = new Map<string, Set<string>>();
-    for (const pairing of pairings) {
+    for (const pairing of activePairings) {
       const key = pairing.value.toFixed(2);
       const set = groupsByValue.get(key) ?? new Set<string>();
       set.add(pairing.group);
@@ -3184,19 +3230,18 @@ export function crossProjectValueCopyIssues(
     for (const [key, groupSet] of groupsByValue) {
       if (groupSet.size < 2) continue;
       // P3.2 判定 A 语义（K3 契约）：同值出现在 ≥2 工程对象语境且这些对象的明细值互不相同
-      // → 至少一处是复制错误，不要求值本身 ∈ 某工程明细（999 双组同写须报；run1「AL共42台」
-      // 同值跨公厕/公共广场且明细 1/4/…互异，正文多处与明细矛盾属真缺陷，保留报告由 LLM 修复轮处理）
-      const hitDetail = detail.filter(item => groupSet.has(item.group));
+      // → 至少一处是复制错误，不要求值本身 ∈ 某工程明细
+      const hitDetail = entry.detail.filter(item => groupSet.has(item.group));
       if (new Set(hitDetail.map(item => Math.round(item.value * 100))).size < 2) continue;
-      const sample = pairings.find(pairing => pairing.value.toFixed(2) === key)!;
+      const sample = activePairings.find(pairing => pairing.value.toFixed(2) === key)!;
       issues.push({
         level: 'error',
         severity: 'blocker',
         category: 'fact_consistency',
         owner: 'llm',
         repairability: 'llm_repairable',
-        message: `跨工程同值复制：“${sample.excerpt.slice(0, 40)}”数值 ${key}${authority.unit} 同时出现在“${[...groupSet].join('”“')}”等 ${groupSet.size} 个工程对象语境，而清单明细值互不相同（${hitDetail.map(item => `${item.group} ${item.value}${authority.unit}`).join('、')}）——至少一处属跨工程同值复制`,
-        suggestion: `逐工程对象按清单明细值修正取值（${hitDetail.map(item => `${item.group} ${item.value}${authority.unit}`).join('、')}），不得多工程共用同一数值。`,
+        message: `跨工程同值复制：“${sample.excerpt.slice(0, 40)}”数值 ${key}${entry.authority.unit} 同时出现在“${[...groupSet].join('”“')}”等 ${groupSet.size} 个工程对象语境，而清单明细值互不相同（${hitDetail.map(item => `${item.group} ${item.value}${entry.authority.unit}`).join('、')}）——至少一处属跨工程同值复制`,
+        suggestion: `逐工程对象按清单明细值修正取值（${hitDetail.map(item => `${item.group} ${item.value}${entry.authority.unit}`).join('、')}），不得多工程共用同一数值。`,
       });
       break;
     }

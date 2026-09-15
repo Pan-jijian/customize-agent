@@ -1,7 +1,7 @@
 /**
  * 4.19 成稿质量五模块修复单测（A~E）：
  * A 编号归一根治（finalize 单调+幂等 / 目录正文编号对应校验）
- * B 工作包三要素硬门（宽松门 workPackageElementsMeetLenientGate）
+ * B 工作包三要素硬门（workPackageContentElementsComplete）
  * C 危大判定闭环（危大分级交叉质检 / 支护形式事实一致性）
  * D 参数一致性（设备进场时间合理性）
  * E 规划卫生（规划小节归一去重）
@@ -9,7 +9,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { finalizeDocumentMarkdown } from '@/services/document-workflow/markdownComposer';
 import { sectionCountOverflowIssues, sectionNumberingIssues, tocBodyConsistencyIssues } from '@/services/document-workflow/qualityValidation';
-import { workPackageElementsMeetLenientGate } from '@/services/document-workflow/utils';
+import { workPackageContentElementsComplete } from '@/services/document-workflow/utils';
 import { equipmentEntryTimingIssues, excavationDepthFromFacts, excavationHazardClassificationIssues, supportFormFactConsistencyIssues } from '@/services/document-workflow/documentIntegrityChecks';
 import { dedupePlannedSections } from '@/services/document-workflow/promptRuleExtraction';
 import { buildCanonicalFacts, collectStructuredFactCandidates, extractDrawingAnnotationFacts } from '@/services/document-workflow/factGovernance';
@@ -294,22 +294,21 @@ describe('sectionCountOverflowIssues L5 块数守恒门禁（A-4）', () => {
 
 // ── B-1：工作包三要素硬门 ──
 
-describe('workPackageElementsMeetLenientGate 三要素硬门（B 模块）', () => {
+describe('workPackageContentElementsComplete 三要素硬门（B 模块）', () => {
   it('概况+工序+方法三要素齐备 → 通过', () => {
     const block = '施工概况：本项目基坑面积约1.2万㎡。\n施工工序：先放线定位，再土方开挖，随后支护施工，最后验收。\n施工方法：采用分层开挖、土钉墙支护工艺。';
-    expect(workPackageElementsMeetLenientGate(block)).toBe(true);
+    expect(workPackageContentElementsComplete(block)).toBe(true);
   });
 
   it('只有施工方法、缺工序顺序 → 不通过', () => {
     const block = '施工方法：采用分层开挖工艺，土钉间距1.2m。';
-    expect(workPackageElementsMeetLenientGate(block)).toBe(false);
+    expect(workPackageContentElementsComplete(block)).toBe(false);
   });
 
-  it('工序顺序（箭头链）+方法、缺概况 → 不通过（三要素全齐才放行）', () => {
-    // C1 收紧：降级验收从「工序必备、其余二选一」收紧为三要素齐全（与验收同源），
-    // 缺概况要素的块不再被降级放行出厂
+  it('工序顺序（箭头链）+方法、缺概况 → 不通过（三要素全齐才通过）', () => {
+    // 4.36 B4：历史「宽松门降级放行」分支已从写时链路删除，本判定为结构门禁/专项验收唯一口径
     const block = '工艺流程：基层清理 → 放线定位 → 分层摊铺 → 碾压 → 检测验收。\n施工方法：机械碾压，压实度不低于95%。';
-    expect(workPackageElementsMeetLenientGate(block)).toBe(false);
+    expect(workPackageContentElementsComplete(block)).toBe(false);
   });
 });
 

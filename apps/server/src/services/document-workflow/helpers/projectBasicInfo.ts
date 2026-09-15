@@ -198,6 +198,12 @@ export function projectBasicInfoTableMarkdown(facts: DocumentFact[], existingMar
   return ['**项目基本信息表**', '', '| 信息项 | 内容 |', '|---|---|', ...rows.map(row => `| ${row[0]} | ${row[1]} |`)].join('\n');
 }
 
+/** 项目基本信息段落式渲染（暗标正文禁表：同数据源转文字列表，数值口径不变） */
+export function projectBasicInfoProseMarkdown(facts: DocumentFact[], existingMarkdown = '', fullMarkdown = existingMarkdown) {
+  const rows = projectBasicInfoRows(facts, existingMarkdown, fullMarkdown);
+  return ['**项目基本信息**', '', ...rows.map(row => `- ${row[0]}：${row[1]}`)].join('\n');
+}
+
 const PROJECT_BASIC_LABELS = [/^项目名称$/u, /^工程名称$/u, /^项目编号$/u, /^招标项目编号$/u, /^招标人$/u, /^项目业主$/u, /^建设单位$/u, /^发包人$/u, /^建设地点$/u, /^实施地点$/u, /^建设规模$/u, /^工程规模$/u, /^计划工期$/u, /^合同工期$/u, /^总工期$/u, /^质量标准$/u, /^质量目标$/u, /^合同估算价$/u, /^投资估算$/u, /^最高投标限价$/u, /^招标控制价$/u];
 
 function isProjectBasicLabel(label: string) {
@@ -320,9 +326,10 @@ function removeRedundantFormalTables(content: string) {
 /** 旧项目基础信息表块删除（收窄版）：只删除「项目基础信息类」表格块——两列信息项表
  * （项目名称/招标人等标签行占比达标）或三列序号表（序号|项目名称|内容参数）。
  * 编制依据表（依据类别|主要文件及标准）、工程概况信息表等专业表格不在标签集内天然豁免，
- * 消除旧正则跨空行贪婪连坐删除聚合块（H4 子小节）内其他表格的缺陷。 */
+ * 消除旧正则跨空行贪婪连坐删除聚合块（H4 子小节）内其他表格的缺陷。
+ * bodyTableForbidden（暗标正文禁表）：同时清理段落式「**项目基本信息** + - 标签：值」旧块（重建前清旧）。 */
 
-function removeProjectBasicInfoTableBlocks(content: string) {
+function removeProjectBasicInfoTableBlocks(content: string, bodyTableForbidden = false) {
   const lines = content.split('\n');
   const output: string[] = [];
   const isBasicTable = (rows: string[]) => {
@@ -336,6 +343,13 @@ function removeProjectBasicInfoTableBlocks(content: string) {
   };
   for (let index = 0; index < lines.length;) {
     const line = lines[index] || '';
+    // 段落式项目基本信息块（暗标口径旧块清理）：精确标题行 + 紧随的「- 标签：值」列表整体删除
+    if (bodyTableForbidden && /^\s*\*\*\s*项目基本信息\s*\*\*\s*$/u.test(line)) {
+      index += 1;
+      while (index < lines.length && (lines[index] || '').trim() === '') index += 1;
+      while (index < lines.length && /^\s*[-*]\s/u.test(lines[index] || '') && isProjectBasicLabel((/^\s*[-*]\s*([^：:|]{1,16})[：:]/u.exec(lines[index] || '')?.[1] || '').replace(/\*\*/gu, '').trim())) index += 1;
+      continue;
+    }
     // 「**项目基本信息表**」加粗标题行（或 H3-H5 同名标题）及其紧随的表格块整体删除
     if (/^\s*\*\*[^\n]*项目基本信息表[^\n]*\*\*\s*$/u.test(line) || /^\s*#{3,5}\s+[^\n]*项目基本信息表\s*$/u.test(line)) {
       index += 1;
@@ -365,7 +379,9 @@ function removeProjectBasicInfoTableBlocks(content: string) {
   return output.join('\n');
 }
 
-export function normalizeProjectBasicInfoTable(content: string, facts: DocumentFact[]) {
+export function normalizeProjectBasicInfoTable(content: string, facts: DocumentFact[], options?: { bodyTableForbidden?: boolean }) {
+  // 暗标正文禁表：项目基本信息以段落式列表呈现（同数据源，数值口径不变）
+  const prose = options?.bodyTableForbidden === true;
   content = removeRedundantFormalTables(content);
   if (!/项目基本信息|项目概况|工程概况|招标范围/u.test(content)) return removeDuplicateProjectBasicInfoBlocks(normalizeBareMarkdownTables(stripProvenanceTableColumns(content)));
   // 注入锚点 H2~H4（舒城实测：第一章标题为「## 工程概况」H2 形态，原 #{3,4} 锚点永不命中
@@ -373,12 +389,13 @@ export function normalizeProjectBasicInfoTable(content: string, facts: DocumentF
   const projectHeadingRe = /^(#{2,4}\s+(?:\d+\.\d+\s+)?[^\n]*(?:项目概况|工程概况|项目基本信息|招标范围)[^\n]*\n)/mu;
   const fallbackHeadingRe = /^(#{2,4}\s+(?:\d+\.\d+\s+)?[^\n]*(?:概况|基本信息)[^\n]*\n)/mu;
   const findProjectHeading = () => projectHeadingRe.exec(content) ?? fallbackHeadingRe.exec(content);
-  if (!/\|\s*信息项\s*\|\s*内容\s*\|/u.test(content) && projectBasicFactCandidates(facts).length > 0) {
+  const hasBasicBlock = /\|\s*信息项\s*\|\s*内容\s*\|/u.test(content) || (prose && /\*\*\s*项目基本信息\s*\*\*/u.test(content));
+  if (!hasBasicBlock && projectBasicFactCandidates(facts).length > 0) {
     const firstProjectHeading = findProjectHeading();
     if (firstProjectHeading?.index || firstProjectHeading?.index === 0) {
       const insertAt = firstProjectHeading.index + firstProjectHeading[0].length;
-      const table = `${projectBasicInfoTableMarkdown(facts, '', content)}\n\n`;
-      content = `${content.slice(0, insertAt)}\n${table}${content.slice(insertAt).trimStart()}`;
+      const block = `${prose ? projectBasicInfoProseMarkdown(facts, '', content) : projectBasicInfoTableMarkdown(facts, '', content)}\n\n`;
+      content = `${content.slice(0, insertAt)}\n${block}${content.slice(insertAt).trimStart()}`;
     }
   }
   const projectSection = findProjectHeading();
@@ -393,12 +410,12 @@ export function normalizeProjectBasicInfoTable(content: string, facts: DocumentF
   const nextMatch = nextHeading.exec(content);
   const sectionEnd = nextMatch?.index ?? content.length;
   const body = content.slice(sectionBodyStart, sectionEnd);
-  const table = projectBasicInfoTableMarkdown(facts, body, content);
+  const table = prose ? projectBasicInfoProseMarkdown(facts, body, content) : projectBasicInfoTableMarkdown(facts, body, content);
   const hasUsefulFact = projectBasicInfoRows(facts, body, content).some(row => !/资料未明确|系统暂未从知识库确认|项目资料暂未明确/u.test(row[1]));
   if (!hasUsefulFact) return content;
   // 旧基本信息表删除只作用于项目基础信息类表格块（标签集判定），
   // 编制依据表、工程概况信息表等专业表格完整保留（详见 removeProjectBasicInfoTableBlocks）
-  const cleanedBody = removeProjectBasicInfoTableBlocks(body)
+  const cleanedBody = removeProjectBasicInfoTableBlocks(body, prose)
     // eslint-disable-next-line no-control-regex -- [^\u000A] 与原始 [^\n] 语义等价（编辑工具会破坏字面换行转义，改用 unicode 转义）
     .replace(/该小节围绕“[^”]+”进行补充说明[^\u000A]*(?:\u000A\u000A该小节围绕“[^”]+”进行补充说明[^\u000A]*)*/gu, '')
     .replace(/\n{3,}/gu, '\n\n')

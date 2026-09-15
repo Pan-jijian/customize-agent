@@ -67,7 +67,8 @@ export function explicitLengthTargets(text: string) {
 /** 章详略级别（容量需求估算档位：详写/标准/概述三档，预算因子参数化） */
 export type ChapterDetailLevel = 'detailed' | 'standard' | 'brief';
 
-/** 详略级别需求因子：详写 1.3 / 标准 1 / 概述 0.75（与历史 chapterBudgetWeight 权重同源） */
+/** 详略级别需求因子：详写 1.3 / 标准 1 / 概述 0.75（产品预算分配参数，不进入正文数值口径；
+ * 与历史 chapterBudgetWeight 权重同源） */
 export const CHAPTER_DETAIL_LEVEL_FACTORS: Record<ChapterDetailLevel, number> = { detailed: 1.3, standard: 1, brief: 0.75 };
 
 /** 章最低可写预算（水填锚点下限）：目标足以覆盖时保证每章不低于此值（方案可写区间下限） */
@@ -86,13 +87,15 @@ export function chapterBudgetWeight(chapter: DocumentTemplateChapter) {
 
 /** 章预算分配（预算契约）：内容单元需求估算（规划小节数 × 详略因子）→ 全局归一化到 T → 水填下限。
  * 确定性逻辑无 LLM；Σ章预算 = T 精确守恒（末位取余额）。
- * 下限不可满足（目标不足以覆盖全部章最低预算）时按下限比例压缩并显式告警——不静默放大。 */
-export function allocateChapterTargets(chapters: DocumentTemplateChapter[], targetChars: number, floorOf: (chapter: DocumentTemplateChapter) => number) {
+ * 下限不可满足（目标不足以覆盖全部章最低预算）时按下限比例压缩并显式告警——不静默放大。
+ * extraFloorOf（4.35 容量密度可行性闭环）：附加下限（如章预算可行性下限）——与 spec 下限同为
+ * 水填锚点，向后兼容（不传 = 原行为逐字一致）。 */
+export function allocateChapterTargets(chapters: DocumentTemplateChapter[], targetChars: number, floorOf: (chapter: DocumentTemplateChapter) => number, extraFloorOf?: (chapter: DocumentTemplateChapter) => number) {
   const target = Math.max(0, Math.round(targetChars));
   const budgets = new Map<string, number>();
   if (chapters.length === 0) return budgets;
   const needs = chapters.map(chapter => Math.max(1, (chapter.sections || []).filter(Boolean).length) * chapterBudgetWeight(chapter));
-  const floors = chapters.map(chapter => Math.max(CHAPTER_MIN_BUDGET, Math.round(floorOf(chapter))));
+  const floors = chapters.map(chapter => Math.max(CHAPTER_MIN_BUDGET, Math.round(floorOf(chapter)), Math.round(extraFloorOf?.(chapter) || 0)));
   const anchored = new Map<number, number>();
   for (let guard = 0; guard <= chapters.length; guard += 1) {
     const flexible = chapters.map((_, index) => index).filter(index => !anchored.has(index));
@@ -126,6 +129,40 @@ export function allocateChapterTargets(chapters: DocumentTemplateChapter[], targ
     assigned += value;
   });
   return budgets;
+}
+
+/** 章预算可行性重校准（4.35 容量密度可行性闭环）：蓝图落盘且校验通过后（写作前），按真实要点
+ * 密度重锚章预算——低于可行性下限（minFeasible = ceil(要点数/6) × 1800）的章抬升至下限、
+ * 其余章按需求归一化缩减（复用 allocateChapterTargets 锚定循环，附加下限参数）；
+ * Σ章预算 = T 精确守恒（断言防御）；Σ minFeasible > T（目标不足以覆盖全部章的密度需求）时
+ * 按下限比例压缩 + 显式告警（对齐既有「篇幅预算不足」路径，不静默）。
+ * 幂等：以章节/目标/下限为输入的纯计算，重复调用结果一致（与初次 allocateChapterTargets 同口径）。
+ * 调用方负责把返回的 chapterTargets 原位写回既有 Map（clear + set 保持别名可见）。 */
+export function reanchorChapterTargetsByFeasibility(input: {
+  chapters: DocumentTemplateChapter[];
+  targetChars: number;
+  floorOf: (chapter: DocumentTemplateChapter) => number;
+  feasibilityFloorOf: (chapter: DocumentTemplateChapter) => number;
+  /** 重校准前的章预算（供调整报告：from → to）；缺省时 adjustments 为空 */
+  currentTargets?: Map<string, number>;
+}): { chapterTargets: Map<string, number>; adjustments: Array<{ id: string; title: string; from: number; to: number }>; compressed: boolean } {
+  const { chapters, targetChars, floorOf, feasibilityFloorOf, currentTargets } = input;
+  const target = Math.max(0, Math.round(targetChars));
+  const feasibleFloors = chapters.map(chapter => Math.max(0, Math.round(feasibilityFloorOf(chapter))));
+  const floorSum = chapters.reduce((sum, chapter, index) => sum + Math.max(CHAPTER_MIN_BUDGET, Math.round(floorOf(chapter)), feasibleFloors[index]!), 0);
+  const compressed = floorSum > target;
+  if (compressed) {
+    console.error(`[budget] 章预算可行性校准：最低密度预算合计 ${floorSum} 字超出全文目标 ${target} 字，按下限比例压缩（容量密度需求与目标字数冲突，显式暴露不静默）`);
+  }
+  const chapterTargets = allocateChapterTargets(chapters, target, floorOf, chapter => feasibilityFloorOf(chapter));
+  const sum = [...chapterTargets.values()].reduce((acc, value) => acc + value, 0);
+  if (Math.abs(sum - target) > Math.max(chapters.length, Math.floor(target * 0.02))) {
+    throw new Error(`章预算可行性校准违约：Σ章预算 ${sum} 与目标 ${target} 偏差超出容差（算法回归防御）`);
+  }
+  const adjustments = currentTargets
+    ? chapters.map(chapter => ({ id: chapter.id, title: chapter.title, from: currentTargets.get(chapter.id) || 0, to: chapterTargets.get(chapter.id) || 0 })).filter(item => item.from !== item.to)
+    : [];
+  return { chapterTargets, adjustments, compressed };
 }
 
 export function buildDocumentBudget(input: { requirement?: string; promptTexts: string; template: DocumentTemplate; chapters: DocumentTemplateChapter[]; spec?: AutoDocumentSpecPackage }): DocumentBudget {

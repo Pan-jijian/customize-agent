@@ -2,14 +2,22 @@
  * dicNumericFixes2：applyNumericConsistencyDeterministicFixes 聚合器与内部修复器家族边界矩阵（J 组）。
  * 覆盖：fixLaborPeakConflicts（J1-J8/J33-J35）、fixNodeScheduleConflicts（J9-J13/J36-J37）、
  * fixCrossSectionNumericConflicts（J14-J18/J39-J40）、fixSupportSystemConflicts（J19-J21）、
- * fixQuantityAuthorityConflicts（J22-J29）、聚合器组合与截断（J30-J31）。
+ * fixQuantityAuthorityConflicts 锚点直连经聚合器（J22-J29）、聚合器组合与截断（J30-J31）。
  * 所有用例均为确定性数值提取/替换判定，无语义依赖。
  */
 import { describe, expect, it } from 'vitest';
 import { applyNumericConsistencyDeterministicFixes, fixSupportSystemConflicts, fixGluedQuantityNumbers, fixOversizedDayRanges } from '@/services/document-workflow/documentIntegrityChecks';
+import type { QuantityConflictAnchor } from '@/services/document-workflow/integratedBlueprint';
 import { fixtureIndex } from '../authorityFixture';
 
 const fixes = applyNumericConsistencyDeterministicFixes;
+
+/** 锚点构造：从名称之后定位原文数值串（生产由判定层裁决产出；值 == 权威不入候选） */
+function anchorAt(markdown: string, name: string, value: number, authorityValue: number, unit = ''): QuantityConflictAnchor {
+  const nameAt = markdown.indexOf(name);
+  const at = markdown.indexOf(String(value), nameAt >= 0 ? nameAt + name.length : 0);
+  return { name, value, unit, authorityValue, start: at, end: at + String(value).length };
+}
 
 describe('dicNumericFixes2 · J 组：数值一致性确定性修复聚合器', () => {
   describe('fixLaborPeakConflicts（经聚合器）', () => {
@@ -193,85 +201,76 @@ describe('dicNumericFixes2 · J 组：数值一致性确定性修复聚合器', 
     });
   });
 
-  describe('fixQuantityAuthorityConflicts（经聚合器）', () => {
-    it('J22 基本替换：正文工程量漂移 >2% → 清单汇总值', () => {
+  describe('fixQuantityAuthorityConflicts（经聚合器·锚点直连）', () => {
+    it('J22 基本替换：锚点直连替换 18949.52→18000（聚合器传递锚点）', () => {
       const md = '级配碎石铺设18949.52m²，压实度符合要求。';
-      const result = fixes(md, { authorityIndex: fixtureIndex({ quantity: [{ label: '级配碎石', value: 18000, unit: 'm²' }] }) });
+      const result = fixes(md, { quantityAnchors: [anchorAt(md, '级配碎石', 18949.52, 18000, 'm²')] });
       expect(result.markdown).toBe('级配碎石铺设18000m²，压实度符合要求。');
       expect(result.fixedCount).toBe(1);
       expect(result.details[0]).toContain('以工程量清单汇总值为准');
     });
 
-    it('J23 D2 零豁免：差异 0.27% 四舍五入口径差同样替换', () => {
+    it('J23 D2 零豁免：差异 0.27% 四舍五入口径差同样锚点替换', () => {
       const md = '级配碎石铺设18949.52m²。';
-      const result = fixes(md, { authorityIndex: fixtureIndex({ quantity: [{ label: '级配碎石', value: 19000, unit: 'm²' }] }) });
+      const result = fixes(md, { quantityAnchors: [anchorAt(md, '级配碎石', 18949.52, 19000, 'm²')] });
       expect(result.markdown).toBe('级配碎石铺设19000m²。');
       expect(result.fixedCount).toBe(1);
     });
 
-    it('J24 名称前 12 字内含村名特征词 → 分村分表合法量不归一', () => {
+    it('J24 村名语境零豁免（裁决在判定层）：锚点照替换', () => {
       const md = '殷郢组段级配碎石铺设18949.52m²。';
-      const result = fixes(md, { authorityIndex: fixtureIndex({ quantity: [{ label: '级配碎石', value: 18000, unit: 'm²' }] }) });
-      expect(result.markdown).toBe(md);
-      expect(result.fixedCount).toBe(0);
+      const result = fixes(md, { quantityAnchors: [anchorAt(md, '级配碎石', 18949.52, 18000, 'm²')] });
+      expect(result.markdown).toBe('殷郢组段级配碎石铺设18000m²。');
+      expect(result.fixedCount).toBe(1);
     });
 
-    it('J25 规格限定词后置（DN200）→ 分规格量不归一', () => {
+    it('J25 规格限定词后置（DN200）零豁免：锚点照替换', () => {
       const md = '钢带PE增强螺旋波纹管DN200铺设2170m。';
-      const result = fixes(md, { authorityIndex: fixtureIndex({ quantity: [{ label: '螺旋波纹管', value: 2000, unit: 'm' }] }) });
-      expect(result.markdown).toBe(md);
-      expect(result.fixedCount).toBe(0);
+      const result = fixes(md, { quantityAnchors: [anchorAt(md, '螺旋波纹管', 2170, 2000, 'm')] });
+      expect(result.markdown).toBe('钢带PE增强螺旋波纹管DN200铺设2000m。');
+      expect(result.fixedCount).toBe(1);
     });
 
-    it('J26 句内全不一致无总量锚点 → 不豁免 → 全部按清单归一', () => {
+    it('J26 三锚点同句（无总量豁免）：全部按锚点替换', () => {
       const md = '挖一般土方146.93m³，级配碎石480.5m³，水泥混凝土572.3m³。';
       const result = fixes(md, {
-        authorityIndex: fixtureIndex({
-          quantity: [
-            { label: '挖一般土方', value: 300, unit: 'm³' },
-            { label: '级配碎石', value: 1000, unit: 'm³' },
-            { label: '水泥混凝土', value: 1200, unit: 'm³' },
-          ],
-        }),
+        quantityAnchors: [
+          anchorAt(md, '挖一般土方', 146.93, 300, 'm³'),
+          anchorAt(md, '级配碎石', 480.5, 1000, 'm³'),
+          anchorAt(md, '水泥混凝土', 572.3, 1200, 'm³'),
+        ],
       });
       expect(result.markdown).toBe('挖一般土方300m³，级配碎石1000m³，水泥混凝土1200m³。');
       expect(result.fixedCount).toBe(3);
     });
 
-    it('J27 句级豁免不触发（大差异 1 条 + 小差异 1 条）→ 两条都按清单归一', () => {
+    it('J27 两条目同句（句级豁免已废）：各锚点独立替换', () => {
       const md = '拆除路面633m²，级配碎石铺设18949.52m²，压实度符合要求。';
       const result = fixes(md, {
-        authorityIndex: fixtureIndex({
-          quantity: [
-            { label: '拆除路面', value: 2134, unit: 'm²' },
-            { label: '级配碎石', value: 18000, unit: 'm²' },
-          ],
-        }),
+        quantityAnchors: [
+          anchorAt(md, '拆除路面', 633, 2134, 'm²'),
+          anchorAt(md, '级配碎石', 18949.52, 18000, 'm²'),
+        ],
       });
       expect(result.markdown).toContain('拆除路面2134m²');
       expect(result.markdown).toContain('级配碎石铺设18000m²');
       expect(result.fixedCount).toBe(2);
     });
 
-    it('J28 最长条目名优先：长条目值一致时不改，短条目被 occupied 拦截', () => {
+    it('J28 名称形态无关：短名锚点照替换（名称不参与匹配）', () => {
       const md = '塑料管铺设8205.53m。';
       const result = fixes(md, {
-        authorityIndex: fixtureIndex({
-          quantity: [
-            { label: '塑料管铺设', value: 8205.53, unit: 'm' },
-            { label: '塑料管', value: 7525.01, unit: 'm' },
-          ],
-        }),
+        quantityAnchors: [anchorAt(md, '塑料管', 8205.53, 7525.01, 'm')],
       });
-      expect(result.markdown).toBe(md);
-      expect(result.fixedCount).toBe(0);
+      expect(result.markdown).toBe('塑料管铺设7525.01m。');
+      expect(result.fixedCount).toBe(1);
     });
 
-    it('J29 表格行内工程量不修（分村分表数据交修复轮）', () => {
+    it('J29 表格行零豁免（掩码在采集层）：锚点照替换', () => {
       const md = '| 级配碎石 | 18949.52m² |';
-      const result = fixes(md, { authorityIndex: fixtureIndex({ quantity: [{ label: '级配碎石', value: 18000, unit: 'm²' }] }) });
-      expect(result.markdown).toBe(md);
-      expect(result.fixedCount).toBe(0);
+      const result = fixes(md, { quantityAnchors: [anchorAt(md, '级配碎石', 18949.52, 18000, 'm²')] });
+      expect(result.markdown).toBe('| 级配碎石 | 18000m² |');
+      expect(result.fixedCount).toBe(1);
     });
   });
 
@@ -285,13 +284,18 @@ describe('dicNumericFixes2 · J 组：数值一致性确定性修复聚合器', 
       expect(result.details.length).toBe(2);
     });
 
-    it('J31 details 上限截断：13 处替换 fixedCount 全记、details slice(0,12)', () => {
-      const entries = Array.from({ length: 13 }, (_, i) => ({ label: `清单条目${String(i + 1).padStart(2, '0')}`, value: 90, unit: 'm²' }));
+    it('J31 details 上限截断：13 锚点替换 fixedCount 全记、details slice(0,8)', () => {
       const md = Array.from({ length: 13 }, (_, i) => `清单条目${String(i + 1).padStart(2, '0')}铺设100m²。`).join('\n');
-      const result = fixes(md, { authorityIndex: fixtureIndex({ quantity: entries }) });
+      const anchors: QuantityConflictAnchor[] = Array.from({ length: 13 }, (_, i) => {
+        const name = `清单条目${String(i + 1).padStart(2, '0')}`;
+        const nameEnd = md.indexOf(name) + name.length;
+        const at = md.indexOf('100', nameEnd);
+        return { name, value: 100, unit: 'm²', authorityValue: 90, start: at, end: at + 3 };
+      });
+      const result = fixes(md, { quantityAnchors: anchors });
       expect(result.markdown).not.toContain('100m²');
       expect(result.markdown).toContain('清单条目01铺设90m²');
-      // fixedCount 全记 13，但每个内部修复器的 applySpanReplacements 自身 details 去重后 slice(0,8)，
+      // fixedCount 全记 13，但 applySpanReplacements 自身 details 去重后 slice(0,8)，
       // 聚合器外层 slice(0,12) 为再保险 → 实际保留 8 条（实现行为锁定）
       expect(result.fixedCount).toBe(13);
       expect(result.details.length).toBe(8);

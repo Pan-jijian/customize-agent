@@ -9,6 +9,7 @@ import { markdownTableQualityIssues } from '@/services/document-workflow/quality
 import { repairTableBlockLines } from '@/services/document-workflow/tableRepairHelpers';
 import { splitMarkdownTableLine, stripTableCellInvisibleChars } from '@/services/document-workflow/helpers/markdownCleanup';
 import type { DocumentFactsModel, SpecAuthorityMap, TenderRequirementModel } from '@/services/document-workflow/types';
+import type { QuantityConflictAnchor } from '@/services/document-workflow/integratedBlueprint';
 import { fixtureIndex } from './authorityFixture';
 
 vi.mock('@/services/document-workflow/semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
@@ -1706,131 +1707,60 @@ describe('清单红线权威比对（丰乐镇第五版实测 P1 养护期 / P3 
   });
 });
 
-describe('fixQuantityAuthorityConflicts（G3 清单工程量权威定点校正）', () => {
-  const authorities = [
-    { name: '级配碎石', value: 20931.02, unit: 'm²' },
-    { name: '路床(槽)碾压检验', value: 19930.52, unit: 'm²' },
-    { name: '挖一般土方', value: 4187.38, unit: 'm³' },
-    { name: '拆除路面', value: 2134, unit: 'm²' },
-  ];
+describe('fixQuantityAuthorityConflicts（S5 判定层锚点直连：豁免全废，只做坐标替换）', () => {
+  /** 锚点构造：按正文字面值定位坐标（生产由判定层裁决产出；值 == 权威不入候选） */
+  function anchorAt(markdown: string, name: string, value: number, authorityValue: number, unit = ''): QuantityConflictAnchor {
+    const at = markdown.indexOf(String(value));
+    return { name, value, unit, authorityValue, start: at, end: at + String(value).length };
+  }
 
-  it('同名数值漂移替换为清单汇总值', () => {
+  it('锚点冲突值 → 替换为清单汇总值；未裁决条目不在锚点内 → 不动', () => {
     const markdown = '道路工程主要工程量包括级配碎石基层18949.52m²、水泥混凝土面层18799.52m²。';
-    const result = fixQuantityAuthorityConflicts(markdown, authorities);
+    const result = fixQuantityAuthorityConflicts(markdown, [anchorAt(markdown, '级配碎石', 18949.52, 20931.02, 'm²')]);
     expect(result.fixedCount).toBe(1);
     expect(result.markdown).toContain('级配碎石基层20931.02m²');
+    expect(result.markdown).toContain('水泥混凝土面层18799.52m²');
   });
 
-  it('括号形态变体互配（路床(槽) ↔ 路床（槽））', () => {
-    const markdown = '路床（槽）碾压检验18429.52m²，压实度不低于93%。';
-    const result = fixQuantityAuthorityConflicts(markdown, authorities);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown).toContain('路床（槽）碾压检验19930.52m²');
+  it('微漂移（4190.5 vs 4187.38）与大幅漂移（633 vs 2134）均锚点直连校正', () => {
+    const micro = '挖一般土方4190.5m³。';
+    expect(fixQuantityAuthorityConflicts(micro, [anchorAt(micro, '挖一般土方', 4190.5, 4187.38, 'm³')]).markdown).toContain('挖一般土方4187.38m³');
+    const macro = '拆除路面633m²。';
+    expect(fixQuantityAuthorityConflicts(macro, [anchorAt(macro, '拆除路面', 633, 2134, 'm²')]).markdown).toContain('拆除路面2134m²');
   });
 
-  it('名称前含村级地名豁免（单村分表量不归一）', () => {
-    const markdown = '马老郢村路床（槽）碾压检验1436.4m²。';
-    const result = fixQuantityAuthorityConflicts(markdown, authorities);
-    expect(result.fixedCount).toBe(0);
+  it('修复层零豁免：村名/规格前置/表格行/部位语境锚点照常替换（裁决在判定层）', () => {
+    const village = '马老郢村路床（槽）碾压检验18429.52m²。';
+    expect(fixQuantityAuthorityConflicts(village, [anchorAt(village, '路床(槽)碾压检验', 18429.52, 19930.52, 'm²')]).markdown).toContain('路床（槽）碾压检验19930.52m²');
+    const spec = '污水管网包含直径450塑料检查井40座。';
+    expect(fixQuantityAuthorityConflicts(spec, [anchorAt(spec, '塑料检查井', 40, 555, '座')]).markdown).toContain('直径450塑料检查井555座');
+    const table = '| 方岗段 | 道路、铺装 | 路床碾压1436.4m² |';
+    const at = table.indexOf('1436.4');
+    expect(fixQuantityAuthorityConflicts(table, [{ name: '路床(槽)碾压检验', value: 1436.4, unit: 'm²', authorityValue: 19930.52, start: at, end: at + '1436.4'.length }]).markdown).toContain('19930.52');
+    const part = '生态池外围栽植色带90m²，配套金属扶手、栏杆、栏板224m。';
+    expect(fixQuantityAuthorityConflicts(part, [anchorAt(part, '栽植色带', 90, 552, 'm²')]).markdown).toContain('栽植色带552m²');
   });
 
-  it('与权威值一致不动', () => {
-    const markdown = '挖一般土方4187.38m³。';
-    const result = fixQuantityAuthorityConflicts(markdown, authorities);
-    expect(result.fixedCount).toBe(0);
-  });
-
-  it('D2 零漂移豁免：微漂移（4190.5 vs 4187.38，差 0.07%）同样定点替换为清单汇总值', () => {
-    const markdown = '挖一般土方4190.5m³。';
-    const result = fixQuantityAuthorityConflicts(markdown, authorities);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown).toContain('挖一般土方4187.38m³');
-  });
-
-  it('大幅漂移同样校正（拆除路面 633 vs 权威 2134）', () => {
-    const markdown = '拆除路面633m²。';
-    const result = fixQuantityAuthorityConflicts(markdown, authorities);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown).toContain('拆除路面2134m²');
-  });
-
-  it('名称后先出现其他单位数值时仍锁定工程量（厚度 15cm 场景）', () => {
+  it('名称后其他单位数值不受影响（级配碎石基层（厚度15cm）共18949.52m²）', () => {
     const markdown = '级配碎石基层（厚度15cm）共18949.52m²。';
-    const result = fixQuantityAuthorityConflicts(markdown, authorities);
+    const result = fixQuantityAuthorityConflicts(markdown, [anchorAt(markdown, '级配碎石', 18949.52, 20931.02, 'm²')]);
     expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('厚度15cm');
     expect(result.markdown).toContain('共20931.02m²');
   });
 
-  it('无权威清单时零改动', () => {
+  it('锚点名称与正文无关也照替换（名称仅作修复说明，无名称弹性匹配）', () => {
+    const markdown = '本分项工程量为：塑料管铺设8205.53m。';
+    const result = fixQuantityAuthorityConflicts(markdown, [anchorAt(markdown, '塑料管', 8205.53, 7525.01, 'm')]);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('塑料管铺设7525.01m');
+    expect(result.details[0]).toContain('塑料管 ');
+  });
+
+  it('无锚点/空锚点 → 零改动零统计', () => {
     const markdown = '级配碎石基层18949.52m²。';
-    const result = fixQuantityAuthorityConflicts(markdown, []);
-    expect(result).toEqual({ markdown, fixedCount: 0, details: [] });
-  });
-
-  it('最长条目名优先：「塑料管铺设8205.53m」不被「塑料管」条目误改', () => {
-    const markdown = '本分项工程量为：塑料管铺设8205.53m；挖基坑土方42.12m³。';
-    const result = fixQuantityAuthorityConflicts(markdown, [
-      { name: '塑料管', value: 7525.01, unit: 'm' },
-      { name: '塑料管铺设', value: 8205.53, unit: 'm' },
-    ]);
-    expect(result.fixedCount).toBe(0);
-    expect(result.markdown).toContain('塑料管铺设8205.53m');
-  });
-
-  it('规格前置豁免：「直径450塑料检查井40座」不被汇总条目「塑料检查井555座」覆盖', () => {
-    const markdown = '污水管网包含直径450塑料检查井40座、直径630塑料检查井79座。';
-    const result = fixQuantityAuthorityConflicts(markdown, [{ name: '塑料检查井', value: 555, unit: '座' }]);
-    expect(result.fixedCount).toBe(0);
-    expect(result.markdown).toContain('直径450塑料检查井40座');
-  });
-
-  it('规格后置豁免：「波纹管DN200铺设2170m」分规格量不归一', () => {
-    const markdown = '钢带PE增强螺旋波纹管DN200铺设2170m。';
-    const result = fixQuantityAuthorityConflicts(markdown, [{ name: '钢带PE增强螺旋波纹管', value: 3200, unit: 'm' }]);
-    expect(result.fixedCount).toBe(0);
-  });
-
-  it('表格行豁免：分村分表数据行不归一', () => {
-    const markdown = '| 方岗段 | 道路、铺装 | 路床碾压1436.4m²、挖一般土方359.1m³ | 土方班组1个 |';
-    const result = fixQuantityAuthorityConflicts(markdown, authorities);
-    expect(result.fixedCount).toBe(0);
-  });
-
-  it('段落级村名豁免：村名列表远离条目名时整段不归一', () => {
-    const markdown = '殷郢组、张大郢、五星等自然村组，主要作业内容为整体化粪池安装、塑料管铺设及配套土方开挖回填。本分项工程量为：砌筑检查井2座；挖基坑土方42.12m³；回填方42.12m³。';
-    const result = fixQuantityAuthorityConflicts(markdown, [{ name: '挖基坑土方', value: 68.68, unit: 'm³' }, { name: '回填方', value: 15481.48, unit: 'm³' }]);
-    expect(result.fixedCount).toBe(0);
-  });
-
-  it('句级口径豁免：分部量列举句（多数条目大幅差异）整句不归一', () => {
-    const markdown = '景观工程主要工程量包括挖一般土方146.93m³、级配碎石480.5m²、水泥混凝土572.3m²、人行道板安砌114.8m²、仿木护栏333m。';
-    const result = fixQuantityAuthorityConflicts(markdown, [
-      ...authorities,
-      { name: '水泥混凝土', value: 20872.82, unit: 'm²' },
-      { name: '人行道板安砌', value: 264.8, unit: 'm²' },
-      { name: '仿木护栏', value: 333, unit: 'm' },
-    ]);
-    expect(result.fixedCount).toBe(0);
-    expect(result.markdown).toContain('挖一般土方146.93m³');
-  });
-
-  it('句级口径豁免不误杀：小差异条目与真实漂移共存时照修（2.1 道路段 3 大 4 小）', () => {
-    const markdown = '道路工程主要工程量包括挖一般土方4040.45m³、路床（槽）碾压检验18949.52m²、级配碎石基层18949.52m²，以及拆除路面633m²、拆除基层633m²、余方弃置158.25m³。';
-    const result = fixQuantityAuthorityConflicts(markdown, [
-      ...authorities,
-      { name: '拆除基层', value: 2134, unit: 'm²' },
-      { name: '余方弃置', value: 3245.5, unit: 'm³' },
-    ]);
-    expect(result.fixedCount).toBe(6);
-    expect(result.markdown).toContain('挖一般土方4187.38m³');
-    expect(result.markdown).toContain('拆除路面2134m²');
-    expect(result.markdown).toContain('余方弃置3245.5m³');
-  });
-
-  it('生态池部位量豁免：「生态池外围栽植色带90m²」不被「栽植色带」汇总值误改', () => {
-    const markdown = '生态池外围栽植色带90m²，配套金属扶手、栏杆、栏板224m。';
-    const result = fixQuantityAuthorityConflicts(markdown, [{ name: '栽植色带', value: 552, unit: 'm²' }]);
-    expect(result.fixedCount).toBe(0);
+    expect(fixQuantityAuthorityConflicts(markdown, [])).toEqual({ markdown, fixedCount: 0, details: [] });
+    expect(fixQuantityAuthorityConflicts(markdown).markdown).toBe(markdown);
   });
 });
 

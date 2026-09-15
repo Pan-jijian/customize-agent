@@ -73,6 +73,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
       progressStages: session.global.progressStages, emitProgress: session.global.emitProgress, withProgressHeartbeat: session.global.withProgressHeartbeat,
       blueprintData: session.blueprint.integratedBlueprint?.validation.passed ? session.blueprint.integratedBlueprint.data : undefined,
       billFactLock: session.blueprint.billFactLock,
+      // 标书编制规格（暗标禁表/禁图）：跨章一致性修复与内部修复链同口径
+      bidComposition: session.understanding.bidComposition,
     });
     globalConsistencyIssues = reviewed.issues;
     globalDedupRan = reviewed.dedupRan;
@@ -84,6 +86,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
       chapterDraftsFinal: session.chapterLoop.chapterDraftsFinal, template: session.prepare.template, repairPromptTexts: session.prepare.repairPromptTexts,
       projectContext: session.planning.projectContext, requirement: session.global.input.requirement, signal: session.global.input.signal,
       generationDiagnostics: session.planning.generationDiagnostics, progressStages: session.global.progressStages, emitProgress: session.global.emitProgress, withProgressHeartbeat: session.global.withProgressHeartbeat,
+      bidComposition: session.understanding.bidComposition,
     });
   }
 
@@ -93,6 +96,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     chapterDraftsFinal: session.chapterLoop.chapterDraftsFinal, template: session.prepare.template, repairPromptTexts: session.prepare.repairPromptTexts,
     requirement: session.global.input.requirement, signal: session.global.input.signal,
     generationDiagnostics: session.planning.generationDiagnostics, progressStages: session.global.progressStages, emitProgress: session.global.emitProgress, withProgressHeartbeat: session.global.withProgressHeartbeat,
+    bidComposition: session.understanding.bidComposition,
   });
 
   // 表格执行率确定性核验已提取至 globalQualityGates.repairTableExecutionGaps（单轮定向补表修复闭环，失败即放弃）
@@ -100,6 +104,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
     effectiveChapters: session.planning.effectiveChapters, chapterDraftsFinal: session.chapterLoop.chapterDraftsFinal, template: session.prepare.template, repairPromptTexts: session.prepare.repairPromptTexts,
     requirement: session.global.input.requirement, signal: session.global.input.signal,
     generationDiagnostics: session.planning.generationDiagnostics, progressStages: session.global.progressStages, emitProgress: session.global.emitProgress, withProgressHeartbeat: session.global.withProgressHeartbeat,
+    // 暗标禁表：补表闭环反转为拆表闭环（正文残留表格改写为段落式叙述）
+    bidComposition: session.understanding.bidComposition,
   });
 
   // h15 补表后确定性去重已提取至 globalQualityGates.dedupeAfterTableFix；
@@ -129,6 +135,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     projectUnderstanding: session.prepare.projectUnderstanding, projectContext: session.planning.projectContext, projectRoot: session.prepare.projectRoot, projectId: session.prepare.projectId, readiness: session.prepare.readiness,
     factExtractionPromptTexts: session.prepare.factExtractionPromptTexts,
     blueprintData: session.blueprint.integratedBlueprint?.validation.passed ? session.blueprint.integratedBlueprint.data : undefined,
+    bidComposition: session.understanding.bidComposition,
     billFactLock: session.blueprint.billFactLock,
     requirementSemantics: session.prepare.requirementSemantics,
     hasExplicitOutline: session.prepare.hasExplicitOutline, missingItems: session.understanding.missingItems, retrievalCoverageReports: session.understanding.retrievalCoverageReports,

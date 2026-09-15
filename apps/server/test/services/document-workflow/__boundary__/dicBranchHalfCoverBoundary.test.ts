@@ -201,21 +201,25 @@ describe('GG10 体系缩放：无后续替换时计数 +1', () => {
   });
 });
 
-// ── GG11. fixQuantityAuthorityConflicts：多段落窗（L3430 paraStart 非 -1） ──
+// ── GG11. fixQuantityAuthorityConflicts：跨段落锚点直连（S5 无段落窗） ──
 
-describe('GG11 清单量定点校正：跨段落段落窗', () => {
-  it('GG11 名称前有段落分隔 → paraFrom 取段首 → 照常修复 50→100', () => {
-    const result = fixQuantityAuthorityConflicts('主要工程量：\n\nC.1项铺装 50m。', [{ name: 'C.1项铺装', value: 100, unit: 'm' }]);
+describe('GG11 清单量定点校正：跨段落锚点直连', () => {
+  it('GG11 名称前有段落分隔 → 锚点照常替换 50→100', () => {
+    const markdown = '主要工程量：\n\nC.1项铺装 50m。';
+    const at = markdown.indexOf('50', markdown.indexOf('C.1项铺装') + 'C.1项铺装'.length);
+    const result = fixQuantityAuthorityConflicts(markdown, [{ name: 'C.1项铺装', value: 50, unit: 'm', authorityValue: 100, start: at, end: at + 2 }]);
     expect(result.fixedCount).toBe(1);
     expect(result.markdown).toContain('C.1项铺装 100m。');
   });
 });
 
-// ── GG12. fixQuantityAuthorityConflicts：窗口内更近候选替换 best（L3448-3449） ──
+// ── GG12. fixQuantityAuthorityConflicts：锚点唯一性（无窗口取近候选启发） ──
 
-describe('GG12 清单量定点校正：双候选取更近', () => {
-  it('GG12 窗口内 100m 与 85m → 85 更近权威 90 → best 更新为 85 → 替换 85→90', () => {
-    const result = fixQuantityAuthorityConflicts('C.1项铺装 100m和85m。', [{ name: 'C.1项铺装', value: 90, unit: 'm' }]);
+describe('GG12 清单量定点校正：锚点唯一性', () => {
+  it('GG12 正文 100m 与 85m，锚点指向 85 → 只改 85→90，100m 原样', () => {
+    const markdown = 'C.1项铺装 100m和85m。';
+    const at = markdown.indexOf('85');
+    const result = fixQuantityAuthorityConflicts(markdown, [{ name: 'C.1项铺装', value: 85, unit: 'm', authorityValue: 90, start: at, end: at + 2 }]);
     expect(result.fixedCount).toBe(1);
     expect(result.markdown).toBe('C.1项铺装 100m和90m。');
   });

@@ -1,5 +1,93 @@
 # server
 
+## 4.37.0
+
+### Minor Changes
+
+- 4.37.0 缺陷修复与语义判定重构（v4 方案：不兜底·不造数·不靠人工）：
+
+  - S1 生成链瘦身：评标相关条款生成链与死条款全部删除（施工组织设计技术标定位纯化，无保留兼容）
+  - S2 豁免审计（29 份真实产物重放 + 数值全量溯源）：发现并修复两项缺陷——① 收集器括号变体缺口
+    （flexNameOptionalPattern 升级：括号段整体可省略 + 严格/省略两轮命中统一分配防抢占，含括号条目
+    命中 13192→13642、候选 479→504 全部审查无错绑、零丢失）；② B3 章级写时对齐 quantities 分支拆除
+    （「每 20931.02m²不少于 1 点」检测频次句被直替为工程量的实物破坏；工程量不一致引用统一交 S5 判定链裁决）
+  - S3 资料直取：绿化品种白名单删除改为清单原文直取；8 处默认参数显式化；strategyId 按解析结果精确落盘
+  - S4 不造数：自编系数推导删除改缺口显式化；工艺参数补依据
+  - S5 语义判定链（词表豁免全废除）：新增 semanticAdjudication 判定层（LLM 三态裁决
+    consistent/conflict/uncertain + 批量 + 缓存 + 判定不可用显式暴露，不回退词表猜测、不静默放行）；
+    integratedBlueprint 引用检测改为「结构定位 + 语义判定」（collect 候选 → LLM 判定 → conflict
+    产修复锚点 → fixers 锚点直连替换，删除全部平行豁免链）；detectors 跨工程检测规格句豁免改走判定层；
+    gates/stage5/finalValidation 调用点接入
+  - S6 模块拆分（零行为）：integratedBlueprint.ts（3023 行）按职责拆为 9 个模块 + 门面
+    （types/parse/derive/decisionLock/outline/capacity/render/validate/citation；门面 re-export 公共 API 逐一对应）
+  - 验证：tsc 零错误、全量 13041 用例 13040 通过（1 skipped）、拆分前后行级零行为校验通过
+
+## 4.36.2
+
+### Patch Changes
+
+- 4.36.2 深度复查修正：修复轮事件诊断可见性 parity + 图集引用清洗补接 round-2 链
+
+  - 修复轮事件双写 parity（finalStages = executionStages 快照（早于修复轮）+ finalGateRepairStages，
+    单写事件在持久化 executionStages 中不可见）：deterministic-stage5 两处汇总事件
+    （deterministic-surface-fix 33 项计数 / deterministic-consistency-fix 总量）、
+    numeric-verification 核对通过事件、planned-section-repair 轮内事件
+    （enforcePlannedSectionCompleteness 增加 finalGateRepairStages 可选入参、
+    postReviewSurface 修复轮调用传参；生成期调用行为不变）
+  - 清洗器补诊断事件（有修改才推、零噪音、双写）：formal-source-clean / commercial-strip /
+    table-deterministic-repair / post-review-surface（round-2 链聚合计数）/ terminology-strip /
+    toc-consistency——此前这些清洗器修改最终成稿后无任何事件，生成后复盘不可见
+  - atlas-reference 补接 round-2 链（文件头治理目标「round-2 曾缺图集引用清洗」的遗留漂移）：
+    stage5 之后的 LLM 补写轮可再引入「做法参照 XX 图集」类引用，此前 round-2 链无确定性收敛点
+  - 测试锁定：numeric 通过分支双写断言、planned-section-repair 双写用例（running 原位收口）、
+    round-2 链顺序快照更新
+
+## 4.36.1
+
+### Patch Changes
+
+- 4.36.1 深度复查修正（A2 章片段重放接线 + stage5 重建门结构性修复 + 路面结构决策锁误报根治）：
+
+  - A2 章片段模式接线修正（structureIntegrityRules/deterministicFixChains）：stage5 逐章链输入为章片段（写作侧未编号章标题行「## 工程概况」，装配层成文时才替换为「## 第 N 章」），section-renumber 经 ctx.chapterNumber 按章序整段重放（章序=草案下标+1=装配层「## 第{index+1}章」渲染序=终检 sectionNumberingIssues 口径，三源同值）；片段内未编号 H2 与陈旧「## 第 N 章」行（≤1 条容差）均不清除权威章号——原缺陷下片段内全部 H3/H4 重放静默失效；round-2 全文链不注入章序（复用共享 ctx 不写回），维持「## 第 N 章」行解析
+  - stage5 重建门结构性修复（deterministicStage5）：重建判定由「逐键列举」改为「注册表计数集合任意命中」（surfaceFixCounts.size）——历史门条件漏列 6 个步骤键（templated-labels/structure-integrity/repeated-words/collision-numbered-heading/inverted-date-range/internal-term-heading），仅这些步命中时章节侧修复不触发 rebuild、不进入 finalMarkdown（修复丢失且检测复报死区）；集合判定与 SURFACE_FIX_STEPS 注册表天然同步，新增步骤零维护；诊断消息同步补全 6 项计数
+  - pavement_structure 决策锁去 exclusive 单值锁（integratedBlueprint）：面层沥青+基层半刚性为道路工程合法组合，exclusive 锁会把锁外「半刚性」判为语义矛盾误报 blocker（semanticChoiceConflicts）→ LLM 修复轮误改真实内容；改多值共存锁定，D3 两可表述裁决路径不变（有锁归一/无锁缺口）
+  - 回归测试：invariantGovernance436 新增 5 用例（真实片段形态未编号 H2 按章序重放/陈旧「## 第 N 章」以调用方章序接管/未传与非法章序零改动/链步骤消费 ctx.chapterNumber/路面多值共存零误报 + exclusive 元数据断言）
+
+## 4.36.0
+
+### Minor Changes
+
+- 4.36.0 生成链路不变量治理批次（从「缺陷拦截」到「不变量治理」· 远端 4.35.0 报错根治）：
+
+  - INV-1 结构不变量（A1/A2/A3）：标题同一性单源（装配/清洗共用 sectionIdentity，计划标题尾部防撞名括号剥离）；小节编号链尾原子重放（renumberSectionHeadings 接入 stage5/round-2 双链末端——清洗层删除重复 H3 行后的编号空档必然收敛，H3 连续单调 + H4 父前缀同步，目录/围栏保护、幂等）；patchGuard 结构预检（删 H3/降级合并/空节写入即拒），rolePipeline 装配校验加 H3 守恒
+  - INV-4 完整性（C1/B2/B4）：全角括号/书名号成对性入块级质检——scanPunctuationBalance 写时熔断（不闭合即 blocking 重写，符号对定义与终检 punctuationArtifactIssues 单源共用，块级计数解决全文计数互相抵消掩盖）；工伤保险检测-定位单源（hasWorkInjuryInsuranceStatement 字面短路，检测与修复幂等共用同一判定，书名号引用剥离）；宽松门死代码整体删除（allowLenientStructureGate 参数与降级放行分支及别名函数，结构缺陷统一严格拒绝，不存在绕过通道）
+  - INV-2 单源（D1/D3）：决策项注册表扩围——新增 4 类设计决策类目（基础形式/设备减振方式/混凝土浇筑连续组织/路面结构类型），weakAliases 弱形态机制（仅定位锚定不参与锁计分）；两可表述「A 或 B」模式化裁决——matchDecisionCategory 双侧覆盖规则（强弱别名协同，防「柔性接口」类裸词误配）与检测器/修复器单一事实源，修复器按决策锁归一（有锁）/转缺口（无锁，重扫不静默）；替换双侧贴缘约束（左组后缀/右组前缀，邻接正文全保留）
+  - 回归测试：新增 4.36 不变量治理专项 19 用例（编号重放/H3H4 同步/目录保护/幂等、块级成对性/反馈接线、注册表双侧覆盖/锚定/裁决三态贴缘拒绝、工伤字面短路）；链顺序快照与 B4 测试同步更新；全量 check 13102 用例通过
+
+## 4.35.0
+
+### Minor Changes
+
+- 4.35.0 生成容量「要点密度可行性」闭环（4.34 自测「主要施工方法」章阻断根因治理）：
+
+  - 归并密度封顶（规划层）：块内要点数硬封顶 6（复用单次调用输出安全语义），归并/主题域切块/兜底分块任何路径都不再产出超密度块；块数允许超「章目标/1800」上限，扩容由软下限与 Σ 守恒吸收——根治「12 要点块 × 1800 字 = 每要点 150 字 < 单要点最小可写量 300 字 → 骨架质检物理不可达 → 块必败、章必败」
+  - 章预算可行性重校准（规划层）：蓝图落盘且校验通过后（写作前），逐章按真实要点数（工作包数 + 未覆盖模板小节数）计算 minFeasible = ceil(要点数/6) × 1800——低于下限的章抬升至下限、其余章按需求归一化缩减，Σ 章预算 = 全文目标精确守恒（含断言防御）；下限合计超目标时按下限比例压缩并显式告警（对齐既有「篇幅预算不足」路径，不静默）；仅长文显式目标（≥4 万字）且蓝图校验通过时执行，其余情形零影响；tuningProfile.capacityFeasibilityRecalibration=0 应急回退
+  - 块内超密度守卫（规划层兜底）：预算分配后「要点数 > floor(块预算/300)」时保留前 cap-1 个详写要点、其余合并为一个 brief 概览要点（sources 全量保留——覆盖清单/引用校验不受影响）+ 告警日志，小目标文档/极端参数下重校准仍不可行时降级不失败
+  - 阶段挂载与观测：stageBlueprint 重校准进度行（逐章 from → to 字 + 要点数与密度下限口径）；导出 estimateChapterMinFeasibleWords / reanchorChapterTargetsByFeasibility
+  - 契约测试同步：integratedBlueprint 新增归并密度封顶/超密度守卫/要点数估算 3 用例；budget 新增章预算重校准（锚定/压缩/幂等）3 用例；r26 新增舒城形态回归 fixture（13 小节 96 工作包 + 7 模板小节 → 主要施工方法章预算 15600 → 32400、18 块 ≤6 要点且 Σ 守恒、反向对照 4.34 原预算不失败）；stageBlueprint 新增挂载门控 5 用例（正向锚定/非长文跳过/校验未过跳过/蓝图异常跳过/开关关闭跳过）
+
+## 4.34.0
+
+### Minor Changes
+
+- 4.34.0 生成性能根因治理（舒城实测 130 分钟 / 9 章阻断修复）：
+
+  - 容量校准（规划层）：单块可写下限 1200→1800 字（块数上限 = 章目标/此值）、拆块阈值 4500→2800 字（对齐模型自然输出区间约 1900~2700）、新增单块硬上限 4500（不可拆块触顶接受章级欠产显式暴露）；块预算分配加下限保护（低于下限抬升 → 按可回收量比例回收 → 取整余数逐字扣减 → Σ 守恒收口），绝不向写作层下发不可写预算——小目标块系统性超产 2~3 倍、大目标块系统性欠产 0.67~0.78× 的错配根治
+  - 字数合同分层验收（写作层）：达标区 [0.85,1.15] 直通；接受区 [0.7,1.4] 记录放行不耗重写；越界区（<0.7 或 >1.4）仅首轮（attempt=0）阻断重写一次、二轮一律放行；确定性修复通道同步按 [0.7,1.4] 复核——消除重写风暴（单块写作次数 2.5~4× → ~1.2×，章级耗时对照 ~2.2×→~1.0×）
+  - 容器块归并屏障：容量归并时容器块（全章总述）独立成组、不被分部块吸收（保持单要点总述语义，P2.5/P2.7 契约）；软下限 = min(1800, 公平份额) 保证任意结构下 Σ 下限 ≤ 章目标、抬升回收必然可行；拆分循环加块数上限门（拆出块预算低于可写下限即停拆）
+  - 章阻断消息归因（消息层）：章阻断消息与详情呈现真实失败原因（generationDiagnostics.llm.lastError），不再统一误报「大模型未返回有效正文」
+  - 契约测试同步：plannedBlockRetry 新增分层验收 3 用例（接受区直通/两轮严重不足放行/首轮严重超产阻断换压缩指令）、r26-convergence 与 fl-p0-acceptance 容量断言更新（块数上限 1800 口径、容器归并屏障、Σ 精确守恒）
+
 ## 4.33.0
 
 ### Minor Changes

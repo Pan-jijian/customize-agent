@@ -237,6 +237,9 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   { id: 'prompt-example-leak', scope: 'full-document', category: 'format' },
   { id: 'degenerate-content', scope: 'chapter', category: 'style' },
   { id: 'planned-auto-spec-gate', scope: 'full-document', category: 'structure' },
+  // 暗标正文禁表反向门禁（markdownComposer.bodyCompositionTableIssues，标书编制规格 bodyTablePolicy=forbidden）：
+  // 正文残留 Markdown 表格即 blocker（招标暗标要求正文纯文字，结构化数据由文末附表区承载）
+  { id: 'bid-composition-body-table', scope: 'full-document', category: 'structure' },
   { id: 'planned-structure', scope: 'full-document', category: 'structure' },
   { id: 'prompt-document-rule', scope: 'full-document', category: 'format' },
   { id: 'local-adaptation-keyword', scope: 'full-document', category: 'evidence_coverage' },
@@ -337,6 +340,9 @@ export const DETERMINISTIC_FIXER_ANCHORS: readonly FixerEntry[] = [
   { id: 'truncated-title-completion', kind: 'deterministic', anchoredTo: 'title-integrity', giveUpOnFailure: true },
   // 4.27.2 句化标题切分（标题合并治理）：与检测器 title-integrity（句化标题「含逗号」判定）同源锚定
   { id: 'sentence-like-heading-split', kind: 'deterministic', anchoredTo: 'title-integrity', giveUpOnFailure: true },
+  // 4.36 A2 小节编号重放（结构事务化）：与检测器 section-numbering（编号连续性 blocker）同源锚定——
+  // 删行类修复器造成编号空档时链尾原子重排，检测定位=修复定位
+  { id: 'section-renumber', kind: 'deterministic', anchoredTo: 'section-numbering', giveUpOnFailure: true },
 ];
 
 /**

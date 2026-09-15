@@ -38,7 +38,7 @@ const TRUNCATED_SENTENCE_ARTIFACT_RES = [/：\s*：/u, /；：/u, /。：/u, /�
 
 /**
  * 对单个修复 patch 的 replacement 做确定性缺陷预检，返回命中的缺陷描述数组（空数组=通过）。
- * 十类检测器与确定性检测层同源同口径（P11 扩展，原四类保留）：
+ * 十类内容型检测器与确定性检测层同源同口径（P11 扩展，原四类保留）：
  * 1. 资料来源罗列句（E4）：SOURCE_ENUMERATION_PHRASE_RE 与 markdownComposer.sourcePhraseIssues 同源；
  * 2. 后台内部术语（E7）：词集与 internalTerminologyAnchors L1 精确词 + agentPlanner 禁止话术同源；
  * 3. 编造绝对日期（R5）：CALENDAR_DATE_RE 与 documentIntegrityChecks.fabricatedStartDateIssues 同源
@@ -50,8 +50,14 @@ const TRUNCATED_SENTENCE_ARTIFACT_RES = [/：\s*：/u, /；：/u, /。：/u, /�
  * 8. 装饰层工艺参数异常：直接复用 finishThicknessIssues（同函数即同源）；
  * 9. 占位符：FORMAL_PLACEHOLDER_PATTERNS 与 formalPlaceholderIssues 同源词表；
  * 10. 截断句残留双冒号形态：与 fixTruncatedSentenceArtifacts 同源同口径。
+ * 4.36 A3 结构类预检（11-14，修复轮 patch 不得破坏结构不变量 INV-1）：
+ * 11. 防撞名后缀标题（与装配层 A1 剥离口径同正则）：「（数字/中文数字）」结尾的标题行不得进正文；
+ * 12. 小节标题降级形态：H4 位置出现 X.Y 两段编号（H3 被降级强信号；H4 合法形态为 X.Y.Z 或纯文本）；
+ * 13. 空节形态：连续标题堆叠 / 片段尾裸标题（前面有实质行）——「（一）标题后无内容」类空节根因；
+ * 14. 对偶结构预检（original 可用时）：replacement 删除了原 H3 小节标题或将其降级为 H4/粗体。
+ * observe 模式只计数（新规则灰度采集），enforce 模式拒绝；结构变更由确定性结构操作通道承担（宁缺不假）。
  */
-export function deterministicDefectPrecheck(replacement: string): string[] {
+export function deterministicDefectPrecheck(replacement: string, original?: string): string[] {
   const hits: string[] = [];
   if (SOURCE_ENUMERATION_PHRASE_RE.test(replacement)) hits.push('资料来源罗列句');
   const terms = PATCH_GUARD_INTERNAL_TERMS.filter(term => replacement.includes(term));
@@ -71,5 +77,30 @@ export function deterministicDefectPrecheck(replacement: string): string[] {
   if (TRUNCATED_SENTENCE_ARTIFACT_RES.some(re => re.test(replacement))) hits.push('截断句残留双冒号');
   // 11. 句读标点叠用/括号与书名号不闭合（拼接删节残留）：直接复用 punctuationArtifactIssues 同函数即同源
   if (punctuationArtifactIssues(replacement).length > 0) hits.push('句读标点叠用/括号不闭合');
+  // 12-14. 结构类预检（与 A1/A2 结构不变量守护同层：装配拦截 + 链尾重放之外的修复轮入口守护）
+  const nonEmptyLines = replacement.split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
+  const headingLines = nonEmptyLines.filter(line => /^#{2,6}\s+\S/u.test(line));
+  const collisionSuffixed = headingLines.filter(line => /[（(]\s*(?:\d{1,3}|[一二三四五六七八九十]{1,3})\s*[）)]\s*$/u.test(line));
+  if (collisionSuffixed.length > 0) hits.push(`防撞名后缀标题“${collisionSuffixed[0]}”`);
+  const downgradedForm = headingLines.filter(line => /^####\s+\d+\.\d+(?!\.)\s+\S/u.test(line));
+  if (downgradedForm.length > 0) hits.push(`小节标题降级形态“${downgradedForm[0]}”`);
+  const stackedHeadings = nonEmptyLines.some((line, index) => index > 0 && /^#{2,6}\s+\S/u.test(line) && /^#{2,6}\s+\S/u.test(nonEmptyLines[index - 1]));
+  if (stackedHeadings) hits.push('连续标题堆叠（空节风险）');
+  if (nonEmptyLines.length > 1 && /^#{2,6}\s+\S/u.test(nonEmptyLines[nonEmptyLines.length - 1])) hits.push('尾部裸标题（空节风险）');
+  if (original) {
+    const h3Of = (text: string) => [...text.matchAll(/^###\s+(\S.*)$/gmu)].map(match => (match[1] || '').trim());
+    const originalH3 = h3Of(original);
+    const replacementH3 = h3Of(replacement);
+    if (replacementH3.length < originalH3.length) {
+      hits.push('删除小节标题');
+    } else if (originalH3.length > 0) {
+      const bareKey = (text: string) => text.replace(/^\d+(?:\.\d+)*\s+/u, '').trim();
+      const replacementH3Keys = new Set(replacementH3.map(bareKey));
+      const h4Keys = [...replacement.matchAll(/^#{4,6}\s+(.+)$/gmu)].map(match => bareKey(match[1] || ''));
+      const boldKeys = [...replacement.matchAll(/^\*\*(.+)\*\*\s*$/gmu)].map(match => (match[1] || '').trim());
+      const degraded = originalH3.map(bareKey).filter(key => key && !replacementH3Keys.has(key) && (h4Keys.includes(key) || boldKeys.includes(key)));
+      if (degraded.length > 0) hits.push(`小节标题降级“${degraded[0]}”`);
+    }
+  }
   return hits;
 }

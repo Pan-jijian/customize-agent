@@ -1,8 +1,9 @@
 /**
  * buildPlannedChapterContent（块写作合同）单测：
- * 块质检 = [0.85,1.15]×块目标双向区间（minWords 不打折）→ 首轮/二轮均阻断（越界 → 块失败 →
- * 上层隔离重试 → 章阻断，零降级）→ 标题层缺陷（重复 H4/清单外）确定性修复通道（修复后字数复核
- * 合同区间）→ 两轮不达标返回失败块隔离清单（不整章降级）。
+ * 字数分层验收（4.35）：达标区 [0.85,1.15] 直通；接受区 [0.7,1.4]（非达标区）记录放行不耗重写；
+ * 越界区 <0.7 或 >1.4 仅首轮阻断重写一次、二轮一律放行——字数不再构成块失败/章阻断（重写对字数
+ * 不收敛：舒城实测验收基准块 2270→2066→2376→1710）；结构硬门保留零降级（缺失/重复 H4、清单外
+ * 标题）→ 标题层缺陷确定性修复通道（修复后按接受区复核）→ 两轮不达标返回失败块隔离清单（不整章降级）。
  * LLM 通道 mock（callDocumentLlm 按 prompt 特征返回受控内容）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -41,7 +42,7 @@ function passingContent(h4s: string[], bodyChars: number): string {
   return `### 测量放线\n\n${h4s.map((title, index) => `#### ${title}\n\n${bodyLine(bodyChars, index)}`).join('\n\n')}`;
 }
 
-/** 字数不足的不达标正文（≥120 字符避免走 undefined 分支，但 <0.9×targetWords） */
+/** 字数严重不足且缺 3 个 H4 的短正文（≥120 字符避免走 undefined 分支，<0.7×targetWords 属越界区） */
 const shortContent = `### 测量放线\n\n#### ${H4A}\n\n${bodyLine(150, 0)}`;
 
 function mockDiagnostics(): DocumentGenerationDiagnostics {
@@ -88,7 +89,7 @@ function makeInput(overrides: Partial<PlannedInput> = {}): PlannedInput {
   };
 }
 
-describe('buildPlannedChapterContent（块写作合同：[0.85,1.15] 区间 + 重试 ≤2 次）', () => {
+describe('buildPlannedChapterContent（块字数分层验收 + 结构硬门 + 重试 ≤2 次）', () => {
   beforeEach(() => {
     vi.resetAllMocks();
   });
@@ -115,6 +116,35 @@ describe('buildPlannedChapterContent（块写作合同：[0.85,1.15] 区间 + �
     // A22 缺口数字反馈（块合同区间化）：重试轮带「距篇幅下限 425 字还缺 K 字」与补足指令
     expect(retryPrompt).toContain('距篇幅下限 425 字还缺');
     expect(retryPrompt).toContain('必须逐点展开补足');
+  });
+
+  it('接受区（0.7~0.85×，结构齐全）→ 直通成稿、不耗二轮（微缺口重写收敛期望为负）', async () => {
+    // 420 字 vs 块目标 500（0.84×）：落在接受区 [350,700] 且结构齐全 → 首轮直通（旧实现 <0.85× 即阻断
+    // → 重写风暴；舒城实测重写对字数不收敛，微越界重写的收敛期望为负）
+    llmMock.mockResolvedValue(passingContent([H4A, H4B, H4C, H4D], 90));
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure());
+    expect(result?.allSucceeded).toBe(true);
+    expect(llmMock).toHaveBeenCalledTimes(1);
+    expect(result?.markdown).toContain(H4D);
+  });
+
+  it('两轮字数均严重不足但结构齐全 → 二轮一律放行成稿（字数不再构成块失败）', async () => {
+    // 160 字 vs 500（0.32×）两轮不变：首轮越界区阻断重写、二轮放行——块成功、章不被阻断
+    //（旧实现二轮仍阻断 → 块失败 → 章阻断，舒城 9 章失败链的根源）
+    llmMock.mockResolvedValue(`### 测量放线\n\n${[H4A, H4B, H4C, H4D].map((title, index) => `#### ${title}\n\n${bodyLine(25, index)}`).join('\n\n')}`);
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure());
+    expect(result?.allSucceeded).toBe(true);
+    expect(llmMock).toHaveBeenCalledTimes(2);
+    expect(result?.markdown).toContain(H4A);
+  });
+
+  it('首轮严重超产（>1.4×）→ 二轮携压缩反馈重写；二轮仍超产 → 放行成稿', async () => {
+    // 860 字 vs 500（1.72×）两轮不变：首轮越界区阻断并携带压缩指令、二轮放行（旧实现超产二轮仍阻断）
+    llmMock.mockResolvedValue(passingContent([H4A, H4B, H4C, H4D], 200));
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure());
+    expect(result?.allSucceeded).toBe(true);
+    expect(llmMock).toHaveBeenCalledTimes(2);
+    expect(llmMock.mock.calls[1][1]).toContain('【上一轮篇幅超限】');
   });
 
   it('两轮不达标 → 返回失败块隔离清单（成功块保留，不整章降级重写）', async () => {
@@ -173,9 +203,10 @@ describe('buildPlannedChapterContent（块写作合同：[0.85,1.15] 区间 + �
     expect(chars).toBeGreaterThanOrEqual(4 * 120 + 200);
   });
   
-  it('清单外 H4 删标题留正文后字数仍不足 → 二轮反馈重试（真实缺口才重试）', async () => {
-    // 要点正文薄（各 25 字）+ 两个自由发挥各 100 字：删标题后总字数仍 <0.9×500=450 → 二轮
-    const thinContent = `### 测量放线\n\n${[H4A, H4B, H4C, H4D].map((title, index) => `#### ${title}\n\n${bodyLine(25, index)}`).join('\n\n')}\n\n#### 自由发挥一\n\n${bodyLine(100, 4)}\n\n#### 自由发挥二\n\n${bodyLine(100, 5)}`;
+  it('清单外 H4 删标题留正文后字数仍低于接受区下限 → 二轮反馈重试（真实缺口才重试）', async () => {
+    // 要点正文薄（各 15 字）+ 两个自由发挥各 80 字：删标题后总字数 290 仍 <0.7×500=350（越界区）
+    // 且原始 308 字同属越界区 → 首轮阻断二轮；接受区以内的微缺口由「接受区直通」用例覆盖
+    const thinContent = `### 测量放线\n\n${[H4A, H4B, H4C, H4D].map((title, index) => `#### ${title}\n\n${bodyLine(15, index)}`).join('\n\n')}\n\n#### 自由发挥一\n\n${bodyLine(80, 4)}\n\n#### 自由发挥二\n\n${bodyLine(80, 5)}`;
     llmMock
       .mockResolvedValueOnce(thinContent)
       .mockResolvedValueOnce(passingContent([H4A, H4B, H4C, H4D], 120));
@@ -198,9 +229,10 @@ describe('buildPlannedChapterContent（块写作合同：[0.85,1.15] 区间 + �
     expect(result?.markdown).toContain('编制说明与工程概况');
   });
 
-  it('要点 ≥4 两轮仍越界 → 块合同阻断、无拆半自愈（单块章全失败返回 undefined → 上层章阻断）', async () => {
-    // 工具链对齐：块内两轮均越出字数合同 → 块失败；单块章全部失败 → 返回 undefined（上层解释为
-    // 整章阻断、文档显式失败）。不再有写作层事后拆半——半块重设预算使父块合同失效的历史机制已删除；
+  it('要点缺失两轮仍不齐 → 结构硬门阻断（单块章全失败返回 undefined → 上层章阻断）', async () => {
+    // 工具链对齐：字数维度已不构成块失败（见上方分层验收用例）；短正文缺 3 个 H4 要点 → 结构硬门
+    // 两轮阻断 → 块失败；单块章全部失败 → 返回 undefined（上层解释为整章阻断、文档显式失败）。
+    // 不再有写作层事后拆半——半块重设预算使父块合同失效的历史机制已删除；
     // 多块章的部分失败隔离（成功块保留）见前两个用例与 stageChapterLoop.retryFailedBlocks
     llmMock.mockResolvedValue(shortContent);
     const result = await buildPlannedChapterContent(makeInput(), makeStructure());

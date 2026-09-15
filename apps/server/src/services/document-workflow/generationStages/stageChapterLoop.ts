@@ -32,6 +32,7 @@ import { buildRetrievalCoverageReport, resolveRolePoolRisk, retrieveDeepChapterE
 import { chapterRelevanceTokens, renderBillFactLockText } from '../billFactLock';
 import { retrievePlannedMaterialEvidence, sampleProjectMaterialEvidence } from '../projectMaterialProfile';
 import { buildChapterFactCoverageContext, buildPlannedChapterContent, capFactCoverageContext, evidenceForSection } from '../chapterGeneration';
+import { isBodyTableForbidden } from '../bidComposition';
 import type { PlannedChapterContentInput, PlannedChapterContentResult } from '../chapterGeneration';
 import { chapterCompletionStatus, chapterGenerationTargets, compactChapterQueries, finalizeChapterContentQuality, optimizeChapterEvidence, preselectSemanticCandidates, resolveChapterPromptExecution, retrieveSectionEvidence, semanticEvidenceText, stripBidDisciplineSentencesSemantic } from '../documentGeneratorHelpers';
 import { alignChapterContentToBlueprint, buildChapterStructureFromBlueprint, chapterBlueprintAuthoritiesNeeded, chapterBlueprintAuthorityGaps, findBlueprintChapter, renderBlueprintMustCiteValues } from '../integratedBlueprint';
@@ -276,7 +277,9 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     let deepEvidenceCount = 0;
     // P1-4：事实需求计算提前到深召回判断之前，把 requiredMissingNeeds 并入深召回一次完成，
     // 避免缺失事实与必需事实需求两次深召回查询集高度重叠
-    const forbidDrawingImages = false;
+    // 标书编制规格（阶段 1 判定）：暗标正文禁图（招标「不得有图片和扉页」）驱动写作侧禁图提示与清理；
+    // 明标/未识别（undefined）保持原行为（false）
+    const forbidDrawingImages = isBodyTableForbidden(session.understanding.bidComposition);
     const graphRoleHint = graphMapping
       ? [
           graphMapping.graphWorks.length ? `图谱识别本章工程内容：${graphMapping.graphWorks.join('、')}` : '',
@@ -594,7 +597,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
           promptId: chapterPromptExecution.primaryPromptId,
           status: 'running',
           message: `${displayChapterTitle(chapter.title)} 已规划 ${plannedStructure.blocks.length} 个主题块，正在按主题块并发成稿${plannerNote}`,
-          details: [...chapterPromptDetails, `有效证据：${evidence.length} 条`, `输入细目 ${sectionCount} 条 → 主题块 ${plannedStructure.blocks.length} 个（每块 2~4 个 H4 要点）`, `语义合并 ${mergedCount} 条细目，目录级 H4 合计 ${h4Count} 个`, '单块 1200~2200 字，主题块间全并发，单节深度与整体耗时双优', ...(namingReview.summary ? [namingReview.summary] : [])],
+          details: [...chapterPromptDetails, `有效证据：${evidence.length} 条`, `输入细目 ${sectionCount} 条 → 主题块 ${plannedStructure.blocks.length} 个（每块 2~4 个 H4 要点）`, `语义合并 ${mergedCount} 条细目，目录级 H4 合计 ${h4Count} 个`, '单块 1800~2800 字，主题块间全并发，单节深度与整体耗时双优', ...(namingReview.summary ? [namingReview.summary] : [])],
           progress: { current: chapterOrder + 1, total: session.planning.effectiveChapters.length, label: '主题块并发' },
         }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
         // 同步把「Agent Chapter Task Planner」stage 更新为规划驱动视角：
@@ -604,7 +607,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
           chapterTaskStage.message = `${chapterTaskResult.task.sections.filter(item => item.ready).length}/${chapterTaskResult.task.sections.length} 条细目任务就绪（已规划为 ${plannedStructure.blocks.length} 个主题块）`;
         }
         session.global.emitProgress(session.global.chapterDrafts);
-        const plannedBuildInput: PlannedChapterContentInput = { template: session.prepare.template, chapter, evidence, missingFacts, promptTexts: plannedPromptTexts, projectContext: session.planning.chapterScopedProjectContext(chapter), skeletonProjectContext: session.planning.projectContext, requirement: session.global.input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, factCoverageContext, compactProjectContext: true, scopedProjectContext: true, blueprintData: session.blueprint.integratedBlueprint?.validation.passed ? session.blueprint.integratedBlueprint.data : undefined, blueprintChapter: chapterBlueprintSlice, blueprintMustCiteHint, sectionEvidenceProvider: sectionEvidenceForChapter, onSectionProgress: onSectionProgressForCheckpoint, diagnostics: session.planning.generationDiagnostics, signal: session.global.input.signal };
+        const plannedBuildInput: PlannedChapterContentInput = { template: session.prepare.template, chapter, evidence, missingFacts, promptTexts: plannedPromptTexts, projectContext: session.planning.chapterScopedProjectContext(chapter), skeletonProjectContext: session.planning.projectContext, requirement: session.global.input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, bidComposition: session.understanding.bidComposition, factCoverageContext, compactProjectContext: true, scopedProjectContext: true, blueprintData: session.blueprint.integratedBlueprint?.validation.passed ? session.blueprint.integratedBlueprint.data : undefined, blueprintChapter: chapterBlueprintSlice, blueprintMustCiteHint, sectionEvidenceProvider: sectionEvidenceForChapter, onSectionProgress: onSectionProgressForCheckpoint, diagnostics: session.planning.generationDiagnostics, signal: session.global.input.signal };
         const plannedFirst = await session.global.withProgressHeartbeat(() => measureGenerationStep(session.planning.generationDiagnostics, `chapter-planned-block-draft:${chapter.id}`, () =>
           buildPlannedChapterContent(plannedBuildInput, plannedStructure)
         ));
@@ -647,14 +650,17 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       }
       throwIfAborted(session.global.input.signal);
       if (!llmContent) {
-        const message = `${displayChapterTitle(chapter.title)} 大模型未返回有效正文，已阻断生成`;
+        // 4.35 归因修正：历史消息把「块质检不达标 → 章阻断」统一表述为“大模型未返回有效正文”，
+        // 把质检失守误导为模型空响应（舒城实测 9 章实为块篇幅合同失守）。此处呈现真实阻断归因
+        const failureReason = session.planning.generationDiagnostics.llm.lastError || '空响应或超时';
+        const message = `${displayChapterTitle(chapter.title)} 正文未达到成稿要求，已阻断生成（${failureReason.slice(0, 160)}）`;
         session.global.progressStages[chapterProgressIndex] = displayStage({
           type: 'chapter_generation',
           roleId: 'chapter_generation',
           promptId: chapterPromptExecution.primaryPromptId,
           status: 'failed',
           message,
-          details: [`LLM 最近错误：${session.planning.generationDiagnostics.llm.lastError || '空响应或超时'}`, `证据条数：${evidence.length}`],
+          details: [`阻断归因：${failureReason}`, `证据条数：${evidence.length}`],
           progress: { current: chapterOrder + 1, total: session.planning.effectiveChapters.length, label: '章节阻断' },
         }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
         session.global.emitProgress(session.global.chapterDrafts);

@@ -22,6 +22,11 @@ function bigramOverlap(left: string, right: string) {
   return source.filter(pair => target.has(pair)).length / source.length;
 }
 
+/** 提示词必需表格归属评分下限：最高分低于此值视为无归属，显性返回最终门禁兑底链（产品内部判定参数） */
+const TABLE_ATTACH_MIN_SCORE = 0.3;
+/** 小节承接表格的滑窗重叠阈值（≥ 此值视为承接，避免表述差异导致表格丢失；产品内部判定参数） */
+const TABLE_ATTACH_OVERLAP_THRESHOLD = 0.6;
+
 /** 提示词声明必需表格 → 章节匹配评分（表名与章标题/小节标题的包含关系与滑窗重叠，取最高） */
 function requiredTableMatchScore(title: string, chapter: DocumentTemplateChapter) {
   const norm = normalizeText(title).replace(/表$/u, '');
@@ -39,14 +44,19 @@ function requiredTableMatchScore(title: string, chapter: DocumentTemplateChapter
 /**
  * 规划表格计划构建：表格来源 = 提示词声明的必需表格（用户声明层，必写）+ LLM 章节规划的表格需求
  * （按章按节产出）。无静态目录匹配、无系统创作——规划没有的表不出现。
- * 提示词声明的必需表格逐表全章评分归属最高分章；无归属（评分 < 0.3）的显性返回，
+ * 提示词声明的必需表格逐表全章评分归属最高分章；无归属（评分低于 TABLE_ATTACH_MIN_SCORE）的显性返回，
  * 交由最终门禁的必需表格兜底链（markdownComposer.insertRequiredTable）处理并供进度消息展示。
+ * 标书编制规格为 forbidden（暗标：正文内不允许出现表格与框图）时短路：正文不注入任何表格计划
+ * （LLM 规划表格需求与提示词必需表格均已由阶段 1 编制规格裁决，图表由终稿附表区直出承接）。
  */
 export function buildPlannedTablePlans(input: {
   chapters: DocumentTemplateChapter[];
   plannedTables: Map<string, PlannedTableRequest[]>;
   requiredTables?: string[];
+  /** 标书编制规格（阶段 1 判定）的正文表格策略：forbidden 时正文不注入任何表格计划 */
+  bodyTablePolicy?: 'forbidden' | 'allowed';
 }): { chapters: DocumentTemplateChapter[]; unattachedRequiredTables: string[] } {
+  if (input.bodyTablePolicy === 'forbidden') return { chapters: input.chapters, unattachedRequiredTables: [] };
   const plansByChapterId = new Map<string, PlannedTablePlan[]>();
   const addPlan = (chapterId: string, request: { title: string; fields: string[]; section?: string; required: boolean; reason: string }) => {
     const title = request.title.trim();
@@ -79,7 +89,7 @@ export function buildPlannedTablePlans(input: {
       const score = requiredTableMatchScore(title, chapter);
       if (score > bestScore) { bestScore = score; bestChapter = chapter; }
     }
-    if (!bestChapter || bestScore < 0.3) { unattachedRequiredTables.push(title); continue; }
+    if (!bestChapter || bestScore < TABLE_ATTACH_MIN_SCORE) { unattachedRequiredTables.push(title); continue; }
     addPlan(bestChapter.id, { title, fields: [], required: true, reason: '用户提示词声明的必需表格。' });
   }
   const chapters = input.chapters.map(chapter => {
@@ -114,7 +124,7 @@ export function sectionTablePlans(chapter: DocumentTemplateChapter, sectionTitle
     const plainTitle = titleNorm.replace(/表$/u, '');
     if (plainTitle && (norm.includes(plainTitle) || plainTitle.includes(norm))) return true;
     // 二字滑窗重叠率兜底：小节标题与表名语义高度重合（≥60%）视为承接，避免表述差异导致表格丢失
-    if (plainTitle && bigramOverlap(norm, plainTitle) >= 0.6) return true;
+    if (plainTitle && bigramOverlap(norm, plainTitle) >= TABLE_ATTACH_OVERLAP_THRESHOLD) return true;
     return false;
   });
 }

@@ -19,6 +19,7 @@ import { buildChapterIntentClassifier } from '../chapterIntentClassifier';
 import { buildProfessionalDepthClassifier } from '../professionalDepthClassifier';
 import { buildWritingTaskBrief } from '../documentWritingTaskBrief';
 import { buildPlannedTablePlans } from '../constructionOrgTablePlan';
+import { isBodyTableForbidden } from '../bidComposition';
 import { runWithAdaptiveConcurrency } from '../utils';
 import { displayStage, upsertProgressStage } from '../progress';
 import { raiseDocumentLlmConcurrencyForScale } from '../llmClient';
@@ -85,7 +86,7 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
     const chapterEvidence = selectEvidenceByBudget(session.understanding.writerEvidence.filter(item => item.chapterId === chapter.id || evidenceMatchesFact(item, chapter.title)), { preservePinned: true });
     const roleContext = session.prepare.projectUnderstanding.chapterPlans.find(plan => plan.chapterId === chapter.id)?.writingGoal || '';
     const planningPromptExecution = resolveChapterPromptExecution(session.prepare.promptPlan, chapter);
-    const planned = await planChapterSectionsWithLlm({ template: provisionalTemplate, chapter, chapterIndex, evidence: chapterEvidence, promptTexts: planningPromptExecution.promptTexts, projectContext: session.planning.projectContext, requirement: session.global.input.requirement, roleContext, targetWords: session.planning.provisionalBudget.chapterTargets.get(chapter.id) || 1200, projectGraphSummary: session.planning.chapterGraphSummaryText(chapter.id), lockedSections, signal: session.global.input.signal, diversity: { directive: session.planning.diversityProfile.prompt, avoidSections: fingerprintAvoidTitles, overlapCheck: fingerprintOverlapCheck } });
+    const planned = await planChapterSectionsWithLlm({ template: provisionalTemplate, chapter, chapterIndex, evidence: chapterEvidence, promptTexts: planningPromptExecution.promptTexts, projectContext: session.planning.projectContext, requirement: session.global.input.requirement, roleContext, targetWords: session.planning.provisionalBudget.chapterTargets.get(chapter.id) || 1200, projectGraphSummary: session.planning.chapterGraphSummaryText(chapter.id), lockedSections, bodyTablePolicy: session.understanding.bidComposition.bodyTablePolicy, signal: session.global.input.signal, diversity: { directive: session.planning.diversityProfile.prompt, avoidSections: fingerprintAvoidTitles, overlapCheck: fingerprintOverlapCheck } });
     if (planned.diversity?.retried) {
       diversityRenameChapterCount += 1;
       diversityRemainingCollisionCount += planned.diversity.remainingCollisions;
@@ -139,10 +140,17 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
   session.planning.finalBidStructureAudit = validateBidStructureBeforeGeneration({ template: session.prepare.template, chapters: plannedWithConstructionOrgRequiredSections, requirement: session.global.input.requirement, evaluationItems: session.understanding.evaluationItems, semanticSimilarity: finalCriteriaSimilarity });
   // 规划表格计划构建（组件 9）：表格来源 = 提示词声明的必需表格（用户声明层，必写）+ LLM 章节规划的
   // 表格需求（规划产物，应写）；无静态目录匹配、无系统创作——规划没有的表不出现。必需表格逐表全章
-  // 评分归属；无归属的显性提示，交由文档合成终验的必需表格兜底链（insertRequiredTable）插入
-  const plannedTableBuild = buildPlannedTablePlans({ chapters: session.planning.finalBidStructureAudit.enrichedChapters, plannedTables: plannedTablesByChapter, requiredTables: session.prepare.runtimePromptRules.requiredTables });
+  // 评分归属；无归属的显性提示，交由文档合成终验的必需表格兜底链（insertRequiredTable）插入。
+  // 标书编制规格为 forbidden（暗标正文禁表）时短路：正文不生成任何表格计划（含提示词必需表格——
+  // 已由阶段 1 编制规格逐一裁决：能对应招标附表的收敛入终稿附表区，其余取消表格形式转文字表述）
+  // 防御：判定缺失（非常规 session）时 bodyTablePolicy 为空，buildPlannedTablePlans 按常规口径放开
+  const plannedTableBuild = buildPlannedTablePlans({ chapters: session.planning.finalBidStructureAudit.enrichedChapters, plannedTables: plannedTablesByChapter, requiredTables: session.prepare.runtimePromptRules.requiredTables, bodyTablePolicy: session.understanding.bidComposition?.bodyTablePolicy });
   session.planning.effectiveChapters = plannedTableBuild.chapters;
-  if (plannedTableBuild.unattachedRequiredTables.length > 0) {
+  if (isBodyTableForbidden(session.understanding.bidComposition)) {
+    const composition = session.understanding.bidComposition;
+    upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'bid-composition-table-policy', status: 'success', message: `暗标编制规格消费：正文禁用表格与框图——小节规划 ${plannedTableRequestCount} 项表格需求与提示词必需表格 ${session.prepare.runtimePromptRules.requiredTables.length} 张均不进入正文，图表由终稿附表区 ${composition.appendixPlan.length} 项附表承接`, details: [...composition.conflicts.map(conflict => `${conflict.rule} → ${conflict.resolution}`), ...composition.appendixPlan.map(entry => `附表${entry.no}：${entry.title}${entry.kind === 'figure' ? '（图类，编制人补图）' : `（数据源：${entry.dataSource}）`}`)] }, { subtitle: '表格计划' }));
+    session.global.emitProgress();
+  } else if (plannedTableBuild.unattachedRequiredTables.length > 0) {
     upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'required-tables-unattached', status: 'success', message: `提示词必需表格归属：${plannedTableBuild.unattachedRequiredTables.length} 张未匹配到明确章节（${plannedTableBuild.unattachedRequiredTables.join('、')}），交由文档合成终验兜底插入`, details: ['未归属必需表格不做语义错挂——防止表格落到不相关章节'] }, { subtitle: '表格计划' }));
   }
   // 改8：概况类小节置首（确定性调序，仅动小节顺序——首章以「编制说明与工程概况」类小节开篇）

@@ -73,9 +73,6 @@ export interface BlueprintDerivationStrategy {
   laborUnitRange: Record<string, { unit: string; min: number; max: number }>;
   equipmentMapping: Array<{ name: string; spec: string; pattern: RegExp; unit: string; basis: string }>;
   machinePowerTable: Array<{ name: string; kw: number }>;
-  /** 造价锚定人工费占比（市政/绿化经验口径见村域组注释，房建另档） */
-  laborCostRatio: { min: number; max: number };
-  dailyWage: { min: number; max: number };
   inspectionBatchRules: BlueprintInspectionBatchRule[];
   difficultyTemplates: BlueprintDifficultyTemplate[];
   /** 定额工效知识库（权威定额数据接入点）：命中行 → 定额工日区间；未配置/未命中 → laborUnitRange 经验区间降级。
@@ -186,8 +183,6 @@ export const villageMunicipalStrategy: BlueprintDerivationStrategy = {
     { name: '洒水车', kw: 90 },
     { name: '高空作业车', kw: 60 },
   ],
-  laborCostRatio: { min: 0.15, max: 0.25 },
-  dailyWage: { min: 250, max: 350 },
   inspectionBatchRules: [
     { scope: '污水管网管道', namePattern: /塑料管|管道/u, unit: 'm', divisor: 200, descTemplate: '管道闭水试验分段检验，按每 200m 一段划分约 {count} 段（总长 {total}m）' },
     { scope: '道路工程', namePattern: /水泥混凝土|级配碎石|路床/u, unit: 'm2', divisor: 200, descTemplate: '路床压实度按每层每 200m² 不少于 1 点检验，约 {count} 点（总面积 {total}m²）' },
@@ -302,8 +297,6 @@ export const buildingStrategy: BlueprintDerivationStrategy = {
     { name: '混凝土输送泵', kw: 90 },
     { name: '物料提升机', kw: 11 },
   ],
-  laborCostRatio: { min: 0.18, max: 0.3 },
-  dailyWage: { min: 250, max: 350 },
   inspectionBatchRules: [
     { scope: '钢筋工程', namePattern: /钢筋/u, unit: 't', divisor: 60, descTemplate: '钢筋按进场检验批划分，每 60t 一批，约 {count} 批（总量 {total}t）' },
     { scope: '混凝土工程', namePattern: /混凝土/u, unit: 'm3', divisor: 100, descTemplate: '混凝土按浇筑批次留置标准养护试件，每 100m³ 一批，约 {count} 批（总量 {total}m³）' },
@@ -382,8 +375,6 @@ export const generalStrategy: BlueprintDerivationStrategy = {
     { name: '蛙式打夯机', kw: 3 },
     { name: '混凝土搅拌运输车', kw: 110 },
   ],
-  laborCostRatio: { min: 0.15, max: 0.25 },
-  dailyWage: { min: 250, max: 350 },
   inspectionBatchRules: [
     { scope: '混凝土工程', namePattern: /混凝土/u, unit: 'm3', divisor: 100, descTemplate: '混凝土按浇筑批次留置标准养护试件，每 100m³ 一批，约 {count} 批（总量 {total}m³）' },
     { scope: '检查井', namePattern: /检查井/u, unit: '', divisor: 1, descTemplate: '检查井逐座验收，共 {total} 座' },
@@ -473,8 +464,6 @@ export const bridgeTunnelStrategy: BlueprintDerivationStrategy = {
     { name: '混凝土输送泵', kw: 90 },
     { name: '插入式振捣器', kw: 1.5 },
   ],
-  laborCostRatio: { min: 0.12, max: 0.22 },
-  dailyWage: { min: 250, max: 350 },
   inspectionBatchRules: [
     { scope: '桩基工程', namePattern: /灌注桩|桩基/u, unit: '', divisor: 1, descTemplate: '钻孔灌注桩逐桩检验（桩位/孔径/沉渣厚度/混凝土充盈系数），共 {total} 根' },
     { scope: '钢筋工程', namePattern: /钢筋/u, unit: 't', divisor: 60, descTemplate: '钢筋按进场检验批划分，每 60t 一批，约 {count} 批（总量 {total}t）' },
@@ -568,8 +557,6 @@ export const highwayStrategy: BlueprintDerivationStrategy = {
     { name: '自卸汽车', kw: 120 },
     { name: '洒水车', kw: 90 },
   ],
-  laborCostRatio: { min: 0.12, max: 0.2 },
-  dailyWage: { min: 250, max: 350 },
   inspectionBatchRules: [
     { scope: '路基压实', namePattern: /路床|路基|填方/u, unit: 'm2', divisor: 1000, descTemplate: '路基压实度按每 1000m² 不少于 1 点检测，约 {count} 点（总面积 {total}m²）' },
     { scope: '水稳基层', namePattern: /水稳|基层/u, unit: 'm2', divisor: 1000, descTemplate: '水稳基层按每 1000m² 一个检验批，约 {count} 批（总面积 {total}m²）' },
@@ -658,8 +645,6 @@ export const waterConservancyStrategy: BlueprintDerivationStrategy = {
     { name: '插入式振捣器', kw: 1.5 },
     { name: '蛙式打夯机', kw: 3 },
   ],
-  laborCostRatio: { min: 0.15, max: 0.25 },
-  dailyWage: { min: 250, max: 350 },
   inspectionBatchRules: [
     { scope: '混凝土工程', namePattern: /混凝土/u, unit: 'm3', divisor: 100, descTemplate: '混凝土按浇筑批次留置标准养护试件，每 100m³ 一批，约 {count} 批（总量 {total}m³）' },
     { scope: '土方回填', namePattern: /回填|填方/u, unit: 'm3', divisor: 200, descTemplate: '土方回填按每 200m³ 一个检验批检测压实度，约 {count} 批（总量 {total}m³）' },

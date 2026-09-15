@@ -9,7 +9,7 @@ import { snapshotEmbedCacheStats } from './semanticSimilarity';
 import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, applySpanReplacements, basicInfoScheduleFieldIssues, crossProjectValueCopyIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, duplicateTableRowIssues, equipmentBatchConflicts, excavationDepthFromFacts, excavationDepthLockIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractSupportSystemAuthority, fixAdjacentPhraseDuplication, fixAmbiguousEitherOrCandidates, fixForbiddenConfigurationTerms, fixFormulaResidues, fixGreeningMaintenanceMismatch, fixHazardIdentificationGaps, fixHeaderlessTables, fixInternalTerminology, fixMetaDiscourseDeclarations, fixPlaceholderTableCells, fixQualityAssuranceCoverage, fixSelfUnderminingCandidates, fixSixHundredPercentCoverage, formulaResidueIssues, foundationFormResidueIssues, laborPeakConflictIssues, metaDiscourseDeclarationIssues, nodeScheduleConsistencyIssues, overviewRecapIssues, phaseLaborMixingIssues, preliminaryActionTimingIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, stripDuplicateTablesAcrossChapters, stripInternalDuplicateTableRows, supportSystemConflictIssues, tablePeakLaborWithChainFallback, waterLaborPeakAssociationIssues } from './documentIntegrityChecks';
 import { arbitrateNumericConflicts } from './numericConflictArbiter';
 import type { BillFactLock } from './billFactLock';
-import { blueprintCitationConsistencyIssues, type BlueprintData } from './integratedBlueprint';
+import { blueprintCitationVerdict, rebaseCitationAnchorsForChapters, type BlueprintCitationAdjudicationSummary, type BlueprintData, type QuantityConflictAnchor } from './integratedBlueprint';
 import { blueprintEquipmentAuthorities, blueprintLaborPeakAuthority, blueprintPhaseLaborAuthorities, blueprintQuantityGroupAuthorities, buildAuthorityIndex } from './authorityIndex';
 import { applyDeterministicConsistencyFixes, collectSectionContentGaps, crossChapterConsistencyIssues, processSpecConflictIssues } from './qualityValidation';
 import { professionalSectionTaskCard } from './promptRuleExtraction';
@@ -24,6 +24,8 @@ import { missingWorkPackageSkeletonTitles, stripEmptyWorkPackageHeadings, stripT
 import { DIVISION_SECTION_RE } from './writingSpec';
 import { majorContentGovernanceIssues, perPackageContentElementIssues } from './constructionOrgQualityRules';
 import { flowFormRepairTargets, skeletonFingerprintRepairTargets, titleRepairTargets } from './templatingGovernance';
+import { bodyTableDismantleIssue, isBodyTableForbidden, type BidCompositionSpec } from './bidComposition';
+import { countMarkdownTables, extractMarkdownTableTextBlocks } from './markdownComposer';
 
 export type EmitProgressFn = (checkpointChapters?: DocumentDraftChapter[], stages?: DocumentExecutionStage[]) => void;
 export type WithProgressHeartbeatFn = <T>(work: () => Promise<T>) => Promise<T>;
@@ -142,10 +144,98 @@ export async function dedupeAfterTableFix(input: {
   return globalConsistencyIssues;
 }
 
+/** 暗标拆表闭环输入（与 repairTableExecutionGaps 共享调用上下文） */
+interface DismantleBodyTablesInput {
+  chapterDraftsFinal: DocumentDraftChapter[];
+  template: DocumentTemplate;
+  repairPromptTexts: string;
+  requirement?: string;
+  signal?: AbortSignal;
+  generationDiagnostics: DocumentGenerationDiagnostics;
+  progressStages: DocumentExecutionStage[];
+  emitProgress: EmitProgressFn;
+  withProgressHeartbeat: WithProgressHeartbeatFn;
+  bidComposition?: BidCompositionSpec;
+}
+
+/**
+ * 暗标拆表闭环（标书编制规格 bodyTablePolicy=forbidden）：正文残留 Markdown 表格改写为段落式连贯叙述。
+ * 与补表闭环同构反演：检测与反向门禁同口径（countMarkdownTables 分隔线行计数），
+ * 修复=表格块原文锚点直连改写（extractMarkdownTableTextBlocks 精确摘录，LLM 不复述只输出段落式改写），
+ * P12 回滚保护同补表（表数不降反升即回滚保留修复前正文）；残留转终检反向门禁阻断，不自行兜底。
+ */
+async function dismantleBodyTables(input: DismantleBodyTablesInput): Promise<{ tableFixApplied: boolean }> {
+  const { chapterDraftsFinal, template, repairPromptTexts, requirement, signal, generationDiagnostics, progressStages, emitProgress, withProgressHeartbeat, bidComposition } = input;
+  const targets = chapterDraftsFinal
+    .map(chapter => ({ chapter, tableCount: countMarkdownTables(chapter.content), blocks: extractMarkdownTableTextBlocks(chapter.content) }))
+    .filter(item => item.tableCount > 0);
+  if (targets.length === 0) return { tableFixApplied: false };
+  upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'table-execution-repair', status: 'running', message: `暗标拆表修复：${targets.length} 个章节正文残留表格（招标暗标要求正文纯文字）` }, { subtitle: '暗标拆表修复' }));
+  emitProgress(chapterDraftsFinal);
+  let appliedCount = 0;
+  const failedDetails: string[] = [];
+  const repairOne = async (target: (typeof targets)[number]) => {
+    const { chapter, tableCount, blocks } = target;
+    return withPatchRollback({
+      originalContent: chapter.content,
+      repairRound: 'table-execution-repair',
+      diagnostics: generationDiagnostics,
+      beforeMetrics: [tableCount],
+      apply: async () => {
+        const repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `body-table-dismantle:${chapter.id}`, () => repairChapterByQuality({
+          template,
+          chapter: { id: chapter.id, title: chapter.title, content: chapter.content, evidence: chapter.evidence || [], missingFacts: chapter.missingFacts || [], sections: chapter.sections },
+          issues: [bodyTableDismantleIssue(chapter.title, tableCount)],
+          promptTexts: repairPromptTexts,
+          requirement,
+          forbidDrawingImages: true,
+          bidComposition,
+          diagnostics: generationDiagnostics,
+          signal,
+          patchGuard: repairPatchGuard('table-execution-repair', generationDiagnostics),
+          // 锚点直连：系统从正文精确摘录的表格块原文即改写目标；表格块提取为空（畸形表）时走非锚点模式
+          anchorTexts: blocks.length > 0 ? blocks : undefined,
+          // 表格→段落改写输出量大于建表（每张表按 1600 token 预留）
+          maxTokens: Math.min(12000, Math.max(6000, blocks.length * 1600)),
+        })));
+        return repaired.content && repaired.content !== chapter.content ? repaired.content : chapter.content;
+      },
+      // 同源复检：章内表格数（与反向门禁 countMarkdownTables 同口径），不降反升即回滚
+      recheck: (content) => [countMarkdownTables(content)],
+    });
+  };
+  const results = await Promise.allSettled(targets.map(target => repairOne(target)));
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      if (signal?.aborted) throw result.reason;
+      failedDetails.push(`${targets[index].chapter.title}：拆表修复异常（${result.reason instanceof Error ? result.reason.message : '未知错误'}）`);
+      return;
+    }
+    const repaired = result.value;
+    const { chapter } = targets[index];
+    if (repaired.rolledBack) {
+      failedDetails.push(`${chapter.title}：拆表后表格数不降反升，已回滚本轮修改`);
+      return;
+    }
+    if (repaired.content && repaired.content !== chapter.content) {
+      chapter.content = repaired.content;
+      appliedCount += 1;
+    } else {
+      failedDetails.push(`${chapter.title}：拆表 patch 未应用（${generationDiagnostics?.llm.lastError || '无产出'}）`);
+    }
+  });
+  // 收口：残留表格数清零时才 success；残留转终检反向门禁（bid-composition-body-table blocker），不自行兜底
+  const residual = chapterDraftsFinal.reduce((sum, chapter) => sum + countMarkdownTables(chapter.content), 0);
+  upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'table-execution-repair', status: residual > 0 ? 'failed' : 'success', message: residual > 0 ? `暗标拆表修复：${appliedCount} 章已改写，正文仍有 ${residual} 处表格残留（终检反向门禁拦截）` : `暗标拆表修复：${appliedCount} 章已改写，正文表格清零`, details: failedDetails }, { subtitle: '暗标拆表修复' }));
+  emitProgress(chapterDraftsFinal);
+  return { tableFixApplied: appliedCount > 0 };
+}
+
 /**
  * 表格执行率确定性核验：表格计划（治理决策）必须真实落为 markdown 表格；
  * 执行率显著不足的章节进入定向补表修复闭环（单轮，失败即放弃），保证表格数量与计划一致。
  * 返回 tableFixApplied 供调用侧判断补表后去重是否触发（未落地时正文未变，重复执行去重无意义）。
+ * 暗标禁表（bodyTablePolicy=forbidden）：补表闭环反转为拆表闭环（正文残留表格改写为段落式叙述）。
  */
 export async function repairTableExecutionGaps(input: {
   effectiveChapters: DocumentTemplateChapter[];
@@ -158,8 +248,14 @@ export async function repairTableExecutionGaps(input: {
   progressStages: DocumentExecutionStage[];
   emitProgress: EmitProgressFn;
   withProgressHeartbeat: WithProgressHeartbeatFn;
+  /** 标书编制规格（暗标禁表）：补表闭环反转为拆表闭环 */
+  bidComposition?: BidCompositionSpec;
 }): Promise<{ tableFixApplied: boolean }> {
   const { effectiveChapters, chapterDraftsFinal, template, repairPromptTexts, requirement, signal, generationDiagnostics, progressStages, emitProgress, withProgressHeartbeat } = input;
+  // 暗标正文禁表（招标编制要求）：不补表，改为拆表（表格承载数据改写为段落式连贯叙述）
+  if (isBodyTableForbidden(input.bidComposition)) {
+    return dismantleBodyTables(input);
+  }
   let tableGaps = tablePlanExecutionGaps(effectiveChapters, chapterDraftsFinal);
   // 补表 patch 是否真正落地（供补表后去重的触发判断：未落地时正文未变，重复执行去重无意义）
   let tableFixApplied = false;
@@ -293,8 +389,10 @@ export async function repairTemplatingIssues(input: {
   progressStages: DocumentExecutionStage[];
   emitProgress: EmitProgressFn;
   withProgressHeartbeat: WithProgressHeartbeatFn;
+  /** 标书编制规格（暗标禁表）：修复链与写作链同口径 */
+  bidComposition?: BidCompositionSpec;
 }): Promise<{ templatingFixApplied: boolean }> {
-  const { chapterDraftsFinal, template, repairPromptTexts, requirement, signal, generationDiagnostics, progressStages, emitProgress, withProgressHeartbeat } = input;
+  const { chapterDraftsFinal, template, repairPromptTexts, requirement, signal, generationDiagnostics, progressStages, emitProgress, withProgressHeartbeat, bidComposition } = input;
   let templatingFixApplied = false;
   for (let round = 0; round < 2; round += 1) {
     const fullMarkdown = chapterDraftsFinal.map(chapter => chapter.content).join('\n\n');
@@ -399,6 +497,7 @@ export async function repairTemplatingIssues(input: {
         promptTexts: repairPromptTexts,
         requirement,
         forbidDrawingImages: true,
+        bidComposition,
         diagnostics: generationDiagnostics,
         signal,
         patchGuard: repairPatchGuard('templating-repair', generationDiagnostics),
@@ -502,8 +601,10 @@ export async function enforceWorkPackageSkeletons(input: {
   progressStages: DocumentExecutionStage[];
   emitProgress: EmitProgressFn;
   withProgressHeartbeat: WithProgressHeartbeatFn;
+  /** 标书编制规格（暗标禁表）：修复链与写作链同口径 */
+  bidComposition?: BidCompositionSpec;
 }): Promise<{ skeletonFixApplied: boolean }> {
-  const { chapterDraftsFinal, projectContext, template, repairPromptTexts, requirement, signal, generationDiagnostics, progressStages, emitProgress, withProgressHeartbeat } = input;
+  const { chapterDraftsFinal, projectContext, template, repairPromptTexts, requirement, signal, generationDiagnostics, progressStages, emitProgress, withProgressHeartbeat, bidComposition } = input;
   // 关键小节标题行形态：容忍标题内空格（十度实测“项目主要施工 内容”）与缺“工程”变体（锚定清单同口径）；
   // H3/H4 双层级（H4 关键小节实测：模板中该小节常为 H4，H3 硬编码会导致修复链完全哑火）
   const KEY_SECTION_HEADING = /^#{3,4}\s+(?:\d+(?:\.\d+)*\s+)?(?:项目主要施工\s*内容|主要施工\s*内容|主要分部分项工程施工方案|主要分部分项施工方案|主要施工方法)\s*$/u;
@@ -627,6 +728,7 @@ export async function enforceWorkPackageSkeletons(input: {
             promptTexts: repairPromptTexts,
             requirement,
             forbidDrawingImages: true,
+            bidComposition,
             diagnostics: generationDiagnostics,
             signal,
             patchGuard: repairPatchGuard('workpackage-skeleton-repair', generationDiagnostics),
@@ -698,8 +800,13 @@ export async function enforcePlannedSectionCompleteness(input: {
   progressStages: DocumentExecutionStage[];
   emitProgress: EmitProgressFn;
   withProgressHeartbeat: WithProgressHeartbeatFn;
+  /** 修复轮调用方（postReviewSurface）传入：事件双写落点——finalStages=executionStages 快照(早于修复轮)+本数组，
+   * 单写 progressStages 在持久化 executionStages 中不可见；生成期调用不传，行为不变 */
+  finalGateRepairStages?: DocumentExecutionStage[];
+  /** 标书编制规格（暗标禁表）：修复链与写作链同口径 */
+  bidComposition?: BidCompositionSpec;
 }): Promise<{ plannedSectionFixApplied: boolean }> {
-  const { chapterDraftsFinal, template, repairPromptTexts, requirement, signal, generationDiagnostics, progressStages, emitProgress, withProgressHeartbeat } = input;
+  const { chapterDraftsFinal, template, repairPromptTexts, requirement, signal, generationDiagnostics, progressStages, emitProgress, withProgressHeartbeat, finalGateRepairStages, bidComposition } = input;
   // 缺失判定与写作期/导出期检查器同源（collectSectionContentGaps 全量跑，只取 missing_planned_section 口径），
   // 补写目标 = 检查器会报「缺少规划小节」的小节，不多不少；
   // 丰乐镇第 2 轮实测扩展：规划小节只有标题或表格无正文（planned empty，如扬尘治理六个百分百/环境污染物管控指标
@@ -715,7 +822,10 @@ export async function enforcePlannedSectionCompleteness(input: {
     return [{ chapter, sectionTitles, lastHeadingLine }];
   });
   if (targets.length === 0) return { plannedSectionFixApplied: false };
-  upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'planned-section-repair', status: 'running', message: `缺规划小节补写（${targets.length} 章缺失）` }, { subtitle: '缺节补写收口' }));
+  const plannedSectionRunningStage = displayStage({ type: 'llm_review', roleId: 'planned-section-repair', status: 'running', message: `缺规划小节补写（${targets.length} 章缺失）` }, { subtitle: '缺节补写收口' });
+  upsertProgressStage(progressStages, plannedSectionRunningStage);
+  // 4.36.2 复查修正：修复轮（postReviewSurface）调用时事件双写，否则复盘不可见
+  if (finalGateRepairStages) upsertProgressStage(finalGateRepairStages, plannedSectionRunningStage);
   emitProgress(chapterDraftsFinal);
   const chapterIndexByTitle = new Map(chapterDraftsFinal.map((chapter, index) => [chapter.title, index]));
   const repairOne = async (target: (typeof targets)[number]) => {
@@ -741,6 +851,7 @@ export async function enforcePlannedSectionCompleteness(input: {
           promptTexts: repairPromptTexts,
           requirement,
           forbidDrawingImages: true,
+          bidComposition,
           diagnostics: generationDiagnostics,
           signal,
           patchGuard: repairPatchGuard('planned-section-repair', generationDiagnostics),
@@ -777,7 +888,9 @@ export async function enforcePlannedSectionCompleteness(input: {
     }
   });
   emitProgress(chapterDraftsFinal);
-  upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'planned-section-repair', status: appliedCount > 0 ? 'success' : 'failed', message: appliedCount > 0 ? `缺规划小节补写完成：补写 ${appliedCount} 章` : '缺规划小节补写：修复 patch 未落地（锚点失配或 LLM 未产出）' }, { subtitle: '缺节补写收口' }));
+  const plannedSectionCompletedStage = displayStage({ type: 'llm_review', roleId: 'planned-section-repair', status: appliedCount > 0 ? 'success' : 'failed', message: appliedCount > 0 ? `缺规划小节补写完成：补写 ${appliedCount} 章` : '缺规划小节补写：修复 patch 未落地（锚点失配或 LLM 未产出）' }, { subtitle: '缺节补写收口' });
+  upsertProgressStage(progressStages, plannedSectionCompletedStage);
+  if (finalGateRepairStages) upsertProgressStage(finalGateRepairStages, plannedSectionCompletedStage);
   return { plannedSectionFixApplied: appliedCount > 0 };
 }
 
@@ -806,8 +919,10 @@ export async function runGlobalConsistencyReviewLoop(input: {
   blueprintData?: BlueprintData;
   /** B1 清单事实锁（4.27.0 A1/A2）：参数口径冲突/规格错位裁决的清单锚点（缺失时裁决器恒无锚留 LLM） */
   billFactLock?: BillFactLock;
+  /** 标书编制规格（暗标禁表/禁图）：跨章一致性修复与内部修复链同口径 */
+  bidComposition?: BidCompositionSpec;
 }): Promise<{ issues: string[]; dedupRan: boolean }> {
-  const { chapterDraftsFinal, template, reviewPromptTexts, repairPromptTexts, requirement, signal, projectContext, generationDiagnostics, preliminaryFactsModel, scopeConflicts, progressStages, emitProgress, withProgressHeartbeat, blueprintData, billFactLock } = input;
+  const { chapterDraftsFinal, template, reviewPromptTexts, repairPromptTexts, requirement, signal, projectContext, generationDiagnostics, preliminaryFactsModel, scopeConflicts, progressStages, emitProgress, withProgressHeartbeat, blueprintData, billFactLock, bidComposition } = input;
   let globalConsistencyIssues: string[] = [];
   // 跨章一致性阶段的确定性去重是否已执行（供补表后去重判断：内容未变时 stripDuplicate* 幂等，可安全跳过）
   let globalDedupRan = false;
@@ -844,11 +959,32 @@ export async function runGlobalConsistencyReviewLoop(input: {
     // F8 残留分类：确定性检测 issue 与 LLM 审查 issue 分开追踪——收口节点只有「确定性可修但残留」才置 failed，
     // LLM 审查类/资料两可类不再制造误导性 error 节点（由交付门禁兑底）
     let deterministicIssues: string[] = [];
+    // S5 判定层冲突锚点（blueprintCitationVerdict.anchors，全文坐标）：前置/后置确定性修复共用——
+    // 检测时捕获（检测-修复同源快照），正文变更后重跑 verdict 刷新（旧坐标失效不消费）
+    let citationAnchors: QuantityConflictAnchor[] = [];
+    // S5 判定记录观测：候选/三态计数与逐条结论落盘（判定过程可审计；不改变检测结果）
+    const recordCitationAdjudication = (summary: BlueprintCitationAdjudicationSummary) => {
+      console.log(`[gen] citation-adjudication: 候选 ${summary.total} 条（冲突 ${summary.conflicts}、未决 ${summary.uncertain}、一致 ${summary.consistent}）${summary.unavailable ? `；判定不可用：${summary.unavailable}` : ''}`);
+      upsertProgressStage(progressStages, displayStage({
+        type: 'validation',
+        roleId: 'citation-adjudication',
+        status: summary.conflicts > 0 ? 'failed' : 'success',
+        message: `蓝图引用语义判定：候选 ${summary.total} 条（冲突 ${summary.conflicts}、未决 ${summary.uncertain}、一致 ${summary.consistent}）${summary.unavailable ? `；判定不可用：${summary.unavailable}` : ''}`,
+        details: summary.records.filter(record => record.conclusion !== 'consistent').slice(0, 20).map(record => `[${record.conclusion}] ${record.subject}：${record.rationale}`),
+      }, { subtitle: '蓝图引用判定' }));
+      emitProgress(chapterDraftsFinal);
+    };
     // V5 P4：蓝图权威索引（AuthorityIndex 全量投影）——检测/前置修复/后置修复共用同一权威源，
     // 替代 blueprintPlanAuthorities 人工映射白名单（蓝图 data 全字段自动入权威，新增设备/清单条目自动获得修复通道）
     const blueprintAuthorityIndex = blueprintData ? buildAuthorityIndex(blueprintData) : undefined;
     const runDeterministicConsistencyCheck = async () => {
       const fullMarkdown = chapterDraftsFinal.map(chapter => chapter.content).join('\n\n');
+      // S5 蓝图引用语义判定（三态）：error 级冲突进修复链（uncertain/缺口 warning 由判定记录落盘
+      // 显式暴露）；工程量冲突锚点捕获供前置/后置确定性修复直连
+      const citationVerdict = blueprintData
+        ? await blueprintCitationVerdict(fullMarkdown, blueprintData, { diagnostics: generationDiagnostics, signal, onAdjudication: recordCitationAdjudication })
+        : undefined;
+      if (citationVerdict) citationAnchors = citationVerdict.anchors;
       return [
         ...(await crossChapterConsistencyIssues(fullMarkdown, preliminaryFactsModel, scopeConflicts)).filter(issue => /跨章一致性冲突/u.test(issue.message)),
         ...(await processSpecConflictIssues(fullMarkdown, preliminaryFactsModel)).filter(issue => issue.level === 'error'),
@@ -864,7 +1000,7 @@ export async function runGlobalConsistencyReviewLoop(input: {
         // V5 P4b 跨工程同值复制：多村/多标段清单条目分组明细（groups）与正文分工程语境比对——
         // 修复器对「值 ∈ 分组值集」精确豁免（分村分表合法量不归一），本检测器接手该豁免放过的
         // 同值复制错误（值恰为其他工程明细值 / 同值出现在多个工程对象语境且明细值不同）
-        ...crossProjectValueCopyIssues(fullMarkdown, blueprintQuantityGroupAuthorities(blueprintData)),
+        ...(await crossProjectValueCopyIssues(fullMarkdown, blueprintQuantityGroupAuthorities(blueprintData), { diagnostics: generationDiagnostics, signal })),
         // V5 P4b 阶段人数混用：正文「XX阶段 + N 人」vs byPhase 推导权威（阶段名命中但数值不符）
         ...phaseLaborMixingIssues(fullMarkdown, blueprintPhaseLaborAuthorities(blueprintData)),
         // 批2-1 机械分批求和：句内「首批/剩余补充」分批台数并存但无组合等于权威总数（丰乐镇实测 5+5≠5）
@@ -887,7 +1023,7 @@ export async function runGlobalConsistencyReviewLoop(input: {
         ...overviewRecapIssues(fullMarkdown),
         // 三期收口：蓝图引用一致性质检（权威源=蓝图参数桶）——总工期/关键工程量不一致 error 进修复链，
         // 红线事实缺口 warning 由章级对齐缺口观测兑底（不进入修复轮）
-        ...(blueprintData ? blueprintCitationConsistencyIssues(fullMarkdown, blueprintData).filter(issue => issue.level === 'error') : []),
+        ...(citationVerdict?.issues.filter(issue => issue.level === 'error') ?? []),
         // G1 关键小节逐专业工程三要素判定（缺哪维报哪维，修复轮定向补写）
         ...perPackageContentElementIssues(fullMarkdown),
         // G2 关键小节清单口径治理（禁表格承载正文 + 禁清单内部口径词）
@@ -910,8 +1046,10 @@ export async function runGlobalConsistencyReviewLoop(input: {
     // 检测器已锁定矛盾数值对与权威口径（表格优先），无需 LLM 定位能力（历史缺陷：修复器
     // 无法在正文定位错误数值 → 不产出 patch → 空转轮次，矛盾残留被导出门禁硬阻断）
     let preDeterministicFixCount = 0;
-    for (const chapter of chapterDraftsFinal) {
-      const numericFix = applyNumericConsistencyDeterministicFixes(chapter.content, { authorityIndex: blueprintAuthorityIndex, supportAuthority });
+    // S5 判定层锚点章级重定位（全文坐标→章内坐标；逐章替换不跨章不漂移）
+    const preCitationAnchorBatches = rebaseCitationAnchorsForChapters(citationAnchors, chapterDraftsFinal.map(chapter => chapter.content));
+    for (const [chapterIndex, chapter] of chapterDraftsFinal.entries()) {
+      const numericFix = applyNumericConsistencyDeterministicFixes(chapter.content, { authorityIndex: blueprintAuthorityIndex, supportAuthority, quantityAnchors: preCitationAnchorBatches[chapterIndex] });
       if (numericFix.fixedCount > 0) {
         chapter.content = numericFix.markdown;
         preDeterministicFixCount += numericFix.fixedCount;
@@ -1049,6 +1187,7 @@ export async function runGlobalConsistencyReviewLoop(input: {
             promptTexts: repairPromptTexts,
             requirement,
             forbidDrawingImages: true,
+            bidComposition,
             diagnostics: generationDiagnostics,
             signal,
             patchGuard: repairPatchGuard('global-consistency-repair', generationDiagnostics),
@@ -1101,11 +1240,11 @@ export async function runGlobalConsistencyReviewLoop(input: {
     // 模板化修复闭环（套话句重写 + 重难点归因量化补齐）：正确性修复链之后、确定性数值修复之前执行——
     // 套话重写可能引入数值破坏，由随后的 deterministicFix/postNumericFix 两道数值兜底按原顺序修正；
     // 套话句锚点来自修复后最新正文，不与正确性修复轮共享快照
-    await repairTemplatingIssues({ chapterDraftsFinal, template, repairPromptTexts, requirement, signal, generationDiagnostics, progressStages, emitProgress, withProgressHeartbeat });
+    await repairTemplatingIssues({ chapterDraftsFinal, template, repairPromptTexts, requirement, signal, generationDiagnostics, progressStages, emitProgress, withProgressHeartbeat, bidComposition });
     // 工作包骨架确定性收口（稳定版）：关键小节内部 #### 结构由系统锁定，写作后仍缺失时确定性兑底——
     // 表格剥离（零 LLM）+ 缺失骨架锚点直连补写（系统下发标题、LLM 只填三要素正文）；
     // 放在模板化修复之后：套话重写不改结构，骨架收口不改套话，两条修复链互不干扰
-    await enforceWorkPackageSkeletons({ chapterDraftsFinal, projectContext, template, repairPromptTexts, requirement, signal, generationDiagnostics, progressStages, emitProgress, withProgressHeartbeat });
+    await enforceWorkPackageSkeletons({ chapterDraftsFinal, projectContext, template, repairPromptTexts, requirement, signal, generationDiagnostics, progressStages, emitProgress, withProgressHeartbeat, bidComposition });
     // LLM 定向修复轮次（默认 1 轮）后仍未消除的数值冲突：按检测同源归属规则确定性定点替换（“检测定位=修复定位”），
     // 不依赖 LLM 定位能力——repairChapterByQuality 约束“无法安全定位的问题不要生成 patch”，数值冲突
     // 修复器常因无法在正文定位错误数值而不产出 patch，残留冲突会被导出门禁硬阻断形成“继续生成”死循环
@@ -1119,16 +1258,23 @@ export async function runGlobalConsistencyReviewLoop(input: {
     const scaleSummary = extractProjectScaleSummary(preliminaryFactsModel);
     // B1 蓝图权威（进度节点/机械台数/规格/工程量）统一走 AuthorityIndex 全量投影（V5 P4 单一权威源），
     // 与 factsModel 权威（总工期/装配率）并列注入
-    // A3 劳动力峰值跨章权威（丰乐镇实测）：蓝图 peakValue（造价锚定口径，量级可靠）优先；
+    // A3 劳动力峰值跨章权威（丰乐镇实测）：蓝图 peakValue（清单工效推导口径，量级可靠）优先；
     // 蓝图不可用时回退全文表峰值扫描（表缺失时回退高峰表述最大值）。丰乐镇第 3 轮：
-    // 蓝图荒谬值已被造价锚定校验拦截，峰值不再出现正文自编 71 与蓝图 1222 两套口径。
+    // 蓝图荒谬值已被内部一致性校验（超推导区间）拦截，峰值不再出现正文自编 71 与蓝图 1222 两套口径。
     const blueprintPeak = blueprintLaborPeakAuthority(blueprintData);
     const laborPeakAuthority = (blueprintPeak !== undefined && blueprintPeak > 0)
       ? blueprintPeak
       : tablePeakLaborWithChainFallback(chapterDraftsFinal.map(chapter => chapter.content).join('\n\n'));
     let postNumericFixCount = 0;
-    for (const chapter of chapterDraftsFinal) {
-      const numericFix = applyNumericConsistencyDeterministicFixes(chapter.content, { authorityIndex: blueprintAuthorityIndex, scheduleAuthority, assemblyRateAuthority, supportAuthority, laborPeakAuthority });
+    // S5 后置锚点刷新：前置修复/LLM 修复轮/数值裁决器均已改写正文，旧全文坐标失效——重跑判定
+    // （同内容候选命中判定缓存，零额外 LLM 成本），按章重定位后注入
+    if (blueprintData) {
+      const postCitationVerdict = await blueprintCitationVerdict(chapterDraftsFinal.map(chapter => chapter.content).join('\n\n'), blueprintData, { diagnostics: generationDiagnostics, signal, onAdjudication: recordCitationAdjudication });
+      citationAnchors = postCitationVerdict.anchors;
+    }
+    const postCitationAnchorBatches = rebaseCitationAnchorsForChapters(citationAnchors, chapterDraftsFinal.map(chapter => chapter.content));
+    for (const [chapterIndex, chapter] of chapterDraftsFinal.entries()) {
+      const numericFix = applyNumericConsistencyDeterministicFixes(chapter.content, { authorityIndex: blueprintAuthorityIndex, scheduleAuthority, assemblyRateAuthority, supportAuthority, laborPeakAuthority, quantityAnchors: postCitationAnchorBatches[chapterIndex] });
       if (numericFix.fixedCount > 0) {
         chapter.content = numericFix.markdown;
         postNumericFixCount += numericFix.fixedCount;

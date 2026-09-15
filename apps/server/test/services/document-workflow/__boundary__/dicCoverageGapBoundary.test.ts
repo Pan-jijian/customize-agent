@@ -432,14 +432,18 @@ describe('FF30 code 锚点：权威值一致跳过（L3340）', () => {
 
 // ── FF31. fixQuantityAuthorityConflicts：名称元字符转义（L3378） ──
 
-describe('FF31 清单权威修复：名称含正则元字符', () => {
-  it('FF31 名称「C.1项铺装」点号转义 → 字面匹配修复 50→100', () => {
-    const result = fixQuantityAuthorityConflicts('C.1项铺装 50m。', [{ name: 'C.1项铺装', value: 100, unit: 'm' }]);
+describe('FF31 清单权威修复：名称含正则元字符（名称仅作说明文案）', () => {
+  it('FF31 名称「C.1项铺装」点号形态 → 锚点直连修复 50→100', () => {
+    const markdown = 'C.1项铺装 50m。';
+    const at = markdown.indexOf('50');
+    const result = fixQuantityAuthorityConflicts(markdown, [{ name: 'C.1项铺装', value: 50, unit: 'm', authorityValue: 100, start: at, end: at + 2 }]);
     expect(result.fixedCount).toBe(1);
     expect(result.markdown).toContain('C.1项铺装 100m');
   });
-  it('FF31 名称「A+B铺装」加号转义 → 字面匹配修复 5→100', () => {
-    const result = fixQuantityAuthorityConflicts('A+B铺装 5m。', [{ name: 'A+B铺装', value: 100, unit: 'm' }]);
+  it('FF31 名称「A+B铺装」加号形态 → 锚点直连修复 5→100', () => {
+    const markdown = 'A+B铺装 5m。';
+    const at = markdown.indexOf('5');
+    const result = fixQuantityAuthorityConflicts(markdown, [{ name: 'A+B铺装', value: 5, unit: 'm', authorityValue: 100, start: at, end: at + 1 }]);
     expect(result.fixedCount).toBe(1);
     expect(result.markdown).toContain('A+B铺装 100m');
   });
@@ -447,9 +451,11 @@ describe('FF31 清单权威修复：名称含正则元字符', () => {
 
 // ── FF32. fixQuantityAuthorityConflicts：窗口值 Infinity（L3447） ──
 
-describe('FF32 清单权威修复：窗口数值 Infinity', () => {
-  it('FF32 正文值为 400 位数字 → best 不更新 → 不修', () => {
-    const result = fixQuantityAuthorityConflicts(`塑料管铺设 ${HUGE}m。`, [{ name: '塑料管铺设', value: 100, unit: 'm' }]);
+describe('FF32 清单权威修复：锚点切片非有限值', () => {
+  it('FF32 正文值为 400 位数字（切片解析 Infinity）→ 校验跳过不修', () => {
+    const markdown = `塑料管铺设 ${HUGE}m。`;
+    const at = markdown.indexOf(HUGE);
+    const result = fixQuantityAuthorityConflicts(markdown, [{ name: '塑料管铺设', value: Number(HUGE), unit: 'm', authorityValue: 100, start: at, end: at + HUGE.length }]);
     expect(result.fixedCount).toBe(0);
     expect(result.markdown).toContain(HUGE);
   });

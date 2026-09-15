@@ -1,5 +1,5 @@
 /**
- * stageUnderstanding：阶段 1 —— 索引/证据/事实池/裁决/图谱/canonical/评分项提取链。
+ * stageUnderstanding：阶段 1 —— 索引/证据/事实池/裁决/图谱/canonical/标书编制规格/评分项提取链。
  * P1 六阶段拆分（方案 5.1）：由 documentGenerator.generateDocumentDraft 阶段 1 代码块机械搬迁而来，
  * 变量读写经 session 子对象显式化，业务生成语义与原巨型函数逐字一致（行为保持）。
  */
@@ -26,6 +26,7 @@ import { buildBidProcedureJudge, evidenceSafetyKey, partitionEvidenceByContentSa
 import { buildFactsModel, extractLocalFactPool } from '../factsModel';
 import { arbitrateFactPool, buildCanonicalFactModel, extractDrawingAnnotationFacts, PROJECT_BASIC_FIELD_SPECS } from '../factGovernance';
 import { emptyTenderRequirements, extractRequirementFieldGaps, extractTenderRequirements, filterMandatoryClauseEvidence, hasTenderRequirements, MANDATORY_FIELD_NAMES, mandatoryFieldGaps, mergeTenderRequirements, preselectTenderRequirementEvidence, readCachedTenderRequirements, requirementFieldGaps, requirementFieldLabel, tenderRequirementsCacheKey, tenderRequirementsSummary, writeCachedTenderRequirements } from '../tenderRequirements';
+import { bidCompositionSummary, extractBidCompositionSpec, isBodyTableForbidden, stripRequiredTableRuleLine } from '../bidComposition';
 
 export async function stageUnderstanding(session: GenerationSession): Promise<void> {
   session.understanding.evidenceScopePaths = new Set(session.prepare.materialFilePaths);
@@ -197,6 +198,67 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
     enrichedOutlineChapters.map(chapterCriteriaText),
   );
   session.understanding.bidStructureAudit = validateBidStructureBeforeGeneration({ template: session.prepare.template, chapters: enrichedOutlineChapters, requirement: session.global.input.requirement, evaluationItems: session.understanding.evaluationItems, semanticSimilarity: criteriaSimilarity });
+  // ── 标书编制规格判定（暗标/明标）——一处判定、全链消费 ──
+  // 与评分项要求提取链同源直读（招标/补疑/答疑/评标文件全量切片，不经检索命中），确定性解析（无 LLM）：
+  // 判定结果驱动阶段 2 小节规划/表格计划口径（暗标正文禁表 → 不产出表格需求）、阶段 3 蓝图 composition 承接
+  // （附表清单与数据源绑定）、阶段 4 写作/门禁（禁表禁图注入 + 正文表格反向阻断）、终稿文末附表直出与封面口径；
+  // 未能识别标书类型标记时显性展示（skipped，按常规口径），不静默猜测。
+  const bidCompositionTexts: string[] = [];
+  for (const relativePath of [...session.understanding.evidenceScopePaths].sort()) {
+    if (!/招标|补疑|答疑|评标/u.test(relativePath)) continue;
+    const detail = session.understanding.getCachedFileDetail(relativePath);
+    if (!detail?.chunks?.length) continue;
+    for (const chunk of detail.chunks as Array<{ content: string }>) bidCompositionTexts.push(chunk.content || '');
+  }
+  session.understanding.bidComposition = extractBidCompositionSpec({
+    tenderTexts: bidCompositionTexts,
+    requirement: session.global.input.requirement,
+    requiredTables: session.prepare.runtimePromptRules.requiredTables,
+  });
+  const compositionSummary = bidCompositionSummary(session.understanding.bidComposition);
+  upsertProgressStage(session.global.progressStages, displayStage({
+    type: 'validation',
+    roleId: 'bid-composition',
+    status: compositionSummary.status,
+    message: compositionSummary.message,
+    details: compositionSummary.details,
+  }, { subtitle: '标书编制规格', order: session.global.progressStages.length }));
+  session.global.emitProgress();
+  // 暗标口径消解（B6 门禁反转）：阶段 0 先于本判定拼装运行时提示词，已把「必须输出以下正式 Markdown 表格」
+  // 规则行写入写作/事实提取/审查/修复四条消费链——判定为正文禁表后从这些文本中移除该行（字符串消解，
+  // 不重建提示词），使阶段 2/4/终稿各轮消费的提示词与招标暗标口径一致；表格需求改由终稿文末附表区承接。
+  if (isBodyTableForbidden(session.understanding.bidComposition)) {
+    const dissolve = (text: string): { next: string; changed: boolean } => {
+      const next = stripRequiredTableRuleLine(text || '');
+      return { next, changed: next !== (text || '') };
+    };
+    const dissolvedFields: string[] = [];
+    const runtimeRulesResult = dissolve(session.prepare.runtimeRulesText);
+    session.prepare.runtimeRulesText = runtimeRulesResult.next;
+    if (runtimeRulesResult.changed) dissolvedFields.push('runtimeRulesText');
+    const promptTextsResult = dissolve(session.prepare.promptTexts);
+    session.prepare.promptTexts = promptTextsResult.next;
+    if (promptTextsResult.changed) dissolvedFields.push('promptTexts');
+    const factExtractionResult = dissolve(session.prepare.factExtractionPromptTexts);
+    session.prepare.factExtractionPromptTexts = factExtractionResult.next;
+    if (factExtractionResult.changed) dissolvedFields.push('factExtractionPromptTexts');
+    const reviewResult = dissolve(session.prepare.reviewPromptTexts);
+    session.prepare.reviewPromptTexts = reviewResult.next;
+    if (reviewResult.changed) dissolvedFields.push('reviewPromptTexts');
+    const repairResult = dissolve(session.prepare.repairPromptTexts);
+    session.prepare.repairPromptTexts = repairResult.next;
+    if (repairResult.changed) dissolvedFields.push('repairPromptTexts');
+    if (dissolvedFields.length > 0) {
+      upsertProgressStage(session.global.progressStages, displayStage({
+        type: 'validation',
+        roleId: 'bid-composition-prompt-dissolve',
+        status: 'success',
+        message: `暗标口径消解：提示词「必须输出表格」规则行已从 ${dissolvedFields.length} 处消费文本移除（${dissolvedFields.join('、')}）`,
+        details: ['正文表格需求改由终稿文末附表区按招标附表清单直出；写作/检查/修复提示词不再要求正文输出表格'],
+      }, { subtitle: '标书编制规格', order: session.global.progressStages.length }));
+      session.global.emitProgress();
+    }
+  }
   // C1 前置链并行：评分项要求提取链（招标直读→预筛→主提取∥窄通道召回→条件补提→合并→缓存）
   // 独立任务与大纲规划并行执行——提取 LLM 时间被规划 LLM 时间覆盖（真实生成前置链省 2~4 分钟）；
   // 提取失败独立降级为空模型 + skipped 显性警示（提取失败不得阻断生成，与串行路径 skipped 语义一致）

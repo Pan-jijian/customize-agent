@@ -172,6 +172,8 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     },
     generatedAt: Date.now(),
     markdown: session.finalMarkdown,
+    // 标书编制规格快照落盘（导出层格式口径承接：页码页脚/封面/页数上限）
+    bidComposition: session.bidComposition,
   };
 }
 

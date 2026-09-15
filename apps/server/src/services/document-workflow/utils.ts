@@ -10,6 +10,17 @@ export const WORK_PACKAGE_SECTION_RE = /项目主要施工内容|主要分部分
  * 引用法规名称不构成正文对应主题内容（劳资/工伤类词面门控前先剥离，避免纯引用文档误报） */
 export const BOOK_TITLE_CITATION_RE = /《[^》]*》/gu;
 
+/** 工伤保险缴纳表述判定（4.36 B2 检测定位=修复定位单源）：检测端 localAdaptationKeywordIssues
+ * 的 workInjury 字面短路与修复端 fixWorkInjuryInsurance 的幂等判定共用本函数——
+ * 「工伤保险」邻近（±8 字）出现办理/缴纳/参保/缴费/投保类动词即构成缴纳表述；
+ * 判定前剥离书名号引用（《工伤保险条例》书名引用不构成缴纳表述）。
+ * 字面短路解决两个历史死结：①修复补写句落在 bge 句级采样窗口外时检测残留；
+ * ②检测 bge 语义判定与修复幂等正则两套口径导致的「已修仍报/该修不修」摇摆。 */
+export function hasWorkInjuryInsuranceStatement(text: string): boolean {
+  const stripped = text.replace(/《[^》]*》/gu, '');
+  return /(?:办理|缴纳|参保|缴费|投保).{0,8}工伤保险|工伤保险.{0,8}(?:办理|缴纳|参保|缴费|投保)/u.test(stripped);
+}
+
 /**
  * 工序顺序表达检测：施工流程/施工方法的工序顺序表达形式不限——箭头链、编号步骤、
  * 有序/无序列表、顺序词引导、连接线链任一即可，不再强制“→”箭头。
@@ -55,14 +66,6 @@ export function workPackageContentElementFlags(block: string): { scope: boolean;
 export function workPackageContentElementsComplete(block: string): boolean {
   const flags = workPackageContentElementFlags(block);
   return flags.scope && flags.process && flags.method;
-}
-
-/** 工作包要素门槛（4.18.6 三要素硬门）：结构门禁的降级放行不得绕过三要素——
- * 每包作业对象与工程量/工序顺序/施工方法三要素必须齐全（直接复用 workPackageContentElementsComplete，
- * 两处口径单点同源）；4.19 的“至少 2 要素”门槛实测放行“只有作业对象”型工作包直达交付（轮7），
- * 收紧为三要素齐全后降级验收与专项验收/结构门禁口径统一。 */
-export function workPackageElementsMeetLenientGate(block: string): boolean {
-  return workPackageContentElementsComplete(block);
 }
 
 /** 小节标题去重归一化：剥离编号前缀与括号标注后比较（“1.3.2 室外雨污分流改造”与“1.3.12 室外雨污分流改造”视为同一要点）。

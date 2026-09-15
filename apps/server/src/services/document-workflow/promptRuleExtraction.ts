@@ -500,7 +500,7 @@ export function minimumSectionCount(chapter: DocumentTemplateChapter, targetWord
  * 表格需求（表名+表头字段，写作期按此注入表格硬性要求）。小节结构只来自用户声明与 LLM 规划，
  * 系统不生成任何小节：LLM 失败时保留锁定结构继续；无锁定结构且规划失败/无产出即显性失败（throw），不凑数补位。
  */
-export async function planChapterSectionsWithLlm(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; chapterIndex?: number; evidence: DocumentEvidence[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; projectGraphSummary?: string; lockedSections?: string[]; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; diversity?: { directive: string; avoidSections?: string[]; overlapCheck?: (sections: string[]) => Array<{ title: string; collidedWith: string }> } }): Promise<{ sections: string[]; tables: PlannedTableRequest[]; diversity?: { retried: boolean; remainingCollisions: number } }> {
+export async function planChapterSectionsWithLlm(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; chapterIndex?: number; evidence: DocumentEvidence[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; projectGraphSummary?: string; lockedSections?: string[]; /** 标书编制规格（阶段 1 判定）的正文表格策略：forbidden（暗标）时不规划任何表格需求 */ bodyTablePolicy?: 'forbidden' | 'allowed'; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; diversity?: { directive: string; avoidSections?: string[]; overlapCheck?: (sections: string[]) => Array<{ title: string; collidedWith: string }> } }): Promise<{ sections: string[]; tables: PlannedTableRequest[]; diversity?: { retried: boolean; remainingCollisions: number } }> {
   const locked = normalizePlannedSections(input.lockedSections || [], input.chapter.title);
   const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, input.evidence), { maxChars: evidencePromptBudgetForTarget(input.targetWords, 5000, 12000), diagnostics: input.diagnostics });
   const minSections = minimumSectionCount(input.chapter, input.targetWords, input.evidence, locked.length);
@@ -531,7 +531,9 @@ export async function planChapterSectionsWithLlm(input: { template: DocumentTemp
       input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
       evidenceText ? `真实绑定资料：\n${evidenceText}` : '',
       `请输出 ${minSections}-${maxSections} 个适合直接成稿的二级小节标题。标题必须具体、业务相关、能承载真实资料；每个标题控制在 16 个汉字以内，避免多个小节表达同一内容。`,
-      '如本章需要输出管理表格或清单（投入计划表、控制要点表、验收清单、管控台账、检查记录表等），必须在 tables 中逐表给出表名与表头字段（字段名必须具体、可填）；不需要表格时 tables 返回空数组。',
+      input.bodyTablePolicy === 'forbidden'
+        ? '本标书为暗标（招标编制要求：正文内不允许出现表格与框图）：tables 必须返回空数组；计划、清单、台账类内容一律规划为纯文字叙述型小节，不得规划表格型小节。'
+        : '如本章需要输出管理表格或清单（投入计划表、控制要点表、验收清单、管控台账、检查记录表等），必须在 tables 中逐表给出表名与表头字段（字段名必须具体、可填）；不需要表格时 tables 返回空数组。',
       'JSON 格式：{"sections":["小节标题1","小节标题2"],"tables":[{"title":"表名","fields":["字段1","字段2"]}]}',
     ].filter(Boolean).join('\n\n'), { maxTokens: 2400, temperature: DIVERSITY_PLANNING_TEMPERATURE, signal: input.signal, diagnostics: input.diagnostics });
     const plannedItems: string[] = [];
@@ -548,7 +550,7 @@ export async function planChapterSectionsWithLlm(input: { template: DocumentTemp
     }
     const sections = dedupePlannedSections(merged).slice(0, Math.max(MAX_CHAPTER_SECTIONS, locked.length));
     const tables: PlannedTableRequest[] = [];
-    for (const item of result?.tables || []) {
+    for (const item of input.bodyTablePolicy === 'forbidden' ? [] : result?.tables || []) {
       const title = cleanSectionTitleArtifacts(normalizePlannedSectionTitle(String(item?.title || '')));
       if (!title || isInvalidPlannedSectionTitle(title, input.chapter.title)) continue;
       if (tables.some(existing => sectionTitleEquivalent(existing.title, title))) continue;

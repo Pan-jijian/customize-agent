@@ -2,7 +2,7 @@
  * 边界矩阵（P1 第 32 批 · RR 组 · 厚度修复谱系 + 单位变体归一矩阵）
  * 断言按探测锁定的真实行为推导。
  *  - R1 fixFinishThickness：≥100 的 mm 值 ÷10 修正（999→100 四舍五入、99 不匹配）
- *  - R2 单位变体归一：UNIT_GROUPS 五组全变体 × 清单量校正（大写/中文/符号互认）
+ *  - R2 单位变体归一：全变体 × 锚点直连替换（单位仅作文案，坐标切片替换）
  */
 import { describe, expect, it } from 'vitest';
 import { fixFinishThickness, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
@@ -63,10 +63,14 @@ const UNIT_MATRIX: Array<{ v: string; unit: string }> = [
   { v: '50系统', unit: '系统' },
 ];
 
-describe('R2 单位变体归一：同物理口径不同写法互认', () => {
-  it.each(UNIT_MATRIX)('R2 正文「$v」vs 清单单位「$unit」→ 归一匹配 → 修复 100', ({ v, unit }) => {
-    const r = fixQuantityAuthorityConflicts(`C.1项铺装 ${v}。`, [{ name: 'C.1项铺装', value: 100, unit }]);
+describe('R2 单位变体归一：锚点直连（单位变体不阻碍坐标替换）', () => {
+  it.each(UNIT_MATRIX)('R2 正文「$v」vs 清单单位「$unit」→ 锚点照替换 100', ({ v, unit }) => {
+    const markdown = `C.1项铺装 ${v}。`;
+    const raw = '50';
+    const nameEnd = markdown.indexOf('C.1项铺装') + 'C.1项铺装'.length;
+    const at = markdown.indexOf(raw, nameEnd);
+    const r = fixQuantityAuthorityConflicts(markdown, [{ name: 'C.1项铺装', value: 50, unit, authorityValue: 100, start: at, end: at + raw.length }]);
     expect(r.fixedCount).toBe(1);
-    expect(r.markdown).toContain('100');
+    expect(r.markdown).toBe(`C.1项铺装 100${v.slice(raw.length)}。`);
   });
 });

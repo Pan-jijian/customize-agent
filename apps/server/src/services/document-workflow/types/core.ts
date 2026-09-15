@@ -3,6 +3,7 @@
  * 依赖 validation（Issue/Gate/ReviewMetadata）与 progress（Stage/Asset）的 import type（type-only 引用，运行时无依赖）。
  */
 import type { AgentWorkflowContext } from '../agentWorkflow';
+import type { BidCompositionSpec } from '../bidComposition';
 import type { ExportGateResult, ValidationIssue, DocumentReviewMetadata } from './validation';
 import type { DocumentExecutionStage, DocumentAsset } from './progress';
 
@@ -466,6 +467,8 @@ export interface GeneratedDocumentDraft {
   projectGraph?: ProjectGraph;
   /** 施工组织设计写作任务书：每章的写作指导 */
   writingTaskBrief?: WritingTaskBrief;
+  /** 标书编制规格（阶段 1 判定快照）：导出层格式口径（页眉页脚/封面/页数上限/单黑色）承接消费 */
+  bidComposition?: BidCompositionSpec;
   generatedAt: number;
 }
 

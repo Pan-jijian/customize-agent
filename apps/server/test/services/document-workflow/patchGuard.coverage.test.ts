@@ -1,6 +1,6 @@
 /**
  * patchGuard 覆盖率防回归（P22 第 4 项 / P11）：
- * 源码 grep 式断言——所有 repairChapterByQuality 调用点（7 处）必须传入 patchGuard 参数。
+ * 源码 grep 式断言——所有 repairChapterByQuality 调用点（8 处）必须传入 patchGuard 参数。
  * 新增调用点若漏传 patchGuard，本测试直接失败（防修复链重新引入已知坏内容而无预检）。
  */
 import { readFileSync } from 'node:fs';
@@ -36,22 +36,24 @@ function repairCallBlocks(source: string): string[] {
 }
 
 describe('patchGuard 全链接入防回归（P11/P22）', () => {
-  it('7 个调用点全部存在且每处均传 patchGuard（源码 grep 式断言）', () => {
+  it('8 个调用点全部存在且每处均传 patchGuard（源码 grep 式断言）', () => {
     const allBlocks = REPAIR_CALL_FILES.flatMap(file => repairCallBlocks(readFileSync(path.join(SRC_DIR, file), 'utf8')));
-    // 7 个调用点：fact-landing / table-repair（finalize/repairRounds）+ 5 处（globalQualityGates）
-    expect(allBlocks).toHaveLength(7);
+    // 8 个调用点：fact-landing / table-repair（finalize/repairRounds）+ 6 处（globalQualityGates：
+    // 补表/拆表同域 table-execution-repair 双闭环——补表（非暗标缺表）与暗标拆表（bodyTablePolicy=forbidden）互斥）
+    expect(allBlocks).toHaveLength(8);
     allBlocks.forEach((block, index) => {
       expect(block, `第 ${index + 1} 个调用点未传 patchGuard`).toMatch(/patchGuard\s*:/u);
     });
   });
 
-  it('7 个调用点的 patchGuard 轮次声明与 LLM_PATCH_REPAIR_ROUNDS 七轮 id 一一对应', () => {
+  it('8 个调用点的 patchGuard 轮次声明与 LLM_PATCH_REPAIR_ROUNDS 七轮 id 一一对应（table-execution-repair 双闭环）', () => {
     const sources = REPAIR_CALL_FILES.map(file => readFileSync(path.join(SRC_DIR, file), 'utf8'));
     const rounds = sources.flatMap(source => [...source.matchAll(/repairPatchGuard\('([\w-]+)'/gu)].map(match => match[1])).sort();
     expect(rounds).toEqual([
       'fact-landing',
       'global-consistency-repair',
       'planned-section-repair',
+      'table-execution-repair',
       'table-execution-repair',
       'table-repair',
       'templating-repair',

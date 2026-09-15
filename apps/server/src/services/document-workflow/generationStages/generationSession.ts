@@ -48,6 +48,7 @@ import type { GenerationBudget } from '../generationBudget';
 import type { IntegratedBlueprint } from '../integratedBlueprint';
 import type { BillFactLock } from '../billFactLock';
 import type { RequirementSemanticPlan } from '../requirementSemantics';
+import type { BidCompositionSpec } from '../bidComposition';
 import type { Semaphore } from '../utils';
 import type { planDocument } from '../agentPlanner';
 import type { buildChapterIntentClassifier } from '../chapterIntentClassifier';
@@ -178,6 +179,8 @@ export interface GenerationSessionUnderstanding {
   bidStructureAudit: ReturnType<typeof validateBidStructureBeforeGeneration>;
   /** 阶段 1 尾部启动的招标要求提取链任务（阶段 2 消费） */
   tenderRequirementsTask: Promise<TenderRequirementModel>;
+  /** 标书编制规格（暗标/明标判定与编制要求；阶段 1 判定，阶段 2/3/4/终稿全链消费） */
+  bidComposition: BidCompositionSpec;
 }
 
 /** planning：阶段 2 产物（大纲规划/评分项路由/预算/诊断） */

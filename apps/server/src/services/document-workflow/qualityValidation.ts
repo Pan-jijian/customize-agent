@@ -12,6 +12,7 @@ import { extractEngineeringMeasureTokens, normalizeEngineeringTextForFactMatch }
 import { displayChapterTitle, isTenderClauseFragmentTitle } from './outline';
 import { extractGeneratedSections, mergeTableLineBreaks } from './markdownComposer';
 import { stripTableCellInvisibleChars } from './helpers/markdownCleanup';
+import { PAIRED_PUNCTUATION_SYMBOLS } from './structureIntegrityRules';
 import type { BlueprintData } from './integratedBlueprint';
 import { buildResourceBreakdownAuthority, scanResourceBreakdownClaims } from './resourceBreakdownNumbers';
 import { evidenceSatisfiesSpecField } from './factMatching';
@@ -589,8 +590,10 @@ export function formalContentIntegrityIssues(markdown: string): ValidationIssue[
  * 「279号」残成「279订」、句子删除残留「。；」标点叠用，全部穿透既有防线带病交付）：
  * - 句读标点叠用（「。；」「；。」「。，」「，。」「。。」等，句号+引号「。”」天然不在字符类）：
  *   确定性修复器修得掉则 stage5 已修；检测残留即 error 阻断，防「修复器漏网形态」带病交付；
- * - 全角括号/书名号全文级成对性：内容丢失拼接必然破坏成对性，零误伤强信号；
- *   内容已丢失无法确定性恢复，error 进修复轮由 LLM 重写所在句子/小节。
+ * - 全角括号/书名号成对性：内容丢失拼接必然破坏成对性，零误伤强信号（文档级计数，报告不静默）；
+ *   4.36 C1 后写时块级熔断已先拦截（structureIntegrityRules.scanPunctuationBalance，符号对定义单源），
+ *   此处为终检安全网——能到达本检测说明写入侧链未收敛，内容已丢失无法确定性恢复，
+ *   error 进修复轮由 LLM 重写所在句子/小节。
  */
 export function punctuationArtifactIssues(markdown: string): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
@@ -606,15 +609,12 @@ export function punctuationArtifactIssues(markdown: string): ValidationIssue[] {
       issues.push({ level: 'error', severity: 'blocker', category: 'format', owner: 'llm', repairability: 'llm_repairable', message: `正文存在句读标点叠用（拼接/删节残留）：${context}`, suggestion: '相邻句读标点（如「。；」「；。」「。。」）是删节拼接残留或省略号误写，请重写该句。' });
     }
   }
-  const parenPairs = [
-    { open: /（/gu, close: /）/gu, label: '全角括号' },
-    { open: /《/gu, close: /》/gu, label: '书名号' },
-  ] as const;
-  for (const { open, close, label } of parenPairs) {
-    const openCount = (markdown.match(open) || []).length;
-    const closeCount = (markdown.match(close) || []).length;
+  // 4.36 C1：符号对定义与写时块级扫描（structureIntegrityRules.scanPunctuationBalance）单源共用
+  for (const { open, close, label } of PAIRED_PUNCTUATION_SYMBOLS) {
+    const openCount = markdown.split(open).length - 1;
+    const closeCount = markdown.split(close).length - 1;
     if (openCount === closeCount) continue;
-    const locateLine = lines.find(line => (line.match(open) || []).length !== (line.match(close) || []).length);
+    const locateLine = lines.find(line => (line.split(open).length - 1) !== (line.split(close).length - 1));
     issues.push({ level: 'error', severity: 'blocker', category: 'format', owner: 'llm', repairability: 'llm_repairable', message: `正文存在${label}不闭合（开 ${openCount} 处、闭 ${closeCount} 处，拼接/删节残留）：${locateLine?.trim().slice(0, 120) ?? ''}`, suggestion: `${label}成对性破坏是内容丢失拼接的确定性信号，请重写所在句子/小节，补齐或删除残缺部分。` });
   }
   return issues;

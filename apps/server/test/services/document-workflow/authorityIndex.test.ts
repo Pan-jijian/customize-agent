@@ -19,6 +19,7 @@ import type { BlueprintData } from '@/services/document-workflow/integratedBluep
 /** 全字段填充 fixture：覆盖 BlueprintData 全部数值叶子（契约测试基准） */
 function makeBlueprintData(): BlueprintData {
   return {
+    strategyId: 'village-municipal',
     project: { name: '舒城县美丽宜居自然村建设项目', scope: '9 个自然村市政配套', works: ['道路工程', '排水工程'], location: '六安市舒城县' },
     contract: { totalDays: 240, qualityStandard: '合格', pricingFile: '安徽省 2018 版计价定额', estimatedAmount: 1200 },
     climate: { rainySeason: '6-7月梅雨', highTemp: '7-8月高温', winter: '冬季施工' },
@@ -30,7 +31,7 @@ function makeBlueprintData(): BlueprintData {
       labor: {
         peak: { min: 160, max: 200 },
         peakValue: 180,
-        peakBasis: '造价锚定',
+        peakBasis: '清单工效推导',
         byPhase: [
           { phase: '施工准备阶段', min: 20, max: 30, basis: '推导' },
           { phase: '主体施工阶段', min: 120, max: 140, basis: '推导' },
@@ -70,7 +71,6 @@ function makeBlueprintData(): BlueprintData {
     },
     specAuthorities: { 垫层: 'C20' },
     inspectionBatches: [{ scope: '排水管道', planDesc: '按检查井分段' }],
-    standardBlocks: [{ id: 'dust', title: '扬尘治理', source: '参考.docx', items: ['六个百分百'], gap: false }],
     constructionDeployment: { sections: [{ name: '第一施工段', basis: '推导' }], sequence: '先地下后地上', sequenceBasis: '推导', flow: '分区流水' },
     keyDifficulties: [{ name: '交通导改', measure: '分段围挡', basis: '推导' }],
     basisRegulations: ['《中华人民共和国安全生产法》'],

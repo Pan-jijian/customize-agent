@@ -9,6 +9,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { generatedRoot, getGeneratedDocument, updateGeneratedDocument, type ExportReport, type ExportRenderAuditReport, type GeneratedDocumentRecord } from '@/services/document-core/generatedDocumentService';
 import { getProjectKbRoot, getProjectRoot } from '@/services/knowledge/kbService';
 import type { DocumentExportSettings } from '@/services/document-workflow';
+import type { BidCompositionSpec } from '@/services/document-workflow/bidComposition';
 import { sanitizeFormalMarkdown } from '@/services/document-workflow/markdownComposer';
 import { recordErrorLog } from '@/services/common/errorLogService';
 import { withApiErrorBoundary } from '@/services/common/apiErrorBoundary';
@@ -865,7 +866,7 @@ function enhanceTocHtml(body: string) {
   });
 }
 
-function buildPrintCss(style: ReturnType<typeof resolveExportStyle>) {
+function buildPrintCss(style: ReturnType<typeof resolveExportStyle>, monoColor = false) {
   return `
 @page{size:${style.paper};margin:${style.marginTop} ${style.marginRight} ${style.marginBottom} ${style.marginLeft}}
 *{box-sizing:border-box}
@@ -887,16 +888,16 @@ img{display:block;max-width:100%;max-height:500px;object-fit:contain;margin:10pt
 table{width:100%;border-collapse:collapse;table-layout:auto;page-break-inside:auto;break-inside:auto;margin:8pt 0 10pt 0}
 thead{display:table-header-group}tfoot{display:table-footer-group}tr{page-break-inside:avoid;break-inside:avoid;page-break-after:auto}
 th,td{font-family:${style.bodyFontFamily};font-size:${Math.max(style.bodyPt - 1, 9)}pt;line-height:${style.lineCss};border:1px solid #666;padding:3pt 5pt;vertical-align:top;text-indent:0;text-align:left;word-break:normal;overflow-wrap:break-word}
-th{background:#f3f4f6;font-weight:700;text-align:center}
+th{background:${monoColor ? '#fff' : '#f3f4f6'};font-weight:700;text-align:center}
 pre{white-space:pre-wrap;font-family:${style.bodyFontFamily};font-size:${style.bodyCss};line-height:${style.lineCss};page-break-inside:avoid;break-inside:avoid}.page-break{page-break-after:always;break-after:page;height:0}
 @media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}a{text-decoration:none;color:#111827}}
 `;
 }
 
-function htmlShell(title: string, body: string, settings?: DocumentExportSettings) {
+function htmlShell(title: string, body: string, settings?: DocumentExportSettings, monoColor = false) {
   const style = resolveExportStyle(settings);
   const enhancedBody = enhanceTocHtml(body);
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeXml(title)}</title><style>${buildPrintCss(style)}</style></head><body>${enhancedBody}</body></html>`;
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeXml(title)}</title><style>${buildPrintCss(style, monoColor)}</style></head><body>${enhancedBody}</body></html>`;
 }
 
 /** 判断问题是否为阻止导出的严重问题（非警告类问题） */
@@ -1083,10 +1084,10 @@ function removeRenderedMarkdownTableSeparators(html: string) {
   return html.replace(/<p>\s*\|\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*<\/p>/giu, '');
 }
 
-async function buildExportHtml(title: string, markdown: string, settings: DocumentExportSettings | undefined, projectRoot: string) {
+async function buildExportHtml(title: string, markdown: string, settings: DocumentExportSettings | undefined, projectRoot: string, monoColor = false) {
   const { marked } = await import('marked');
   const body = removeRenderedMarkdownTableSeparators(markChapterHeadings(marked.parse(markdown, { async: false }) as string));
-  return inlineLocalImages(htmlShell(title, body, settings), projectRoot);
+  return inlineLocalImages(htmlShell(title, body, settings, monoColor), projectRoot);
 }
 
 function existingBrowserPaths() {
@@ -1155,7 +1156,7 @@ function pdfPageCount(buffer: Buffer) {
   return matches?.length || undefined;
 }
 
-async function renderPdfBuffer(html: string, settings?: DocumentExportSettings) {
+async function renderPdfBuffer(html: string, settings?: DocumentExportSettings, formatRules?: BidCompositionSpec['formatRules']) {
   const { chromium } = await import('playwright');
   const attempts: Array<{ label: string; options: Parameters<typeof chromium.launch>[0] }> = [
     { label: 'playwright-bundled-chromium', options: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] } },
@@ -1173,7 +1174,11 @@ async function renderPdfBuffer(html: string, settings?: DocumentExportSettings) 
         await page.waitForFunction(() => Array.from(document.images).every(img => img.complete), undefined, { timeout: 10_000 }).catch(() => undefined);
         await page.emulateMedia({ media: 'print' });
         const style = resolveExportStyle(settings);
-        const pdf = await page.pdf({ format: style.paper as 'A4', printBackground: true, preferCSSPageSize: true, margin: { top: style.marginTop, right: style.marginRight, bottom: style.marginBottom, left: style.marginLeft }, displayHeaderFooter: true, headerTemplate: '<div></div>', footerTemplate: `<div style="font-family:${style.fontFamily};font-size:10.5pt;line-height:12pt;width:100%;text-align:center;color:#666;">第 <span class="pageNumber"></span> 页 / 共 <span class="totalPages"></span> 页</div>` });
+        // 标书编制规格：暗标「不需编制页眉、页脚、页码」→ 禁用页码页脚（招标文件 > 系统默认）
+        const headerFooter = formatRules?.headersFooters === 'forbidden'
+          ? { displayHeaderFooter: false as const }
+          : { displayHeaderFooter: true as const, headerTemplate: '<div></div>', footerTemplate: `<div style="font-family:${style.fontFamily};font-size:10.5pt;line-height:12pt;width:100%;text-align:center;color:#666;">第 <span class="pageNumber"></span> 页 / 共 <span class="totalPages"></span> 页</div>` };
+        const pdf = await page.pdf({ format: style.paper as 'A4', printBackground: true, preferCSSPageSize: true, margin: { top: style.marginTop, right: style.marginRight, bottom: style.marginBottom, left: style.marginLeft }, ...headerFooter });
         return Buffer.from(pdf);
       } finally {
         await browser.close();
@@ -1235,6 +1240,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const projectRoot = body.projectRoot || getProjectRoot();
     const record = body.documentId ? getGeneratedDocument(body.documentId, projectRoot) : null;
     if (body.documentId && !record) return res.status(404).json({ error: 'Document not found' });
+    // 标书编制规格快照（生成时落盘）：导出层格式口径承接（页码页脚/单黑色/页数上限）
+    const composition = record?.draft?.bidComposition;
     const title = body.title || record?.title || 'document';
     const exportSettings = record?.draft?.exportSettings;
     const recordMarkdown = record?.editedMarkdown || record?.markdown || record?.draft?.markdown || '';
@@ -1279,7 +1286,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(200).send(docx);
     }
     // HTML 和 PDF 需要将 Markdown 渲染为 HTML
-    const html = await buildExportHtml(title, markdown, exportSettings, projectRoot);
+    const html = await buildExportHtml(title, markdown, exportSettings, projectRoot, composition?.formatRules.monoColor === true);
     if (format === 'html') {
       archiveExportReport(record, format, projectRoot, renderAuditReport);
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -1287,8 +1294,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(200).send(html);
     }
     try {
-      const pdf = await renderPdfBuffer(html, exportSettings);
+      const pdf = await renderPdfBuffer(html, exportSettings, composition?.formatRules);
       const pages = pdfPageCount(pdf);
+      // 标书编制规格：总页数上限（超页扣分项）→ 响应头显性提示（不阻断导出，交编制人复核）
+      const pageLimit = composition?.formatRules.pageLimit;
+      if (pageLimit && pages && pages > pageLimit) res.setHeader('X-Export-Page-Limit', encodeURIComponent(`超出招标规定总页数上限：当前 ${pages} 页 / 上限 ${pageLimit} 页`));
       archiveExportReport(record, format, projectRoot, renderAuditReport);
       res.setHeader('Content-Type', 'application/pdf');
       if (pages) res.setHeader('X-PDF-Page-Count', String(pages));

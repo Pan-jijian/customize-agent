@@ -5,10 +5,10 @@
  *  - M1 面积算术：18 格式矛盾句 + 自洽锚定（无容差：地上+地下 ≠ 单体建筑面积即报）
  *  - M2 tablePeakLabor：18 格式单元格解析（千分位/前导零/小数/科学计数判定）
  *  - M3 劳动力峰值修复：18 格式（小数截尾解析行为锁定：1.0→捕获0跳过、0.5→捕获5）
- *  - M4 清单量定点校正：18 格式（99→2%豁免、1e3→不匹配保留、其余→修复100）
+ *  - M4 清单量定点校正：18 格式（锚点切片解析 → 全格式替换 100，含 1e3 读作 1000）
  *  - M5 灭火器数值锚点：18 格式同值零报 + 千分位/科学计数混合行为（1,000具→解析0具）
  *  - M6 面积单位归一：5 单位变体（m²/㎡/m2/M2/平方米）立方组合 125 条自洽 + 4 条混合矛盾
- *  - M7 村名词谱系：14 村词 × 窗口内豁免/窗口外修复
+ *  - M7 村名词谱系：锚点直连零豁免（24 村词语境照替换）
  *  - M8 否定声明词谱系：11 词 × 行级豁免 + 对照
  */
 import { describe, expect, it } from 'vitest';
@@ -25,7 +25,7 @@ import { NUMERIC_FORMATS, VILLAGE_WORDS, VILLAGE_WORDS_REMOVED } from './boundar
 // area: '地上f㎡地下f㎡单体建筑面积f㎡' 报数（2v ≠ v 即报）
 // table: tablePeakLabor 单元格值（undefined=不识别）
 // labor: applyNumeric('高峰期约f人。', {laborPeakAuthority:186}) fixedCount
-// qty: fixQuantityAuthorityConflicts('C.1项铺装 f m。', [{value:100}]) fixedCount
+// qty: 锚点切片解析（Number('1e3')=1000）→ 替换 fixedCount（全格式 1，替换归一 100）
 const FORMAT_BEHAVIOR: Array<{ f: string; area: number; table: number | 'undef'; labor: number; qty: number }> = [
   { f: '1', area: 1, table: 1, labor: 1, qty: 1 },
   { f: '1.0', area: 1, table: 'undef', labor: 0, qty: 1 },
@@ -42,7 +42,7 @@ const FORMAT_BEHAVIOR: Array<{ f: string; area: number; table: number | 'undef';
   { f: '1234.567', area: 1, table: 'undef', labor: 1, qty: 1 },
   { f: '0001', area: 1, table: 1, labor: 1, qty: 1 },
   { f: '010', area: 1, table: 10, labor: 1, qty: 1 },
-  { f: '1e3', area: 1, table: 'undef', labor: 1, qty: 0 },
+  { f: '1e3', area: 1, table: 'undef', labor: 1, qty: 1 },
   { f: '3.0', area: 1, table: 'undef', labor: 0, qty: 1 },
   { f: '12,345,678', area: 1, table: 12345678, labor: 1, qty: 1 },
 ];
@@ -101,17 +101,20 @@ describe('M3 劳动力峰值修复：数值格式捕获行为', () => {
 
 // ── M4. 清单量定点校正：格式 × 修复判定 ──
 
-describe('M4 清单量定点校正：数值格式', () => {
-  it.each(FORMAT_BEHAVIOR)('M4 「C.1项铺装 $fm」权威100 → fixedCount $qty', ({ f, qty }) => {
-    const result = fixQuantityAuthorityConflicts(`C.1项铺装 ${f}m。`, [{ name: 'C.1项铺装', value: 100, unit: 'm' }]);
+describe('M4 清单量定点校正：数值格式（锚点切片解析）', () => {
+  it.each(FORMAT_BEHAVIOR)('M4 「C.1项铺装 $fm」权威100 → 锚点切片解析 → fixedCount $qty', ({ f, qty }) => {
+    const markdown = `C.1项铺装 ${f}m。`;
+    const at = markdown.indexOf(f, markdown.indexOf('C.1项铺装') + 'C.1项铺装'.length);
+    const result = fixQuantityAuthorityConflicts(markdown, [{ name: 'C.1项铺装', value: Number(f.replace(/,/gu, '')), unit: 'm', authorityValue: 100, start: at, end: at + f.length }]);
     expect(result.fixedCount).toBe(qty);
-    if (qty === 1) expect(result.markdown).toContain('100m');
-    else expect(result.markdown).toContain(`${f}m`);
+    expect(result.markdown).toBe('C.1项铺装 100m。');
   });
-  it('M4 千分位完整解析：「1,000m」权威 1000 → 同值不动', () => {
-    const result = fixQuantityAuthorityConflicts('C.1项铺装 1,000m。', [{ name: 'C.1项铺装', value: 1000, unit: 'm' }]);
-    expect(result.fixedCount).toBe(0);
-    expect(result.markdown).toContain('1,000m');
+  it('M4 千分位锚点同值：解析 1000 == 权威 1000 → 替换归一（文本去逗号）', () => {
+    const markdown = 'C.1项铺装 1,000m。';
+    const at = markdown.indexOf('1,000', markdown.indexOf('C.1项铺装') + 'C.1项铺装'.length);
+    const result = fixQuantityAuthorityConflicts(markdown, [{ name: 'C.1项铺装', value: 1000, unit: 'm', authorityValue: 1000, start: at, end: at + 5 }]);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toBe('C.1项铺装 1000m。');
   });
 });
 
@@ -162,33 +165,27 @@ describe('M6 面积算术：单位写法互认矩阵', () => {
   });
 });
 
-// ── M7. 村名词谱系：窗口内豁免 / 窗口外修复 ──
+// ── M7. 村名词谱系：锚点直连零豁免（S5 裁决在判定层） ──
 
-// 段落级豁免词表（探测锁定）：段落含这些村词 → 即使名称前 12 字窗口无村词也豁免
+// 原窗口/段落级豁免词表素材（覆盖保留）：全部语境零豁免照替换
 const PARAGRAPH_EXEMPT_WORDS = ['郢', '庄', '岗', '塘', '圩', '坝'] as const;
-// 仅窗口豁免词表（D2 收紧后）：窗口内有村词豁免、窗口外修复（池/井非段落级词）
 const WINDOW_ONLY_WORDS = ['池', '井'] as const;
 
-describe('M7 清单量校正：村名词豁免窗口', () => {
-  it.each(VILLAGE_WORDS)('M7 名称前 12 字内含「%s」→ 分村量豁免 → 50 不动', (word) => {
-    const result = fixQuantityAuthorityConflicts(`马老${word}区C.1项铺装 50m。`, [{ name: 'C.1项铺装', value: 100, unit: 'm' }]);
-    expect(result.fixedCount).toBe(0);
-    expect(result.markdown).toContain('50m');
-  });
-  it.each(WINDOW_ONLY_WORDS)('M7 仅窗口豁免词「%s」距名称超 12 字 → 不豁免 → 修复 100', (word) => {
-    const result = fixQuantityAuthorityConflicts(`马老${word}村，主要工程量包括其他条目若干。C.1项铺装 50m。`, [{ name: 'C.1项铺装', value: 100, unit: 'm' }]);
+describe('M7 清单量校正：村名词零豁免（锚点直连照替换）', () => {
+  const inline = (word: string) => `马老${word}区C.1项铺装 50m。`;
+  const distant = (word: string) => `马老${word}村，主要工程量包括其他条目若干。C.1项铺装 50m。`;
+  const rows: Array<{ label: string; markdown: string }> = [
+    ...VILLAGE_WORDS.map(word => ({ label: `窗口村词「${word}」`, markdown: inline(word) })),
+    ...VILLAGE_WORDS_REMOVED.map(word => ({ label: `收紧剔除词「${word}」`, markdown: inline(word) })),
+    ...WINDOW_ONLY_WORDS.map(word => ({ label: `超窗村词「${word}」`, markdown: distant(word) })),
+    ...PARAGRAPH_EXEMPT_WORDS.map(word => ({ label: `段落级村词「${word}」`, markdown: distant(word) })),
+  ];
+  it.each(rows)('M7 $label → 照替换 100', ({ markdown }) => {
+    const nameEnd = markdown.indexOf('C.1项铺装') + 'C.1项铺装'.length;
+    const at = markdown.indexOf('50', nameEnd);
+    const result = fixQuantityAuthorityConflicts(markdown, [{ name: 'C.1项铺装', value: 50, unit: 'm', authorityValue: 100, start: at, end: at + 2 }]);
     expect(result.fixedCount).toBe(1);
-    expect(result.markdown).toContain('C.1项铺装 100m');
-  });
-  it.each(VILLAGE_WORDS_REMOVED)('M7 收紧剔除词「%s」12 字窗口内 → 不再豁免 → 修复 100（D2 反漂移）', (word) => {
-    const result = fixQuantityAuthorityConflicts(`马老${word}区C.1项铺装 50m。`, [{ name: 'C.1项铺装', value: 100, unit: 'm' }]);
-    expect(result.fixedCount).toBe(1);
-    expect(result.markdown).toContain('C.1项铺装 100m');
-  });
-  it.each(PARAGRAPH_EXEMPT_WORDS)('M7 段落级豁免词「%s」距名称超 12 字 → 仍豁免 → 50 不动', (word) => {
-    const result = fixQuantityAuthorityConflicts(`马老${word}村，主要工程量包括其他条目若干。C.1项铺装 50m。`, [{ name: 'C.1项铺装', value: 100, unit: 'm' }]);
-    expect(result.fixedCount).toBe(0);
-    expect(result.markdown).toContain('50m');
+    expect(result.markdown).toBe(`${markdown.slice(0, at)}100${markdown.slice(at + 2)}`);
   });
 });
 

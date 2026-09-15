@@ -40,6 +40,7 @@ import type { BlueprintData, extractDecisionLockEntries } from '../integratedBlu
 import type { SurfaceFixerContext } from '../deterministicFixChains';
 import type { BillFactLock } from '../billFactLock';
 import type { RequirementSemanticPlan } from '../requirementSemantics';
+import type { BidCompositionSpec } from '../bidComposition';
 import type { buildFactsModel } from '../factsModel';
 import type { kbIndexHealth, validateDraft } from '../documentGeneratorHelpers';
 import type { buildKnowledgeCoverageReport } from '../documentKnowledgeCoverage';
@@ -108,6 +109,8 @@ export interface FinalizeGenerationInput {
   professionalDepthClassifier: ProfessionalDepthClassifier;
   /** 一体化蓝图参数桶（生成前锁定口径）：交付前确定性清洗的节点工期/机械台数/决策锁权威（三期蓝图接管） */
   blueprintData?: BlueprintData;
+  /** 标书编制规格（阶段 1 判定）：终稿附表直出/封面口径/正文禁表门禁依据 */
+  bidComposition?: BidCompositionSpec;
   /** B1 清单事实锁（蓝图阶段确定性解析）：正文数值 vs 资料原文核对轮（numeric-verification）的清单行权威源 */
   billFactLock?: BillFactLock;
   /** A2 用户提示词语义解析计划：生成后用户要求执行核验闭环（requirement-verification）的核验依据 */
@@ -151,6 +154,8 @@ export interface FinalizeSession {
   factTokenScopeClassifier: FactTokenScopeClassifier;
   professionalDepthClassifier: ProfessionalDepthClassifier;
   blueprintData?: BlueprintData;
+  /** 标书编制规格快照（终稿附表直出/封面口径/正文禁表门禁消费） */
+  bidComposition?: BidCompositionSpec;
   /** B1 清单事实锁快照（numeric-verification 轮消费） */
   billFactLock?: BillFactLock;
   /** A2 用户提示词语义解析计划快照（requirement-verification 轮消费） */
@@ -244,6 +249,7 @@ export function createFinalizeSession(input: FinalizeGenerationInput): FinalizeS
     factTokenScopeClassifier: input.factTokenScopeClassifier,
     professionalDepthClassifier: input.professionalDepthClassifier,
     blueprintData: input.blueprintData,
+    bidComposition: input.bidComposition,
     billFactLock: input.billFactLock,
     requirementSemantics: input.requirementSemantics,
     generationDiagnostics: input.generationDiagnostics,

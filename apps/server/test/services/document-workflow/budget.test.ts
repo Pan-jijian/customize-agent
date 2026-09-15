@@ -4,6 +4,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  allocateChapterTargets,
   buildDocumentBudget,
   chapterBudgetWeight,
   charsPerPageForSettings,
@@ -14,6 +15,7 @@ import {
   explicitLengthTargets,
   pageTargetIssues,
   parseChineseNumber,
+  reanchorChapterTargetsByFeasibility,
   type DocumentBudget,
 } from '@/services/document-workflow/budget';
 import type { AutoDocumentSpecPackage } from '@/services/document-core/autoDocumentSpecTypes';
@@ -285,6 +287,62 @@ describe('buildDocumentBudget', () => {
     expect(sum).toBe(30000);
     expect(budget.chapterTargets.get('tiny')).toBe(800);
     expect([...budget.chapterTargets.values()].every(value => value >= 800)).toBe(true);
+  });
+});
+
+describe('reanchorChapterTargetsByFeasibility（4.35 容量密度可行性闭环）', () => {
+  // 舒城形态：11 章 / T=14 万，「主要施工方法」1.56 万 → 密度下限 3.24 万（96 工作包 + 7 小节）
+  const makeChapters = () => [
+    makeChapter({ id: 'main', title: '主要施工方法', sections: ['s1', 's2', 's3', 's4', 's5', 's6', 's7'] }),
+    ...Array.from({ length: 10 }, (_, index) => makeChapter({ id: `c${index}`, title: `第${index + 2}章 质量保证措施`, sections: ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8'] })),
+  ];
+
+  it('低于可行性下限的章抬升至下限、其余章按需求归一化缩减、Σ 章预算 = T 精确守恒', () => {
+    const chapters = makeChapters();
+    const before = new Map<string, number>([['main', 15603], ...chapters.slice(1).map(chapter => [chapter.id, 12440] as [string, number])]);
+    const { chapterTargets, adjustments, compressed } = reanchorChapterTargetsByFeasibility({
+      chapters,
+      targetChars: 140000,
+      floorOf: () => 0,
+      feasibilityFloorOf: chapter => (chapter.id === 'main' ? 32400 : 0),
+      currentTargets: before,
+    });
+    // 锚定抬升：main = minFeasible 精确值；其余 10 章按需求归一化分享余量（均不低于最低可写预算）
+    expect(chapterTargets.get('main')).toBe(32400);
+    expect([...chapterTargets.values()].reduce((sum, value) => sum + value, 0)).toBe(140000);
+    expect([...chapterTargets.values()].every(value => value >= 800)).toBe(true);
+    expect(compressed).toBe(false);
+    // 调整报告：main 抬升、其余章缩减（from → to）
+    const mainAdjust = adjustments.find(item => item.id === 'main');
+    expect(mainAdjust).toEqual({ id: 'main', title: '主要施工方法', from: 15603, to: 32400 });
+    expect(adjustments.filter(item => item.id !== 'main').every(item => item.to < item.from)).toBe(true);
+  });
+
+  it('Σ minFeasible > T（目标不足以覆盖密度需求）→ 按下限比例压缩且显式标记 compressed', () => {
+    const chapters = [
+      makeChapter({ id: 'a', title: '第一章 主要施工方法', sections: ['s1', 's2'] }),
+      makeChapter({ id: 'b', title: '第二章 主要施工方法', sections: ['s1', 's2'] }),
+    ];
+    const { chapterTargets, compressed } = reanchorChapterTargetsByFeasibility({
+      chapters,
+      targetChars: 140000,
+      floorOf: () => 0,
+      feasibilityFloorOf: () => 80000,
+    });
+    expect(compressed).toBe(true);
+    expect([...chapterTargets.values()]).toEqual([70000, 70000]);
+    expect([...chapterTargets.values()].reduce((sum, value) => sum + value, 0)).toBe(140000);
+  });
+
+  it('幂等：同输入重复调用结果一致；附加下限全 0 时与初次分配同口径（向后兼容）', () => {
+    const chapters = makeChapters();
+    const call = () => reanchorChapterTargetsByFeasibility({ chapters, targetChars: 140000, floorOf: () => 0, feasibilityFloorOf: () => 0 });
+    const first = call();
+    const second = call();
+    expect([...first.chapterTargets.entries()]).toEqual([...second.chapterTargets.entries()]);
+    // 向后兼容：附加下限全 0 的结果 = allocateChapterTargets 不传附加下限（既有路径逐字一致）
+    const legacy = allocateChapterTargets(chapters, 140000, () => 0);
+    expect([...first.chapterTargets.entries()]).toEqual([...legacy.entries()]);
   });
 });
 

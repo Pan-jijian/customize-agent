@@ -121,7 +121,10 @@ export async function stageNumericVerification(session: FinalizeSession): Promis
   }
   const totalSuspects = [...chapterSuspects.values()].reduce((sum, items) => sum + items.length, 0);
   if (totalSuspects === 0) {
-    upsertProgressStage(session.progressStages, displayStage({ type: 'validation', roleId: 'numeric-verification', status: 'success', message: '正文数值确定性核对通过：全部正文数值均在资料原文/清单事实锁/蓝图参数桶中找到同值来源', details: [`数值权威库规模：${authority.size} 个归一化 token`] }, { subtitle: '数值确定性核对' }));
+    const numericVerificationPassStage = displayStage({ type: 'validation', roleId: 'numeric-verification', status: 'success', message: '正文数值确定性核对通过：全部正文数值均在资料原文/清单事实锁/蓝图参数桶中找到同值来源', details: [`数值权威库规模：${authority.size} 个归一化 token`] }, { subtitle: '数值确定性核对' });
+    // 4.36.2 复查修正：修复轮事件必须双写（finalStages=executionStages 快照+finalGateRepairStages）
+    upsertProgressStage(session.progressStages, numericVerificationPassStage);
+    upsertProgressStage(session.finalGateRepairStages, numericVerificationPassStage);
     session.emitProgress(session.finalChapterDrafts, session.progressStages);
     return;
   }
@@ -168,6 +171,8 @@ export async function stageNumericVerification(session: FinalizeSession): Promis
             promptTexts: numericInstruction,
             requirement: session.requirement,
             forbidDrawingImages: false,
+            // 标书编制规格（暗标禁表）：修复链 system 口径同步
+            bidComposition: session.bidComposition,
             diagnostics: session.generationDiagnostics,
             signal: session.signal,
             patchGuard: repairPatchGuard('numeric-verification', session.generationDiagnostics),

@@ -87,10 +87,12 @@ describe('P2.7 division 章容器块展开排除分部块标题（P0 验收实�
     expect(container).toBeDefined();
     // 排除后骨架名不足 3 → 不展开，保持同名单要点（三段式概述接管）
     expect(container?.subPoints.map(point => point.title)).toEqual(['主要分部分项工程施工方案']);
-    // 分部块保持独立成块
-    expect(structure.blocks.some(block => block.title === '道路工程')).toBe(true);
-    expect(structure.blocks.some(block => block.title === '景观工程')).toBe(true);
-    expect(structure.blocks.some(block => block.title === '绿化工程')).toBe(true);
+    // 4.35 容器块归并屏障：4 块超 maxBlocks=3（6000/1800）时相邻分部块归并成块，
+    // 容器块独立成组不被归并吸收（保持单要点总述语义——P2.5/P2.7 契约）
+    expect(structure.blocks.length).toBeLessThanOrEqual(Math.floor(6000 / 1800));
+    // 分部名零丢失：独立成块或被归并块的要点承载（归并不丢点）
+    const carried = new Set(structure.blocks.flatMap(block => [block.title, ...block.subPoints.map(point => point.title)]));
+    for (const name of ['道路工程', '景观工程', '绿化工程']) expect(carried.has(name)).toBe(true);
   });
 });
 
@@ -110,9 +112,9 @@ describe('4.19.8 division 分部章容量规划（丰乐镇第三轮实测：块
       evidence: [],
     });
     const targets = structure.blocks.map(block => block.targetWords);
-    // 容量规划一次成型：块数 ≤ floor(章目标/1200)（旧行为 8 块各下限 1200 → 9600 字数雪崩）
-    expect(structure.blocks.length).toBeLessThanOrEqual(Math.floor(4000 / 1200));
-    // Σ块预算 = 章目标精确守恒（末块取余额，规划层无事后归并/拆半）
+    // 容量规划一次成型：块数 ≤ floor(章目标/1800)（旧行为 8 块各下限 1200 → 9600 字数雪崩）
+    expect(structure.blocks.length).toBeLessThanOrEqual(Math.floor(4000 / 1800));
+    // Σ块预算 = 章目标精确守恒（4.35 下限保护 + Σ守恒收口，规划层无事后归并/拆半）
     expect(targets.reduce((sum, target) => sum + target, 0)).toBe(4000);
     // 单块预算落在单次输出安全区（0, 4500]
     expect(targets.every(target => target > 0 && target <= 4500)).toBe(true);

@@ -7,7 +7,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AMBIGUOUS_RESIDUE_RE, enforcePlannedSectionCompleteness, enforceWorkPackageSkeletons, repairTemplatingIssues, runGlobalConsistencyReviewLoop } from '@/services/document-workflow/globalQualityGates';
-import type { DocumentDraftChapter, DocumentEvidence, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate } from '@/services/document-workflow/types';
+import type { DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate } from '@/services/document-workflow/types';
 import type * as RolePipelineModule from '@/services/document-workflow/rolePipeline';
 
 vi.mock('@/services/document-workflow/chapterReview', () => ({ reviewGlobalConsistency: vi.fn() }));
@@ -592,6 +592,23 @@ describe('enforcePlannedSectionCompleteness（缺规划小节补写收口：F1�
     const result = await enforcePlannedSectionCompleteness(input);
     expect(result.plannedSectionFixApplied).toBe(true);
     expect(chapter.content).toContain('### 1.1 资源配置计划');
+  });
+
+  it('修复轮调用（传入 finalGateRepairStages）：planned-section-repair 事件双写且 running 原位收口', async () => {
+    const chapter = makeChapter('ch-1', '劳动力安排计划', [
+      '## 劳动力安排计划',
+      '',
+      '### 1.1 劳动力组织与实名制管理',
+      '实名制管理覆盖全部进场人员，先入场登记再安全教育，随后考勤打卡，最后工资代发。',
+    ].join('\n'));
+    chapter.sections = ['资源配置计划', '劳动力组织与实名制管理'];
+    const finalGateRepairStages: DocumentExecutionStage[] = [];
+    const input = makePlannedInput({ chapterDraftsFinal: [chapter], finalGateRepairStages });
+    await enforcePlannedSectionCompleteness(input);
+    // mockNoopRepair 返回原内容 → appliedCount=0 → 终态 failed；running/completed 同 roleId 原位替换不堆叠
+    const stages = finalGateRepairStages.filter(item => item.roleId === 'planned-section-repair');
+    expect(stages).toHaveLength(1);
+    expect(stages[0].status).toBe('failed');
   });
 
   it('无缺失小节：零 LLM 调用、返回 false', async () => {

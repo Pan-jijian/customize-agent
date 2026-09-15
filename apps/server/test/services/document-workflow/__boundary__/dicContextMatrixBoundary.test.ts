@@ -4,11 +4,11 @@
  *  - N1 excavationDepthFromFacts × 18 数值格式（≥1且<50 过滤、千分位截尾、科学计数截尾）
  *  - N2 excavationHazardClassificationIssues × 18 格式（深度≥3 → 缺危大标注报 1）
  *  - N3 fixTocFromBody 中文章序数谱系（二十/三十/一百等 → chapterOrdinal undefined → 章被滤除）
- *  - N4 contextTemplates 12 语境模板 × 清单量校正（表格行不修、村词/规格词豁免、否定句仍修）
- *  - N5 SPEC_WORDS 6 规格词前缀 → 分规格量豁免
- *  - N6 NEGATION_PREFIXES 8 前缀 → 检测器不认豁免 → 仍修复（锁定）
- *  - N7 parenStates 括号三态 × 清单名匹配（半角/全角归一、无括号不匹配）
- *  - N8 LIST_SEPARATORS 4 分隔符 × 多条目窗口
+ *  - N4 contextTemplates 12 语境模板 × 锚点直连（S5：语境形态零影响，坐标切片替换）
+ *  - N5 SPEC_WORDS 6 规格词前缀 → 零豁免照替换（裁决在判定层）
+ *  - N6 NEGATION_PREFIXES 8 前缀 → 照替换（锁定）
+ *  - N7 括号三态 × 名称形态无关（名称仅作修复说明，不参与匹配）
+ *  - N8 LIST_SEPARATORS 4 分隔符 × 锚点照替换
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -17,7 +17,15 @@ import {
   fixQuantityAuthorityConflicts,
   fixTocFromBody,
 } from '@/services/document-workflow/documentIntegrityChecks';
+import type { QuantityConflictAnchor } from '@/services/document-workflow/integratedBlueprint';
 import { contextTemplates, factOf, factsOf, LIST_SEPARATORS, NEGATION_PREFIXES, SPEC_WORDS } from './boundaryKit';
+
+/** 锚点构造：从名称之后定位原文数值串（生产由判定层裁决产出；值 == 权威不入候选） */
+function anchorAfter(markdown: string, name: string, raw: string, authorityValue: number, unit = ''): QuantityConflictAnchor {
+  const nameAt = markdown.indexOf(name);
+  const start = markdown.indexOf(raw, nameAt >= 0 ? nameAt + name.length : 0);
+  return { name, value: Number(raw.replace(/,/gu, '')), unit, authorityValue, start, end: start + raw.length };
+}
 
 // 探测锁定的行为表：格式 → excavationDepthFromFacts 提取值（≥1且<50 过滤）
 const DEPTH_BEHAVIOR: Array<{ f: string; depth: number | 'undef' }> = [
@@ -125,46 +133,36 @@ describe('N3 目录重建：章序数谱系（二十及以上 → chapterOrdinal
   });
 });
 
-// ── N4. 语境模板 × 清单量校正 ──
+// ── N4. 语境模板 × 锚点直连（S5 零豁免：语境形态不影响坐标替换） ──
 
-const CTX_BEHAVIOR: Array<{ key: string; fixed: number }> = [
-  { key: 'prose', fixed: 1 },
-  { key: 'proseList', fixed: 1 },
-  { key: 'proseListPrev', fixed: 1 },
-  { key: 'tableRow', fixed: 0 },
-  { key: 'tableRowPrevUnit', fixed: 0 },
-  { key: 'headingH4', fixed: 1 },
-  { key: 'headingH3', fixed: 1 },
-  { key: 'boldLead', fixed: 1 },
-  { key: 'village', fixed: 0 },
-  { key: 'specPrefix', fixed: 0 },
-  { key: 'specSuffix', fixed: 0 },
-  { key: 'negation', fixed: 1 },
-];
-
-describe('N4 语境模板 × 清单量校正', () => {
+describe('N4 语境模板 × 锚点直连', () => {
   const tpl = contextTemplates('C.1项铺装', '50', 'm');
-  it.each(CTX_BEHAVIOR)('N4 语境「$key」→ fixedCount $fixed（表行不修/村词规格词豁免/否定句仍修）', ({ key, fixed }) => {
-    const result = fixQuantityAuthorityConflicts(tpl[key], [{ name: 'C.1项铺装', value: 100, unit: 'm' }]);
-    expect(result.fixedCount).toBe(fixed);
+  it.each(Object.keys(tpl))('N4 语境「%s」→ 锚点照替换 1 处（50→100）', (key) => {
+    const markdown = tpl[key];
+    const anchor = anchorAfter(markdown, 'C.1项铺装', '50', 100, 'm');
+    const result = fixQuantityAuthorityConflicts(markdown, [anchor]);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toBe(`${markdown.slice(0, anchor.start)}100${markdown.slice(anchor.end)}`);
   });
 });
 
 // ── N5. 规格词谱系：分规格量豁免 ──
 
-describe('N5 规格限定词：分规格量豁免', () => {
-  it.each(SPEC_WORDS)('N5 规格词「%s」在名称前 → 豁免 → 50 不动', (word) => {
-    const result = fixQuantityAuthorityConflicts(`${word}C.1项铺装 50m。`, [{ name: 'C.1项铺装', value: 100, unit: 'm' }]);
-    expect(result.fixedCount).toBe(0);
-    expect(result.markdown).toContain('50m');
+describe('N5 规格限定词：零豁免照替换（裁决在判定层）', () => {
+  it.each(SPEC_WORDS)('N5 规格词「%s」在名称前 → 锚点照替换 50→100', (word) => {
+    const markdown = `${word}C.1项铺装 50m。`;
+    const result = fixQuantityAuthorityConflicts(markdown, [anchorAfter(markdown, 'C.1项铺装', '50', 100, 'm')]);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('C.1项铺装 100m');
   });
 });
 
 // ── N6. 否定前缀谱系：检测器不认 → 仍修复（锁定） ──
 
-describe('N6 否定前缀 × 清单量校正（NEGATION_PREFIXES 不触发豁免）', () => {
-  it.each(NEGATION_PREFIXES)('N6 前缀「%s」→ 「无50m」的 50m 仍被捕获修复', (prefix) => {
-    const result = fixQuantityAuthorityConflicts(`本项目C.1项铺装${prefix}50m。`, [{ name: 'C.1项铺装', value: 100, unit: 'm' }]);
+describe('N6 否定前缀 × 锚点直连（前缀不影响坐标替换）', () => {
+  it.each(NEGATION_PREFIXES)('N6 前缀「%s」→ 「无50m」的 50m 照常替换 100', (prefix) => {
+    const markdown = `本项目C.1项铺装${prefix}50m。`;
+    const result = fixQuantityAuthorityConflicts(markdown, [anchorAfter(markdown, 'C.1项铺装', '50', 100, 'm')]);
     expect(result.fixedCount).toBe(1);
     expect(result.markdown).toContain('100m');
   });
@@ -172,28 +170,33 @@ describe('N6 否定前缀 × 清单量校正（NEGATION_PREFIXES 不触发豁免
 
 // ── N7. 括号三态 × 清单名匹配 ──
 
-describe('N7 括号三态：清单名匹配', () => {
-  const authParen = [{ name: 'C.1项铺装(石材)', value: 100, unit: 'm' }];
-  it('N7 正文半角括号 → 与清单名同形 → 匹配修复', () => {
-    const result = fixQuantityAuthorityConflicts('C.1项铺装(石材) 50m。', authParen);
+describe('N7 括号三态 × 名称形态无关（锚点直连）', () => {
+  it('N7 正文半角括号 → 锚点照替换', () => {
+    const markdown = 'C.1项铺装(石材) 50m。';
+    const result = fixQuantityAuthorityConflicts(markdown, [anchorAfter(markdown, 'C.1项铺装(石材)', '50', 100, 'm')]);
     expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('C.1项铺装(石材) 100m');
   });
-  it('N7 正文全角括号 → 归一后与清单名匹配 → 修复', () => {
-    const result = fixQuantityAuthorityConflicts('C.1项铺装（石材） 50m。', authParen);
+  it('N7 正文全角括号 → 锚点照替换', () => {
+    const markdown = 'C.1项铺装（石材） 50m。';
+    const result = fixQuantityAuthorityConflicts(markdown, [anchorAfter(markdown, 'C.1项铺装(石材)', '50', 100, 'm')]);
     expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('C.1项铺装（石材） 100m');
   });
-  it('N7 正文无括号 → 与清单名不匹配 → 不动', () => {
-    const result = fixQuantityAuthorityConflicts('C.1项铺装 50m。', authParen);
-    expect(result.fixedCount).toBe(0);
-    expect(result.markdown).toContain('50m');
+  it('N7 正文无括号（名称与正文不同形）→ 名称不参与匹配，照替换', () => {
+    const markdown = 'C.1项铺装 50m。';
+    const result = fixQuantityAuthorityConflicts(markdown, [anchorAfter(markdown, 'C.1项铺装(石材)', '50', 100, 'm')]);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('100m');
   });
 });
 
 // ── N8. 列举分隔符 × 多条目窗口 ──
 
-describe('N8 列举分隔符：多条目窗口截断', () => {
-  it.each(LIST_SEPARATORS)('N8 分隔符「%s」后的条目不干扰本条目 → 修复 1', (sep) => {
-    const result = fixQuantityAuthorityConflicts(`C.1项铺装 50m${sep}C.2项浇筑 200m。`, [{ name: 'C.1项铺装', value: 100, unit: 'm' }]);
+describe('N8 列举分隔符：锚点照替换（分隔符不影响坐标）', () => {
+  it.each(LIST_SEPARATORS)('N8 分隔符「%s」后的条目不干扰本条目 → 替换 1 处', (sep) => {
+    const markdown = `C.1项铺装 50m${sep}C.2项浇筑 200m。`;
+    const result = fixQuantityAuthorityConflicts(markdown, [anchorAfter(markdown, 'C.1项铺装', '50', 100, 'm')]);
     expect(result.fixedCount).toBe(1);
     expect(result.markdown).toContain('C.1项铺装 100m');
   });

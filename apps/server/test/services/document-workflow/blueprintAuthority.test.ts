@@ -174,7 +174,8 @@ describe('documentGenerator 源码防回归（P14/P24）', () => {
   });
 
   it('validateBlueprint 返回 authorityAvailability（per-check 映射落点）', () => {
-    const blueprint = readFileSync(path.join(SRC_DIR, 'integratedBlueprint.ts'), 'utf8');
+    // S6 模块拆分：校验层已迁至 integratedBlueprint/validate.ts，防回归断言覆盖拆分后归属文件
+    const blueprint = readFileSync(path.join(SRC_DIR, 'integratedBlueprint', 'validate.ts'), 'utf8');
     expect(blueprint).toContain('return { passed: checks.every(check => check.passed), checks, authorityAvailability }');
     expect(blueprint).toContain('computeBlueprintAuthorityAvailability({');
   });
