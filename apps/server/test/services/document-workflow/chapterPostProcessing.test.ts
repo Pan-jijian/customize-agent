@@ -83,7 +83,7 @@ describe('filterConstructionSteps（流程步骤中清单条目剔除）', () =>
 describe('parseMajorConstructionPackages（结构化 JSON / 图谱行两通道）', () => {
   it('结构化 JSON 通道：解析工作包并清洗脏数据', () => {
     const context = '施工工作包结构化数据： [{"name":"室外道排工程","scope":"室外雨污水管网改造","quantities":["雨水管 1200m","雨水管 1200m","挖沟槽 500m³"],"process":["放线→开挖→铺设→回填","配电箱 2台"],"acceptance":["闭水试验验收"]}]';
-    const packages = parseMajorConstructionPackages(context, []);
+    const packages = parseMajorConstructionPackages(context);
     expect(packages).toHaveLength(1);
     expect(packages[0].name).toBe('室外道排工程');
     // 数量去重 + 流程剔除清单条目；箭头链按 → 拆为单步
@@ -94,7 +94,7 @@ describe('parseMajorConstructionPackages（结构化 JSON / 图谱行两通道�
 
   it('图谱行通道：按「｜范围：…｜工程量/材料：…｜流程：…｜验收：…」解析', () => {
     const context = '1. 屋面维修工程｜范围：屋面防水卷材翻新｜工程量/材料：防水卷材 800㎡｜流程：清底→找平→铺设→密封｜验收：淋水试验';
-    const packages = parseMajorConstructionPackages(context, []);
+    const packages = parseMajorConstructionPackages(context);
     expect(packages).toHaveLength(1);
     expect(packages[0].name).toBe('屋面维修工程');
     expect(packages[0].quantities).toEqual(['防水卷材 800㎡']);
@@ -104,11 +104,11 @@ describe('parseMajorConstructionPackages（结构化 JSON / 图谱行两通道�
 
   it('名称以「项目施工」结尾/scope 缺失的工作包跳过', () => {
     const context = '施工工作包结构化数据： [{"name":"本项目施工","scope":"全项目","quantities":[],"process":[]},{"name":"室外道排工程","scope":"","quantities":[]}]';
-    expect(parseMajorConstructionPackages(context, [])).toHaveLength(0);
+    expect(parseMajorConstructionPackages(context)).toHaveLength(0);
   });
 
   it('无结构化数据且无图谱行返回空', () => {
-    expect(parseMajorConstructionPackages('普通上下文。', [])).toHaveLength(0);
+    expect(parseMajorConstructionPackages('普通上下文。')).toHaveLength(0);
   });
 });
 

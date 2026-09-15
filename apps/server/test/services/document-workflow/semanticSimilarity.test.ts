@@ -42,7 +42,7 @@ describe('buildSemanticSimilarity', () => {
     const similarity = await buildSemanticSimilarity(
       ['甲', '乙'],
       ['甲', '乙'],
-      async texts => texts.map((text, index) => (text === '甲' ? [1, 0] : [0, 1])),
+      async texts => texts.map(text => (text === '甲' ? [1, 0] : [0, 1])),
     );
     expect(similarity('甲', '甲')).toBe(1);
     expect(similarity('甲', '乙')).toBe(0);
@@ -81,7 +81,7 @@ describe('3.3 全局 LRU 缓存', () => {
   });
 
   it('跨构建点命中：相同文本第二次构建不再调用嵌入且计数命中', async () => {
-    const embed = vi.fn(async (texts: string[]) => texts.map((text, index) => [index + 1, 0]));
+    const embed = vi.fn(async (texts: string[]) => texts.map((_text, index) => [index + 1, 0]));
     await buildSemanticSimilarity(['甲'], ['乙'], embed);
     expect(embed).toHaveBeenCalledTimes(1);
     expect(snapshotEmbedCacheStats()).toEqual({ embedCacheHits: 0, embedCacheMisses: 2 });

@@ -2,9 +2,9 @@
  * helpers/factCoverage：事实覆盖检测（P3 拆分，逐字机械搬移自 documentGeneratorHelpers.ts）。
  * 依赖 projectBasicInfo（cleanInlineFactValue）。
  */
-import type { DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, ValidationIssue } from '../types';
-import { normalizeOcrFactText, isValidProjectBasicFactValue } from '../factsModel';
-import { BID_DISCIPLINE_PHRASES, dedupeCrossSectionSkeletonH4s, dedupeRepeatedSubsections, isBidDisciplineSentence, stringifyFactValue, throwIfAborted, WORK_PACKAGE_SECTION_RE } from '../utils';
+import type { DocumentEvidence, DocumentFact } from '../types';
+import { normalizeOcrFactText } from '../factsModel';
+import { stringifyFactValue } from '../utils';
 import { cleanInlineFactValue } from './projectBasicInfo';
 
 export function factsWithEvidenceSource(facts: DocumentFact[], evidence: DocumentEvidence[]) {

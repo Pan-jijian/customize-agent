@@ -20,7 +20,7 @@ import {
 } from '@/services/document-workflow/factsModel';
 import { arbitrateFactPool, buildCanonicalFactModel } from '@/services/document-workflow/factGovernance';
 import type { AutoDocumentSpecPackage } from '@/services/document-workflow/../document-core/autoDocumentSpecTypes';
-import type { DocumentEvidence, DocumentFact, DocumentFactsModel, FactSourceRef, ProjectGraph, StructuredTableFact } from '@/services/document-workflow/types';
+import type { DocumentEvidence, DocumentFact, ProjectGraph } from '@/services/document-workflow/types';
 
 const fact = (value: string, extra: Partial<DocumentFact> = {}): DocumentFact => ({
   key: 'k', value, sourceFile: '招标文件正文', roleId: 'r', confidence: 0.9, ...extra,

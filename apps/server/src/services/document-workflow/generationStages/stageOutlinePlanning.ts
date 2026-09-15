@@ -1,5 +1,5 @@
 /**
- * stageOutlinePlanning：阶段 2 —— 评标校验/评分项提取链消费/小节规划/校准/过滤/路由/预算诊断。
+ * stageOutlinePlanning：阶段 2 —— 评标校验/招标要求消费/小节规划/校准/过滤/预算诊断。
  * P1 六阶段拆分（方案 5.1）：由 documentGenerator.generateDocumentDraft 阶段 2 代码块机械搬迁而来，
  * 变量读写经 session 子对象显式化，业务生成语义与原巨型函数逐字一致（行为保持）。
  */
@@ -12,7 +12,7 @@ import { buildDocumentBudget } from '../budget';
 import { chapterCriteriaText, prioritizeOverviewSections, validateBidStructureBeforeGeneration } from '../constructionBidStructure';
 import { buildSemanticSimilarity } from '../semanticSimilarity';
 import { filterOffTopicSectionsForChapters } from '../evidenceContentSafety';
-import { hasTenderRequirements, normalizeChapterTitleLine, routeTenderRequirementsToChapters, tenderRequirementCheckItems, tenderRequirementSemanticQuery, tenderRequirementsSummary, tenderRequirementsWritingRules } from '../tenderRequirements';
+import { hasTenderRequirements, normalizeChapterTitleLine, tenderRequirementCheckItems, tenderRequirementSemanticQuery, tenderRequirementsSummary, tenderRequirementsWritingRules } from '../tenderRequirements';
 import { applyRequirementSectionAdditions, calibrateOutlineSectionsToRequirements } from '../requirementCalibration';
 import { buildFactTokenScopeClassifier } from '../factTokenClassifier';
 import { buildChapterIntentClassifier } from '../chapterIntentClassifier';
@@ -28,7 +28,6 @@ import { buildGenerationBudget } from '../generationBudget';
 import { cleanSectionTitleArtifacts, extractPromptStructuralRules, normalizePlannedSections, planChapterSectionsWithLlm, sectionTitleEquivalent, type PlannedTableRequest } from '../promptRuleExtraction';
 import { resolveChapterPromptExecution } from '../documentGeneratorHelpers';
 import { constructionOrganizationPrompt } from '../projectIntelligence';
-import { planDocument } from '../agentPlanner';
 import { deriveDiversityProfile, loadDiversityHistory, recordDiversityUsage } from '../diversityProfile';
 import { findFingerprintCollisions, loadFingerprintPool } from '../sectionFingerprint';
 import { tuningProfile } from '../tuningProfile';
@@ -169,13 +168,7 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
     tenderRequirementCheckItems(session.planning.tenderRequirements).map(({ item }) => tenderRequirementSemanticQuery(item)),
     session.planning.effectiveChapters.map(chapter => normalizeChapterTitleLine(chapter.title)),
   );
-  // W4/P3 评分项要求章节级路由：每个要求项路由到语义最相似章节，生成时注入该章 roleContext
-  // （“本章必须显性响应”），治本于生成侧——不再依赖事后零响应检测+补写
-  session.planning.requirementsRoutes = await routeTenderRequirementsToChapters(session.planning.tenderRequirements, session.planning.effectiveChapters, session.planning.requirementsSimilarity);
-  if (session.planning.requirementsRoutes.length > 0) {
-    upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'tender-requirement-routing', status: 'success', message: `评分项要求章节级路由：${session.planning.requirementsRoutes.length} 条要求已路由到责任章节（生成时显性响应）`, details: session.planning.requirementsRoutes.map(route => `${route.kind}“${route.item.text}” → ${route.chapterTitle}（相似度 ${route.score.toFixed(2)}）`) }, { subtitle: '要求响应路由', order: session.global.progressStages.length }));
-    session.global.emitProgress();
-  }
+  // 评分项要求分配下沉阶段 3 蓝图构建（assignTenderRequirementsToChapters 随蓝图落盘：唯一权威分配 + 分配对账）
   // 总量口径语义分类器（round-13）：事实反查的口径归属语义复核（根治跨口径误伤）；
   // 本地语义模型恒可用（本地 ONNX 推理），构建失败直接抛出，无不可用降级路径
   session.planning.factTokenScopeClassifier = await buildFactTokenScopeClassifier();
@@ -186,7 +179,7 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
   // 专业深度语义分类器（round-14）：章节专业深度/缺项/套话/闭环/依赖的语义判定（根治关键词正则模拟语义打分）；
   // 本地语义模型恒可用，构建失败直接抛出，无不可用降级路径
   session.planning.professionalDepthClassifier = await buildProfessionalDepthClassifier();
-  session.planning.writingTaskBrief = buildWritingTaskBrief({ chapters: session.planning.effectiveChapters, factsModel: session.understanding.preliminaryFactsModel, projectGraph: session.understanding.projectGraph || undefined, requirement: session.global.input.requirement, templateName: session.prepare.template.name, tenderRequirements: session.planning.tenderRequirements });
+  session.planning.writingTaskBrief = buildWritingTaskBrief({ chapters: session.planning.effectiveChapters, factsModel: session.understanding.preliminaryFactsModel, projectGraph: session.understanding.projectGraph || undefined, requirement: session.global.input.requirement, templateName: session.prepare.template.name });
   // 评分项要求写作规则注入：生成时显性响应招标要求（零响应即评标失分），与零响应检测共用同一份提取模型
   session.planning.tenderWritingRulesText = tenderRequirementsWritingRules(session.planning.tenderRequirements);
   session.planning.projectContext = [session.planning.baseProjectContext, session.planning.tenderWritingRulesText].filter(Boolean).join('\n\n');

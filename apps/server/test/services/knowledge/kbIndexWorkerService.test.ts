@@ -1,5 +1,4 @@
 import { EventEmitter } from 'node:events';
-import * as path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('child_process', () => ({ fork: vi.fn() }));
@@ -23,8 +22,6 @@ import {
 function createFakeChild() {
   return Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter() });
 }
-
-type FakeChild = ReturnType<typeof createFakeChild>;
 
 const WORKER_PATH = expect.stringContaining('kb-index-worker.cjs');
 

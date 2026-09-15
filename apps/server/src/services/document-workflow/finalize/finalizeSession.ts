@@ -28,6 +28,7 @@ import type {
 } from '../types';
 import type { FactTokenScopeClassifier } from '../factTokenClassifier';
 import type { ProfessionalDepthClassifier } from '../professionalDepthClassifier';
+import type { TenderRequirementAssignment } from '../tenderRequirements';
 import type { ProjectMaterialScope } from '../projectMaterialScope';
 import type { ProjectMaterialProfile, ProjectUnderstanding } from '../projectMaterialProfile';
 import type { DocumentBudget } from '../budget';
@@ -101,6 +102,8 @@ export interface FinalizeGenerationInput {
   evaluationCriteriaItems?: string[];
   /** 招标文件评分项要求（LLM 结构化提取产物）：零响应检测锚点 + 交付阻断修复轮输入 */
   tenderRequirements?: TenderRequirementModel;
+  /** 招标要求分配（生成期蓝图产物）：交付前补写器按责任章定位（与章级注入/验收同源） */
+  requirementAssignments: TenderRequirementAssignment[];
   /** 评分项要求↔章节语义相似度函数（本地 bge 余弦，生成前预构建恒非空，随 p 传递复用） */
   requirementsSimilarity: (leftText: string, rightText: string) => number;
   /** 总量口径语义分类器（round-13，生成前预构建）：事实反查口径归属语义复核（本地 bge 恒可用） */
@@ -150,6 +153,8 @@ export interface FinalizeSession {
   scopeConflicts?: NumericScopeConflict[];
   evaluationCriteriaItems?: string[];
   tenderRequirements?: TenderRequirementModel;
+  /** 招标要求分配（生成期蓝图产物）：交付前补写器按责任章定位 */
+  requirementAssignments: TenderRequirementAssignment[];
   requirementsSimilarity: (leftText: string, rightText: string) => number;
   factTokenScopeClassifier: FactTokenScopeClassifier;
   professionalDepthClassifier: ProfessionalDepthClassifier;
@@ -245,6 +250,7 @@ export function createFinalizeSession(input: FinalizeGenerationInput): FinalizeS
     scopeConflicts: input.scopeConflicts,
     evaluationCriteriaItems: input.evaluationCriteriaItems,
     tenderRequirements: input.tenderRequirements,
+    requirementAssignments: input.requirementAssignments,
     requirementsSimilarity: input.requirementsSimilarity,
     factTokenScopeClassifier: input.factTokenScopeClassifier,
     professionalDepthClassifier: input.professionalDepthClassifier,

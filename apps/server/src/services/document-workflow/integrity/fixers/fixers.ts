@@ -2,7 +2,6 @@
  * integrity/fixers：确定性修复器组（P4 拆分，逐字机械搬移自 documentIntegrityChecks.ts）。
  * 依赖 detectors/authorities（SURFACE_FIX_STEPS 注册表锚定侧）。
  */
-import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel, SpecAuthorityMap, TenderRequirementModel, ValidationIssue } from '../../types';
 import { hasWorkInjuryInsuranceStatement, normalizeSubsectionTitleForDedup, workPackageThemeLabel } from '../../utils';
 import { MARKDOWN_TABLE_DIVIDER_RE, MARKDOWN_TABLE_ROW_RE } from '../../../constants';
 import { DANGEROUS_APPLICABLE_ITEMS, extractDangerZone } from '../../dangerousApplicability';
@@ -10,7 +9,7 @@ import { PEAK_LABOR_RE, PILE_SUPPORT_LITERAL_RE, SLOPE_SUPPORT_LITERAL_RE, cnNum
 import type { SupportSystemAuthorityKind } from '../authorities/authorities';
 import { extractBasisRegulations, locateDecisionOptionAnchor, matchDecisionCategory } from '../../integratedBlueprint';
 import type { DecisionLockEntry, QuantityConflictAnchor } from '../../integratedBlueprint';
-import { COMMERCIAL_RATE_RE, COMMERCIAL_TERM_RE, CROSS_SECTION_ANCHORS, CROSS_SECTION_ANCHOR_ENTITY_RE, ENUMERATION_VALUE_RE, FINISH_THICKNESS_CONTEXT_WORD, LABOR_COUNT_RE, META_DECLARATION_RE, NEGATIVE_DECLARATION_RE, PARAGRAPH_START_RE, REPEATED_WORD_RE, SCHEDULE_NODE_ANCHORS, SIX_HUNDRED_PERCENT_ITEMS, ambiguousEitherOrIssues, cellCoverage, extractMarkdownTables, isSanctionedResponseSentence, jaccard, judgeQueryCoverage, laborGroupOf, locationGroupForMatch, PARAGRAPH_TAIL_REPEAT_MIN_CHARS, paragraphFingerprint, scanCollisionNumberedHeadings, scanInvertedDateRanges, scanParagraphTailRepeats, scanPhaseLaborClaims, scanUncoveredEngineeringHeadings, sixHundredPercentLexicalHit, splitConcatenatedPhaseName, textCellsOf } from '../detectors/detectors';
+import { COMMERCIAL_RATE_RE, COMMERCIAL_TERM_RE, CROSS_SECTION_ANCHORS, CROSS_SECTION_ANCHOR_ENTITY_RE, ENUMERATION_VALUE_RE, FINISH_THICKNESS_CONTEXT_WORD, LABOR_COUNT_RE, META_DECLARATION_RE, NEGATIVE_DECLARATION_RE, PARAGRAPH_START_RE, REPEATED_WORD_RE, SCHEDULE_NODE_ANCHORS, SIX_HUNDRED_PERCENT_ITEMS, ambiguousEitherOrIssues, cellCoverage, extractMarkdownTables, isSanctionedResponseSentence, jaccard, judgeQueryCoverage, laborGroupOf, locationGroupForMatch, PARAGRAPH_TAIL_REPEAT_MIN_CHARS, paragraphFingerprint, scanCollisionNumberedHeadings, scanInvertedDateRanges, scanPhaseLaborClaims, scanUncoveredEngineeringHeadings, sixHundredPercentLexicalHit, splitConcatenatedPhaseName, textCellsOf } from '../detectors/detectors';
 import type { AuthorityDomain, AuthorityIndex } from '../../authorityIndex';
 
 const PILE_WORD_TO_SLOPE: Array<[RegExp, string]> = [
@@ -1196,7 +1195,7 @@ function fixNodeScheduleConflicts(markdown: string, options?: { scheduleAuthorit
     replacements.push({ start: lineSpans[index].start + day.start, end: lineSpans[index].start + day.end, replacement: String(authority), detail: `表格节点“${label}”${day.value}日→${authority}日（以总进度计划/总工期控制表为准）` });
   }
   const keyOf = (text: string) => SCHEDULE_NODE_ANCHORS.find(anchor => anchor.re.test(text))?.key;
-  const pushReplacement = (nodeText: string, day: number, dayStart: number, dayEnd: number, raw: string) => {
+  const pushReplacement = (nodeText: string, day: number, dayStart: number, dayEnd: number) => {
     const key = keyOf(nodeText);
     if (key === undefined || !Number.isFinite(day) || day < 1 || day > 3000) return;
     const authority = authorityByKey.get(key);
@@ -1212,24 +1211,24 @@ function fixNodeScheduleConflicts(markdown: string, options?: { scheduleAuthorit
   // 在第270日完成」枚举句中 135 曾被跨项误绑到封顶替换（与检测器 extractNodeScheduleDays 同源同口径）
   for (const match of next.matchAll(/第(\d{2,3})日(?:(?![）)→。；;\n，、]).){0,14}?完成(?:(?![（(→。；;\n，、]).){0,12}?(基坑支护及土方外运|装饰装修及幕墙|机电安装及智能化调试|室外工程及竣工验收|地下结构出正负零|主体结构封顶|正负零|封顶)/gu)) {
     const dayStart = match.index + match[0].indexOf(match[1]);
-    pushReplacement(match[2], Number(match[1]), dayStart, dayStart + match[1].length, match[0].slice(0, 40));
+    pushReplacement(match[2], Number(match[1]), dayStart, dayStart + match[1].length);
   }
   // 形态 D 竣工验收倒序式：竣工验收节点第N日——负向前瞻排除「后」（相对量句「竣工验收合格后第90日」
   // 不缩放）与节点分隔符，覆盖「主体结构封顶节点第311日与竣工验收节点第365日为刚性控制点」形态
   for (const match of next.matchAll(/(竣工验收)(?:(?!(?:后|第\d{2,3}[日天]|，|、|→)).){0,10}?第(\d{2,3})[日天]/gu)) {
     const dayStart = match.index + match[0].indexOf(match[2]);
-    pushReplacement(match[1], Number(match[2]), dayStart, dayStart + match[2].length, match[0].slice(0, 40));
+    pushReplacement(match[1], Number(match[2]), dayStart, dayStart + match[2].length);
   }
   for (const match of next.matchAll(/(基坑支护|正负零|封顶|装饰装修|机电安装|竣工验收)(?:(?!(?:第\d{2,3}[日天]|，|、)).){0,8}?完成[^。；;\n]{0,10}?第(\d{2,3})[日天]/gu)) {
     const dayStart = match.index + match[0].indexOf(match[2]);
-    pushReplacement(match[1], Number(match[2]), dayStart, dayStart + match[2].length, match[0].slice(0, 40));
+    pushReplacement(match[1], Number(match[2]), dayStart, dayStart + match[2].length);
   }
   // 形态 C 倒序锁定式：封顶节点第N日——h18 与检测器同源排除「，、/完成/|/句界」；
   // 「后」只在节点名后定点排除（「主体结构封顶后第10日」相对量句），窗口内不排除——
   // 防设备表行「主体封顶 | 商品混凝土泵送 | 开工后第158日进场」误采的同时不误杀「开工后第N日」倒序式
   for (const match of next.matchAll(/(主体(?:结构)?封顶)(?!后)(?:(?!(?:第\d{2,3}[日天]|，|、|完成|\||[。；;\n])).){0,20}?第(\d{2,3})日/gu)) {
     const dayStart = match.index + match[0].indexOf(match[2]);
-    pushReplacement(match[1], Number(match[2]), dayStart, dayStart + match[2].length, match[0].slice(0, 40));
+    pushReplacement(match[1], Number(match[2]), dayStart, dayStart + match[2].length);
   }
   const applied = applySpanReplacements(next, replacements);
   return { markdown: applied.markdown, fixedCount: applied.fixedCount + (allDetails.length > 0 ? 1 : 0), details: [...allDetails, ...applied.details].slice(0, 12) };

@@ -11,6 +11,13 @@ import type { DocumentFactsModel, TenderRequirementModel } from '@/services/docu
 const factOf = (key: string, value: string): any => ({ key, value, sourceFile: 's', roleId: 'r' });
 const whitelistModel = (src: 'quality' | 'project' | 'schedule', text: string): DocumentFactsModel =>
   ({ quality: src === 'quality' ? [factOf('创优', text)] : [], project: src === 'project' ? [factOf('创优', text)] : [], schedule: src === 'schedule' ? [factOf('创优', text)] : [] }) as unknown as DocumentFactsModel;
+const emptyFacts = (): DocumentFactsModel => ({ quality: [], project: [], schedule: [] }) as unknown as DocumentFactsModel;
+const tenderReq = (entries: string[], extracted = true): TenderRequirementModel => ({
+  entries: entries.map(text => ({ text, coreTerms: [], sources: [{ file: '招标文件.pdf' }], category: '质量创优', policy: 'respond' as const })),
+  excluded: [],
+  reconciliation: { clauseCount: entries.length, entryCount: entries.length, excludedCount: 0, undecidedCount: 0, mergedCount: 0, batchCount: 1, retriedBatches: 0 },
+  extracted,
+});
 
 // ── U1. fabricatedAwardIssues 谱系 ──
 
@@ -67,21 +74,16 @@ describe('U1 奖项白名单：来源谱系', () => {
     const model = { quality: [{ key: '创优', value: ['争创舜耕杯'], sourceFile: 's', roleId: 'r' }], project: [], schedule: [] } as unknown as DocumentFactsModel;
     expect(fabricatedAwardIssues('争创舜耕杯。', model)).toHaveLength(0);
   });
-  it('U1 tender awardObjectives 文本入白名单 → 0', () => {
-    const tender = { extracted: true, awardObjectives: [{ text: '争创舜耕杯' }], specialQualityStandards: [], awardClauses: [] } as unknown as TenderRequirementModel;
-    expect(fabricatedAwardIssues('争创舜耕杯。', { quality: [], project: [], schedule: [] } as unknown as DocumentFactsModel, tender)).toHaveLength(0);
+  it('U1 tender entries 条款文本入白名单 → 0', () => {
+    const tender = tenderReq(['争创舜耕杯', '确保鲁班奖']);
+    expect(fabricatedAwardIssues('争创舜耕杯。', emptyFacts(), tender)).toHaveLength(0);
+    expect(fabricatedAwardIssues('确保鲁班奖。', emptyFacts(), tender)).toHaveLength(0);
   });
-  it('U1 tender specialQualityStandards 入白名单 → 0', () => {
-    const tender = { extracted: true, awardObjectives: [], specialQualityStandards: [{ text: '确保鲁班奖' }], awardClauses: [] } as unknown as TenderRequirementModel;
-    expect(fabricatedAwardIssues('确保鲁班奖。', { quality: [], project: [], schedule: [] } as unknown as DocumentFactsModel, tender)).toHaveLength(0);
-  });
-  it('U1 tender awardClauses 入白名单 → 0', () => {
-    const tender = { extracted: true, awardObjectives: [], specialQualityStandards: [], awardClauses: [{ text: '争创鲁班奖' }] } as unknown as TenderRequirementModel;
-    expect(fabricatedAwardIssues('争创鲁班奖。', { quality: [], project: [], schedule: [] } as unknown as DocumentFactsModel, tender)).toHaveLength(0);
+  it('U1 tender 白名单不含正文奖项 → 报 1 条（对照组）', () => {
+    expect(fabricatedAwardIssues('争创鲁班奖。', emptyFacts(), tenderReq(['争创舜耕杯']))).toHaveLength(1);
   });
   it('U1 tender extracted=false → 白名单空不检测 0', () => {
-    const tender = { extracted: false, awardObjectives: [{ text: '争创舜耕杯' }], specialQualityStandards: [], awardClauses: [] } as unknown as TenderRequirementModel;
-    expect(fabricatedAwardIssues('争创舜耕杯。', { quality: [], project: [], schedule: [] } as unknown as DocumentFactsModel, tender)).toHaveLength(0);
+    expect(fabricatedAwardIssues('争创舜耕杯。', emptyFacts(), tenderReq(['争创舜耕杯'], false))).toHaveLength(0);
   });
 });
 

@@ -3,10 +3,10 @@
  * 依赖 projectBasicInfo（PROJECT_BASIC_FACT_QUERIES/projectBasicFactScore）。
  */
 import type { getMultiProjectManager } from '../../knowledge/kbService';
-import type { DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, ValidationIssue } from '../types';
+import type { DocumentEvidence, DocumentGenerationDiagnostics, DocumentTemplateChapter } from '../types';
 import { evidencePromptImportance, selectEvidenceByBudget } from '../evidence';
-import { normalizeOcrFactText, isValidProjectBasicFactValue } from '../factsModel';
-import { BID_DISCIPLINE_PHRASES, dedupeCrossSectionSkeletonH4s, dedupeRepeatedSubsections, isBidDisciplineSentence, stringifyFactValue, throwIfAborted, WORK_PACKAGE_SECTION_RE } from '../utils';
+import { normalizeOcrFactText } from '../factsModel';
+import { throwIfAborted } from '../utils';
 import { PROJECT_BASIC_FACT_QUERIES, projectBasicFactScore } from './projectBasicInfo';
 
 export function evidenceDedupeIdentity(item: DocumentEvidence) {

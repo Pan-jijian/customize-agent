@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { buildChapterCoverageReports, chapterCoverageIssues } from '@/services/document-workflow/documentChapterCoverage';
-import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplateChapter } from '@/services/document-workflow/types';
+import type { DocumentDraftChapter, DocumentFactsModel } from '@/services/document-workflow/types';
 
 function makeChapter(overrides: Partial<DocumentDraftChapter> = {}): DocumentDraftChapter {
   return { id: 'c1', title: '施工部署', content: '', evidence: [], missingFacts: [], ...overrides };

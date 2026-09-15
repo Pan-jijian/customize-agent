@@ -513,10 +513,6 @@ describe('J2 extractAssemblyRateAuthority', () => {
     const model = factsOf({ project: [factOf({ key: 'assembly', fieldName: '装配率', value: '150%' })] });
     expect(extractAssemblyRateAuthority(model)).toBeUndefined();
   });
-  it('J2 tenderRequirements 兜底', () => {
-    const model = factsOf({ tenderRequirements: { assemblyRate: { text: '装配率不低于50%' } } as never });
-    expect(extractAssemblyRateAuthority(model)).toBe(50);
-  });
   it('J2 非装配标签跳过', () => {
     const model = factsOf({ project: [factOf({ key: 'x', fieldName: '绿化率', value: '30%' })] });
     expect(extractAssemblyRateAuthority(model)).toBeUndefined();

@@ -8,9 +8,9 @@ import { bodyCompositionTableIssues, plannedStructureIssues, promptDocumentRuleI
 import { webEvidenceLeakageIssues } from './webResearchService';
 import { constructionOrgChapterDataCoverageIssues, constructionOrgConsistencyIssues } from './constructionOrgConsistency';
 import { constructionOrgBonusModuleIssues, constructionOrgControlLoopIssues, constructionOrgDivisionSectionIssues, constructionOrgGenericLanguageIssues, constructionOrgMajorContentIssues, constructionOrgProfessionalChainIssues } from './constructionOrgQualityRules';
-import { ambiguousEitherOrIssues, areaArithmeticIssues, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, closurePhraseDensityCapIssues, collapseRepeatedWords, commercialDataInBodyIssues, crossProjectValueCopyIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, equipmentBatchConflicts, equipmentEntryTimingIssues, excavationDepthLockIssues, excavationHazardClassificationIssues, extractSupportSystemAuthority, fabricatedAwardIssues, fabricatedStartDateIssues, fieldValueMismatchIssues, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, hazardExclusionContradictionIssues, invertedDateRangeIssues, collisionNumberedHeadingIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, overviewRecapIssues, paragraphOpeningRepeatIssues, paragraphTailRepeatIssues, phaseLaborMixingIssues, preliminaryActionTimingIssues, repeatedWordIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripCommercialDataSentences, supportFormFactConsistencyIssues, supportSystemConflictIssues } from './documentIntegrityChecks';
+import { ambiguousEitherOrIssues, areaArithmeticIssues, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, closurePhraseDensityCapIssues, commercialDataInBodyIssues, crossProjectValueCopyIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, equipmentBatchConflicts, equipmentEntryTimingIssues, excavationDepthLockIssues, excavationHazardClassificationIssues, extractSupportSystemAuthority, fabricatedAwardIssues, fabricatedStartDateIssues, fieldValueMismatchIssues, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, hazardExclusionContradictionIssues, invertedDateRangeIssues, collisionNumberedHeadingIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, overviewRecapIssues, paragraphOpeningRepeatIssues, paragraphTailRepeatIssues, phaseLaborMixingIssues, preliminaryActionTimingIssues, repeatedWordIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, supportFormFactConsistencyIssues, supportSystemConflictIssues } from './documentIntegrityChecks';
 import { buildSemanticSimilarity } from './semanticSimilarity';
-import { normalizeChapterTitleLine, requirementsCoverageIssues, tenderRequirementCheckItems, tenderRequirementSemanticQuery } from './tenderRequirements';
+import { normalizeChapterTitleLine, requirementAcceptanceIssues, tenderRequirementCheckItems, tenderRequirementSemanticQuery } from './tenderRequirements';
 import { internalTerminologyAnchorIssues } from './internalTerminologyAnchors';
 import { parameterConceptConflictIssues } from './parameterConceptConflicts';
 import type { BillFactLock } from './billFactLock';
@@ -132,9 +132,8 @@ export async function buildStandardFinalValidationIssues(input: {
   billFactLock?: BillFactLock;
 }): Promise<ValidationIssue[]> {
   const factVerification = await generatedFactVerificationIssuesAsync(input.markdown, input.factsModel, { scopeClassifier: input.factTokenScopeClassifier });
-  // W4/P3 评分项要求正文级语义检测：要求项 ↔（章节标题 + 正文句）同闭包 embedding，
-  // 正文句采样与 documentIntegrityChecks.bodySentencesForSemantic 同口径（历史缺陷：只查章节标题，
-  // 正文未落位而标题语义接近即误判为已响应）；语义模型恒可用，空输入由 buildSemanticSimilarity 返回恒零函数
+  // 招标要求正文级语义检测（终局全量对账）：要求条目 ↔（章节标题 + 正文句）同闭包 embedding，
+  // 正文句采样与 documentIntegrityChecks.bodySentencesForSemantic 同口径；语义模型恒可用，空输入返回恒零函数
   const requirementQueries = tenderRequirementCheckItems(input.tenderRequirements).map(({ item }) => tenderRequirementSemanticQuery(item));
   const requirementChapterLines = input.markdown.split(/\n/u).filter(line => /^#{2,4}\s/u.test(line.trim())).map(line => normalizeChapterTitleLine(line)).filter(Boolean).slice(0, 80);
   const requirementBodySentences = bodySentencesForSemantic(input.markdown);
@@ -165,7 +164,7 @@ export async function buildStandardFinalValidationIssues(input: {
     // 规划层双闸（isInvalidPlannedSectionTitle / isInvalidTitle）的交付前兜底
     ...det('title-integrity', () => titleIntegrityIssues(input.markdown)),
     ...det('evaluation-criteria-coverage', () => evaluationCriteriaCoverageIssues(input.markdown, input.evaluationCriteriaItems || [], { semanticSimilarity: evaluationCriteriaSimilarity })),
-    ...await detSafe('requirements-coverage', () => requirementsCoverageIssues(input.markdown, input.tenderRequirements, { semanticSimilarity: requirementsSimilarityForCoverage, bodyTexts: requirementBodySentences })),
+    ...await detSafe('requirements-coverage', () => requirementAcceptanceIssues({ markdown: input.markdown, entries: tenderRequirementCheckItems(input.tenderRequirements).map(({ item }) => item), bodyTexts: requirementBodySentences, semanticSimilarity: requirementsSimilarityForCoverage })),
     ...det('fabricated-start-date', () => fabricatedStartDateIssues(input.markdown, input.factsModel)),
     ...det('field-value-mismatch', () => fieldValueMismatchIssues(input.markdown, input.factsModel)),
     ...det('area-arithmetic', () => areaArithmeticIssues(input.markdown)),

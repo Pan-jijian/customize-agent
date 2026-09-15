@@ -126,7 +126,6 @@ describe('B1 paragraphOpeningRepeatIssues 段首机械重复', () => {
 // ── C. 概况段跨章复述 ──
 
 const RECAP_OPENERS = ['本项目为', '本工程为', '该项目为', '该工程为'] as const;
-const S12 = `${'合肥市包河区'}`;
 
 describe('C1 overviewRecapCandidates 结构召回', () => {
   it.each([

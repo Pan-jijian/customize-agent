@@ -6,7 +6,7 @@
 import type { DocumentDraftChapter, DocumentExecutionStage, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, NumericScopeConflict } from './types';
 import { displayStage, upsertProgressStage } from './progress';
 import { snapshotEmbedCacheStats } from './semanticSimilarity';
-import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, applySpanReplacements, basicInfoScheduleFieldIssues, crossProjectValueCopyIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, duplicateTableRowIssues, equipmentBatchConflicts, excavationDepthFromFacts, excavationDepthLockIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractSupportSystemAuthority, fixAdjacentPhraseDuplication, fixAmbiguousEitherOrCandidates, fixForbiddenConfigurationTerms, fixFormulaResidues, fixGreeningMaintenanceMismatch, fixHazardIdentificationGaps, fixHeaderlessTables, fixInternalTerminology, fixMetaDiscourseDeclarations, fixPlaceholderTableCells, fixQualityAssuranceCoverage, fixSelfUnderminingCandidates, fixSixHundredPercentCoverage, formulaResidueIssues, foundationFormResidueIssues, laborPeakConflictIssues, metaDiscourseDeclarationIssues, nodeScheduleConsistencyIssues, overviewRecapIssues, phaseLaborMixingIssues, preliminaryActionTimingIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, stripDuplicateTablesAcrossChapters, stripInternalDuplicateTableRows, supportSystemConflictIssues, tablePeakLaborWithChainFallback, waterLaborPeakAssociationIssues } from './documentIntegrityChecks';
+import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, applySpanReplacements, basicInfoScheduleFieldIssues, crossProjectValueCopyIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, duplicateTableRowIssues, equipmentBatchConflicts, excavationDepthFromFacts, excavationDepthLockIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractSupportSystemAuthority, fixAdjacentPhraseDuplication, fixAmbiguousEitherOrCandidates, fixForbiddenConfigurationTerms, fixGreeningMaintenanceMismatch, fixHazardIdentificationGaps, fixHeaderlessTables, fixInternalTerminology, fixPlaceholderTableCells, fixQualityAssuranceCoverage, fixSelfUnderminingCandidates, fixSixHundredPercentCoverage, formulaResidueIssues, foundationFormResidueIssues, laborPeakConflictIssues, metaDiscourseDeclarationIssues, nodeScheduleConsistencyIssues, overviewRecapIssues, phaseLaborMixingIssues, preliminaryActionTimingIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, stripDuplicateTablesAcrossChapters, stripInternalDuplicateTableRows, supportSystemConflictIssues, tablePeakLaborWithChainFallback, waterLaborPeakAssociationIssues } from './documentIntegrityChecks';
 import { arbitrateNumericConflicts } from './numericConflictArbiter';
 import type { BillFactLock } from './billFactLock';
 import { blueprintCitationVerdict, rebaseCitationAnchorsForChapters, type BlueprintCitationAdjudicationSummary, type BlueprintData, type QuantityConflictAnchor } from './integratedBlueprint';
@@ -185,7 +185,7 @@ async function dismantleBodyTables(input: DismantleBodyTablesInput): Promise<{ t
         const repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `body-table-dismantle:${chapter.id}`, () => repairChapterByQuality({
           template,
           chapter: { id: chapter.id, title: chapter.title, content: chapter.content, evidence: chapter.evidence || [], missingFacts: chapter.missingFacts || [], sections: chapter.sections },
-          issues: [bodyTableDismantleIssue(chapter.title, tableCount)],
+          issues: [bodyTableDismantleIssue(tableCount)],
           promptTexts: repairPromptTexts,
           requirement,
           forbidDrawingImages: true,
@@ -930,7 +930,7 @@ export async function runGlobalConsistencyReviewLoop(input: {
     const samplingRate = input.globalReviewSamplingRate ?? 1;
     const sampledChapters = samplingRate >= 1 || chapterDraftsFinal.length <= 2
       ? chapterDraftsFinal
-      : chapterDraftsFinal.filter((chapter, index) => index % Math.max(2, Math.round(1 / samplingRate)) === 0);
+      : chapterDraftsFinal.filter((_chapter, index) => index % Math.max(2, Math.round(1 / samplingRate)) === 0);
     const sampledCount = sampledChapters.length;
     const runGlobalReview = () => withProgressHeartbeat(() => reviewGlobalConsistency({ template, chapters: sampledChapters, chapterReviews: [], promptTexts: reviewPromptTexts, requirement, projectContext, diagnostics: generationDiagnostics, signal }));
     // v3 阶段 2：统一一致性审查——全局一致性 LLM 审查与数据一致性数值矛盾审查并行合并为单一问题清单。

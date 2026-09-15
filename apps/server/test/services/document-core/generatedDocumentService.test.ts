@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // 依赖隔离：document-workflow 编排、qualityValidation、知识库服务、操作日志、外部 runtime 包全部 mock；
 // 文件系统经 homedir mock 重定向到工厂内自建的固定临时目录。
@@ -260,7 +260,7 @@ describe('资产管理', () => {
   });
 
   it('deleteGeneratedAsset 不删除知识库目录外的文件', () => {
-    const asset = upsertGeneratedAssets([{ id: 'k1', type: 'file' as const, role: 'reference' as const, path: 'kb/keep.pdf', status: 'failed' as const }], 'doc-1', '/proj')[0]!;
+    upsertGeneratedAssets([{ id: 'k1', type: 'file' as const, role: 'reference' as const, path: 'kb/keep.pdf', status: 'failed' as const }], 'doc-1', '/proj');
     expect(deleteGeneratedAsset('k1', '/proj')).toBe(true);
     // kb 根路径在 generatedRoot 之外，文件不会被 rm
   });

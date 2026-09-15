@@ -928,7 +928,7 @@ export function startProjectIntelligenceBuild(projectRoot: string) {
   }
   const id = `project-intelligence-${Date.now()}`;
   notifyBuildProgress(projectRoot, id, { stage: 'generating', status: 'processing', percent: 5, message: '正在构建项目级蓝图、图谱、事实索引和章节意图索引' });
-  const run = buildProjectIntelligence(projectRoot, (stage, percent, message) => {
+  const run = buildProjectIntelligence(projectRoot, (_stage, percent, message) => {
     notifyBuildProgress(projectRoot, id, { stage: 'generating', status: 'processing', percent, message });
   });
   buildInFlight.set(projectRoot, run);
@@ -953,7 +953,7 @@ export async function buildProjectIntelligenceSync(projectRoot: string): Promise
   if (inflight) return inflight;
   const id = `project-intelligence-${Date.now()}`;
   notifyBuildProgress(projectRoot, id, { stage: 'generating', status: 'processing', percent: 5, message: '正在构建项目级蓝图、图谱、事实索引和章节意图索引' });
-  const run = buildProjectIntelligence(projectRoot, (stage, percent, message) => {
+  const run = buildProjectIntelligence(projectRoot, (_stage, percent, message) => {
     notifyBuildProgress(projectRoot, id, { stage: 'generating', status: 'processing', percent, message });
   });
   buildInFlight.set(projectRoot, run);

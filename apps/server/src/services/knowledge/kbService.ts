@@ -1,5 +1,4 @@
 import { computeProjectId, getProjectKbPath, IndexStateStore, loadBetterSqlite3, MultiProjectManager } from '@customize-agent/knowledge';
-import type Database from 'better-sqlite3';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';

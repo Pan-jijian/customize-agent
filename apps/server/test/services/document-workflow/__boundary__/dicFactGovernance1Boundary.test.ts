@@ -21,7 +21,7 @@ import {
   SUPPORT_FORM_LEXICON,
   type FieldSpec,
 } from '@/services/document-workflow/factGovernance';
-import type { DocumentFact, FactSourceRef } from '@/services/document-workflow/types';
+import type { DocumentFact } from '@/services/document-workflow/types';
 
 const specOf = (key: string): FieldSpec => PROJECT_BASIC_FIELD_SPECS.find(item => item.key === key)!;
 const textSpec = (key = 'custom_text'): FieldSpec => ({ key, label: '自定义', aliases: [], valueType: 'text' });

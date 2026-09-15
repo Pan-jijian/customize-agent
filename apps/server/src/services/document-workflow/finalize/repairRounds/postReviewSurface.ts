@@ -102,8 +102,7 @@ export async function stagePostReviewSurface(session: FinalizeSession): Promise<
   const scoringFixFinal = await fixScoringRequirementResponsesInFinalMarkdown({
     markdown: session.finalMarkdown,
     chapters: session.finalChapterDrafts,
-    model: session.tenderRequirements,
-    similarity: session.requirementsSimilarity,
+    assignments: session.requirementAssignments,
     signal: session.signal,
     diagnostics: session.generationDiagnostics,
   });

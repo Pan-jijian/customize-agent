@@ -511,7 +511,7 @@ describe('回退路径（任何失败不阻断生成）', () => {
   });
 
   it('fallbackWorkPackagesFromExisting：无有效输入不 throw，返回数组', () => {
-    const packages = fallbackWorkPackagesFromExisting('', []);
+    const packages = fallbackWorkPackagesFromExisting('');
     expect(Array.isArray(packages)).toBe(true);
   });
 });

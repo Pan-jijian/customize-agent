@@ -238,7 +238,7 @@ function isWorkPackageListFact(text: string) {
   return packageLikeCount >= 5 && !/\d|㎡|m2|m²|mm|厚|验收|检测|调试|试验|复试|记录|报告|材料|设备|规格|标准|检验批/u.test(value);
 }
 
-export function parseMajorConstructionPackages(projectContext: string, evidence: DocumentEvidence[]): MajorConstructionPackage[] {
+export function parseMajorConstructionPackages(projectContext: string): MajorConstructionPackage[] {
   const packages: MajorConstructionPackage[] = [];
   const structuredMatch = projectContext.match(/施工工作包结构化数据：\s*(\[[^\n]*\])/u);
   if (structuredMatch) {
@@ -401,7 +401,7 @@ function billItemSkeletonNames(evidence: DocumentEvidence[]): string[] {
  * 只存在于清单条目）；图谱/范围已主导时仅补乡村/市政特征分项（防通用土方/混凝土清单行拼入骨架噪声），
  * 图谱/范围均不足 3 个时保留 F10 原兑底路径（清单条目全额兑底，特征分项优先排序） */
 export function majorConstructionSkeletonNames(projectContext: string, evidence: DocumentEvidence[]): string[] {
-  const graphNames = parseMajorConstructionPackages(projectContext, evidence).map(pkg => pkg.name).filter(Boolean);
+  const graphNames = parseMajorConstructionPackages(projectContext).map(pkg => pkg.name).filter(Boolean);
   const scopeNames = scopeEngineeringNames(projectContext, evidence);
   const billNames = billItemSkeletonNames(evidence);
   const merged: string[] = [];

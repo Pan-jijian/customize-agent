@@ -894,7 +894,7 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
     : input.projectContext;
   // 工作包级小节（项目主要施工内容/主要分部分项工程施工方案/主要施工方法）：从项目图谱/上下文识别工作包，匹配工艺知识卡，注入工序链与工艺参数参考
   const skeletonContext = input.skeletonProjectContext ?? input.projectContext;
-  const majorConstructionPackages = (MAJOR_CONTENT_SECTION_RE.test(input.sectionTitle) || DIVISION_SECTION_RE.test(input.sectionTitle)) ? parseMajorConstructionPackages(skeletonContext, sectionEvidence) : [];
+  const majorConstructionPackages = (MAJOR_CONTENT_SECTION_RE.test(input.sectionTitle) || DIVISION_SECTION_RE.test(input.sectionTitle)) ? parseMajorConstructionPackages(skeletonContext) : [];
   const processKnowledgeCards = majorConstructionPackages.length > 0 ? matchProcessKnowledgeCards(majorConstructionPackages.map(pkg => pkg.name)) : [];
   const processKnowledgePrompt = processKnowledgeCards.length > 0 ? buildProcessKnowledgePrompt(processKnowledgeCards, majorConstructionPackages.map(pkg => pkg.name)) : '';
   // 骨架锁定（稳定版）：识别到足够工作包时把小节内部 #### 标题锁死为系统清单，LLM 只填内容不编结构

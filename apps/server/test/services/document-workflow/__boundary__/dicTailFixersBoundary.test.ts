@@ -320,11 +320,6 @@ describe('dicTailFixersBoundary · L 组：权威提取器', () => {
       expect(extractAssemblyRateAuthority(model)).toBe(30);
     });
 
-    it('L2 tenderRequirements.assemblyRate.text 兜底', () => {
-      const model = factsOf({ tenderRequirements: { assemblyRate: { text: '本工程装配率为40%', coreTerms: [] } } as never });
-      expect(extractAssemblyRateAuthority(model)).toBe(40);
-    });
-
     it('L2 数值 >100 无效过滤', () => {
       const model = factsOf({ project: [factOf({ key: '装配率', value: '装配率120%' })] });
       expect(extractAssemblyRateAuthority(model)).toBeUndefined();

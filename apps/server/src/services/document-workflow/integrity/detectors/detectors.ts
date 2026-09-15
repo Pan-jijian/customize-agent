@@ -2,7 +2,7 @@
  * integrity/detectors：确定性检测器组（P4 拆分，逐字机械搬移自 documentIntegrityChecks.ts）。
  * 依赖 authorities（权威口径）；被 fixers 依赖（修复器锚定检测器）。
  */
-import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel, DocumentGenerationDiagnostics, SpecAuthorityMap, TenderRequirementModel, ValidationIssue } from '../../types';
+import type { DocumentFactsModel, DocumentGenerationDiagnostics, SpecAuthorityMap, TenderRequirementModel, ValidationIssue } from '../../types';
 import { documentTextLength } from '../../budget';
 import { BOOK_TITLE_CITATION_RE, hasWorkInjuryInsuranceStatement, stableHash, stringifyFactValue } from '../../utils';
 import { buildSemanticSimilarity, SEMANTIC_COVERAGE_THRESHOLD } from '../../semanticSimilarity';
@@ -717,7 +717,7 @@ export const SIX_HUNDRED_PERCENT_ITEMS = [
 /** 语义判定候选正文句：非标题/表格行，句级拆分，均匀采样上限 400 句（短句语义判定样本）。
  * 均匀采样而非头部截断：4 万字级文档 800+ 句，slice(0,160) 只取前部（历史缺陷：工伤保险/创优/
  * 四节量化表述位于文档中后部，全在采样外 → 属地适配三项「缺失」误报且修复轮死循环）。
- * 导出供 requirementsCoverageIssues（W4/P3 正文级评分项要求检测）等语义消费方复用同口径采样。 */
+ * 导出供 requirementAcceptanceIssues（W4/P3 正文级评分项要求检测）等语义消费方复用同口径采样。 */
 
 export function bodySentencesForSemantic(markdown: string): string[] {
   const sentences: string[] = [];
@@ -2972,11 +2972,10 @@ export function fabricatedAwardIssues(markdown: string, factsModel: DocumentFact
     const text = stringifyFactValue(fact.value);
     for (const match of text.matchAll(AWARD_NAME_RE)) whitelist.add(stripAwardLeadVerb(match[0]));
   }
-  // 白名单来源 2：评分项要求提取的奖项类文本（创优目标/特殊质量标准/奖项条款）
+  // 白名单来源 2：招标要求全量条目文本（奖项名必在条款原文中，穷举模型不丢条款）
   if (tenderRequirements?.extracted) {
-    const items = [...(tenderRequirements.awardObjectives || []), ...(tenderRequirements.specialQualityStandards || []), ...(tenderRequirements.awardClauses || [])];
-    for (const item of items) {
-      for (const match of (item.text || '').matchAll(AWARD_NAME_RE)) whitelist.add(stripAwardLeadVerb(match[0]));
+    for (const entry of tenderRequirements.entries) {
+      for (const match of entry.text.matchAll(AWARD_NAME_RE)) whitelist.add(stripAwardLeadVerb(match[0]));
     }
   }
   if (whitelist.size === 0) return [];

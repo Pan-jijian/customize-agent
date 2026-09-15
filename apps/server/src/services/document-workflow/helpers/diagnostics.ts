@@ -3,9 +3,9 @@
  * 无域内跨依赖。
  */
 import * as path from 'node:path';
-import type { DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, ValidationIssue } from '../types';
+import type { DocumentDraftChapter, DocumentExecutionStage, DocumentFact, DocumentGenerationDiagnostics, DocumentTemplate } from '../types';
 import { documentTextLength } from '../budget';
-import { templatePromptBindings, type ResolvedPromptContent } from '../templateStore';
+import { templatePromptBindings } from '../templateStore';
 import { criticalSectionBlockerMinChars } from '../chapterPostProcessing';
 
 export function chapterGenerationTargets(input: { budgetTarget: number; sectionCount: number; title: string; longformStrict: boolean }) {

@@ -4,11 +4,6 @@ import {
   parseMajorConstructionPackages,
   scopeEngineeringNames,
 } from '../../../src/services/document-workflow/chapterPostProcessing';
-import type { DocumentEvidence } from '../../../src/services/document-workflow/types';
-
-const evidenceOf = (content: string): DocumentEvidence[] => [
-  { filePath: 'a.txt', roleId: 'reference', score: 0.9, content, processingType: 'text' } as unknown as DocumentEvidence,
-];
 
 describe('B7 骨架工作包名清洗（丰乐镇第七轮章失败实测）', () => {
   it('招标范围叙述性句子碎片不被提取为工作包名', () => {
@@ -26,7 +21,7 @@ describe('B7 骨架工作包名清洗（丰乐镇第七轮章失败实测）', (
       '1. 2026年度丰乐镇20个美丽宜居自然村建设项目｜范围：本项目全部施工内容｜工程量/材料：按证据展开｜流程：按证据展开｜验收：按规范和资料闭环',
       '2. 道路硬化工程｜范围：村内道路C30混凝土硬化｜工程量/材料：混凝土C30约1200m3｜流程：路基处理→模板支设→浇筑→养护｜验收：强度检测',
     ].join('\n');
-    const packages = parseMajorConstructionPackages(projectContext, []);
+    const packages = parseMajorConstructionPackages(projectContext);
     const names = packages.map(pkg => pkg.name);
     expect(names.some(name => /2026年度/u.test(name))).toBe(false);
     expect(names).toContain('道路硬化工程');

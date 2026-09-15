@@ -32,6 +32,7 @@ import {
   resourceTriadSectionHierarchyIssues,
   supportFormFactConsistencyIssues,
 } from '@/services/document-workflow/documentIntegrityChecks';
+import type { TenderRequirementModel } from '@/services/document-workflow/types';
 import { factOf, factsOf } from './boundaryKit';
 
 // ── GG1. cnNumberToArabic：十形态真分支（L1748/L1749/L1750） ──
@@ -366,15 +367,11 @@ describe('GG23 养护期红线：单行文档', () => {
 
 describe('GG25 奖项白名单：tenderRequirements 未提取', () => {
   it('GG25 extracted=false → 来源 2 不参与 → 白名单空 → 正文奖项不检不报', () => {
-    const tenderRequirements = {
+    const tenderRequirements: TenderRequirementModel = {
+      entries: [{ text: '创优目标：确保获得黄山杯。', coreTerms: [], sources: [{ file: '招标文件.pdf' }], category: '质量创优', policy: 'respond' }],
+      excluded: [],
+      reconciliation: { clauseCount: 1, entryCount: 1, excludedCount: 0, undecidedCount: 0, mergedCount: 0, batchCount: 1, retriedBatches: 0 },
       extracted: false,
-      awardObjectives: [{ text: '确保黄山杯', coreTerms: [] }],
-      specialQualityStandards: [],
-      awardClauses: [],
-      systematicBenchmarks: [],
-      dateFabricationProhibited: false,
-      prohibitionNotes: [],
-      frontScheduleClauses: [],
     };
     expect(fabricatedAwardIssues('本工程确保鲁班奖。', factsOf({}), tenderRequirements)).toHaveLength(0);
   });

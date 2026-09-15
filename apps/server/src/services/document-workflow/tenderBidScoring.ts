@@ -108,7 +108,7 @@ function completenessScore(
 }
 
 /** 方案针对性：项目专属事实落位率 + 专属事实跨章节分布率 */
-function specificityScore(markdown: string, chapters: DocumentDraftChapter[], factTraces: DocumentFactTrace[]) {
+function specificityScore(chapters: DocumentDraftChapter[], factTraces: DocumentFactTrace[]) {
   const scoredTraces = factTraces.filter(isActionableTraceFact);
   const usedTraces = scoredTraces.filter(trace => trace.status === 'used');
   const usedRate = scoredTraces.length ? usedTraces.length / scoredTraces.length : 1;
@@ -283,7 +283,7 @@ export async function buildTenderBidScores(input: {
   const filler = await fillerDensityReport(input.markdown, input.embedDocuments);
   return {
     completeness: completenessScore(input.markdown, input.chapters, input.template, anyBlockMatches),
-    specificity: specificityScore(input.markdown, input.chapters, input.factTraces),
+    specificity: specificityScore(input.chapters, input.factTraces),
     compliance: complianceScore(input.markdown, anyBlockMatches),
     executability: await executabilityScore(input.markdown),
     normalization: normalizationScore(input.issues),

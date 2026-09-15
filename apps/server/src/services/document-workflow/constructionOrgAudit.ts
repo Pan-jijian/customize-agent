@@ -3,7 +3,7 @@ import { stripTableCellInvisibleChars } from './helpers/markdownCleanup';
 import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
 import { buildSemanticGate } from './semanticGate';
 import { isFillerPoolExcludedLine, isZeroInfoSloganSentence, judgeFillerSentences } from './tenderBidChecks';
-import { hasProcessSequenceExpression, workPackageContentElementsComplete } from './utils';
+import { workPackageContentElementsComplete } from './utils';
 
 export { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
 
@@ -17,7 +17,7 @@ export { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
   * 4. sectionCardStructureIssues    —— 工作包内容要素完整性（4.17.9 呈现形式不限，标签不强制）
  * 5. tableCompletenessIssues       —— 表格空字段检测
  * （原 6. reviewResponseIssues 已删除：招标硬性要求响应检测统一由 tenderRequirements.ts
- *   锚点级语义通道（requirementsCoverageIssues）承担，消除两处实现口径分裂——阶段五 5.3）
+ *   锚点级语义通道（requirementAcceptanceIssues）承担，消除两处实现口径分裂——阶段五 5.3）
  */
 
 /** 废话段模式库：正则只做召回（短路优化），语义判定由 FILLER_PARAGRAPH_SEMANTIC_PROTOTYPES 语义 gate 完成（阶段五） */

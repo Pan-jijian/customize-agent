@@ -621,12 +621,6 @@ function trimEvidenceContent<T extends GeneratedDocumentRecord>(record: T): T {
   };
 }
 
-function failGeneratingDocument(documentId: string, projectRoot: string, message: string) {
-  const current = getGeneratedDocument(documentId, projectRoot);
-  if (!current || (current.status !== 'generating' && current.status !== 'queued')) return current;
-  return saveGeneratedDocument({ ...current, title: fallbackFailedTitle(current), status: 'failed', error: message, executionStages: failRunningStages(current.executionStages, message), completedAt: Date.now() }, projectRoot);
-}
-
 function activeTaskResponse(task: GenerateTask, projectRoot: string) {
   const record = getGeneratedDocument(task.documentId, projectRoot);
   if (!record || record.status !== 'generating') return null;

@@ -182,9 +182,9 @@ export function buildWorkPackageFromBoqSection(section: string, entries: BoqEntr
 }
 
 /** 阶段 C 回退：现有 parseMajorConstructionPackages 产物直填（蓝图工作包解析失败时启用） */
-export function fallbackWorkPackagesFromExisting(projectContext: string, evidence: DocumentEvidence[]): BlueprintWorkPackage[] {
+export function fallbackWorkPackagesFromExisting(projectContext: string): BlueprintWorkPackage[] {
   try {
-    const packages = parseMajorConstructionPackages(projectContext, evidence);
+    const packages = parseMajorConstructionPackages(projectContext);
     return packages.map(workPackage => ({
       name: workPackage.name,
       kind: 'major' as const,

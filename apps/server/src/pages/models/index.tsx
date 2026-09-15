@@ -3,8 +3,8 @@ import { useEffect, useState } from 'react';
 import { useAppTranslations } from '@/components/Layout';
 import { PageHeader } from '@/components/PageHeader';
 import { Button, Tag, Drawer, Input, Select, Space, Popconfirm, Form, App, InputNumber, Checkbox, Skeleton, Switch } from 'antd';
-import { PlusOutlined, DeleteOutlined, ApiOutlined, KeyOutlined, GlobalOutlined, EditOutlined, CheckCircleFilled, CloseCircleFilled, ThunderboltOutlined, SettingOutlined } from '@ant-design/icons';
-import { getProviders, getModels, saveProvider, deleteProvider, saveModels, healthCheck, getProviderDetail, getEmbeddingConfig, saveEmbeddingConfig, embeddingHealthCheck, getWebAccessConfig, saveWebAccessConfig, type ProviderInfo, type ModelsConfig, type EmbeddingConfig, type ModelCapabilities, type WebAccessConfig } from '@/lib/api';
+import { PlusOutlined, DeleteOutlined, ApiOutlined, KeyOutlined, GlobalOutlined, EditOutlined, CheckCircleFilled, CloseCircleFilled, ThunderboltOutlined } from '@ant-design/icons';
+import { getProviders, getModels, saveProvider, deleteProvider, saveModels, healthCheck, getProviderDetail, getEmbeddingConfig, saveEmbeddingConfig, embeddingHealthCheck, type ProviderInfo, type ModelsConfig, type EmbeddingConfig, type ModelCapabilities } from '@/lib/api';
 
 const PROTOCOL_OPTIONS = [
   { labelKey: 'models.openAICompatible', value: 'openai' }, { labelKey: 'models.anthropic', value: 'anthropic' }, { labelKey: 'models.google', value: 'google' },
@@ -19,7 +19,7 @@ const CAPABILITY_OPTIONS: Array<{ key: keyof ModelCapabilities; labelKey: string
   { key: 'imageGeneration', labelKey: 'models.imageGeneration' }, { key: 'imageUnderstanding', labelKey: 'models.imageUnderstanding' },
   { key: 'fileUnderstanding', labelKey: 'models.fileUnderstanding' }, { key: 'audio', labelKey: 'models.audioCapability' }, { key: 'video', labelKey: 'models.videoCapability' },
 ];
-const DEFAULT_WEB_ACCESS: WebAccessConfig = { enabled: false, allowProjectFacts: false, maxQueriesPerChapter: 2, maxResultsPerQuery: 3, trustedDomains: [] };
+
 
 export default function ModelsPage() {
   const t = useAppTranslations();
@@ -28,8 +28,6 @@ export default function ModelsPage() {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [models, setModels] = useState<ModelsConfig | null>(null);
   const [embedding, setEmbedding] = useState<EmbeddingConfig>({ provider: 'transformers-local', model: 'BAAI/bge-small-zh-v1.5', dimensions: 512 });
-  const [webAccess, setWebAccess] = useState<WebAccessConfig>(DEFAULT_WEB_ACCESS);
-  const [webAccessSaving, setWebAccessSaving] = useState(false);
   const [embeddingSaving, setEmbeddingSaving] = useState(false);
   const [embeddingTesting, setEmbeddingTesting] = useState(false);
   const [embeddingTestResult, setEmbeddingTestResult] = useState<boolean | null>(null);
@@ -52,12 +50,11 @@ export default function ModelsPage() {
   const load = async () => {
     setLoading(true);
     try {
-      const [p, m, e, w] = await Promise.all([
+      const [p, m, e] = await Promise.all([
         getProviders().catch(() => []), getModels().catch(() => null),
         getEmbeddingConfig().catch(() => ({ provider: 'transformers-local' as const, model: 'BAAI/bge-small-zh-v1.5', dimensions: 512 })),
-        getWebAccessConfig().catch(() => DEFAULT_WEB_ACCESS),
       ]);
-      setProviders(p); setModels(m); setEmbedding(e); setWebAccess(w);
+      setProviders(p); setModels(m); setEmbedding(e);
     } catch { message.error(t('common.error')); } finally { setLoading(false); }
   };
   useEffect(() => { void load(); }, []);
@@ -131,12 +128,6 @@ export default function ModelsPage() {
   };
   const handleEmbeddingSave = async () => { setEmbeddingSaving(true); try { const s = await saveEmbeddingConfig(embedding); setEmbedding(s); setEmbeddingTestResult(null); message.success(t('common.success')); } catch { message.error(t('common.error')); } finally { setEmbeddingSaving(false); } };
   const handleEmbeddingTest = async () => { setEmbeddingTesting(true); try { const r = await embeddingHealthCheck(); setEmbeddingTestResult(r.success); message[r.success ? 'success' : 'error'](r.message || (r.success ? t('models.connected') : t('models.connectionFailed'))); } catch { setEmbeddingTestResult(false); } finally { setEmbeddingTesting(false); } };
-  const handleWebAccessSave = async (next: WebAccessConfig) => {
-    setWebAccess(next); setWebAccessSaving(true);
-    try { const saved = await saveWebAccessConfig(next); setWebAccess(saved); message.success(t('common.success')); }
-    catch { setWebAccess(webAccess); message.error(t('common.error')); }
-    finally { setWebAccessSaving(false); }
-  };
 
   if (loading) return (
     <div className="space-y-6">

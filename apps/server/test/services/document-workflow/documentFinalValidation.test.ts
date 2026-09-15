@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi, afterEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildStandardFinalValidationIssues, crossChapterDuplicateSectionIssues } from '@/services/document-workflow/documentFinalValidation';
 import type { FactTokenScopeClassifier } from '@/services/document-workflow/factTokenClassifier';
 import type * as LlmClientModule from '@/services/document-workflow/llmClient';

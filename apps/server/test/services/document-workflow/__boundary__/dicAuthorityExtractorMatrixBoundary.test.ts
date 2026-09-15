@@ -2,7 +2,7 @@
  * 边界矩阵（P1 第 33 批 · TT 组 · 权威口径提取器 + 危大缺口修复器）
  * 断言按探测锁定的真实行为推导（probeTT/probeTT2 已删）。
  *  - T1 extractScheduleAuthority：schedule 卡与 canonical.schedule 双源谱系
- *  - T2 extractAssemblyRateAuthority：project/bills/preciseFacts + tenderRequirements 谱系
+ *  - T2 extractAssemblyRateAuthority：project/bills/preciseFacts 三源谱系
  *  - T3 extractProjectScaleSummary：面积卡 + 层数 JSON 全量提取谱系
  *  - T4 fixHazardIdentificationGaps：适用判定边界 × 辨识别名窗口 × 插入锚点谱系
  */
@@ -60,7 +60,7 @@ describe('T1 工期权威提取：schedule 卡与 canonical 双源', () => {
 
 // ── T2. extractAssemblyRateAuthority 谱系 ──
 
-describe('T2 装配率权威提取：事实卡三源 + 招标文本', () => {
+describe('T2 装配率权威提取：事实卡三源', () => {
   it.each([
     { src: 'project', label: '装配率', value: '30%', expect: 30 },
     { src: 'bills', label: '装配率', value: '38.4%', expect: 38.4 },
@@ -87,22 +87,6 @@ describe('T2 装配率权威提取：事实卡三源 + 招标文本', () => {
     const model = { project: [factOf('', '60%', '', )], bills: [], preciseFacts: [] } as unknown as DocumentFactsModel;
     model.project[0].fieldId = 'assembly_rate';
     expect(extractAssemblyRateAuthority(model)).toBe(60);
-  });
-  it('T2 tenderRequirements.assemblyRate.text「50%」→ 50', () => {
-    const model = { project: [], bills: [], preciseFacts: [], tenderRequirements: { assemblyRate: { text: '50%' }, systematicBenchmarks: [], dateFabricationProhibited: false } } as unknown as DocumentFactsModel;
-    expect(extractAssemblyRateAuthority(model)).toBe(50);
-  });
-  it('T2 tender 文本「装配率不小于55%」→ 55', () => {
-    const model = { project: [], bills: [], preciseFacts: [], tenderRequirements: { assemblyRate: { text: '装配率不小于55%' }, systematicBenchmarks: [], dateFabricationProhibited: false } } as unknown as DocumentFactsModel;
-    expect(extractAssemblyRateAuthority(model)).toBe(55);
-  });
-  it('T2 tender 文本无百分号 → undefined', () => {
-    const model = { project: [], bills: [], preciseFacts: [], tenderRequirements: { assemblyRate: { text: '装配率不小于55' }, systematicBenchmarks: [], dateFabricationProhibited: false } } as unknown as DocumentFactsModel;
-    expect(extractAssemblyRateAuthority(model)).toBeUndefined();
-  });
-  it('T2 project 卡命中时不读 tender（优先级）', () => {
-    const model = { project: [factOf('装配率', '30%')], bills: [], preciseFacts: [], tenderRequirements: { assemblyRate: { text: '50%' }, systematicBenchmarks: [], dateFabricationProhibited: false } } as unknown as DocumentFactsModel;
-    expect(extractAssemblyRateAuthority(model)).toBe(30);
   });
 });
 

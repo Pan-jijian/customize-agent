@@ -162,8 +162,8 @@ describe('写作约束与门禁渲染', () => {
     expect(isBodyTableForbidden(undefined)).toBe(false);
   });
 
-  it('bodyTableDismantleIssue：拆表指令带章节与表格数', () => {
-    const issue = bodyTableDismantleIssue('第五章 施工组织设计', 3);
+  it('bodyTableDismantleIssue：拆表指令带表格数', () => {
+    const issue = bodyTableDismantleIssue(3);
     expect(issue).toContain('暗标正文禁表');
     expect(issue).toContain('本章正文出现 3 处 Markdown 表格结构');
     expect(issue).toContain('段落式连贯叙述');

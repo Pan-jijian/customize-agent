@@ -13,7 +13,7 @@ import { sectionContentIntegrityIssues } from '../qualityValidation';
 import { chapterCriteriaText } from '../constructionBidStructure';
 import { buildSemanticSimilarity } from '../semanticSimilarity';
 import { evidenceSafetyKey } from '../evidenceContentSafety';
-import { normalizeChapterTitleLine } from '../tenderRequirements';
+import { fixScoringRequirementResponses, normalizeChapterTitleLine, renderChapterRequirementSlice } from '../tenderRequirements';
 import { buildChapterFactNeeds, factNeedsCoveragePrompt, factsForChapterNeeds, resolveChapterFactNeeds } from '../factsModel';
 import { QUANTIFIED_FACT_RE } from '../parameterPatterns';
 import { chapterSectionFactUsageIssues } from '../chapterReview';
@@ -293,15 +293,13 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     // 与 structureIntegrityRules 检测口径同源的写作侧单源）为逐章强约束——检测器能拦的缺陷必须在写作 prompt 前置声明，
     // 从源头不产出（重点在写时，检测与清理只作安全网），故在此逐章注入 roleContext
     const scopeOverrideAnchors = renderScopeOverrideAnchors(session.understanding.canonicalFacts.scopeConflicts);
-    // W4/P3 本章责任要求项：路由到本章的评分项要求必须显性写入正文（生成侧治本，不依赖事后补写）
-    const chapterRequirementContext = session.planning.requirementsRoutes.length > 0
-      ? (() => {
-        const chapterTitle = normalizeChapterTitleLine(chapter.title);
-        const routed = session.planning.requirementsRoutes.filter(route => route.chapterTitle === chapterTitle);
-        if (routed.length === 0) return '';
-        return ['【本章必须显性响应的招标要求（逐条写入正文，零响应即评标失分）】', ...routed.map(route => `- ${route.kind}：${route.item.text}`)].join('\n');
-      })()
-      : '';
+    // 本章责任要求项（蓝图分配唯一权威源）：分配到本章的招标要求必须显性写入正文（生成侧治本，不依赖事后补写）
+    const chapterRequirementContext = (() => {
+      if (session.blueprint.requirementAssignments.length === 0) return '';
+      const chapterTitle = normalizeChapterTitleLine(chapter.title);
+      const entries = session.blueprint.requirementAssignments.filter(assignment => assignment.chapterTitle === chapterTitle).map(assignment => assignment.entry);
+      return renderChapterRequirementSlice(entries);
+    })();
     // 4.17.8 六个百分百写作侧前置注入：扬尘治理六项是国家规范固定封闭集，历史缺陷只在检测/修复侧
     // 逐项补写（后期修复模式），写作 LLM 凭记忆编写必漏项（4.17.7 实测缺 2 项）；写作时即注入六项
     // 原文要求逐项落实，缺项从源头消失——修复是辅助，写作是主力
@@ -713,9 +711,22 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     return async (): Promise<void> => {
       // 达标契约收口：初稿质量由达标契约（minWords=目标、块质检 0.9×目标）保证，
       // 不再运行章级 Reviewer/Repairer 补写循环（历史缺陷：审查修复成为 token 主力军，
-      // 补写落位锚点随成稿变化全部失效）。跨章一致性/数据一致性/结构问题统一在
+      // 补写落位锚点随成稿变化全部失效）。跨章一致性/数据一致性问题统一在
       // 初稿完成后的全局一致性审查阶段冻结问题清单并定向修复
-      const draftChapter = { id: chapter.id, title: chapter.title, content, evidence, missingFacts, sections, tablePlans: chapter.tablePlans || [] };
+      // 章级要求验收（P4 修复前移）：本章责任要求（蓝图分配唯一权威源）逐条核验（判定=修复同源
+      // clauseSatisfied 三通道），零响应/部分响应在章内即时确定性补写——不再等待终局统一补写
+      //（终局补写器降级为安全网；补写段落在章尾，随章成稿进入后续全局审查）
+      let finalContent = content;
+      const chapterRequirementAssignments = session.blueprint.requirementAssignments.filter(assignment => assignment.chapterTitle === normalizeChapterTitleLine(chapter.title));
+      if (chapterRequirementAssignments.length > 0) {
+        const acceptanceChapter = { title: chapter.title, content: finalContent };
+        const chapterFix = await fixScoringRequirementResponses({ chapters: [acceptanceChapter], assignments: chapterRequirementAssignments, signal: session.global.input.signal, diagnostics: session.planning.generationDiagnostics });
+        if (chapterFix.fixedCount > 0) {
+          finalContent = acceptanceChapter.content;
+          upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: `chapter-requirement-acceptance-${chapter.id}`, status: 'success', message: `${displayChapterTitle(chapter.title)} 章级要求验收：补写 ${chapterFix.fixedCount} 条未响应责任要求（章内修复前移）`, details: chapterFix.details }, { subtitle: `${displayChapterTitle(chapter.title)}·要求验收`, order: session.global.progressStages.length }));
+        }
+      }
+      const draftChapter = { id: chapter.id, title: chapter.title, content: finalContent, evidence, missingFacts, sections, tablePlans: chapter.tablePlans || [] };
       session.understanding.chapterDraftsByOrder[chapterOrder] = draftChapter;
       session.global.chapterDrafts = session.understanding.chapterDraftsByOrder.filter((item): item is DocumentDraftChapter => Boolean(item));
       session.global.emitProgress(session.global.chapterDrafts);

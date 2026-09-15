@@ -1,5 +1,5 @@
 import type { AutoDocumentSpecPackage } from '../document-core/autoDocumentSpecTypes';
-import type { DocumentDraftChapter, DocumentExportSettings, DocumentGenerationSettings, DocumentTemplate, DocumentTemplateChapter, ValidationIssue } from './types';
+import type { DocumentExportSettings, DocumentGenerationSettings, DocumentTemplate, DocumentTemplateChapter, ValidationIssue } from './types';
 
 export function estimateDocumentPages(markdown: string, settings?: DocumentGenerationSettings | DocumentExportSettings) {
   const textLength = documentTextLength(markdown);

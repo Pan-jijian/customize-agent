@@ -488,10 +488,6 @@ describe('FF34 装配率权威：无百分比数值', () => {
     const facts = factsOf({ project: [factOf({ key: '装配率', value: '满足装配式建筑要求' })] });
     expect(extractAssemblyRateAuthority(facts)).toBeUndefined();
   });
-  it('FF34 tenderRequirements 装配率文本无 % → undefined', () => {
-    const facts = factsOf({ tenderRequirements: { assemblyRate: { text: '装配率不低于政策要求' } } } as never);
-    expect(extractAssemblyRateAuthority(facts)).toBeUndefined();
-  });
 });
 
 // ── FF35. fixAdjacentPhraseDuplication：纯字母块不折叠（L3618） ──

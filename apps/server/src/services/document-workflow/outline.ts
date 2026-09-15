@@ -1,7 +1,7 @@
 import type { AutoDocumentSpecPackage } from '../document-core/autoDocumentSpecTypes';
 import type { DocumentTemplate, DocumentTemplateChapter } from './types';
 import { CN_NUMERAL_RE } from './constants';
-import { violatesConfiguredChapterTitleFilter, violatesConfiguredChapterTitleForbiddenFilter } from './templateStore';
+import { violatesConfiguredChapterTitleForbiddenFilter } from './templateStore';
 
 /** 复选框/对勾/圈符：招标文件选项符号，不属合法中文小节标题字符（评分报告 P5：目录「8.2 ☑电子保函」
  * 串章回归根因——投标保证金条款原文连同复选框符号被 LLM 带入小节标题）；

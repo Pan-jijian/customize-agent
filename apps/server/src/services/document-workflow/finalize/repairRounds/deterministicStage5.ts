@@ -26,9 +26,9 @@ export async function stageDeterministicStage5(session: FinalizeSession): Promis
   // B2 绿化养护期权威（丰乐镇实测「养护一年」漏网）：养护期红线事实无章级锚定时，
   // 从 factsModel 清单/精确事实抽取权威养护年限，与检测器同源（extractGreeningMaintenanceAuthority）
   session.greeningMaintenanceAuthority = extractGreeningMaintenanceAuthority(session.factsModel);
-  // B1 评分项响应强制：交付前对零命中/部分响应的实质条款按路由责任章节补写响应句（锚点同源判定）
+  // B1 评分项响应强制：交付前对零命中/部分响应的实质条款按蓝图分配的责任章节补写响应句（锚点同源判定）
   const stage5ScoringFix = await fixScoringRequirementResponses({
-    chapters: session.finalChapterDrafts, model: session.tenderRequirements, similarity: session.requirementsSimilarity, signal: session.signal,
+    chapters: session.finalChapterDrafts, assignments: session.requirementAssignments, signal: session.signal,
   });
   if (stage5ChapterFix.fixedCount > 0 || stage5ScoringFix.fixedCount > 0) session.finalMarkdown = session.rebuildFinalMarkdown();
   if (stage5ScoringFix.fixedCount > 0) {

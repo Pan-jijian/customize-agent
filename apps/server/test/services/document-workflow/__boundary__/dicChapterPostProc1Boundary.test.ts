@@ -301,7 +301,7 @@ describe('X6 scopeEngineeringNames', () => {
 describe('X7 parseMajorConstructionPackages', () => {
   it('结构化 JSON 通道：解析工作包五元组', () => {
     const ctx = '施工工作包结构化数据： [{"name":"污水管网工程","scope":"村内污水管网改造","quantities":["HDPE管1200米"],"process":["测量放线→沟槽开挖→管道铺设"],"acceptance":["闭水试验"]}]';
-    const packages = parseMajorConstructionPackages(ctx, []);
+    const packages = parseMajorConstructionPackages(ctx);
     expect(packages).toHaveLength(1);
     expect(packages[0]).toMatchObject({
       name: '污水管网工程',
@@ -313,24 +313,24 @@ describe('X7 parseMajorConstructionPackages', () => {
 
   it('项目名形态 name 过滤（XX建设项目）', () => {
     const ctx = '施工工作包结构化数据： [{"name":"某某建设项目","scope":"范围","quantities":[],"process":[],"acceptance":[]}]';
-    expect(parseMajorConstructionPackages(ctx, [])).toEqual([]);
+    expect(parseMajorConstructionPackages(ctx)).toEqual([]);
   });
 
   it('年度形态 name 过滤（2024年度维修改造）', () => {
     const ctx = '施工工作包结构化数据： [{"name":"2024年度维修改造项目","scope":"范围","quantities":[],"process":[],"acceptance":[]}]';
-    expect(parseMajorConstructionPackages(ctx, [])).toEqual([]);
+    expect(parseMajorConstructionPackages(ctx)).toEqual([]);
   });
 
   it('scope 污染标记「资料内容事实：」被清洗后残留文本（见附件）→ 包保留', () => {
     const ctx = '施工工作包结构化数据： [{"name":"污水管网工程","scope":"资料内容事实：见附件","quantities":[],"process":[],"acceptance":[]}]';
-    const packages = parseMajorConstructionPackages(ctx, []);
+    const packages = parseMajorConstructionPackages(ctx);
     expect(packages).toHaveLength(1);
     expect(packages[0].scope).toBe('见附件');
   });
 
   it('图谱行通道：解析 ｜ 分隔五元组', () => {
     const ctx = '1. 污水管网工程｜范围：村内污水管网改造｜工程量/材料：HDPE管1200米｜流程：测量放线→沟槽开挖｜验收：闭水试验';
-    const packages = parseMajorConstructionPackages(ctx, []);
+    const packages = parseMajorConstructionPackages(ctx);
     expect(packages).toHaveLength(1);
     expect(packages[0].name).toBe('污水管网工程');
     expect(packages[0].quantities).toEqual(['HDPE管1200米']);
@@ -338,23 +338,23 @@ describe('X7 parseMajorConstructionPackages', () => {
 
   it('图谱行项目名形态过滤', () => {
     const ctx = '1. 某某建设项目｜范围：范围描述｜工程量/材料：X｜流程：Y→Z｜验收：W';
-    expect(parseMajorConstructionPackages(ctx, [])).toEqual([]);
+    expect(parseMajorConstructionPackages(ctx)).toEqual([]);
   });
 
   it('无任何数据 → 空数组', () => {
-    expect(parseMajorConstructionPackages('普通上下文', [])).toEqual([]);
+    expect(parseMajorConstructionPackages('普通上下文')).toEqual([]);
   });
 
   it('结构化 JSON 非法 → 回退图谱行通道', () => {
     const ctx = ['施工工作包结构化数据： [{非法json}]', '1. 污水管网工程｜范围：村内污水管网改造｜工程量/材料：HDPE管1200米｜流程：测量放线→沟槽开挖｜验收：闭水试验'].join('\n');
-    const packages = parseMajorConstructionPackages(ctx, []);
+    const packages = parseMajorConstructionPackages(ctx);
     expect(packages).toHaveLength(1);
     expect(packages[0].name).toBe('污水管网工程');
   });
 
   it('图谱行通道 cap 8', () => {
     const lines = Array.from({ length: 10 }, (_item, i) => `${i + 1}. 工程${i + 1}｜范围：范围${i + 1}｜工程量/材料：X｜流程：Y→Z｜验收：W`);
-    const packages = parseMajorConstructionPackages(lines.join('\n'), []);
+    const packages = parseMajorConstructionPackages(lines.join('\n'));
     expect(packages).toHaveLength(8);
   });
 });

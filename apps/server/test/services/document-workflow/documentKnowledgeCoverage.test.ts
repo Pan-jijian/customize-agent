@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { buildKnowledgeCoverageReport, knowledgeCoverageIssues } from '@/services/document-workflow/documentKnowledgeCoverage';
-import type { DocumentDraftChapter, DocumentEvidence, DocumentFactsModel, DocumentTemplateChapter } from '@/services/document-workflow/types';
+import type { DocumentDraftChapter, DocumentEvidence, DocumentFactsModel } from '@/services/document-workflow/types';
 
 function makeFact(key: string, value: string): DocumentFactsModel['project'][number] {
   return { key, value, sourceFile: '/proj/facts.json', roleId: 'role-fact', confidence: 1 };

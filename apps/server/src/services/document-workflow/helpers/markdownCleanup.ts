@@ -2,11 +2,11 @@
  * helpers/markdownCleanup：正文清理/表格工具/章节质量线（P3 拆分，逐字机械搬移自 documentGeneratorHelpers.ts）。
  * 无域内跨依赖。
  */
-import type { DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, ValidationIssue } from '../types';
+import type { DocumentTemplateChapter, ValidationIssue } from '../types';
 import type { buildPromptBindingPlan, ResolvedPromptContent } from '../templateStore';
 import { mergeTableLineBreaks, normalizeInlineListBreaks, normalizeMarkdownTableDividers, normalizeTenderSourcePageRefs, removeAdjacentDuplicateHeadings, dedupeCrossLevelHeadingDuplicates, dedupeRepeatedBlocksWithinSections } from '../markdownComposer';
 import { displayChapterTitle, isTenderClauseFragmentTitle } from '../outline';
-import { BID_DISCIPLINE_PHRASES, dedupeCrossSectionSkeletonH4s, dedupeRepeatedSubsections, isBidDisciplineSentence, stringifyFactValue, throwIfAborted, WORK_PACKAGE_SECTION_RE } from '../utils';
+import { BID_DISCIPLINE_PHRASES, dedupeCrossSectionSkeletonH4s, dedupeRepeatedSubsections, isBidDisciplineSentence, WORK_PACKAGE_SECTION_RE } from '../utils';
 import { promptTextsForResolvedPrompts } from '../rolePipeline';
 
 export function removeSystemInjectedBoilerplate(content: string) {

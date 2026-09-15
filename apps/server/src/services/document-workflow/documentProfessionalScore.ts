@@ -1,5 +1,5 @@
 import type { DocumentDraftChapter } from './types';
-import { duplicateParagraphIssues, fillerParagraphIssues, processParameterDensityIssues, tableCompletenessIssues, sectionCardStructureIssues } from './constructionOrgAudit';
+import { duplicateParagraphIssues, fillerParagraphIssues, processParameterDensityIssues, sectionCardStructureIssues } from './constructionOrgAudit';
 import { stripTableCellInvisibleChars } from './helpers/markdownCleanup';
 import { PROCESS_PARAMETER_RE, QUANTIFIED_BODY_PARAM_RE } from './parameterPatterns';
 import { fillerDensityReport } from './tenderBidChecks';
@@ -128,7 +128,7 @@ function duplicationScore(chapters: DocumentDraftChapter[]): { score: number; de
 }
 
 /** 7. 评标响应度：招标硬性要求响应检测统一由 tenderRequirements.ts 锚点级语义通道
- * （requirementsCoverageIssues）承担，本维度仅保留评分用的词面响应率快照，
+ * （requirementAcceptanceIssues）承担，本维度仅保留评分用的词面响应率快照，
  * 不再复用已删除的 constructionOrgAudit.reviewResponseIssues（阶段五 5.3 口径分裂治理） */
 function reviewResponseScore(chapters: DocumentDraftChapter[], markdown = ''): { score: number; detail: string } {
   const wholeText = markdown || chapters.map(chapter => chapter.content).join('\n\n');

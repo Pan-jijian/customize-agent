@@ -173,7 +173,7 @@ describe('retrieveDeepChapterEvidence', () => {
   });
 
   it('检索结果过滤范围外文件并标记来源与加权', async () => {
-    searchMock.mockImplementation(async (_root, query, _options) => ({
+    searchMock.mockImplementation(async (_root, _query, _options) => ({
       results: [
         { filePath: '/data/招标文件.docx', score: 1, content: '总工期420日历天' },
         { filePath: '/data/范围外文件.docx', score: 9, content: '不应被保留' },

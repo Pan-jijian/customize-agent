@@ -87,16 +87,6 @@ function adoptionWindows(text: string) {
   return windows;
 }
 
-/** 句式证据摘录：含关键模式的句子（招标原文，截断 90 字符） */
-function evidenceSentences(text: string, pattern: RegExp, limit = 2) {
-  return text
-    .split(/[。；;\n]/u)
-    .map(item => item.replace(/\s+/gu, ' ').trim())
-    .filter(item => item.length >= 6 && pattern.test(item))
-    .slice(0, limit)
-    .map(item => item.slice(0, 90));
-}
-
 function firstMatch(text: string, pattern: RegExp) {
   const match = pattern.exec(text);
   return match ? (match[0] || '').trim() : undefined;
@@ -243,7 +233,7 @@ export function bidCompositionWritingRules(spec: BidCompositionSpec | undefined)
 }
 
 /** 门禁/修复提示中的拆表指令（禁表模式修复用） */
-export function bodyTableDismantleIssue(chapterTitle: string, tableCount: number): string {
+export function bodyTableDismantleIssue(tableCount: number): string {
   return `暗标正文禁表（招标编制要求，违反即施工组织设计部分不得分）：本章正文出现 ${tableCount} 处 Markdown 表格结构。请把每处表格的承载数据改写为段落式连贯叙述（数值、口径保持不变，数据原样保留），删除表格表头与分隔线结构；不得新增或删除其它正文内容。`;
 }
 

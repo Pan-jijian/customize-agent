@@ -3,8 +3,8 @@
  * 层序最底层（零域间出边）：工期/装配率/支护/劳动力峰值/绿化养护/路灯/开挖深度/项目规模等权威口径
  * 单源抽取 + 共享数值辅助（PEAK_LABOR_RE 等跨域常量归此）。
  */
-import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel, SpecAuthorityMap, TenderRequirementModel, ValidationIssue } from '../../types';
-import { stableHash, stringifyFactValue } from '../../utils';
+import type { DocumentFact, DocumentFactsModel } from '../../types';
+import { stringifyFactValue } from '../../utils';
 
 export const PEAK_LABOR_RE = /(?:高峰期|高峰|峰值)[^。；;\n]{0,20}?(?:约)?\s*([\d,]+)\s*人/g;
 // 阶段劳动力形态盲区（P1 扩围）：「装饰装修阶段投入20人」「主体结构阶段约300人」无高峰/劳动力前缀词，
@@ -378,8 +378,7 @@ export function extractScheduleAuthority(factsModel?: DocumentFactsModel | null)
   return undefined;
 }
 
-/** 装配率权威口径提取：factsModel 装配率事实卡（fieldId=assembly_rate / key=装配率）
- * 或招标要求模型（tenderRequirements.assemblyRate）中的百分比数值。
+/** 装配率权威口径提取：factsModel 装配率事实卡（fieldId=assembly_rate / key=装配率）中的百分比数值。
  * 4.17.4 合肥师范实测：正文 38.4% vs 招标锁定 30%，正文计算值必须回退为招标锁定值。 */
 
 export function extractAssemblyRateAuthority(factsModel?: DocumentFactsModel | null): number | undefined {
@@ -396,8 +395,6 @@ export function extractAssemblyRateAuthority(factsModel?: DocumentFactsModel | n
     const found = extract(stringifyFactValue(fact.value));
     if (found !== undefined) return found;
   }
-  const tenderText = factsModel?.tenderRequirements?.assemblyRate?.text;
-  if (tenderText) return extract(tenderText);
   return undefined;
 }
 

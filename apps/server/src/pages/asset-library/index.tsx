@@ -71,11 +71,6 @@ export default function AssetLibraryPage() {
     });
   };
 
-  /** 切换资源选中状态 */
-  const toggleSelect = (id: string) => {
-    setSelectedIds(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
-  };
-
   /** 获取图片资源的预览 URL */
   const previewSrc = (asset: GeneratedAssetRecord) =>
     asset.type === 'image' && asset.path

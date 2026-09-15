@@ -384,49 +384,58 @@ export interface DocumentFactsModel {
   missing: string[];
   conflicts: string[];
   canonical?: CanonicalFactModel;
-  /** 招标文件文本性评分项要求（创优目标/绿色等级/特殊质量标准/体系基准等），LLM 结构化提取产物 */
-  tenderRequirements?: TenderRequirementModel;
 }
 
-/** 单项评分项要求：text 为要求原文，coreTerms 为可用于正文命中检测的核心词（由 LLM 提取时给出，避免下游正则猜词） */
+/** 招标要求响应方式三态：respond=正文显性响应（创优/等级/技术条款）；comply=遵守类（工期基准/禁编日期等，不逐条抄写但不得违背）；
+ * qualitative=商务定性（保证金/付款/结算等，技术标按合同约定定性响应，不落商务数字参数） */
+export type TenderRequirementPolicy = 'respond' | 'comply' | 'qualitative';
 
-export interface TenderRequirementItem {
+/** 单条实质要求（条款穷举+逐条判定产物）：text 为条款原文（忠实引用），coreTerms 为正文命中检测核心词，
+ * sources 为多来源聚合（同一要求在招标/补疑重复出现时合并，不丢来源） */
+export interface TenderRequirementEntry {
   text: string;
   coreTerms: string[];
+  sources: Array<{ file?: string; location?: string }>;
+  /** LLM 按招标语义自命名的类别（质量创优/工期进度/安全文明等），仅展示分组与消息用 */
+  category: string;
+  policy: TenderRequirementPolicy;
+  /** 全文档性约束（如「以开工令为准」的禁编日期）：除章节分配外同时进入全局写作口径区 */
+  global?: boolean;
+}
+
+/** 被排除条款记录（reason：non_requirement=目录/导语/说明；out_of_scope=投标程序/资格/评标规则/纪律；
+ * no_value=条款值为「无」；duplicate=重复文本合并）——仅对账与审计用，不注入写作 */
+export interface TenderRequirementExclusion {
+  text: string;
   source?: string;
+  reason: 'non_requirement' | 'out_of_scope' | 'no_value' | 'duplicate';
+}
+
+/** 提取对账：条款总数 = entries 覆盖 + excluded + 重复合并 + undecidedCount（必须为 0 才对账闭合） */
+export interface TenderRequirementsReconciliation {
+  clauseCount: number;
+  entryCount: number;
+  excludedCount: number;
+  /** 未判定条款数（LLM 输出缺号且重试后仍缺）：>0 即对账未闭合，缓存不落盘并显式告警 */
+  undecidedCount: number;
+  /** 重复文本合并计数（并入 entries 的 sources 聚合） */
+  mergedCount: number;
+  batchCount: number;
+  retriedBatches: number;
 }
 
 /**
- * 招标文件“要求与标准”结构化模型：从全量绑定资料 LLM 结构化提取的文本性评分项要求。
- * 数字事实由 factsModel 承担；本模型承载无数字形态的实质要求（创优目标、等级、体系基准、禁编条款），
- * 下游两个出口：① 注入章节写作规则（生成时显性响应）；② 生成后零响应检测（校验器锚点）。
- * 历史缺陷：黄山杯零响应（否决级）——纯文本要求无结构化字段可存，生成链路零感知。
+ * 招标要求模型（全量条款穷举范式）：绑定资料 → 条款化（确定性结构切分）→ 逐条判定（每条必出判定）
+ * → 三态归宿（entries/excluded/合并）→ 对账闭合。取代旧 10 字段「必提清单」归纳式提取。
+ * 下游出口：① 蓝图统一分配（每章责任分片注入写作）；② 章级验收（收口前核验本章责任要求）。
  */
-
 export interface TenderRequirementModel {
-  /** 创优目标（如“确保黄山杯”） */
-  awardObjectives: TenderRequirementItem[];
-  /** 特殊质量标准（如“确保获得黄山杯，支付 300 万元”） */
-  specialQualityStandards: TenderRequirementItem[];
-  /** 奖项条款（与创优目标关联的奖励/支付条款） */
-  awardClauses: TenderRequirementItem[];
-  /** 绿色建筑等级（如“国标二星级”） */
-  greenBuildingGrade?: TenderRequirementItem;
-  /** 智慧工地等级（如“基本级”） */
-  smartSiteGrade?: TenderRequirementItem;
-  /** 装配率要求 */
-  assemblyRate?: TenderRequirementItem;
-  /** 体系基准要求（如“扬尘治理六个百分百”，要求逐项覆盖） */
-  systematicBenchmarks: TenderRequirementItem[];
-  /** 禁编日期条款（如“以开工令时间为准”→ 正文不得自设具体开工日期） */
-  dateFabricationProhibited: boolean;
-  /** 其他禁止性/约束性要求原文 */
-  prohibitionNotes: TenderRequirementItem[];
-  /** 投标人须知前附表响应条款（施组必须响应的实质条款：工期/质量标准/创优/缺陷责任期/履约担保/
-   * 工期延误赔偿/项目经理要求/分包限制等）。历史缺陷：前附表被 5 处代码主动过滤，
-   * 黄山杯/缺陷责任期/智慧工地等级等要求零感知零响应 */
-  frontScheduleClauses: TenderRequirementItem[];
-  /** 提取是否实际执行（LLM 不可用/资料为空时为 false，下游不得据此阻断） */
+  /** 全量实质要求（要写/要遵守的） */
+  entries: TenderRequirementEntry[];
+  /** 排除记录（不要的，带原因，对账/审计用） */
+  excluded: TenderRequirementExclusion[];
+  reconciliation: TenderRequirementsReconciliation;
+  /** 判定链是否实际执行（LLM 不可用/资料为空时为 false，下游不得据此阻断） */
   extracted: boolean;
   /** 提取源文本哈希（判定可复现溯源用） */
   sourceHash?: string;

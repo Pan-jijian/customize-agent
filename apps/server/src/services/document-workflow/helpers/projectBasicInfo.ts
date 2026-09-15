@@ -2,11 +2,10 @@
  * helpers/projectBasicInfo：项目基本信息事实/表格（P3 拆分，逐字机械搬移自 documentGeneratorHelpers.ts）。
  * 依赖 markdownCleanup（表格工具）。
  */
-import type { DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, ValidationIssue } from '../types';
+import type { DocumentFact } from '../types';
 import { normalizeOcrFactText, isValidProjectBasicFactValue } from '../factsModel';
 import { buildCanonicalFacts } from '../factGovernance';
-import { mergeTableLineBreaks, normalizeInlineListBreaks, normalizeMarkdownTableDividers, normalizeTenderSourcePageRefs, removeAdjacentDuplicateHeadings, dedupeCrossLevelHeadingDuplicates, dedupeRepeatedBlocksWithinSections } from '../markdownComposer';
-import { BID_DISCIPLINE_PHRASES, dedupeCrossSectionSkeletonH4s, dedupeRepeatedSubsections, isBidDisciplineSentence, stringifyFactValue, throwIfAborted, WORK_PACKAGE_SECTION_RE } from '../utils';
+import { stringifyFactValue } from '../utils';
 import { isMarkdownTableSeparatorLine, looksLikeMarkdownTableLine, splitMarkdownTableLine, normalizeBareMarkdownTables, stripProvenanceTableColumns } from './markdownCleanup';
 
 export const PROJECT_BASIC_FACT_QUERIES = [

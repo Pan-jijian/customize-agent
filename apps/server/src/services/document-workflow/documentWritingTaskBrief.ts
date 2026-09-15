@@ -1,4 +1,4 @@
-import type { DocumentFactsModel, DocumentTemplateChapter, ProjectGraph, TenderRequirementModel, WritingTaskBrief, WritingTaskBriefChapter } from './types';
+import type { DocumentFactsModel, DocumentTemplateChapter, ProjectGraph, WritingTaskBrief, WritingTaskBriefChapter } from './types';
 import { inferConstructionOrgProjectTypes } from './constructionOrgProjectTypes';
 
 /**
@@ -49,7 +49,6 @@ export function buildWritingTaskBrief(input: {
   projectGraph?: ProjectGraph;
   requirement?: string;
   templateName?: string;
-  tenderRequirements?: TenderRequirementModel;
 }): WritingTaskBrief {
   const projectTypes = inferConstructionOrgProjectTypes({ template: { id: 'runtime', name: input.templateName || '', outputTitle: '', description: '', category: '', chapters: input.chapters }, chapters: input.chapters, requirement: input.requirement });
   const isConstructionOrg = /施工组织设计|施工组织|施组|技术标/u.test(`${input.templateName || ''} ${input.requirement || ''} ${input.chapters.map(chapter => chapter.title).join(' ')}`) || projectTypes.length > 0;
@@ -57,9 +56,6 @@ export function buildWritingTaskBrief(input: {
   // 模块2：项目规模事实卡——将规模口径裁决值单独显化，写作 LLM 必须区分「总占地」与「建筑总量」，
   // 历史缺陷：正文把占地约10970㎡误当建筑规模写入（实际单体建筑面积 28570.36㎡），被反向改错 13 处
   const scaleFactLines = canonicalLines.filter(line => /建设规模|建筑面积|占地|用地面积|装配|层数|高度/u.test(line)).slice(0, 8);
-  // 模块2：投标人须知前附表响应清单——施组必须逐条响应或遵守的实质条款（零响应即评标失分），
-  // 历史缺陷：第四轮黄山杯/绿色建筑二星级/智慧工地等级未提取（前附表被宽过滤），正文零落位
-  const frontScheduleLines = (input.tenderRequirements?.frontScheduleClauses || []).map(item => item.text).filter(Boolean).slice(0, 12);
   const globalWritingFocus = [
     '正文必须落到本项目资料已确认的事实，不得使用模板化空话或跨小节复制段落',
     '措施类内容写成“责任岗位+执行动作+量化标准+检查频次+整改时限+复查销项”闭环句式：同一自然段内三要素（责任岗位+检查频次+整改闭环）须同时出现，全文每 1500 字至少 1 段闭环句式',
@@ -69,7 +65,6 @@ export function buildWritingTaskBrief(input: {
     'B5 属地创优目标（安徽省属地适配项）：招标文件未明确具体奖项时，正文必须提出不低于招标文件要求的属地创优目标，如"争创合肥市级优质工程""争创市级安全文明标准化工地"等，并在质量与文明施工章节落位',
     'B5 表格数据一致性（丰乐镇第三轮实测：合计行 5088 与阶段工日之和 5808 矛盾、班组人数 22/28/30 多值并存）：表格类内容（劳动力投入、材料配置、机械设备等）合计行数值必须与上方明细行数据一致、可由各行相加推导；各阶段人数与全项目峰值人数必须显式区分口径并保持一致（如写明"阶段高峰人数按阶段分别统计，合计行仅列全项目峰值口径"）；同一班组人数在配置表与进退场表中必须同值，不得多值并存',
     ...WRITING_INTEGRITY_CONSTRAINTS,
-    ...(frontScheduleLines.length ? [`投标人须知前附表响应条款（正文必须逐条落位或遵守，零响应即评标失分）：${frontScheduleLines.map((line, index) => `${index + 1}.${line}`).join('；')}`] : []),
   ];
   const chapters: WritingTaskBriefChapter[] = input.chapters.map(chapter => {
     const rule = chapterFocusRule(chapter.title);

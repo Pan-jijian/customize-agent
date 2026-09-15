@@ -1,3 +1,8 @@
+/**
+ * 招标要求层（全量条款穷举范式）测试：条款化（确定性切分）→ 逐条判定（序号对齐/重试/确定性复核）→
+ * 重复合并 → 对账闭合 → 缓存 v4（对账门禁）→ 蓝图分配（唯一主责章）→ 章级验收 → 补写/清理器。
+ * 判定链 LLM 经 callDocumentLlmJson mock；语义相似度一律参数注入（内核不依赖真实嵌入）。
+ */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -11,653 +16,341 @@ vi.mock('@/services/document-workflow/semanticSimilarity', () => ({ buildSemanti
 
 import type * as LlmClientModule from '@/services/document-workflow/llmClient';
 import { callDocumentLlmJson } from '@/services/document-workflow/llmClient';
-import { validateJsonAgainstSchema } from '@/services/document-workflow/llmClient';
-import { buildSemanticSimilarity } from '@/services/document-workflow/semanticSimilarity';
-import { emptyTenderRequirements, extractTenderRequirements, extractRequirementFieldGaps, filterMandatoryClauseEvidence, hasTenderRequirements, mandatoryFieldGaps, mergeTenderRequirements, mergeTenderRequirementSlices, missingMandatoryFields, preselectTenderRequirementEvidence, readCachedTenderRequirements, requirementFieldGaps, requirementsCoverageIssues, tenderRequirementsCacheKey, tenderRequirementsWritingRules, writeCachedTenderRequirements, classifyRequirementResponsiveness, classifyAnchorAlternativeClauses, fixScoringRequirementResponses, fixScoringRequirementResponsesInFinalMarkdown, fixTenderMetaLanguage, stripDuplicateResponseLines, REQUIREMENTS_JSON_SCHEMA } from '@/services/document-workflow/tenderRequirements';
+import {
+  assignTenderRequirementsToChapters,
+  emptyTenderRequirements,
+  extractTenderRequirements,
+  fixEmptyScoringResponses,
+  fixScoringRequirementResponses,
+  fixScoringRequirementResponsesInFinalMarkdown,
+  fixTenderMetaLanguage,
+  hasTenderRequirements,
+  judgeTenderClauses,
+  readCachedTenderRequirements,
+  renderChapterRequirementSlice,
+  requirementAcceptanceIssues,
+  saveRequirementAssignmentsAsset,
+  splitTenderClauses,
+  stripDuplicateResponseLines,
+  tenderRequirementCheckItems,
+  tenderRequirementSemanticQuery,
+  tenderRequirementsCacheKey,
+  tenderRequirementsSummary,
+  tenderRequirementsWritingRules,
+  writeCachedTenderRequirements,
+} from '@/services/document-workflow/tenderRequirements';
+import type { TenderClauseUnit, TenderRequirementAssignment } from '@/services/document-workflow/tenderRequirements';
 import { stableHash } from '@/services/document-workflow/utils';
-import type { DocumentEvidence, TenderRequirementModel } from '@/services/document-workflow/types';
+import type { DocumentEvidence, TenderRequirementEntry, TenderRequirementModel, TenderRequirementPolicy } from '@/services/document-workflow/types';
 
 const evidence: DocumentEvidence[] = [
-  { chapterId: 'tender-requirements', filePath: '9.4合肥师范学院新一代信息技术产教融合实训基地项目/招标文件.pdf', sectionTitle: '第三章评标办法', score: 1, content: '评标办法采用综合评估法（模式3）；技术文件5分、商务文件10分、报价文件85分；优秀得4.5分≤F≤5分。' },
+  { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '第三章评标办法', score: 1, content: '3.1 创优目标：确保获得“黄山杯”。\n3.2 绿色建筑等级要求：达到国标二星级。' },
 ];
 
-// 复现自真实 deepseek 输出：awardClauses[0].text 为 85 字符，旧 maxLength=80 会校验失败 → undefined → 空模型 → skipped
-const realModelOutput = {
-  awardObjectives: [{ text: '创优目标：确保黄山杯。', coreTerms: ['黄山杯'], source: '招标文件.pdf' }],
-  specialQualityStandards: [{ text: '特殊质量标准和要求：确保黄山杯。', coreTerms: ['黄山杯'], source: '招标文件.pdf' }],
-  awardClauses: [{ text: '关于工程奖项的约定：本项目确保获得“黄山杯”。获得“黄山杯”的，支付该项300万元（工程量清单中已单独列项）；自竣工验收合格之日起3年内未获得“黄山杯”的，该项不予支付。', coreTerms: ['黄山杯', '300万元'], source: '招标文件.pdf' }],
-  greenBuildingGrade: { text: '绿色建筑等级要求：达到国标二星级。', coreTerms: ['二星级'], source: '招标文件.pdf' },
-  smartSiteGrade: { text: '智慧工地管理要求：基本级。', coreTerms: ['基本级'], source: '招标文件.pdf' },
-  assemblyRate: { text: '本工程有装配式技术要求，装配率为30%。', coreTerms: ['装配率', '30%'], source: '招标文件.pdf' },
-  systematicBenchmarks: [],
-  dateFabricationProhibited: true,
-  prohibitionNotes: [{ text: '计划工期：开工之日（以开工令时间为准）起，540个日历天。', coreTerms: ['开工令'], source: '招标文件.pdf' }],
-};
+const entry = (text: string, coreTerms: string[], policy: TenderRequirementPolicy = 'respond', category = '其他要求'): TenderRequirementEntry => ({
+  text,
+  coreTerms,
+  sources: [{ file: '招标文件.pdf' }],
+  category,
+  policy,
+});
 
-describe('extractTenderRequirements 回归（round-21 S6：schema 超长失败修复）', () => {
+/** 对账闭合模型（clauseCount = entries + mergedCount） */
+const closedModel = (entries: TenderRequirementEntry[], mergedCount = 0): TenderRequirementModel => ({
+  entries,
+  excluded: [],
+  reconciliation: { clauseCount: entries.length + mergedCount, entryCount: entries.length, excludedCount: 0, undecidedCount: 0, mergedCount, batchCount: 1, retriedBatches: 0 },
+  extracted: true,
+});
+
+const assignment = (item: TenderRequirementEntry, chapterTitle: string, lowConfidence = false): TenderRequirementAssignment => ({
+  entry: item,
+  chapterTitle,
+  score: lowConfidence ? 0.2 : 0.8,
+  lowConfidence,
+});
+
+// ═══════════════════════════ L1 条款化（确定性结构切分） ═══════════════════════════
+
+describe('splitTenderClauses 条款化（确定性结构切分，不预筛不剔除）', () => {
+  it('编号行开新单元：同编号后续行归入同一单元，单元带文件/章节/条款号来源定位', () => {
+    const clauses = splitTenderClauses([{
+      chapterId: 'tender-requirements',
+      filePath: '招标文件.pdf',
+      sectionTitle: '第三章评标办法',
+      score: 1,
+      content: '3.1 创优目标：确保获得“黄山杯”。\n具体保证措施由我方组织实施。\n3.2 绿色建筑等级要求：达到国标二星级。',
+    }]);
+    expect(clauses.length).toBe(2);
+    expect(clauses[0]).toMatchObject({ file: '招标文件.pdf', section: '第三章评标办法', clauseNo: '3.1' });
+    expect(clauses[0].text).toBe('3.1 创优目标：确保获得“黄山杯”。\n具体保证措施由我方组织实施。');
+    expect(clauses[1].clauseNo).toBe('3.2');
+    expect(clauses[1].text).toBe('3.2 绿色建筑等级要求：达到国标二星级。');
+  });
+
+  it('短「名：值」行独立成单元（表格行不做整表合并）', () => {
+    const clauses = splitTenderClauses([{
+      chapterId: 'tender-requirements',
+      filePath: '招标文件.pdf',
+      score: 1,
+      content: '绿色建筑等级要求：达到国标二星级。\n智慧工地管理要求：基本级。',
+    }]);
+    expect(clauses.length).toBe(2);
+    expect(clauses[0].clauseNo).toBeUndefined();
+    expect(clauses[0].text).toBe('绿色建筑等级要求：达到国标二星级。');
+    expect(clauses[1].text).toBe('智慧工地管理要求：基本级。');
+  });
+
+  it('空行=段落边界：前后段落各自独立成单元', () => {
+    const clauses = splitTenderClauses([{
+      chapterId: 'tender-requirements',
+      filePath: '招标文件.pdf',
+      score: 1,
+      content: '确保获得黄山杯。\n\n严格执行质量管理制度。',
+    }]);
+    expect(clauses.length).toBe(2);
+    expect(clauses[0].text).toBe('确保获得黄山杯。');
+    expect(clauses[1].text).toBe('严格执行质量管理制度。');
+  });
+
+  it('markdown 标题行更新 section 上下文（# 是结构标记，不作为条款单元）', () => {
+    const clauses = splitTenderClauses([{
+      chapterId: 'tender-requirements',
+      filePath: '招标文件.pdf',
+      score: 1,
+      content: '## 第三章 评标办法\n3.1 创优目标：确保获得“黄山杯”。',
+    }]);
+    expect(clauses.length).toBe(1);
+    expect(clauses[0].section).toBe('第三章 评标办法');
+    expect(clauses[0].clauseNo).toBe('3.1');
+  });
+
+  it('内联 PDF 标题噪声清洗（平方###米 夹断不残留在单元文本）', () => {
+    const clauses = splitTenderClauses([{
+      chapterId: 'tender-requirements',
+      filePath: '招标文件.pdf',
+      score: 1,
+      content: '活动板房面积约200平方###米，用于现场办公。',
+    }]);
+    expect(clauses.length).toBe(1);
+    expect(clauses[0].text).toBe('活动板房面积约200平方米，用于现场办公。');
+    expect(clauses[0].text).not.toContain('#');
+  });
+
+  it('超长单元按句二次切分（≤2000 字符，不丢任何句子；带条款号时子单元编号加后缀）', () => {
+    const longText = '本工程严格执行质量管理制度并进行全过程检查验收。'.repeat(120);
+    const clauses = splitTenderClauses([{
+      chapterId: 'tender-requirements',
+      filePath: '招标文件.pdf',
+      score: 1,
+      content: `3.1 创优目标。\n${longText}`,
+    }]);
+    expect(clauses.length).toBe(2);
+    expect(clauses[0].clauseNo).toBe('3.1-1');
+    expect(clauses[1].clauseNo).toBe('3.1-2');
+    for (const clause of clauses) expect(clause.text.length).toBeLessThanOrEqual(2000);
+    expect(clauses.map(clause => clause.text).join('')).toBe(`3.1 创优目标。\n${longText}`);
+  });
+});
+
+// ═══════════════════════════ L1 逐条判定（每条必出结果） ═══════════════════════════
+
+describe('judgeTenderClauses 逐条判定（序号严格对齐 + 确定性复核）', () => {
   beforeEach(() => {
     vi.resetAllMocks();
   });
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
 
-  it('真实模型输出（奖项条款 85 字超旧上限 80）能通过放宽后的 schema 校验', async () => {
-    // 直接验证校验层：旧 maxLength=80 时该输出会报“字段 $.awardClauses[0].text 长度超限”
-    const errors = validateJsonAgainstSchema(realModelOutput, REQUIREMENTS_JSON_SCHEMA);
-    expect(errors).toEqual([]);
-  });
-
-  it('真实模型输出能被正确解析并生成写作规则', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    mocked.mockResolvedValueOnce(realModelOutput);
-    const model = await extractTenderRequirements(evidence, {});
-    expect(hasTenderRequirements(model)).toBe(true);
-    expect(model.awardClauses.length).toBe(1);
-    expect(model.awardClauses[0].text).toContain('300万元');
-    expect(model.dateFabricationProhibited).toBe(true);
-    const rules = tenderRequirementsWritingRules(model);
-    expect(rules).toContain('黄山杯');
-  });
-
-  it('LLM 返回 undefined 时返回空模型（零响应降级，不抛错）', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    mocked.mockResolvedValueOnce(undefined);
-    const model = await extractTenderRequirements(evidence, {});
-    expect(hasTenderRequirements(model)).toBe(false);
-  });
-
-  it('无值条款表述（值为无/勾选无/数据表占位）被丢弃不入模型（真实回归：新版招标文件「绿色建筑等级要求：无」被当字段值污染下游）', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    mocked.mockResolvedValueOnce({
-      awardObjectives: [{ text: '创优目标：无', coreTerms: [], source: '前附表10.9' }],
-      specialQualityStandards: [{ text: '特殊质量标准和要求：无。', coreTerms: [], source: '数据表5.1.1' }],
-      awardClauses: [{ text: '关于工程奖项的约定：本项目确保获得“黄山杯”。获得“黄山杯”的，支付该项300万元。', coreTerms: ['黄山杯'], source: '数据表5.1.1' }],
-      greenBuildingGrade: { text: '绿色建筑等级要求：无', coreTerms: [], source: '数据表5.1.1' },
-      smartSiteGrade: { text: '智慧工地管理要求：无', coreTerms: [], source: '数据表5.1.1' },
-      assemblyRate: { text: '装配式建筑装配率要求：无', coreTerms: [], source: '数据表5.1.1' },
-      frontScheduleClauses: [{ text: '特殊质量标准和要求：见《专用合同条款数据表》', coreTerms: [], source: '正文5.1' }],
+  it('序号对齐：isRequirement/inScope 三态归宿，排除带 reason，条目带来源与类别', async () => {
+    const clauses: TenderClauseUnit[] = [
+      { file: '招标文件.pdf', section: '第三章', clauseNo: '3.1', text: '创优目标：确保获得黄山杯。' },
+      { file: '招标文件.pdf', section: '第三章', clauseNo: '3.2', text: '开标时间：2026年5月15日9时。' },
+      { file: '招标文件.pdf', section: '第三章', clauseNo: '3.3', text: '绿色建筑等级要求：达到国标二星级。' },
+    ];
+    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({
+      results: [
+        { index: 0, isRequirement: true, inScope: true, policy: 'respond', coreTerms: ['黄山杯'], category: '质量创优' },
+        { index: 1, isRequirement: true, inScope: false, reason: 'out_of_scope' },
+        { index: 2, isRequirement: true, inScope: true, policy: 'respond', coreTerms: ['二星级'], category: '绿色施工' },
+      ],
     });
-    const model = await extractTenderRequirements(evidence, {});
-    expect(model.awardObjectives.length).toBe(0);
-    expect(model.specialQualityStandards.length).toBe(0);
-    expect(model.awardClauses.length).toBe(1);
-    expect(model.awardClauses[0].text).toContain('300万元');
-    expect(model.greenBuildingGrade).toBeUndefined();
-    expect(model.smartSiteGrade).toBeUndefined();
-    expect(model.assemblyRate).toBeUndefined();
-    expect(model.frontScheduleClauses.length).toBe(0);
+    const result = await judgeTenderClauses(clauses, {});
+    expect(result.batchCount).toBe(1);
+    expect(result.retriedBatches).toBe(0);
+    expect(result.undecided).toEqual([]);
+    expect(result.entries.length).toBe(2);
+    expect(result.excluded.length).toBe(1);
+    expect(result.excluded[0].reason).toBe('out_of_scope');
+    expect(result.excluded[0].source).toBe('招标文件.pdf｜第三章·条款3.2');
+    expect(result.entries[0]).toMatchObject({
+      category: '质量创优',
+      policy: 'respond',
+      sources: [{ file: '招标文件.pdf', location: '第三章·条款3.1' }],
+    });
   });
 
-  it('空证据直接返回空模型', async () => {
+  it('缺号重试一次：第二次补齐后条目正常产出（retriedBatches 记账）', async () => {
+    const mocked = vi.mocked(callDocumentLlmJson);
+    mocked.mockResolvedValueOnce({ results: [] });
+    mocked.mockResolvedValueOnce({ results: [{ index: 0, isRequirement: true, inScope: true, policy: 'respond', coreTerms: ['黄山杯'], category: '质量创优' }] });
+    const result = await judgeTenderClauses([{ file: '招标文件.pdf', text: '创优目标：确保获得黄山杯。' }], {});
+    expect(result.entries.length).toBe(1);
+    expect(result.undecided.length).toBe(0);
+    expect(result.retriedBatches).toBe(1);
+    expect(mocked).toHaveBeenCalledTimes(2);
+  });
+
+  it('两轮仍缺号：未判定条款显式记录（不静默丢弃），其余条款正常归宿', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValue({
+      results: [{ index: 0, isRequirement: true, inScope: true, policy: 'respond', coreTerms: ['黄山杯'], category: '质量创优' }],
+    });
+    const result = await judgeTenderClauses([
+      { file: '招标文件.pdf', text: '创优目标：确保获得黄山杯。' },
+      { file: '招标文件.pdf', text: '绿色建筑等级要求：达到国标二星级。' },
+    ], {});
+    expect(result.entries.length).toBe(1);
+    expect(result.undecided.length).toBe(1);
+    expect(result.undecided[0].text).toBe('绿色建筑等级要求：达到国标二星级。');
+    expect(result.retriedBatches).toBe(1);
+  });
+
+  it('LLM 零响应（undefined）：全部记入未判定，不抛错', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValue(undefined);
+    const result = await judgeTenderClauses([
+      { file: '招标文件.pdf', text: '创优目标：确保获得黄山杯。' },
+      { file: '招标文件.pdf', text: '绿色建筑等级要求：达到国标二星级。' },
+    ], {});
+    expect(result.entries).toEqual([]);
+    expect(result.excluded).toEqual([]);
+    expect(result.undecided.length).toBe(2);
+  });
+
+  it('确定性复核：勾选无条款（☑无）LLM 判为要求仍强制剔除 no_value', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValue({
+      results: [{ index: 0, isRequirement: true, inScope: true, policy: 'respond', coreTerms: [], category: '质量创优' }],
+    });
+    const result = await judgeTenderClauses([{ file: '招标文件.pdf', section: '前附表', clauseNo: '10.9', text: '10.9 创优目标 ☑无' }], {});
+    expect(result.entries).toEqual([]);
+    expect(result.excluded.length).toBe(1);
+    expect(result.excluded[0].reason).toBe('no_value');
+  });
+
+  it('确定性复核：评标否决规则/资格条件条款 LLM 判为要求仍强制剔除 out_of_scope', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValue({
+      results: [
+        { index: 0, isRequirement: true, inScope: true, policy: 'respond', coreTerms: [], category: '其他要求' },
+        { index: 1, isRequirement: true, inScope: true, policy: 'respond', coreTerms: [], category: '人员管理' },
+      ],
+    });
+    const result = await judgeTenderClauses([
+      { file: '招标文件.pdf', text: '经评标委员会认定，技术文件明显文不对题的，一律否决其投标。' },
+      { file: '招标文件.pdf', text: '投标人须具有市政公用工程施工总承包二级及以上资质。' },
+    ], {});
+    expect(result.entries).toEqual([]);
+    expect(result.excluded.length).toBe(2);
+    expect(result.excluded.every(item => item.reason === 'out_of_scope')).toBe(true);
+  });
+
+  it('comply 且命中全文档约束正则（开工令）→ global 标记；coreTerms/空类别清洗', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValue({
+      results: [
+        { index: 0, isRequirement: true, inScope: true, policy: 'comply', coreTerms: ['开工令'], category: '工期进度' },
+        { index: 1, isRequirement: true, inScope: true, coreTerms: ['质', '质量管理制度', 'a'.repeat(30), '制度', '多余词'], category: '' },
+      ],
+    });
+    const result = await judgeTenderClauses([
+      { file: '招标文件.pdf', text: '计划工期：开工之日（以开工令时间为准）起，540个日历天。' },
+      { file: '招标文件.pdf', text: '严格执行质量管理制度。' },
+    ], {});
+    expect(result.entries[0].policy).toBe('comply');
+    expect(result.entries[0].global).toBe(true);
+    expect(result.entries[1].policy).toBe('respond');
+    expect(result.entries[1].coreTerms).toEqual(['质量管理制度', '制度', '多余词']);
+    expect(result.entries[1].category).toBe('其他要求');
+  });
+});
+
+// ═══════════════════════════ L1 提取编排（条款化→判定→合并→对账） ═══════════════════════════
+
+describe('extractTenderRequirements 编排（对账闭合）', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('空证据直接返回空模型（零 LLM 调用）', async () => {
     const model = await extractTenderRequirements([], {});
     expect(model).toEqual(emptyTenderRequirements(false));
     expect(vi.mocked(callDocumentLlmJson)).not.toHaveBeenCalled();
   });
-});
 
-// ============ round-23 P0-1/P0-2：必提条款窄通道与奖项忠实性 ============
-
-const fullModel: TenderRequirementModel = {
-  ...emptyTenderRequirements(true),
-  awardObjectives: [{ text: '创优目标：确保黄山杯。', coreTerms: ['黄山杯'], source: '招标文件.pdf' }],
-  awardClauses: [{ text: '本项目确保获得“黄山杯”。获得“黄山杯”的，支付该项300万元。', coreTerms: ['黄山杯', '300万元'], source: '招标文件.pdf' }],
-  greenBuildingGrade: { text: '绿色建筑等级要求：达到国标二星级。', coreTerms: ['二星级'], source: '招标文件.pdf' },
-  smartSiteGrade: { text: '智慧工地管理要求：基本级。', coreTerms: ['基本级'], source: '招标文件.pdf' },
-  assemblyRate: { text: '装配率：30%。', coreTerms: ['30%'], source: '招标文件.pdf' },
-  systematicBenchmarks: [{ text: '施工组织设计采用图表结合形式。', coreTerms: ['图表结合'], source: '招标文件.pdf' }],
-};
-
-describe('round-23 P0-1 必提条款窄通道召回/缺失判定/合并', () => {
-  beforeEach(() => {
-    vi.resetAllMocks();
-  });
-
-  it('filterMandatoryClauseEvidence 召回创优/绿色词形候选，滤掉纯程序性切片', async () => {
-    const candidates: DocumentEvidence[] = [
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '投标人须知前附表10.9', score: 1, content: '有，具体要求如下：确保黄山杯。' },
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '第七章技术标准', score: 1, content: '本项目绿色建筑等级为国标二星级，智慧工地基本级。' },
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '投标人须知', score: 1, content: '开标时间为2026年5月15日9时，评标委员会由5人组成。' },
-    ];
-    // 语义召回 mock：必提条款特征切片命中（黄山杯/二星级），纯程序性切片低分滤掉
-    vi.mocked(buildSemanticSimilarity).mockResolvedValue(((_left: string, right: string) => (/黄山杯|二星级/u.test(right) ? 0.8 : 0.1)) as unknown as ReturnType<typeof buildSemanticSimilarity> extends Promise<infer F> ? F : never);
-    const result = await filterMandatoryClauseEvidence(candidates);
-    expect(result.length).toBe(2);
-    expect(result[0].content).toContain('确保黄山杯');
-    expect(result[1].content).toContain('二星级');
-  });
-
-  it('filterMandatoryClauseEvidence 清洗 PDF 标题标记噪声（平方###米夹断）', async () => {
-    const candidates: DocumentEvidence[] = [
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '专用合同条款', score: 1, content: '关于工程奖项的约定：本项目确保获得“黄山杯”，单体建筑面积28570.36平方\n\n### 米（其中：地上建筑面积24783.39平方米）。' },
-    ];
-    vi.mocked(buildSemanticSimilarity).mockResolvedValue((() => 0.8) as unknown as ReturnType<typeof buildSemanticSimilarity> extends Promise<infer F> ? F : never);
-    const result = await filterMandatoryClauseEvidence(candidates);
-    expect(result.length).toBe(1);
-    expect(result[0].content).not.toContain('###');
-    expect(result[0].content).toContain('28570.36平方米');
-  });
-
-  it('missingMandatoryFields：必提字段任一缺失为 true（触发窄通道），全部齐全为 false（真实生成回归：黄山杯单独漏提）', () => {
-    expect(missingMandatoryFields(undefined)).toBe(true);
-    expect(missingMandatoryFields(emptyTenderRequirements(true))).toBe(true);
-    const withAwardOnly = { ...emptyTenderRequirements(true), awardObjectives: [{ text: '确保黄山杯', coreTerms: ['黄山杯'] }] };
-    expect(missingMandatoryFields(withAwardOnly)).toBe(true);
-    const withGreenOnly = { ...emptyTenderRequirements(true), greenBuildingGrade: { text: '二星级', coreTerms: ['二星级'] } };
-    expect(missingMandatoryFields(withGreenOnly)).toBe(true);
-    expect(missingMandatoryFields(fullModel)).toBe(false);
-  });
-
-  // ============ round-26 字段级缺口检测与定向补提闭环 ============
-  it('mandatoryFieldGaps：字段级缺失清单（空模型全 6 字段，部分缺失仅列缺失项，全齐空数组）', () => {
-    expect(mandatoryFieldGaps(undefined)).toEqual(['awardObjectives', 'awardClauses', 'greenBuildingGrade', 'smartSiteGrade', 'assemblyRate', 'systematicBenchmarks']);
-    expect(mandatoryFieldGaps(emptyTenderRequirements(true))).toEqual(['awardObjectives', 'awardClauses', 'greenBuildingGrade', 'smartSiteGrade', 'assemblyRate', 'systematicBenchmarks']);
-    const withAwardOnly = { ...emptyTenderRequirements(true), awardObjectives: [{ text: '确保黄山杯', coreTerms: ['黄山杯'] }] };
-    expect(mandatoryFieldGaps(withAwardOnly)).toEqual(['awardClauses', 'greenBuildingGrade', 'smartSiteGrade', 'assemblyRate', 'systematicBenchmarks']);
-    const missingAssembly = { ...fullModel, assemblyRate: undefined };
-    expect(mandatoryFieldGaps(missingAssembly)).toEqual(['assemblyRate']);
-    expect(mandatoryFieldGaps(fullModel)).toEqual([]);
-  });
-
-  it('requirementFieldGaps：全字段缺失清单（覆盖全部评分项要求字段，评标办法/篇幅不在其中）', () => {
-    // 空模型：全部 10 个评分项要求字段（必提 6 + 特殊质量/前附表/禁编/禁止性）均为缺失
-    expect(requirementFieldGaps(undefined)).toEqual([
-      'awardObjectives', 'specialQualityStandards', 'awardClauses', 'greenBuildingGrade', 'smartSiteGrade',
-      'assemblyRate', 'systematicBenchmarks', 'frontScheduleClauses', 'dateFabricationProhibited', 'prohibitionNotes',
-    ]);
-    // 常规字段齐全 → 空清单；缺任一常规字段 → 只列该字段（非仅必提字段）
-    const completeOptional = {
-      ...fullModel,
-      specialQualityStandards: [{ text: '特殊质量标准：按最高标准执行。', coreTerms: ['最高标准'] }],
-      frontScheduleClauses: [{ text: '计划工期：540日历天。', coreTerms: ['540日历天'] }],
-      dateFabricationProhibited: true,
-      prohibitionNotes: [{ text: '不得转包。', coreTerms: ['转包'] }],
-    };
-    expect(requirementFieldGaps(completeOptional)).toEqual([]);
-    expect(requirementFieldGaps({ ...completeOptional, specialQualityStandards: [] })).toEqual(['specialQualityStandards']);
-    expect(requirementFieldGaps({ ...completeOptional, dateFabricationProhibited: false })).toEqual(['dateFabricationProhibited']);
-  });
-
-  it('extractRequirementFieldGaps：窗口聚焦提取补齐缺失字段（LLM 一次调用覆盖全部有窗口的缺失字段）', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    const model = { ...fullModel, awardClauses: [], assemblyRate: undefined };
-    mocked.mockResolvedValueOnce({
-      awardClauses: [{ text: '获得“黄山杯”的，支付该项300万元。', coreTerms: ['300万元'] }],
-      assemblyRate: { text: '装配率：30%。', coreTerms: ['30%'] },
-      frontScheduleClauses: [{ text: '获得“黄山杯”的，支付该项300万元。', coreTerms: ['黄山杯', '300万元'] }],
-    });
-    const gapEvidence: DocumentEvidence[] = [
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '专用合同条款数据表5.1.1', score: 1, content: '关于工程奖项的约定：本项目确保获得“黄山杯”。获得“黄山杯”的，支付该项300万元；本工程有装配式技术要求，装配率为30%。' },
-    ];
-    const result = await extractRequirementFieldGaps(model, gapEvidence, {});
-    expect(result.stillGaps).toEqual([]);
-    // 证据中无窗口命中的 3 个常规字段归 noEvidenceGaps（资料无此要求，非漏提）；
-    // 前附表词形覆盖创优奖惩（黄山杯/支付300万元）→ 窗口命中参与补提，不再失明
-    expect(result.noEvidenceGaps).toEqual(['specialQualityStandards', 'dateFabricationProhibited', 'prohibitionNotes']);
-    expect(result.model.awardClauses.length).toBe(1);
-    expect(result.model.awardClauses[0].text).toContain('300万元');
-    expect(result.model.assemblyRate?.text).toContain('30%');
-    expect(result.model.awardObjectives.length).toBe(1);
-    expect(result.model.frontScheduleClauses.length).toBe(1);
-    expect(result.model.frontScheduleClauses[0].text).toContain('300万元');
-  });
-
-  it('extractRequirementFieldGaps：常规字段（特殊质量标准/前附表/禁止性/禁编）缺失同样触发补提', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    // fullModel 缺 4 个常规字段 → 全部进入补提窗口
-    const model = { ...fullModel };
-    mocked.mockResolvedValueOnce({
-      specialQualityStandards: [{ text: '特殊质量标准和要求：按最高标准执行。', coreTerms: ['最高标准'] }],
-      prohibitionNotes: [{ text: '不得转包、违法分包。', coreTerms: ['转包'] }],
-      dateFabricationProhibited: true,
-      frontScheduleClauses: [{ text: '不得转包、违法分包。', coreTerms: ['转包'] }],
-    });
-    const gapEvidence: DocumentEvidence[] = [
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '专用合同条款', score: 1, content: '特殊质量标准和要求：按最高标准执行；不得转包、违法分包；开工日期以开工令为准。' },
-    ];
-    const result = await extractRequirementFieldGaps(model, gapEvidence, {});
-    expect(result.stillGaps).toEqual([]);
-    expect(result.noEvidenceGaps).toEqual([]);
-    expect(result.model.specialQualityStandards.length).toBe(1);
-    expect(result.model.prohibitionNotes.length).toBe(1);
-    expect(result.model.dateFabricationProhibited).toBe(true);
-    expect(result.model.frontScheduleClauses.length).toBe(1);
-  });
-
-  it('extractRequirementFieldGaps：窗口无证据字段判定「资料无此要求」（不误告警、不空跑 LLM）', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    const model = { ...fullModel, greenBuildingGrade: undefined };
-    const gapEvidence: DocumentEvidence[] = [
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '投标人须知', score: 1, content: '开标时间为2026年5月15日9时，评标委员会由5人组成。' },
-    ];
-    const result = await extractRequirementFieldGaps(model, gapEvidence, {});
-    // stillGaps 与 noEvidenceGaps 互斥：全部缺口无窗口命中 → 全归 noEvidence，无真漏提告警
-    expect(result.stillGaps).toEqual([]);
-    expect(result.noEvidenceGaps).toEqual(['specialQualityStandards', 'greenBuildingGrade', 'frontScheduleClauses', 'dateFabricationProhibited', 'prohibitionNotes']);
-    expect(result.model.greenBuildingGrade).toBeUndefined();
-    expect(mocked).not.toHaveBeenCalled();
-  });
-
-  it('extractRequirementFieldGaps：LLM 两轮均提取失败仍缺失（真漏提告警，不无限循环）', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    const model = { ...fullModel, awardObjectives: [] };
-    // 两轮 LLM 均返回空（输出有效但未含该字段）
-    mocked.mockResolvedValue({});
-    const gapEvidence: DocumentEvidence[] = [
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '专用合同条款', score: 1, content: '创优目标：本项目确保获得“黄山杯”。' },
-    ];
-    const result = await extractRequirementFieldGaps(model, gapEvidence, {});
-    // 创优目标与前附表窗口证据均存在但提取失败 → stillGaps；其余 3 常规字段无窗口 → noEvidenceGaps
-    expect(result.stillGaps).toEqual(['awardObjectives', 'frontScheduleClauses']);
-    expect(result.noEvidenceGaps).toEqual(['specialQualityStandards', 'dateFabricationProhibited', 'prohibitionNotes']);
-    expect(mocked).toHaveBeenCalledTimes(2);
-  });
-
-  it('extractRequirementFieldGaps：条款值为「无」的命中句不产生窗口（勾选无/值为无归「资料无此要求」，零 LLM 调用零误报）', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    // 真实回归：新版招标文件前附表10.9「创优目标 ☑无」、数据表5.1.1「关于工程奖项的约定：无」
-    // 词形命中窗口，LLM 正确输出空数组，旧逻辑误报「条款窗口证据存在但 LLM 提取失败」
-    const model = {
-      ...fullModel,
-      awardObjectives: [],
-      awardClauses: [],
-      greenBuildingGrade: undefined,
-      smartSiteGrade: undefined,
-      assemblyRate: undefined,
-    };
-    const gapEvidence: DocumentEvidence[] = [
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '投标人须知前附表10.9', score: 1, content: '10.9 创优目标 ☑无 □有，具体要求如下： /' },
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '专用合同条款数据表5.1.1', score: 1, content: '5.1.1 特殊质量标准和要求：无。关于工程奖项的约定：无。绿色建筑等级要求：无；智慧工地管理要求：无；装配式建筑装配率要求：无。' },
-    ];
-    const result = await extractRequirementFieldGaps(model, gapEvidence, {});
-    expect(result.stillGaps).toEqual([]);
-    expect(result.noEvidenceGaps).toEqual(['awardObjectives', 'specialQualityStandards', 'awardClauses', 'greenBuildingGrade', 'smartSiteGrade', 'assemblyRate', 'frontScheduleClauses', 'dateFabricationProhibited', 'prohibitionNotes']);
-    expect(result.model.awardObjectives.length).toBe(0);
-    expect(result.model.awardClauses.length).toBe(0);
-    expect(mocked).not.toHaveBeenCalled();
-  });
-
-  it('extractRequirementFieldGaps：混合否定/肯定窗口——值为无的命中句跳过，有值条款正常参与补提', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    const model = { ...fullModel, awardObjectives: [], awardClauses: [] };
-    // 创优目标 ☑无 句被跳过（不产生窗口）；奖项约定句含「确保获得黄山杯」→ 创优目标/奖项条款/前附表窗口均有值，一次调用全部提取
-    mocked.mockResolvedValueOnce({
-      awardObjectives: [{ text: '创优目标：确保获得“黄山杯”。', coreTerms: ['黄山杯'] }],
-      awardClauses: [{ text: '获得“黄山杯”的，支付该项300万元。', coreTerms: ['300万元'] }],
-      frontScheduleClauses: [{ text: '本项目确保获得“黄山杯”。获得“黄山杯”的，支付该项300万元。', coreTerms: ['黄山杯', '300万元'] }],
-    });
-    const gapEvidence: DocumentEvidence[] = [
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '投标人须知前附表10.9', score: 1, content: '10.9 创优目标 ☑无 □有，具体要求如下： /' },
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '专用合同条款数据表5.1.1', score: 1, content: '关于工程奖项的约定：本项目确保获得“黄山杯”。获得“黄山杯”的，支付该项300万元（工程量清单中已单独列项）。' },
-    ];
-    const result = await extractRequirementFieldGaps(model, gapEvidence, {});
-    expect(result.stillGaps).toEqual([]);
-    // ☑无 句不产生窗口；无窗口命中的常规字段归 noEvidence，创优/奖项字段均正常补提
-    expect(result.noEvidenceGaps).toEqual(['specialQualityStandards', 'dateFabricationProhibited', 'prohibitionNotes']);
-    expect(result.model.awardClauses.length).toBe(1);
-    expect(result.model.awardClauses[0].text).toContain('300万元');
-    expect(result.model.awardObjectives.length).toBe(1);
-  });
-
-  it('extractRequirementFieldGaps：前附表词形覆盖创优奖惩条款（300万根治：无工期/人员词形时窗口定位不失明）', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    // fullModel 缺 4 个常规字段；证据只有创优奖惩条款（无计划工期/项目经理/分包等旧词形）
-    const model = { ...fullModel };
-    mocked.mockResolvedValueOnce({
-      frontScheduleClauses: [{ text: '本项目确保获得“黄山杯”。获得“黄山杯”的，支付该项300万元。', coreTerms: ['黄山杯', '300万元'] }],
-    });
-    const gapEvidence: DocumentEvidence[] = [
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '投标人须知前附表', score: 1, content: '创优目标与奖惩：本项目确保获得“黄山杯”。获得“黄山杯”的，支付该项300万元（工程量清单中已单独列项）。' },
-    ];
-    const result = await extractRequirementFieldGaps(model, gapEvidence, {});
-    // 前附表窗口命中 → 发起补提而非判「资料无此要求」；其余 3 字段无窗口 → noEvidenceGaps
-    expect(mocked).toHaveBeenCalledTimes(1);
-    expect(result.stillGaps).toEqual([]);
-    expect(result.noEvidenceGaps).toEqual(['specialQualityStandards', 'dateFabricationProhibited', 'prohibitionNotes']);
-    expect(result.model.frontScheduleClauses.length).toBe(1);
-    expect(result.model.frontScheduleClauses[0].text).toContain('300万元');
-  });
-
-  it('filterMandatoryClauseEvidence 词形兜底：语义召回全低分时，必提词形命中切片仍保留（真实生成回归：黄山杯长段落切片 bge 低分漏网）', async () => {
-    const candidates: DocumentEvidence[] = [
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '专用合同条款数据表5.1.1', score: 1, content: '特殊质量标准和要求：确保黄山杯。关于工程奖项的约定：本项目确保获得“黄山杯”。获得“黄山杯”的，支付该项300万元；绿色建筑等级要求：达到国标二星级；智慧工地管理要求：基本级。' },
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '投标人须知', score: 1, content: '开标时间为2026年5月15日9时，评标委员会由5人组成。' },
-    ];
-    // 语义召回全部低于 0.5（模拟 bge 对长段落切片的低相似度），仅词形兜底应命中第一条
-    vi.mocked(buildSemanticSimilarity).mockResolvedValue((() => 0.1) as unknown as ReturnType<typeof buildSemanticSimilarity> extends Promise<infer F> ? F : never);
-    const result = await filterMandatoryClauseEvidence(candidates);
-    expect(result.length).toBe(1);
-    expect(result[0].content).toContain('确保黄山杯');
-  });
-
-  it('mergeTenderRequirementSlices：分片结果并集合并（任何片提到即保留，跨片按 text 去重）', () => {
-    const sliceA: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      frontScheduleClauses: [{ text: '计划工期：540日历天。', coreTerms: ['540日历天'] }],
-      awardClauses: [{ text: '本项目确保获得“黄山杯”。', coreTerms: ['黄山杯'] }],
-      greenBuildingGrade: { text: '绿色建筑等级要求：达到国标二星级。', coreTerms: ['二星级'] },
-    };
-    const sliceB: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      frontScheduleClauses: [{ text: '计划工期：540日历天。', coreTerms: ['540日历天'] }, { text: '本项目脚手架需采用承插型盘扣式钢管。', coreTerms: ['盘扣'] }],
-      awardClauses: [{ text: '获得“黄山杯”的，支付该项300万元。', coreTerms: ['300万元'] }],
-      smartSiteGrade: { text: '智慧工地管理要求：基本级。', coreTerms: ['基本级'] },
-    };
-    const merged = mergeTenderRequirementSlices(sliceA, sliceB);
-    expect(merged.frontScheduleClauses.length).toBe(2);
-    expect(merged.awardClauses.length).toBe(2);
-    expect(merged.greenBuildingGrade?.text).toContain('二星级');
-    expect(merged.smartSiteGrade?.text).toContain('基本级');
-  });
-
-  it('extractTenderRequirements 分片阈值：证据超 4 万字符按片分批提取，片间并集合并（真实生成回归：单片超长噪声稀释短条款提取）', async () => {
-    const bigContentA = '通用表述填充。'.repeat(6000); // 4.2 万字符
-    const bigContentB = '通用表述填充。'.repeat(6000);
-    const slicedEvidence: DocumentEvidence[] = [
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '前部章节', score: 1, content: bigContentA },
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '专用合同条款数据表5.1.1', score: 1, content: `特殊质量标准和要求：确保黄山杯。${bigContentB}` },
-    ];
-    const mocked = vi.mocked(callDocumentLlmJson);
-    // 片1 提取到绿色等级；片2 提取到黄山杯奖项与 300 万元条款
-    mocked.mockResolvedValueOnce({ greenBuildingGrade: { text: '绿色建筑等级要求：达到国标二星级。', coreTerms: ['二星级'], source: '招标文件.pdf' } });
-    mocked.mockResolvedValueOnce({ awardObjectives: [{ text: '特殊质量标准和要求：确保黄山杯。', coreTerms: ['黄山杯'], source: '招标文件.pdf' }], awardClauses: [{ text: '获得“黄山杯”的，支付该项300万元。', coreTerms: ['300万元'], source: '招标文件.pdf' }] });
-    const model = await extractTenderRequirements(slicedEvidence, {});
-    expect(mocked).toHaveBeenCalledTimes(2);
-    expect(model.awardObjectives.length).toBe(1);
-    expect(model.awardObjectives[0].text).toContain('黄山杯');
-    expect(model.greenBuildingGrade?.text).toContain('二星级');
-  });
-
-  it('preselectTenderRequirementEvidence 有用数据预筛：义务词形/语义命中保留，纯程序切片三条件齐备才剔除', async () => {
-    const candidates: DocumentEvidence[] = [
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '专用合同条款数据表5.1.1', score: 1, content: '特殊质量标准和要求：确保黄山杯。本项目确保获得“黄山杯”，支付该项300万元。' },
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '第七章技术标准', score: 1, content: '质量标准：本工程必须达到合格标准。' },
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '投标文件格式', score: 1, content: '投标文件格式要求：正本1份副本4份，密封递交。' },
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '投标人须知', score: 1, content: '开标时间为2026年5月15日9时，解密方式为电子交易系统在线解密。' },
-    ];
-    // 语义召回全低分：仅依赖义务词形通道与程序剔除通道
-    vi.mocked(buildSemanticSimilarity).mockResolvedValue((() => 0.1) as unknown as ReturnType<typeof buildSemanticSimilarity> extends Promise<infer F> ? F : never);
-    const result = await preselectTenderRequirementEvidence(candidates);
-    expect(result.length).toBe(2);
-    expect(result[0].content).toContain('确保黄山杯');
-    expect(result[1].content).toContain('必须达到合格');
-  });
-
-  it('preselectTenderRequirementEvidence 语义命中切片保留（无义务词形但语义相关，防误杀）', async () => {
-    const candidates: DocumentEvidence[] = [
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '投标人须知', score: 1, content: '施工进度计划须经总监审核批准后实施。' },
-    ];
-    // 语义召回高分保留（"计划工期"特征命中）
-    vi.mocked(buildSemanticSimilarity).mockResolvedValue(((_left: string, right: string) => (/总监审核/u.test(right) ? 0.7 : 0.1)) as unknown as ReturnType<typeof buildSemanticSimilarity> extends Promise<infer F> ? F : never);
-    const result = await preselectTenderRequirementEvidence(candidates);
-    expect(result.length).toBe(1);
-  });
-
-  it('preselectTenderRequirementEvidence 预筛零命中回退全量（防误杀导致零输入）', async () => {
-    const candidates: DocumentEvidence[] = [
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '投标文件格式', score: 1, content: '投标文件格式要求：正本1份副本4份，密封递交。' },
-      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '投标人须知', score: 1, content: '开标时间为2026年5月15日9时，解密方式为电子交易系统在线解密。' },
-    ];
-    vi.mocked(buildSemanticSimilarity).mockResolvedValue((() => 0.1) as unknown as ReturnType<typeof buildSemanticSimilarity> extends Promise<infer F> ? F : never);
-    const result = await preselectTenderRequirementEvidence(candidates);
-    expect(result.length).toBe(2);
-  });
-
-  it('mergeTenderRequirements：主结果非空字段优先，缺失字段由窄通道补齐', () => {
-    const main: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      frontScheduleClauses: [{ text: '计划工期：540日历天。', coreTerms: ['540日历天'] }],
-    };
-    const narrow = fullModel;
-    const merged = mergeTenderRequirements(main, narrow);
-    expect(merged.frontScheduleClauses.length).toBe(1);
-    expect(merged.frontScheduleClauses[0].text).toContain('540日历天');
-    expect(merged.awardObjectives.length).toBe(1);
-    expect(merged.awardObjectives[0].text).toContain('黄山杯');
-    expect(merged.greenBuildingGrade?.text).toContain('二星级');
-    expect(merged.smartSiteGrade?.text).toContain('基本级');
-    expect(merged.extracted).toBe(true);
-  });
-
-  it('mergeTenderRequirements：主结果字段非空时窄通道不覆盖主结果', () => {
-    const main: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      awardObjectives: [{ text: '确保鲁班奖', coreTerms: ['鲁班奖'] }],
-    };
-    const merged = mergeTenderRequirements(main, fullModel);
-    expect(merged.awardObjectives[0].text).toContain('鲁班奖');
-    expect(merged.greenBuildingGrade?.text).toContain('二星级');
-  });
-});
-
-describe('round-23 P0-2 奖项名称忠实性检测（requirementsCoverageIssues）', () => {
-  // 覆盖判定语义通道注入恒零相似度（所有要求项零命中），LLM 分类 mock 返回 undefined 走保守全检
-  const zeroSimilarity = () => 0;
-
-  it('正文出现要求外的具名奖项（庐州杯）报杜撰 error', async () => {
-    const markdown = '## 质量目标\n本工程质量目标为合格，争创合肥市优质工程奖（庐州杯）。';
-    const issues = await requirementsCoverageIssues(markdown, fullModel, { semanticSimilarity: zeroSimilarity });
-    const fabrication = issues.filter(issue => issue.message.includes('杜撰'));
-    expect(fabrication.length).toBe(1);
-    expect(fabrication[0].level).toBe('error');
-    expect(fabrication[0].message).toContain('庐州杯');
-  });
-
-  it('正文使用要求原文奖项（黄山杯）不报杜撰', async () => {
-    const markdown = '## 质量目标\n本项目确保获得“黄山杯”。';
-    const issues = await requirementsCoverageIssues(markdown, fullModel, { semanticSimilarity: zeroSimilarity });
-    expect(issues.filter(issue => issue.message.includes('杜撰'))).toEqual([]);
-  });
-
-  it('“确保黄山杯”被弱化为“争创黄山杯”报降级 error', async () => {
-    const markdown = '## 质量目标\n本项目质量目标为争创黄山杯。';
-    const issues = await requirementsCoverageIssues(markdown, fullModel, { semanticSimilarity: zeroSimilarity });
-    const weakened = issues.filter(issue => issue.message.includes('弱化'));
-    expect(weakened.length).toBe(1);
-    expect(weakened[0].level).toBe('error');
-  });
-
-  it('通用荣誉措辞（省优质工程奖）不误报杜撰', async () => {
-    const markdown = '## 质量目标\n本项目确保获得“黄山杯”，并争创省优质工程奖。';
-    const issues = await requirementsCoverageIssues(markdown, fullModel, { semanticSimilarity: zeroSimilarity });
-    expect(issues.filter(issue => issue.message.includes('杜撰'))).toEqual([]);
-  });
-
-  it('奖惩管理词汇不误报杜撰（4.12.13 真实生成回归：奖励/奖金/奖惩/不奖励）', async () => {
-    const markdown = [
-      '## 创优奖惩机制',
-      '技术负责人每月编制创优资金使用台账，逐笔登记奖励发放、整改投入与检测费用支出。',
-      '合同约定创优奖励300万元，该金额作为项目创优专项激励资金。',
-      '班组自检记录完整且一次验收合格奖励200元/周；漏检每次扣100元。',
-      '创优目标实现奖励项目创优奖金的20%；未实现扣减绩效工资的30%。',
-      '项目部将该条款作为创优管理的合同刚性约束，建立与合同奖惩挂钩的内部考核体系。',
-      '承包人提出的合理化建议降低了合同价格的，按合同约定不奖励。',
-    ].join('\n');
-    const issues = await requirementsCoverageIssues(markdown, fullModel, { semanticSimilarity: zeroSimilarity });
-    expect(issues.filter(issue => issue.message.includes('杜撰'))).toEqual([]);
-  });
-
-  it('奖惩词汇与真杜撰奖项并存时只报真杜撰（4.12.13）', async () => {
-    const markdown = '## 质量目标\n逐笔登记奖励发放，确保获得庐州杯。';
-    const issues = await requirementsCoverageIssues(markdown, fullModel, { semanticSimilarity: zeroSimilarity });
-    const fabrication = issues.filter(issue => issue.message.includes('杜撰'));
-    expect(fabrication).toHaveLength(1);
-    expect(fabrication[0].message).toContain('庐州杯');
-  });
-
-  it('通用词“奖项”不误报杜撰（4.12.13：创优目标与奖项申报）', async () => {
-    const markdown = '## 创优目标\n本项目创优目标与奖项申报路径一致，确保获得黄山杯。';
-    const issues = await requirementsCoverageIssues(markdown, fullModel, { semanticSimilarity: zeroSimilarity });
-    expect(issues.filter(issue => issue.message.includes('杜撰'))).toEqual([]);
-  });
-});
-
-// ============ 评分报告问题2：商务纪律条款提取过滤与分类兜底 ============
-
-describe('商务纪律条款确定性治理（评分报告问题2）', () => {
-  beforeEach(() => {
-    vi.resetAllMocks();
-  });
-
-  it('extractTenderRequirements：frontScheduleClauses/prohibitionNotes 纪律条款提取后即过滤，技术条款保留', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    mocked.mockResolvedValueOnce({
-      awardObjectives: [{ text: '创优目标：确保黄山杯。', coreTerms: ['黄山杯'], source: '招标文件.pdf' }],
-      specialQualityStandards: [],
-      awardClauses: [],
-      systematicBenchmarks: [],
-      frontScheduleClauses: [
-        { text: '计划工期：540个日历天。', coreTerms: ['540日历天'], source: '招标文件.pdf' },
-        { text: '我公司对参与本项目投标及施工组织设计编制的工作人员实行严格的纪律管理，确保投标活动合法合规。', coreTerms: ['纪律管理'], source: '招标文件.pdf' },
-        { text: '投标人不得向评标委员会成员行贿、打招呼、递条子。', coreTerms: ['行贿'], source: '招标文件.pdf' },
-      ],
-      dateFabricationProhibited: false,
-      prohibitionNotes: [
-        { text: '禁止编造开工日期。', coreTerms: ['开工日期'], source: '招标文件.pdf' },
-        { text: '参与本项目投标的全体人员签订廉洁从业承诺书。', coreTerms: ['廉洁从业'], source: '招标文件.pdf' },
+  it('全链对账闭合：切分 = 要求 + 排除 + 未判定 0，onPhase 两阶段上报，sourceHash 生成', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({
+      results: [
+        { index: 0, isRequirement: true, inScope: true, policy: 'respond', coreTerms: ['黄山杯'], category: '质量创优' },
+        { index: 1, isRequirement: true, inScope: true, policy: 'respond', coreTerms: ['二星级'], category: '绿色施工' },
       ],
     });
+    const phases: string[] = [];
+    const model = await extractTenderRequirements(evidence, { onPhase: message => phases.push(message) });
+    expect(model.extracted).toBe(true);
+    expect(model.reconciliation).toEqual({ clauseCount: 2, entryCount: 2, excludedCount: 0, undecidedCount: 0, mergedCount: 0, batchCount: 1, retriedBatches: 0 });
+    expect(model.sourceHash).toBeTruthy();
+    expect(phases.length).toBe(2);
+    expect(phases[0]).toContain('条款化完成：2 条单元');
+    expect(phases[1]).toContain('未判定 0');
+  });
+
+  it('重复文本合并：跨文件同一要求合并为一条并聚合 sources（对账等式含合并项）', async () => {
+    const duplicated: DocumentEvidence[] = [
+      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '前附表', score: 1, content: '3.1 创优目标：确保获得黄山杯。' },
+      { chapterId: 'tender-requirements', filePath: '补疑文件.pdf', sectionTitle: '答疑', score: 1, content: '3.1 创优目标：确保获得黄山杯。' },
+    ];
+    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({
+      results: [
+        { index: 0, isRequirement: true, inScope: true, policy: 'respond', coreTerms: ['黄山杯'], category: '质量创优' },
+        { index: 1, isRequirement: true, inScope: true, policy: 'respond', coreTerms: ['300万元', '黄山杯'], category: '质量创优' },
+      ],
+    });
+    const model = await extractTenderRequirements(duplicated, {});
+    expect(model.reconciliation).toEqual({ clauseCount: 2, entryCount: 1, excludedCount: 0, undecidedCount: 0, mergedCount: 1, batchCount: 1, retriedBatches: 0 });
+    expect(model.entries.length).toBe(1);
+    expect(model.entries[0].sources.map(source => source.file)).toEqual(['招标文件.pdf', '补疑文件.pdf']);
+    expect(model.entries[0].coreTerms).toEqual(['黄山杯', '300万元']);
+  });
+
+  it('无值条款全链剔除：LLM 判为要求也不进 entries（对账计入排除）', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({
+      results: [
+        { index: 0, isRequirement: true, inScope: true, policy: 'respond', coreTerms: [], category: '质量创优' },
+        { index: 1, isRequirement: true, inScope: true, policy: 'respond', coreTerms: ['质量目标'], category: '质量创优' },
+      ],
+    });
+    const model = await extractTenderRequirements([{
+      chapterId: 'tender-requirements',
+      filePath: '招标文件.pdf',
+      score: 1,
+      content: '10.9 创优目标 ☑无\n3.1 质量目标：确保合格。',
+    }], {});
+    expect(model.entries.length).toBe(1);
+    expect(model.entries[0].text).toContain('质量目标');
+    expect(model.excluded.length).toBe(1);
+    expect(model.excluded[0].reason).toBe('no_value');
+    expect(model.reconciliation.undecidedCount).toBe(0);
+  });
+
+  it('LLM 不可用：0 要求 + 全部未判定 → extracted=false、对账未闭合，不抛错', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValue(undefined);
     const model = await extractTenderRequirements(evidence, {});
-    expect(model.frontScheduleClauses.length).toBe(1);
-    expect(model.frontScheduleClauses[0].text).toContain('540个日历天');
-    expect(model.prohibitionNotes.length).toBe(1);
-    expect(model.prohibitionNotes[0].text).toContain('禁止编造开工日期');
-    // 纪律条款不得进入写作规则
-    const rules = tenderRequirementsWritingRules(model);
-    expect(rules).not.toContain('纪律管理');
-    expect(rules).not.toContain('行贿');
-    expect(rules).not.toContain('廉洁从业');
-  });
-
-  it('classifyRequirementResponsiveness：纪律条款 LLM 判 responsive=true 仍强制 false', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    // LLM 误判纪律条款为实质要求（responsive=true）
-    mocked.mockResolvedValueOnce({ results: [{ index: 0, responsive: true }, { index: 1, responsive: true }] });
-    const judged = await classifyRequirementResponsiveness([
-      { kind: '前附表响应条款', text: '计划工期：540个日历天。' },
-      { kind: '前附表响应条款', text: '我公司对参与本项目投标的工作人员实行严格的纪律管理，确保投标活动合法合规。' },
-    ]);
-    expect(judged.get(0)).toBe(true);
-    expect(judged.get(1)).toBe(false);
-  });
-
-  it('classifyRequirementResponsiveness：LLM 失败保守全检时纪律条款同样强制 false', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    mocked.mockResolvedValueOnce(undefined);
-    const judged = await classifyRequirementResponsiveness([
-      { kind: '前附表响应条款', text: '确保黄山杯。' },
-      { kind: '前附表响应条款', text: '投标人不得串标、围标、弄虚作假。' },
-    ]);
-    expect(judged.get(0)).toBe(true);
-    expect(judged.get(1)).toBe(false);
+    expect(model.extracted).toBe(false);
+    expect(model.entries).toEqual([]);
+    expect(model.excluded).toEqual([]);
+    expect(model.reconciliation).toEqual({ clauseCount: 2, entryCount: 0, excludedCount: 0, undecidedCount: 2, mergedCount: 0, batchCount: 1, retriedBatches: 1 });
   });
 });
 
-// ============ 2.3 锚点级响应检测（300万缺失根治） ============
+// ═══════════════════════════ L1 提取缓存 v4（对账闭合门禁） ═══════════════════════════
 
-describe('2.3 锚点全覆盖响应检测（requirementsCoverageIssues）', () => {
-  const zeroSimilarity = () => 0;
-
-  beforeEach(() => {
-    vi.resetAllMocks();
-  });
-
-  it('“确保黄山杯+支付300万元”条款：黄山杯命中而300万元缺失时报部分响应', async () => {
-    // 语义通道恒零（最坏情形），字面锚点兜底：黄山杯命中、300万元缺失 → LLM 或选型判定失败保守 false → 报部分响应
-    const markdown = '## 质量目标\n本项目确保获得“黄山杯”。';
-    const issues = await requirementsCoverageIssues(markdown, fullModel, { semanticSimilarity: zeroSimilarity });
-    const partial = issues.filter(issue => issue.message.includes('部分响应'));
-    expect(partial.length).toBe(1);
-    expect(partial[0].level).toBe('error');
-    expect(partial[0].severity).toBe('blocker');
-    expect(partial[0].message).toContain('黄山杯');
-    expect(partial[0].message).toContain('300万元');
-    expect(partial[0].suggestion).toContain('300万元');
-  });
-
-  it('条款内全部锚点（黄山杯+300万元）均命中时不报部分响应', async () => {
-    const markdown = '## 质量目标\n本项目确保获得“黄山杯”，获得“黄山杯”的支付该项300万元。';
-    const issues = await requirementsCoverageIssues(markdown, fullModel, { semanticSimilarity: zeroSimilarity });
-    expect(issues.filter(issue => issue.message.includes('部分响应'))).toEqual([]);
-  });
-
-  it('“或”选型条款（鲁班奖或黄山杯）：命中其一不报部分响应（LLM 或选型判定兜底）', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    // 第一次调用：classifyRequirementResponsiveness 保守全检；第二次：classifyAnchorAlternativeClauses 判 alternative=true
-    mocked.mockResolvedValueOnce(undefined);
-    mocked.mockResolvedValueOnce({ results: [{ index: 0, alternative: true }] });
-    const model: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      awardObjectives: [{ text: '创优目标：获得鲁班奖或黄山杯。', coreTerms: ['鲁班奖', '黄山杯'], source: '招标文件.pdf' }],
-    };
-    const markdown = '## 质量目标\n本项目确保获得“黄山杯”。';
-    const issues = await requirementsCoverageIssues(markdown, model, { semanticSimilarity: zeroSimilarity });
-    expect(issues.filter(issue => issue.message.includes('部分响应'))).toEqual([]);
-  });
-
-  it('classifyAnchorAlternativeClauses：LLM 失败时保守判非或选型（宁报部分响应不漏检）', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    mocked.mockResolvedValueOnce(undefined);
-    const judged = await classifyAnchorAlternativeClauses([
-      { text: '本项目确保获得“黄山杯”，支付该项300万元。', missingAnchors: ['300万元'] },
-    ]);
-    expect(judged.get(0)).toBe(false);
-  });
-
-  it('语义命中放行前金额锚点检查（评分报告合肥师范4：黄山杯已写但300万元未落位）', async () => {
-    // 语义通道恒高（旧逻辑直接放行），条款内金额锚点“300万元”缺失 → 报部分响应定向补写
-    const markdown = '## 质量目标\n本项目确保获得“黄山杯”。';
-    const issues = await requirementsCoverageIssues(markdown, fullModel, { semanticSimilarity: () => 0.8 });
-    const partial = issues.filter(issue => issue.message.includes('部分响应'));
-    expect(partial.length).toBe(1);
-    expect(partial[0].level).toBe('error');
-    expect(partial[0].severity).toBe('blocker');
-    expect(partial[0].message).toContain('300万元');
-  });
-
-  it('语义命中且金额锚点已落位（300万元）→ 放行不报', async () => {
-    const markdown = '## 质量目标\n本项目确保获得“黄山杯”，获得“黄山杯”的支付该项300万元。';
-    const issues = await requirementsCoverageIssues(markdown, fullModel, { semanticSimilarity: () => 0.8 });
-    expect(issues.filter(issue => issue.message.includes('部分响应'))).toEqual([]);
-  });
-
-  it('条款无金额锚点（如装配率 30%）时语义命中直接放行，不触发锚点检查', async () => {
-    const model: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      assemblyRate: { text: '装配率：30%。', coreTerms: ['30%'], source: '招标文件.pdf' },
-    };
-    const markdown = '## 新技术\n本项目装配率30%。';
-    const issues = await requirementsCoverageIssues(markdown, model, { semanticSimilarity: () => 0.8 });
-    expect(issues).toEqual([]);
-  });
-});
-
-// ============ 阶段三 3.1/3.2：写作规则约束封装 ============
-
-describe('3.1/3.2 写作规则约束封装（tenderRequirementsWritingRules）', () => {
-  it('写作规则尾部携带系统约束声明（禁止复述提示词文字）', () => {
-    const model: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      awardObjectives: [{ text: '创优目标：确保黄山杯。', coreTerms: ['黄山杯'], source: '招标文件.pdf' }],
-    };
-    const rules = tenderRequirementsWritingRules(model);
-    expect(rules).toContain('【系统约束——仅指导写作，禁止写入正文，禁止复述本句】');
-    expect(rules).toContain('黄山杯');
-  });
-});
-
-describe('B 阶段 提取结果磁盘缓存（防脏双门禁+哈希失效）', () => {
+describe('提取缓存 v4（对账闭合门禁）', () => {
   let tempRoot = '';
-  /** 必提字段齐全的合法提取结果（写门禁放行的最小形态） */
-  const validModel = (): TenderRequirementModel => ({
-    ...emptyTenderRequirements(true),
-    awardObjectives: [{ text: '创优目标：确保黄山杯。', coreTerms: ['黄山杯'], source: '招标文件.pdf' }],
-    awardClauses: [{ text: '确保获得黄山杯的支付300万元。', coreTerms: ['黄山杯', '300万元'], source: '招标文件.pdf' }],
-    greenBuildingGrade: { text: '绿色建筑等级要求：达到国标二星级。', coreTerms: ['二星级'], source: '招标文件.pdf' },
-    smartSiteGrade: { text: '智慧工地管理要求：基本级。', coreTerms: ['基本级'], source: '招标文件.pdf' },
-    assemblyRate: { text: '装配率为30%。', coreTerms: ['装配率', '30%'], source: '招标文件.pdf' },
-    systematicBenchmarks: [{ text: '质量体系要求：ISO9001。', coreTerms: ['ISO9001'], source: '招标文件.pdf' }],
-  });
   const cacheFile = (key: string) => path.join(os.homedir(), '.customize-agent', 'cache', 'document-workflow', stableHash(tempRoot), `tender-requirements-${key}.json`);
 
   beforeEach(() => {
@@ -668,415 +361,423 @@ describe('B 阶段 提取结果磁盘缓存（防脏双门禁+哈希失效）', 
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
-  it('哈希失效：招标文件集合任一字节变化即生成不同 key', () => {
-    const keyA = tenderRequirementsCacheKey({ collectionEvidence: [{ ...evidence[0] }], preselectEvidence: [] });
-    const keyB = tenderRequirementsCacheKey({ collectionEvidence: [{ ...evidence[0], content: `${evidence[0].content}追加内容` }], preselectEvidence: [] });
+  it('哈希失效：招标文件集合任一字节变化即生成不同 key；key 对证据顺序不敏感', () => {
+    const keyA = tenderRequirementsCacheKey({ collectionEvidence: [{ ...evidence[0] }] });
+    const keyB = tenderRequirementsCacheKey({ collectionEvidence: [{ ...evidence[0], content: `${evidence[0].content}追加内容` }] });
     expect(keyA).not.toBe(keyB);
-  });
-
-  it('哈希失效：预筛输入内容变化即生成不同 key', () => {
-    const keyA = tenderRequirementsCacheKey({ collectionEvidence: [], preselectEvidence: [{ ...evidence[0] }] });
-    const keyB = tenderRequirementsCacheKey({ collectionEvidence: [], preselectEvidence: [{ ...evidence[0], content: '不同预筛输入' }] });
-    expect(keyA).not.toBe(keyB);
-  });
-
-  it('key 对证据顺序不敏感（指纹排序后一致，同一资料重排不失效）', () => {
-    const a = tenderRequirementsCacheKey({ collectionEvidence: [{ ...evidence[0], filePath: 'a' }, { ...evidence[0], filePath: 'b' }], preselectEvidence: [] });
-    const b = tenderRequirementsCacheKey({ collectionEvidence: [{ ...evidence[0], filePath: 'b' }, { ...evidence[0], filePath: 'a' }], preselectEvidence: [] });
+    const a = tenderRequirementsCacheKey({ collectionEvidence: [{ ...evidence[0], filePath: 'a' }, { ...evidence[0], filePath: 'b' }] });
+    const b = tenderRequirementsCacheKey({ collectionEvidence: [{ ...evidence[0], filePath: 'b' }, { ...evidence[0], filePath: 'a' }] });
     expect(a).toBe(b);
   });
 
-  it('写→读回环：合法结果落盘后可原样读回', () => {
-    const model = validModel();
-    const key = tenderRequirementsCacheKey({ collectionEvidence: [], preselectEvidence: [] });
+  it('写→读回环：对账闭合结果落盘后可原样读回', () => {
+    const model = closedModel([entry('创优目标：确保获得黄山杯。', ['黄山杯'], 'respond', '质量创优')]);
+    const key = tenderRequirementsCacheKey({ collectionEvidence: [] });
     writeCachedTenderRequirements(tempRoot, key, model);
     const read = readCachedTenderRequirements(tempRoot, key);
-    expect(read?.awardObjectives[0].text).toBe(model.awardObjectives[0].text);
-    expect(read?.assemblyRate?.text).toBe('装配率为30%。');
+    expect(read?.entries[0].text).toBe('创优目标：确保获得黄山杯。');
+    expect(read?.reconciliation.undecidedCount).toBe(0);
   });
 
-  it('防脏写门禁：必提字段缺失的坏结果不落盘（坏数据永不固化）', () => {
-    const bad = { ...validModel(), awardClauses: [], greenBuildingGrade: undefined };
-    const key = tenderRequirementsCacheKey({ collectionEvidence: [], preselectEvidence: [] });
-    writeCachedTenderRequirements(tempRoot, key, bad);
+  it('合并场景（clauseCount = entries + mergedCount）视为对账闭合，缓存可落盘', () => {
+    const model = closedModel([entry('创优目标：确保获得黄山杯。', ['黄山杯'], 'respond', '质量创优')], 2);
+    const key = tenderRequirementsCacheKey({ collectionEvidence: [] });
+    writeCachedTenderRequirements(tempRoot, key, model);
+    expect(fs.existsSync(cacheFile(key))).toBe(true);
+    expect(readCachedTenderRequirements(tempRoot, key)?.reconciliation.mergedCount).toBe(2);
+  });
+
+  it('防脏写门禁：未判定>0 的结果不落盘（坏数据永不固化）', () => {
+    const partial: TenderRequirementModel = {
+      ...closedModel([entry('创优目标：确保获得黄山杯。', ['黄山杯'], 'respond', '质量创优')]),
+      reconciliation: { clauseCount: 2, entryCount: 1, excludedCount: 0, mergedCount: 0, undecidedCount: 1, batchCount: 1, retriedBatches: 1 },
+    };
+    const key = tenderRequirementsCacheKey({ collectionEvidence: [] });
+    writeCachedTenderRequirements(tempRoot, key, partial);
     expect(fs.existsSync(cacheFile(key))).toBe(false);
-    expect(readCachedTenderRequirements(tempRoot, key)).toBeUndefined();
   });
 
-  it('防脏写门禁：空结果不落盘', () => {
-    const key = tenderRequirementsCacheKey({ collectionEvidence: [], preselectEvidence: [] });
-    writeCachedTenderRequirements(tempRoot, key, emptyTenderRequirements(true));
+  it('防脏写门禁：对账等式不闭合（计数缺失）的结果不落盘', () => {
+    const unclosed: TenderRequirementModel = {
+      ...closedModel([entry('a。', ['aa'], 'respond'), entry('b。', ['bb'], 'respond')]),
+      reconciliation: { clauseCount: 3, entryCount: 2, excludedCount: 0, mergedCount: 0, undecidedCount: 0, batchCount: 1, retriedBatches: 0 },
+    };
+    const key = tenderRequirementsCacheKey({ collectionEvidence: [] });
+    writeCachedTenderRequirements(tempRoot, key, unclosed);
     expect(fs.existsSync(cacheFile(key))).toBe(false);
   });
 
-  it('防脏读门禁：手工写入的脏缓存（缺必提字段）不采用', () => {
-    const key = tenderRequirementsCacheKey({ collectionEvidence: [], preselectEvidence: [] });
-    fs.mkdirSync(path.dirname(cacheFile(key)), { recursive: true });
-    fs.writeFileSync(cacheFile(key), JSON.stringify({ ...validModel(), awardClauses: [] }), 'utf8');
-    expect(readCachedTenderRequirements(tempRoot, key)).toBeUndefined();
+  it('防脏写门禁：未提取（extracted=false）的空模型不落盘', () => {
+    const key = tenderRequirementsCacheKey({ collectionEvidence: [] });
+    writeCachedTenderRequirements(tempRoot, key, emptyTenderRequirements(false));
+    expect(fs.existsSync(cacheFile(key))).toBe(false);
   });
 
-  it('防脏读门禁：损坏 JSON 不采用', () => {
-    const key = tenderRequirementsCacheKey({ collectionEvidence: [], preselectEvidence: [] });
+  it('防脏读门禁：手工写入的未闭合缓存不采用；结构缺失（无 reconciliation）不采用；损坏 JSON 不采用', () => {
+    const key = tenderRequirementsCacheKey({ collectionEvidence: [] });
     fs.mkdirSync(path.dirname(cacheFile(key)), { recursive: true });
+    fs.writeFileSync(cacheFile(key), JSON.stringify({
+      ...closedModel([entry('创优目标：确保获得黄山杯。', ['黄山杯'], 'respond', '质量创优')]),
+      reconciliation: { clauseCount: 5, entryCount: 1, excludedCount: 0, mergedCount: 0, undecidedCount: 0, batchCount: 1, retriedBatches: 0 },
+    }), 'utf8');
+    expect(readCachedTenderRequirements(tempRoot, key)).toBeUndefined();
+    fs.writeFileSync(cacheFile(key), JSON.stringify({ entries: [], excluded: [], extracted: true }), 'utf8');
+    expect(readCachedTenderRequirements(tempRoot, key)).toBeUndefined();
     fs.writeFileSync(cacheFile(key), '{损坏的JSON', 'utf8');
     expect(readCachedTenderRequirements(tempRoot, key)).toBeUndefined();
   });
 
   it('缓存 miss：未写入时返回 undefined（走真实提取链）', () => {
-    const key = tenderRequirementsCacheKey({ collectionEvidence: [], preselectEvidence: [] });
+    const key = tenderRequirementsCacheKey({ collectionEvidence: [] });
     expect(readCachedTenderRequirements(tempRoot, key)).toBeUndefined();
   });
 });
 
-// ============ B1/B2 评分项响应确定性补写（第十次回归：双判脱节 + 空泛补写） ============
+// ═══════════════════════════ 消费侧：摘要/检查项/查询/写作口径 ═══════════════════════════
 
-describe('评分项响应确定性补写（fixScoringRequirementResponses）', () => {
-  beforeEach(() => {
-    vi.resetAllMocks();
+describe('消费侧（摘要/检查项/语义查询/写作规则/章分片）', () => {
+  it('hasTenderRequirements：extracted 且 entries 非空才为 true', () => {
+    expect(hasTenderRequirements(closedModel([entry('创优目标：确保获得黄山杯。', ['黄山杯'])]))).toBe(true);
+    expect(hasTenderRequirements(emptyTenderRequirements(false))).toBe(false);
+    expect(hasTenderRequirements({ ...closedModel([entry('a。', ['aa'])]), extracted: false })).toBe(false);
+    expect(hasTenderRequirements(undefined)).toBe(false);
   });
 
-  it('classifyRequirementResponsiveness：同输入二次调用命中缓存（LLM 只调一次，检测/路由/补写三处双判一致）', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    mocked.mockResolvedValueOnce({ results: [{ index: 0, responsive: true }, { index: 1, responsive: false }] });
-    const items = [
-      { kind: '前附表响应条款', text: '项目经理具备建筑工程专业二级及以上注册建造师，并持有安全生产考核合格证书（B证）。' },
-      { kind: '前附表响应条款', text: '本项目开标时间为2026年5月15日9时，投标文件递交截止时间同开标时间。' },
-    ];
-    const first = await classifyRequirementResponsiveness(items);
-    const second = await classifyRequirementResponsiveness(items);
-    expect(mocked).toHaveBeenCalledTimes(1);
-    expect(first.get(0)).toBe(true);
-    expect(first.get(1)).toBe(false);
-    expect(second.get(0)).toBe(true);
-    expect(second.get(1)).toBe(false);
-  });
-
-  it('部分响应条款补写条款全文（不再产出 missing 锚点拼接的空泛句）', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    mocked.mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
+  it('tenderRequirementsSummary：对账等式（含合并项）+ 类别分组全量 + 未判定告警', () => {
     const model: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      awardClauses: [{ text: '本项目确保获得鲁班奖，获得鲁班奖的支付奖励100万元。', coreTerms: ['鲁班奖', '100万元'], source: '招标文件.pdf' }],
+      entries: [
+        entry('创优目标：确保获得黄山杯。', ['黄山杯'], 'respond', '质量创优'),
+        entry('严格执行六个百分百。', [], 'respond', '质量创优'),
+        entry('保证金按合同约定执行。', [], 'qualitative', '商务支付'),
+      ],
+      excluded: [{ text: '开标时间：2026年5月15日。', reason: 'out_of_scope' }],
+      reconciliation: { clauseCount: 6, entryCount: 3, excludedCount: 1, mergedCount: 2, undecidedCount: 0, batchCount: 1, retriedBatches: 0 },
+      extracted: true,
     };
-    const chapters = [
-      { title: '## 第六章 质量与创优管理', content: '本项目创优目标为确保获得鲁班奖，配套创优管理制度。' },
-    ];
-    // 条款 query（coreTerms 拼接）与章节标题语义相似度 0.7 命中路由；正文缺「100万元」锚点 → 部分响应
-    const similarity = (query: string, title: string) => (query.includes('鲁班奖') && title.includes('质量') ? 0.7 : 0);
-    const result = await fixScoringRequirementResponses({ chapters, model, similarity });
-    expect(result.fixedCount).toBe(1);
-    expect(chapters[0].content).toContain('获得鲁班奖的支付奖励100万元');
-    expect(chapters[0].content).not.toContain('相关内容严格按招标文件要求执行');
+    const summary = tenderRequirementsSummary(model);
+    expect(summary[0]).toBe('条款对账：切分 6 = 要求 3 + 排除 1 + 合并 2（来源已聚合） + 未判定 0（闭合）');
+    expect(summary.some(line => line.startsWith('质量创优 2 条：'))).toBe(true);
+    expect(summary.some(line => line.startsWith('商务支付 1 条：'))).toBe(true);
+    const undecided = tenderRequirementsSummary({
+      ...model,
+      reconciliation: { ...model.reconciliation, clauseCount: 7, mergedCount: 1, undecidedCount: 1 },
+    });
+    expect(undecided.some(line => line.includes('未判定条款 1 条：对账未闭合'))).toBe(true);
+    expect(tenderRequirementsSummary(emptyTenderRequirements(false)).some(line => line.includes('招标要求未提取'))).toBe(true);
   });
 
-  it('零响应条款同样补写条款全文（锚点全落位）', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    mocked.mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
-    const model: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      awardClauses: [{ text: '本项目确保获得鲁班奖，获得鲁班奖的支付奖励100万元。', coreTerms: ['鲁班奖', '100万元'], source: '招标文件.pdf' }],
-    };
-    const chapters = [
-      { title: '## 第六章 质量与创优管理', content: '质量目标为合格，质量保证体系健全。' },
-    ];
-    const similarity = (query: string, title: string) => (query.includes('鲁班奖') && title.includes('质量') ? 0.7 : 0);
-    const result = await fixScoringRequirementResponses({ chapters, model, similarity });
-    expect(result.fixedCount).toBe(1);
-    // 4.27.2 语气治理：补写句为投标人口吻条款全文 + 差异化落实句，不得出现「按招标文件要求：」条幅前缀
-    expect(chapters[0].content).toContain('本项目确保获得鲁班奖，获得鲁班奖的支付奖励100万元。');
-    expect(chapters[0].content).not.toContain('按招标文件');
+  it('tenderRequirementCheckItems：条目按类别展开（kind=category）', () => {
+    const items = tenderRequirementCheckItems(closedModel([entry('创优目标：确保获得黄山杯。', ['黄山杯'], 'respond', '质量创优')]));
+    expect(items.length).toBe(1);
+    expect(items[0].kind).toBe('质量创优');
+    expect(items[0].item.text).toBe('创优目标：确保获得黄山杯。');
   });
 
-  it('商务口径条款（暂列金额）补写定性响应句（第十六版：不再整条跳过，防零响应闭环断裂）', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    mocked.mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
-    const model: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      awardClauses: [{ text: '本项目暂列金额为1000万元（税金另计），其中包含300万元优质优价费。', coreTerms: ['暂列金额', '1000万元'], source: '招标文件.pdf' }],
-    };
-    const chapters = [
-      { title: '## 第六章 合同与造价管理', content: '工程造价管理措施。' },
-    ];
-    const similarity = (query: string, title: string) => (query.includes('暂列金额') && title.includes('造价') ? 0.7 : 0);
-    const result = await fixScoringRequirementResponses({ chapters, model, similarity });
-    expect(result.fixedCount).toBe(1);
-    // 定性响应句：含「暂列金额」词面（检测侧锚点命中），但不含商务数字参数（1000万元不落位）
-    expect(chapters[0].content).toContain('暂列金额');
-    expect(chapters[0].content).not.toContain('1000万元');
+  it('tenderRequirementSemanticQuery：coreTerms 拼接优先，无核心词退回条款原文', () => {
+    expect(tenderRequirementSemanticQuery({ text: '创优目标：确保获得黄山杯。', coreTerms: ['黄山杯', '300万元'] })).toBe('黄山杯 300万元');
+    expect(tenderRequirementSemanticQuery({ text: '创优目标：确保获得黄山杯。', coreTerms: [] })).toBe('创优目标：确保获得黄山杯。');
   });
 
-  it('商务响应条款（履约保证金金额）补写只落定性句，不抄条款原文商务参数（round-27：中标金额的2% 曾进技术标正文）', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    mocked.mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
-    const model: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      frontScheduleClauses: [{ text: '履约保证金金额：中标金额的2%；提交期限：签订合同前；退还时限：履约保证金有效期满7日内退还。', coreTerms: ['履约保证金', '中标金额'], source: '招标文件.pdf' }],
-    };
-    const chapters = [
-      { title: '## 第一章 工程概况', content: '本工程计划工期90日历天。' },
-    ];
-    const similarity = (query: string, title: string) => (query.includes('履约保证金') && title.includes('概况') ? 0.7 : 0);
-    const result = await fixScoringRequirementResponses({ chapters, model, similarity });
-    expect(result.fixedCount).toBe(1);
-    // 定性响应句落位（4.27.2 语气治理：统一「按合同约定」），商务参数（百分比/金额）不抄入正文，内部格式词不出现
-    expect(chapters[0].content).toContain('履约保证金按合同约定的金额');
-    expect(chapters[0].content).not.toContain('按招标文件');
-    expect(chapters[0].content).not.toContain('中标金额的2%');
-    expect(chapters[0].content).not.toContain('招标要求响应');
-    expect(chapters[0].content).not.toContain('前附表响应条款');
+  it('tenderRequirementsWritingRules：global 遵守条目注入全局红线，未提取返回空串', () => {
+    const globalEntry = { ...entry('计划工期：开工之日（以开工令时间为准）起，540个日历天。', ['开工令'], 'comply', '工期进度'), global: true };
+    const rules = tenderRequirementsWritingRules(closedModel([globalEntry, entry('创优目标：确保获得黄山杯。', ['黄山杯'], 'respond', '质量创优')]));
+    expect(rules).toContain('【招标要求全局口径红线（全文档适用）】');
+    expect(rules).toContain('全局遵守：计划工期：开工之日（以开工令时间为准）起，540个日历天。');
+    expect(rules).toContain('必须逐条处理');
+    expect(rules).toContain('【系统约束——仅指导写作，禁止写入正文，禁止复述本句】');
+    expect(tenderRequirementsWritingRules(undefined)).toBe('');
+    expect(tenderRequirementsWritingRules(emptyTenderRequirements(false))).toBe('');
   });
 
-  it('评标否决规则条款（forcedProgrammatic）：不补写进正文（4.28.x 舒城实测「一律否决其投标」曾入施组）', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    // 语义分类不可用时仍强制程序性：isBidEvaluationRuleText 不经 LLM 判定
-    mocked.mockResolvedValueOnce(undefined);
-    const model: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      frontScheduleClauses: [{ text: '投标文件技术标内容明显文不对题的，评标委员会一律否决其投标。', coreTerms: ['否决投标'], source: '招标文件.pdf' }],
-    };
-    const chapters = [{ title: '## 第一章 工程概况', content: '本工程为市政道路工程。' }];
-    const result = await fixScoringRequirementResponses({ chapters, model, similarity: () => 0.7 });
-    expect(result.fixedCount).toBe(0);
-    expect(chapters[0].content).not.toContain('否决其投标');
-  });
-
-  it('classifyRequirementResponsiveness：评标否决/废标规则强制 responsive=false（LLM 未裁决也不放行）', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    mocked.mockResolvedValueOnce(undefined);
-    const result = await classifyRequirementResponsiveness([
-      { kind: '前附表响应条款', text: '投标文件技术标明显文不对题或存在严重错误的，评标委员会一律否决其投标。' },
-      { kind: '前附表响应条款', text: '投标报价低于成本的，作废标处理。' },
+  it('renderChapterRequirementSlice：按 policy 标注处理方式并携带来源，空数组返回空串', () => {
+    const slice = renderChapterRequirementSlice([
+      entry('创优目标：确保获得黄山杯。', ['黄山杯'], 'respond', '质量创优'),
+      { ...entry('计划工期：以开工令时间为准。', ['开工令'], 'comply', '工期进度'), global: true },
+      entry('履约保证金金额：中标金额的2%。', ['履约保证金'], 'qualitative', '商务支付'),
     ]);
-    expect(result.get(0)).toBe(false);
-    expect(result.get(1)).toBe(false);
+    expect(slice).toContain('【本章必须处理的招标要求（蓝图分配全量，逐条响应/遵守；零处理即评标失分）】');
+    expect(slice).toContain('- [显性响应] 创优目标：确保获得黄山杯。（来源：招标文件.pdf）');
+    expect(slice).toContain('- [全文遵守] 计划工期：以开工令时间为准。');
+    expect(slice).toContain('- [定性响应] 履约保证金金额：中标金额的2%。');
+    expect(slice).toContain('【系统约束——仅指导写作，禁止写入正文，禁止复述本句】');
+    expect(renderChapterRequirementSlice([])).toBe('');
   });
 });
 
-// ============ 第十六版 B 闭环：商务条款定性响应分支 + 检测降级 + 终检 markdown 补写 ============
+// ═══════════════════════════ L2 蓝图分配（每条要求唯一主责章） ═══════════════════════════
 
-describe('第十六版 B 闭环（商务分支补写/幂等/检测降级/终检 markdown 补写）', () => {
+describe('assignTenderRequirementsToChapters 蓝图分配', () => {
+  let tempRoot = '';
+  beforeEach(() => {
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'requirement-assign-test-'));
+  });
+  afterEach(() => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('argmax 语义路由：章节标题归一化匹配，低置信标记记账', () => {
+    const chapters = [{ title: '## 第五章 施工组织与分包管理' }, { title: '## 第六章 质量保证措施' }];
+    const similarity = (query: string, title: string) => {
+      if (query.includes('分包') && title.includes('分包')) return 0.72;
+      if (query.includes('黄山杯') && title.includes('质量')) return 0.81;
+      return 0.1;
+    };
+    const { assignments, lowConfidenceCount } = assignTenderRequirementsToChapters([
+      entry('本招标项目不允许分包。', ['不允许分包'], 'respond', '禁止性要求'),
+      entry('创优目标：确保获得黄山杯。', ['黄山杯'], 'respond', '质量创优'),
+    ], chapters, similarity);
+    expect(assignments.length).toBe(2);
+    expect(assignments[0].chapterTitle).toBe('第五章 施工组织与分包管理');
+    expect(assignments[0].lowConfidence).toBe(false);
+    expect(assignments[1].chapterTitle).toBe('第六章 质量保证措施');
+    expect(lowConfidenceCount).toBe(0);
+  });
+
+  it('相似度全零：argmax 兜底退回第一章（未分配恒为 0），标记低置信', () => {
+    const chapters = [{ title: '## 第五章 施工组织管理' }, { title: '## 第六章 质量保证措施' }];
+    const { assignments, lowConfidenceCount } = assignTenderRequirementsToChapters([
+      entry('创优目标：确保获得黄山杯。', ['黄山杯'], 'respond', '质量创优'),
+      entry('保证金按合同约定执行。', ['保证金'], 'qualitative', '商务支付'),
+    ], chapters, () => 0);
+    expect(assignments.length).toBe(2);
+    expect(assignments.every(item => item.chapterTitle === '第五章 施工组织管理')).toBe(true);
+    expect(assignments.every(item => item.lowConfidence)).toBe(true);
+    expect(lowConfidenceCount).toBe(2);
+  });
+
+  it('空输入（无条目/无章节）返回空分配', () => {
+    expect(assignTenderRequirementsToChapters([], [{ title: '## 第五章' }], () => 1).assignments).toEqual([]);
+    expect(assignTenderRequirementsToChapters([entry('a。', ['aa'])], [], () => 1).assignments).toEqual([]);
+  });
+
+  it('分配落盘：审计资产写入 generatedDocuments/assets/requirement-assignments.json', () => {
+    const a = assignment(entry('创优目标：确保获得黄山杯。', ['黄山杯'], 'respond', '质量创优'), '第五章 施工组织管理');
+    const assetPath = saveRequirementAssignmentsAsset(tempRoot, [a]);
+    expect(assetPath).toContain(path.join('assets', 'requirement-assignments.json'));
+    const parsed = JSON.parse(fs.readFileSync(assetPath, 'utf8')) as { total: number; assignments: Array<{ chapterTitle: string }> };
+    expect(parsed.total).toBe(1);
+    expect(parsed.assignments[0].chapterTitle).toBe('第五章 施工组织管理');
+    // 清理生成目录（generatedRoot 落在用户目录按 projectRoot 哈希隔离）
+    fs.rmSync(path.dirname(path.dirname(path.dirname(assetPath))), { recursive: true, force: true });
+  });
+});
+
+// ═══════════════════════════ 章级验收（requirementAcceptanceIssues） ═══════════════════════════
+
+describe('requirementAcceptanceIssues 章级验收（三通道判定）', () => {
   beforeEach(() => {
     vi.resetAllMocks();
   });
 
-  // 实测条款文本（丰乐镇 4.26.0 报告 blocker）：商务参数不落位技术标，只做定性响应
-  const WATER_FEE_CLAUSE = '承包人投标报价已经包含水电费用，工程结算时按照发包人实际缴纳的水电费在结算价（税前）中扣除。';
-  const waterFeeModel = (): TenderRequirementModel => ({
-    ...emptyTenderRequirements(true),
-    frontScheduleClauses: [{ text: WATER_FEE_CLAUSE, coreTerms: ['水电费', '结算价'], source: '招标文件.pdf' }],
-  });
-  const costChapter = () => [{ title: '## 第六章 合同与造价管理', content: '工程造价管理措施。' }];
-  const costSimilarity = (keyword: string) => (query: string, title: string) => (query.includes(keyword) && title.includes('造价') ? 0.7 : 0);
-
-  it('质量保证金条款（实测文本）补写质量保证金定性句，不被通用保证金分支透支', async () => {
-    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
-    const model: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      frontScheduleClauses: [{ text: '质量保证金：最终结算价款的3%的工程款，或由银行业金融机构、工程担保公司、保险机构出具电子保函、纸质保函等担保方式，担保/保证金额为3%的工程结算价款。', coreTerms: ['质量保证金', '3%'], source: '招标文件.pdf' }],
-    };
-    const chapters = costChapter();
-    const result = await fixScoringRequirementResponses({ chapters, model, similarity: costSimilarity('质量保证金') });
-    expect(result.fixedCount).toBe(1);
-    expect(chapters[0].content).toContain('质量保证金按合同约定的金额、担保方式与退还时限执行');
-    expect(chapters[0].content).not.toContain('履约保证金');
-    expect(chapters[0].content).not.toContain('按招标文件');
-    // 商务参数（比例/金额）不落位技术标正文
-    expect(chapters[0].content).not.toContain('3%');
+  it('无条目直接返回空（验收自动跳过）', async () => {
+    const issues = await requirementAcceptanceIssues({ markdown: '## 第五章\n正文。', entries: [], semanticSimilarity: () => 0 });
+    expect(issues).toEqual([]);
   });
 
-  it('水电费条款（实测文本）走水电费分支，泛结算分支不抢捕获', async () => {
-    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
-    const chapters = costChapter();
-    const result = await fixScoringRequirementResponses({ chapters, model: waterFeeModel(), similarity: costSimilarity('水电费') });
-    expect(result.fixedCount).toBe(1);
-    expect(chapters[0].content).toContain('水电费用由我方承担');
-    expect(chapters[0].content).not.toContain('进度款、竣工结算款与最终结清款');
+  it('comply（遵守类）不做落位验收（数据一致性域核验）', async () => {
+    const issues = await requirementAcceptanceIssues({
+      markdown: '## 第五章 施工组织管理\n本工程按计划组织施工。',
+      entries: [entry('计划工期：开工之日（以开工令时间为准）起，540个日历天。', ['开工令'], 'comply', '工期进度')],
+      semanticSimilarity: () => 0,
+    });
+    expect(issues).toEqual([]);
   });
 
-  it('核减条款（实测文本）走核减分支：响应句含核减/报审口径，不落 10% 商务比例', async () => {
-    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
-    const model: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      frontScheduleClauses: [{ text: '工程结算审核核减额超过报审金额10%的，其超过10%部分的造价咨询费用由施工单位（合同乙方）承担，建设单位在支付工程结算款时予以代扣。', coreTerms: ['核减', '造价咨询费'], source: '招标文件.pdf' }],
-    };
-    const chapters = costChapter();
-    const result = await fixScoringRequirementResponses({ chapters, model, similarity: costSimilarity('核减') });
-    expect(result.fixedCount).toBe(1);
-    expect(chapters[0].content).toContain('核减额与报审金额的核对');
-    expect(chapters[0].content).not.toContain('10%');
-    expect(chapters[0].content).not.toContain('进度款、竣工结算款与最终结清款');
-  });
-
-  it('清单异议条款（实测文本）走异议分支：响应句含异议截止日期，泛结算分支不抢捕获', async () => {
-    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
-    const model: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      frontScheduleClauses: [{ text: '对于发包人提供的工程量清单中工程量的错误，承包人未在招标文件规定的异议截止日期前提出异议并附计算书的，工程结算时不再调整。', coreTerms: ['异议', '工程量'], source: '招标文件.pdf' }],
-    };
-    const chapters = costChapter();
-    const result = await fixScoringRequirementResponses({ chapters, model, similarity: costSimilarity('异议') });
-    expect(result.fixedCount).toBe(1);
-    expect(chapters[0].content).toContain('异议截止日期');
-    expect(chapters[0].content).not.toContain('进度款、竣工结算款与最终结清款');
-  });
-
-  it('注册地条款（实测文本）走注册地分支：不落公告号数字，落预缴口径', async () => {
-    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
-    const model: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      frontScheduleClauses: [{ text: '注册地不在合肥市行政区域范围（含四县一市）的中标人，应按照《纳税人跨县（市、区）提供建筑服务增值税征收管理暂行办法》（国家税务总局公告2016年第17号）规定，在建筑服务发生地及时足额预缴增值税。', coreTerms: ['注册地', '增值税'], source: '招标文件.pdf' }],
-    };
-    const chapters = costChapter();
-    const result = await fixScoringRequirementResponses({ chapters, model, similarity: costSimilarity('注册地') });
-    expect(result.fixedCount).toBe(1);
-    expect(chapters[0].content).toContain('注册地及纳税人身份');
-    expect(chapters[0].content).toContain('建筑服务发生地');
-    expect(chapters[0].content).not.toContain('2016');
-  });
-
-  it('商务条款幂等：正文已有对应定性句不再重复补写', async () => {
-    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
-    const chapters = [{ title: '## 第六章 合同与造价管理', content: '本工程水电费用由我方承担，工程结算时按合同约定在结算价中核算处理，缴费与结算资料按合同约定办理。' }];
-    const result = await fixScoringRequirementResponses({ chapters, model: waterFeeModel(), similarity: costSimilarity('水电费') });
-    expect(result.fixedCount).toBe(0);
-  });
-
-  it('商务条款幂等防护：其他条款的定性句不构成已响应（关键词不同不误判）', async () => {
-    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
-    const chapters = [{ title: '## 第六章 合同与造价管理', content: '本工程预付款的支付、扣回与使用按合同约定执行，专款用于施工准备。' }];
-    const result = await fixScoringRequirementResponses({ chapters, model: waterFeeModel(), similarity: costSimilarity('水电费') });
-    expect(result.fixedCount).toBe(1);
-    expect(chapters[0].content).toContain('水电费用由我方承担');
-  });
-
-  it('检测降级：商务条款定性句缺失报 info（不阻断），存在则静默通过', async () => {
-    const missing = await requirementsCoverageIssues('## 工程概况\n本工程按计划组织施工。', waterFeeModel(), { semanticSimilarity: () => 0 });
-    const biz = missing.filter(issue => issue.message.includes('商务条款定性响应'));
-    expect(biz.length).toBe(1);
-    expect(biz[0].level).toBe('info');
-    expect(biz[0].severity).toBe('warning');
-    expect(biz[0].category).toBe('evidence_coverage');
-    const ok = await requirementsCoverageIssues('## 工程概况\n本工程水电费用由我方承担，工程结算时按合同约定在结算价中核算处理，缴费与结算资料按合同约定办理。', waterFeeModel(), { semanticSimilarity: () => 0 });
+  it('qualitative：定性响应句缺失报 info 提示（不阻断），存在则静默通过', async () => {
+    const clause = entry('履约保证金金额：中标金额的2%。', ['履约保证金'], 'qualitative', '商务支付');
+    const missing = await requirementAcceptanceIssues({
+      markdown: '## 第二章 造价与合同管理\n工程量清单计价管理措施。',
+      entries: [clause],
+      semanticSimilarity: () => 0,
+    });
+    expect(missing.length).toBe(1);
+    expect(missing[0].level).toBe('info');
+    expect(missing[0].severity).toBe('warning');
+    expect(missing[0].category).toBe('evidence_coverage');
+    expect(missing[0].message).toContain('商务条款定性响应');
+    const ok = await requirementAcceptanceIssues({
+      markdown: '## 第二章 造价与合同管理\n本工程履约保证金按合同约定的金额、提交期限与退还时限执行，可按约定以保函形式替代。',
+      entries: [clause],
+      semanticSimilarity: () => 0,
+    });
     expect(ok).toEqual([]);
   });
 
-  it('终检 markdown 补写：锚点被 LLM 改写丢失后按路由章节行级重插（插入位在下一章标题前，章节快照同步）', async () => {
-    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
-    const model: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      frontScheduleClauses: [{ text: '本招标项目不允许分包。', coreTerms: ['不允许分包'], source: '招标文件.pdf' }],
-    };
-    const markdown = ['## 第一章 工程概况', '本工程位于合肥市。', '', '## 第五章 施工组织与分包管理', '本工程严禁转包和违法分包。', '', '## 第六章 质量保证措施', '质量保证体系健全。'].join('\n');
+  it('respond：语义命中但金额锚点缺失 → 部分响应 blocker（经或选型判定非或选型）', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({ results: [{ index: 0, alternative: false }] });
+    const issues = await requirementAcceptanceIssues({
+      markdown: '## 第五章 质量保证措施\n本工程确保获得黄山杯，周密策划创优工作。',
+      entries: [entry('本项目确保获得“黄山杯”。获得“黄山杯”的，支付该项300万元。', ['黄山杯', '300万元'], 'respond', '质量创优')],
+      semanticSimilarity: () => 0.8,
+    });
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('部分响应');
+    expect(issues[0].message).toContain('300万元');
+    expect(issues[0].severity).toBe('blocker');
+  });
+
+  it('respond：语义命中且金额锚点已落位 → 放行；语义命中且条款无金额锚点 → 直接放行', async () => {
+    const paid = await requirementAcceptanceIssues({
+      markdown: '## 第五章 质量保证措施\n本工程确保获得黄山杯，该项300万元的奖惩按合同约定办理。',
+      entries: [entry('本项目确保获得“黄山杯”。获得“黄山杯”的，支付该项300万元。', ['黄山杯', '300万元'], 'respond', '质量创优')],
+      semanticSimilarity: () => 0.8,
+    });
+    expect(paid).toEqual([]);
+    const noMoney = await requirementAcceptanceIssues({
+      markdown: '## 第七章 绿色施工\n本工程绿色建筑等级达到国标二星级。',
+      entries: [entry('绿色建筑等级要求：达到国标二星级。', ['二星级'], 'respond', '绿色施工')],
+      semanticSimilarity: () => 0.8,
+    });
+    expect(noMoney).toEqual([]);
+  });
+
+  it('respond：条款原文抄写（含投标人口吻转换）分句全落位 → 不报零响应', async () => {
+    const clause = entry('对于发包人提供的工程量清单中的清单项目，承包人没有报价的，发包人认为视同该项价格已经包括在其他项目中。', ['未报价处理', '视同已包含'], 'respond', '商务支付');
+    const markdown = '## 第二章 投标报价与计量管理\n对于发包人提供的工程量清单中的清单项目，我方没有报价的，视为该项价格已经包括在其他项目中。本工程对清单项目逐项复核报价，未报价项目费用按合同约定执行，不重复计取。';
+    const issues = await requirementAcceptanceIssues({ markdown, entries: [clause], semanticSimilarity: () => 0 });
+    expect(issues).toEqual([]);
+  });
+
+  it('respond：真缺失（正文无条款原文）→ 零响应 blocker', async () => {
+    const issues = await requirementAcceptanceIssues({
+      markdown: '## 第二章 投标报价\n本工程按计划组织施工。',
+      entries: [entry('对于发包人提供的工程量清单中的清单项目，承包人没有报价的，发包人认为视同该项价格已经包括在其他项目中。', ['未报价处理', '视同已包含'], 'respond', '商务支付')],
+      semanticSimilarity: () => 0,
+    });
+    expect(issues.length).toBe(1);
+    expect(issues[0].level).toBe('error');
+    expect(issues[0].severity).toBe('blocker');
+    expect(issues[0].message).toContain('零命中');
+  });
+
+  it('六个百分百词面兜底：正文逐项落位六项措施（≥4 项）→ 判已响应（语义稀释不误报）', async () => {
+    const markdown = [
+      '## 第八章 扬尘治理措施',
+      '施工工地周边100%围挡，物料堆放100%覆盖，出入车辆100%冲洗，施工现场地面100%硬化，渣土车辆100%密闭运输。',
+    ].join('\n');
+    const issues = await requirementAcceptanceIssues({
+      markdown,
+      entries: [entry('扬尘治理必须落实六个百分百。', ['六个百分百'], 'respond', '安全文明')],
+      semanticSimilarity: () => 0,
+    });
+    expect(issues).toEqual([]);
+  });
+});
+
+// ═══════════════════════════ 响应补写（章级 / 终检 markdown） ═══════════════════════════
+
+describe('fixScoringRequirementResponses 章级补写（判定=修复同源，幂等）', () => {
+  it('零响应条款补写条款全文（投标人口吻）+ 差异化落实句到责任章尾', async () => {
     const chapters = [{ title: '## 第五章 施工组织与分包管理', content: '本工程严禁转包和违法分包。' }];
-    const similarity = (query: string, title: string) => (query.includes('分包') && title.includes('分包') ? 0.7 : 0);
-    const result = await fixScoringRequirementResponsesInFinalMarkdown({ markdown, chapters, model, similarity });
+    const { fixedCount, details } = await fixScoringRequirementResponses({
+      chapters,
+      assignments: [assignment(entry('本招标项目不允许分包。', ['不允许分包'], 'respond', '禁止性要求'), '第五章 施工组织与分包管理')],
+    });
+    expect(fixedCount).toBe(1);
+    expect(chapters[0].content).toContain('本项目不允许分包。本工程全部施工任务由我公司项目部自行组织实施，严禁违法分包、转包及挂靠行为。');
+    expect(details[0]).toContain('禁止性要求');
+    // 幂等：二次调用已满足条目零触碰
+    const again = await fixScoringRequirementResponses({
+      chapters,
+      assignments: [assignment(entry('本招标项目不允许分包。', ['不允许分包'], 'respond', '禁止性要求'), '第五章 施工组织与分包管理')],
+    });
+    expect(again.fixedCount).toBe(0);
+  });
+
+  it('comply（遵守类）不补写；分配章节找不到时跳过不误写', async () => {
+    const chapters = [{ title: '## 第五章 施工组织管理', content: '本工程按计划组织施工。' }];
+    const comply = await fixScoringRequirementResponses({
+      chapters,
+      assignments: [assignment(entry('计划工期：开工之日（以开工令时间为准）起，540个日历天。', ['开工令'], 'comply', '工期进度'), '第五章 施工组织管理')],
+    });
+    expect(comply.fixedCount).toBe(0);
+    expect(chapters[0].content).toBe('本工程按计划组织施工。');
+    const missingChapter = await fixScoringRequirementResponses({
+      chapters,
+      assignments: [assignment(entry('创优目标：确保获得黄山杯。', ['黄山杯'], 'respond', '质量创优'), '第九章 不存在的章节')],
+    });
+    expect(missingChapter.fixedCount).toBe(0);
+    expect(chapters[0].content).toBe('本工程按计划组织施工。');
+  });
+
+  it('商务条款只落定性响应句（不抄条款原文商务参数）；低置信分配在明细中标记', async () => {
+    const chapters = [{ title: '## 第五章 造价与合同管理', content: '工程量清单计价管理措施。' }];
+    const commercialEntry = entry('履约保证金金额：中标金额的2%。', ['履约保证金'], 'qualitative', '商务支付');
+    const { fixedCount, details } = await fixScoringRequirementResponses({
+      chapters,
+      assignments: [assignment(commercialEntry, '第五章 造价与合同管理', true)],
+    });
+    expect(fixedCount).toBe(1);
+    expect(chapters[0].content).toContain('本工程履约保证金按合同约定的金额、提交期限与退还时限执行，可按约定以保函形式替代。');
+    expect(chapters[0].content).not.toContain('中标金额的2%');
+    expect(details[0]).toContain('（低置信分配）');
+    // 定性句存在即幂等
+    const again = await fixScoringRequirementResponses({
+      chapters,
+      assignments: [assignment(commercialEntry, '第五章 造价与合同管理', true)],
+    });
+    expect(again.fixedCount).toBe(0);
+  });
+});
+
+describe('fixScoringRequirementResponsesInFinalMarkdown 终检补写（最终成稿行级插入）', () => {
+  it('锚点被 LLM 改写丢失后按责任章行级重插（插入位在下一章标题前，章节快照同步，幂等）', async () => {
+    const markdown = ['## 第五章 施工组织与分包管理', '本工程严禁转包和违法分包。', '', '## 第六章 质量保证措施', '质量保证体系健全。'].join('\n');
+    const chapters = [{ title: '## 第五章 施工组织与分包管理', content: '本工程严禁转包和违法分包。' }];
+    const assignments = [assignment(entry('本招标项目不允许分包。', ['不允许分包'], 'respond', '禁止性要求'), '第五章 施工组织与分包管理')];
+    const result = await fixScoringRequirementResponsesInFinalMarkdown({ markdown, chapters, assignments });
     expect(result.fixedCount).toBe(1);
     const inserted = result.markdown.indexOf('本项目不允许分包。本工程全部施工任务由我公司项目部自行组织实施，严禁违法分包、转包及挂靠行为。');
     expect(inserted).toBeGreaterThan(result.markdown.indexOf('## 第五章'));
     expect(inserted).toBeLessThan(result.markdown.indexOf('## 第六章'));
     expect(chapters[0].content).toContain('本项目不允许分包');
-    expect(result.markdown).not.toContain('按招标文件要求');
-    // 幂等：二次调用不再补写（最终成稿已含锚点）
-    const again = await fixScoringRequirementResponsesInFinalMarkdown({ markdown: result.markdown, chapters, model, similarity });
+    const again = await fixScoringRequirementResponsesInFinalMarkdown({ markdown: result.markdown, chapters, assignments });
     expect(again.fixedCount).toBe(0);
   });
 
-  it('终检 markdown 补写：商务条款缺失定性句时补「按合同约定」定性句（检测端闭环）', async () => {
-    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce({ results: [{ index: 0, responsive: true }] });
+  it('商务条款缺失定性句时补「按合同约定」定性句（检测端闭环）', async () => {
     const markdown = '## 第二章 造价与合同管理\n工程量清单计价管理措施。';
     const chapters = [{ title: '## 第二章 造价与合同管理', content: '工程量清单计价管理措施。' }];
-    const similarity = (query: string, title: string) => (query.includes('水电费') && title.includes('造价') ? 0.7 : 0);
-    const result = await fixScoringRequirementResponsesInFinalMarkdown({ markdown, chapters, model: waterFeeModel(), similarity });
+    const assignments = [assignment(entry('水电费用：由承包人承担，工程结算时按约定在结算价（税前）中核算。', ['水电费'], 'qualitative', '商务支付'), '第二章 造价与合同管理')];
+    const result = await fixScoringRequirementResponsesInFinalMarkdown({ markdown, chapters, assignments });
     expect(result.fixedCount).toBe(1);
     expect(result.markdown).toContain('本工程水电费用由我方承担');
-    expect(result.markdown).not.toContain('按招标文件');
-    expect(result.markdown).toContain('水电费');
     expect(result.markdown).not.toContain('结算价（税前）');
+    expect(result.markdown).toContain('水电费');
+  });
+
+  it('章节标题找不到（LLM 改写标题）→ 跳过不破坏结构', async () => {
+    const markdown = '## 第九章 其他\n内容。';
+    const result = await fixScoringRequirementResponsesInFinalMarkdown({
+      markdown,
+      chapters: [],
+      assignments: [assignment(entry('本招标项目不允许分包。', ['不允许分包'], 'respond', '禁止性要求'), '第五章 施工组织与分包管理')],
+    });
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe(markdown);
   });
 });
 
-// ============ B 闭环终收尾（4.27.1）：条款原文分句兜底（coreTerms 概括短语与抄写句词面错位） ============
+// ═══════════════════════════ 交付前确定性清理器 ═══════════════════════════
 
-describe('B 闭环终收尾（条款原文分句兜底：coreTerms 词面错位误报根治）', () => {
-  beforeEach(() => {
-    vi.resetAllMocks();
+describe('fixEmptyScoringResponses 空响应句确定性改写', () => {
+  it('空响应句改写为前文条款的落实句（检测定位=修复定位）', () => {
+    const input = '（清单项目未报价处理）：对于发包人提供的工程量清单中的清单项目，承包人没有报价的，本施工组织设计已按上述条款要求逐项落实执行。';
+    const result = fixEmptyScoringResponses(input);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('本工程对清单项目逐项复核报价，未报价项目费用按合同约定执行，不重复计取。');
+    expect(result.markdown).not.toContain('已按上述条款要求');
   });
 
-  const zeroSimilarity = () => 0;
-  // 实测条款文本（丰乐镇 4.25/4.26/4.27 三轮持续误报的四条同族条款）
-  const QUOTE_MISSING_CLAUSE = '对于发包人提供的工程量清单中的清单项目，承包人没有报价的，发包人认为视同该项价格已经包括在其他项目中。';
-  const METER_CLAUSE = '发包人在现场安装计量装置，承包人负责施工期间的保护，并在工程移交的同时完好地移交给发包人。';
-  const REPAIR_CLAUSE = '因承包人保护不善造成计量装置损坏，承包人负责修复（包括但不限于修复费用），并承担由此造成的增加费用。';
-
-  it('漏报价条款（实测）：coreTerms 概括短语零命中但条款原文抄写落位 → 不报零响应', async () => {
-    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce(undefined);
-    const model: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      frontScheduleClauses: [{ text: QUOTE_MISSING_CLAUSE, coreTerms: ['未报价处理', '视同已包含'], source: '招标文件.pdf' }],
-    };
-    const markdown = `## 第二章 投标报价与计量管理\n对于发包人提供的工程量清单中的清单项目，我方没有报价的，视为该项价格已经包括在其他项目中。本工程对清单项目逐项复核报价，未报价项目费用按合同约定执行，不重复计取。`;
-    const issues = await requirementsCoverageIssues(markdown, model, { semanticSimilarity: zeroSimilarity });
-    expect(issues).toEqual([]);
-  });
-
-  it('计量装置条款（实测）：部分 coreTerm 命中（保护移交缺失）+ 条款原文抄写落位 → 不报部分响应', async () => {
-    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce(undefined);
-    const model: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      frontScheduleClauses: [{ text: METER_CLAUSE, coreTerms: ['计量装置', '保护移交'], source: '招标文件.pdf' }],
-    };
-    const markdown = `## 第二章 施工计量与现场保护\n发包人在现场安装计量装置，我方负责施工期间的保护，并在工程移交的同时完好地移交给发包人。`;
-    const issues = await requirementsCoverageIssues(markdown, model, { semanticSimilarity: zeroSimilarity });
-    expect(issues).toEqual([]);
-  });
-
-  it('修复费用条款（实测）：正文抄写句省略括号补充（短版）→ 去括号分句全落位不报', async () => {
-    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce(undefined);
-    const model: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      frontScheduleClauses: [{ text: REPAIR_CLAUSE, coreTerms: ['修复费用'], source: '招标文件.pdf' }],
-    };
-    // 「修复费用」只在括号补充内，短版抄写句无此词面——分句去括号后「承包人负责修复」等分句全落位
-    const markdown = '## 第二章 计量装置保护管理\n因我方保护不善造成计量装置损坏，我方负责修复，并承担由此造成的增加费用。';
-    const issues = await requirementsCoverageIssues(markdown, model, { semanticSimilarity: zeroSimilarity });
-    expect(issues).toEqual([]);
-  });
-
-  it('真缺失条款（正文无条款原文）→ 仍报零响应（兜底不误放行）', async () => {
-    vi.mocked(callDocumentLlmJson).mockResolvedValueOnce(undefined);
-    const model: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      frontScheduleClauses: [{ text: QUOTE_MISSING_CLAUSE, coreTerms: ['未报价处理', '视同已包含'], source: '招标文件.pdf' }],
-    };
-    const issues = await requirementsCoverageIssues('## 第二章 投标报价\n本工程按计划组织施工。', model, { semanticSimilarity: zeroSimilarity });
-    const zero = issues.filter(issue => issue.message.includes('零命中'));
-    expect(zero.length).toBe(1);
-    expect(zero[0].level).toBe('error');
-    expect(zero[0].severity).toBe('blocker');
-  });
-
-  it('抄写句只落位前半条款（分句部分缺失）→ 仍报部分响应（兜底不全命中不放行）', async () => {
-    const mocked = vi.mocked(callDocumentLlmJson);
-    // 响应性分类缓存跨用例命中时首条 mock 可能被或选型判定消耗——两态均判非或选型，断言稳定
-    mocked.mockResolvedValueOnce(undefined);
-    mocked.mockResolvedValueOnce({ results: [{ index: 0, alternative: false }] });
-    const model: TenderRequirementModel = {
-      ...emptyTenderRequirements(true),
-      frontScheduleClauses: [{ text: QUOTE_MISSING_CLAUSE, coreTerms: ['清单项目', '视同已包含'], source: '招标文件.pdf' }],
-    };
-    const markdown = '## 第二章 投标报价\n对于发包人提供的工程量清单中的清单项目，我方没有报价的。';
-    const issues = await requirementsCoverageIssues(markdown, model, { semanticSimilarity: zeroSimilarity });
-    const partial = issues.filter(issue => issue.message.includes('部分响应'));
-    expect(partial.length).toBe(1);
-    expect(partial[0].severity).toBe('blocker');
-    expect(partial[0].message).toContain('视同已包含');
+  it('无可提取主题（无条款冒号上下文）保留原句，交元语言清理器兜底', () => {
+    const input = '本施工组织设计已按上述条款要求逐项落实执行。';
+    const result = fixEmptyScoringResponses(input);
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe(input);
   });
 });
 
-// ============ 4.27.2 交付链清理器：招标元语言剥离 + 条款响应重复行去重 ============
-
-describe('fixTenderMetaLanguage 招标元语言确定性清理（4.27.2 语气泄漏治理）', () => {
+describe('fixTenderMetaLanguage 招标元语言确定性清理（语气泄漏治理）', () => {
   it('条幅前缀剥离：条款正文保留并转投标人口吻（「按招标文件要求：」不再入正文）', () => {
     const result = fixTenderMetaLanguage('## 第二章 工程概况\n按招标文件要求：承包人负责施工期间的现场管理。');
     expect(result.fixedCount).toBe(1);
@@ -1116,7 +817,7 @@ describe('fixTenderMetaLanguage 招标元语言确定性清理（4.27.2 语气�
   });
 });
 
-describe('stripDuplicateResponseLines 条款响应重复行去重（4.27.2 重复补写治理）', () => {
+describe('stripDuplicateResponseLines 条款响应重复行去重', () => {
   const duplicatedSentence = '我方承诺本工程严格执行合同约定的各项要求，施工过程中强化过程控制与检查验收管理，确保工程一次成优。';
 
   it('相同响应句重复出现（≥40 字）：仅保留首次，后续整行删除并吞尾随空行', () => {

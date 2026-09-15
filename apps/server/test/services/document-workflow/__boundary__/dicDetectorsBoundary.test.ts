@@ -21,7 +21,7 @@ import {
   supportSystemConflictIssues, tablePeakLabor, tablePeakLaborWithChainFallback,
 } from '@/services/document-workflow/documentIntegrityChecks';
 import { buildSemanticSimilarity } from '@/services/document-workflow/semanticSimilarity';
-import type { DocumentFact, DocumentFactsModel, ValidationIssue } from '@/services/document-workflow/types';
+import type { DocumentFactsModel, ValidationIssue } from '@/services/document-workflow/types';
 import { factOf, factsOf } from './boundaryKit';
 
 vi.mock('@/services/document-workflow/semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));

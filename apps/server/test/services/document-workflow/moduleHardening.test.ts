@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/services/document-workflow/llmClient', async () => {
   const actual = (await vi.importActual('@/services/document-workflow/llmClient')) as typeof LlmClientModule;
@@ -8,12 +8,11 @@ vi.mock('@/services/document-workflow/llmClient', async () => {
 vi.mock('@/services/document-workflow/semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
 
 import type * as LlmClientModule from '@/services/document-workflow/llmClient';
-import { callDocumentLlmJson } from '@/services/document-workflow/llmClient';
 import { hasProcessSequenceExpression } from '@/services/document-workflow/utils';
 import { projectBasicFactScore, rewriteWorkPackageTerminology } from '@/services/document-workflow/documentGeneratorHelpers';
 import { buildGenerationBudget } from '@/services/document-workflow/generationBudget';
-import { emptyTenderRequirements, requirementsCoverageIssues } from '@/services/document-workflow/tenderRequirements';
-import type { DocumentTemplate, DocumentTemplateChapter, TenderRequirementModel } from '@/services/document-workflow/types';
+import { requirementAcceptanceIssues } from '@/services/document-workflow/tenderRequirements';
+import type { DocumentTemplate, DocumentTemplateChapter, TenderRequirementEntry } from '@/services/document-workflow/types';
 
 // 模块 5b：工序顺序表达多形式检测（箭头链强制放宽为任一形式）
 describe('hasProcessSequenceExpression 多形式工序顺序表达检测', () => {
@@ -63,42 +62,29 @@ describe('projectBasicFactScore 窄过滤', () => {
   });
 });
 
-// 模块 4：前附表响应条款零响应检测走窄过滤分支（LLM 已语义分类的实质条款不被通用黑名单整条跳过）
-describe('requirementsCoverageIssues 前附表条款窄过滤', () => {
-  const model: TenderRequirementModel = {
-    ...emptyTenderRequirements(true),
-    frontScheduleClauses: [
-      { text: '投标人须确保获得“黄山杯”，支付300万元。', coreTerms: ['黄山杯'] },
-      { text: '合同工期：540日历天。', coreTerms: ['合同工期', '540日历天'] },
-      { text: '投标保证金账户：XX银行户名XXX。', coreTerms: ['保证金账户'] },
-    ],
-  };
-  // 程序性/实质性 LLM 分类 mock：index 0/1 为实质条款（参与检测），index 2 保证金账户为程序性条款（跳过）
+// 模块 4：章级验收（新范式）——实质要求逐条参与检测（无程序性黑名单整条跳过旁路；程序性条款由判定层 excluded）
+describe('requirementAcceptanceIssues 实质要求逐条检测', () => {
+  const clauseEntry = (text: string, coreTerms: string[]): TenderRequirementEntry => ({ text, coreTerms, sources: [{ file: '招标文件.pdf' }], category: '其他要求', policy: 'respond' });
   const zeroSimilarity = () => 0;
 
-  beforeEach(() => {
-    vi.resetAllMocks();
-    vi.mocked(callDocumentLlmJson).mockResolvedValue({ results: [
-      { index: 0, responsive: true },
-      { index: 1, responsive: true },
-      { index: 2, responsive: false },
-    ] });
+  it('“投标人须确保黄山杯”类条款（含“投标”字样）零命中时报未响应', async () => {
+    const issues = await requirementAcceptanceIssues({
+      markdown: '# 工程概况\n\n本工程工期满足要求。',
+      entries: [clauseEntry('投标人须确保获得“黄山杯”，支付300万元。', ['黄山杯'])],
+      semanticSimilarity: zeroSimilarity,
+    });
+    expect(issues.some(issue => /未响应/u.test(issue.message) && issue.message.includes('黄山杯'))).toBe(true);
   });
 
-  it('“投标人须确保黄山杯”类条款（含“投标”字样）未被整条跳过，零命中时报未响应', async () => {
-    const issues = await requirementsCoverageIssues('# 工程概况\n\n本工程工期满足要求。', model, { semanticSimilarity: zeroSimilarity });
-    expect(issues.some(issue => /评分项要求未响应/u.test(issue.message) && issue.message.includes('黄山杯'))).toBe(true);
-  });
-
-  it('“合同工期”类条款（含“合同”字样）coreTerms 未被黑名单滤掉，落位后不误报', async () => {
+  it('“合同工期”类条款 coreTerms 落位后不误报（语义通道放行）', async () => {
     const similarity = (left: string, right: string) => (left.includes('合同工期') && right.includes('合同工期') ? 0.9 : 0);
-    const issues = await requirementsCoverageIssues('# 进度计划\n\n合同工期540日历天，按总进度计划执行。', model, { semanticSimilarity: similarity, bodyTexts: ['合同工期540日历天，按总进度计划执行。'] });
+    const issues = await requirementAcceptanceIssues({
+      markdown: '# 进度计划\n\n合同工期540日历天，按总进度计划执行。',
+      entries: [clauseEntry('合同工期：540日历天。', ['合同工期', '540日历天'])],
+      bodyTexts: ['合同工期540日历天，按总进度计划执行。'],
+      semanticSimilarity: similarity,
+    });
     expect(issues.some(issue => /合同工期/u.test(issue.message))).toBe(false);
-  });
-
-  it('纯程序条款（保证金账户）被窄过滤跳过，不参与零响应检测', async () => {
-    const issues = await requirementsCoverageIssues('# 工程概况\n\n本工程工期满足要求。', model, { semanticSimilarity: zeroSimilarity });
-    expect(issues.some(issue => /保证金账户/u.test(issue.message))).toBe(false);
   });
 });
 
@@ -136,24 +122,8 @@ describe('buildGenerationBudget 轮次预算收紧', () => {
   });
 });
 
-// 模块 2：写作任务书注入前附表响应清单与规模事实卡（type 层验证，无需 LLM）
-describe('写作任务书前附表注入（函数级验证）', () => {
-  it('frontScheduleClauses 为空时 globalWritingFocus 不含前附表注入段（不注入空清单）', () => {
-    // 注入逻辑在 buildWritingTaskBrief 内联，此处仅验证空数组展开语义与字段契约
-    const clauses: TenderRequirementModel['frontScheduleClauses'] = [];
-    const lines = clauses.map(item => item.text).filter(Boolean).slice(0, 12);
-    expect(lines).toEqual([]);
-    expect(clauses.map((_item, index) => `${index + 1}.`).join('')).toBe('');
-  });
-
-  it('mock 输出中 frontScheduleClauses 可被 cleanItems 管道解析（schema 契约）', () => {
-    // 提取 schema 契约验证：frontScheduleClauses 必须是数组且单项含 text/coreTerms
-    const mock = { frontScheduleClauses: [{ text: '确保黄山杯，支付300万元。', coreTerms: ['黄山杯'], source: '招标文件.pdf' }] };
-    expect(Array.isArray(mock.frontScheduleClauses)).toBe(true);
-    expect(mock.frontScheduleClauses[0].text).toContain('黄山杯');
-    vi.resetAllMocks();
-  });
-});
+// 模块 2：写作任务书不再承载前附表响应清单（旧窄通道已删除）——章节责任要求由蓝图分配分片注入
+//（renderChapterRequirementSlice），测试见 tenderRequirements.test.ts
 
 // ============ round-23 P0-3：PDF 标题标记夹断清洗（建设规模“平方2.8”截断修复） ============
 import { cleanPdfHeadingNoise, extractProjectBasicFactsFromEvidence } from '@/services/document-workflow/factsModel';

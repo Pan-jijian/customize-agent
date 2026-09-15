@@ -2,7 +2,6 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import type Database from 'better-sqlite3';
 import { loadBetterSqlite3 } from '@customize-agent/knowledge';
 import { previewPromptRules } from '../../services/document-workflow/promptRuleExtraction';
 

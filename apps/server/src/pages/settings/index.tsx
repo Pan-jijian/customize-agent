@@ -5,12 +5,6 @@ import { Skeleton, Progress } from 'antd';
 import { Sun, Moon, Monitor, Languages, Info, Server, Database } from 'lucide-react';
 import { getSystemStats, getEmbeddingConfig, getHealth, type EmbeddingConfig, type SystemStats } from '@/lib/api';
 
-const iconBadge = (icon: React.ReactNode, bg: string, color: string) => (
-  <div style={{ width: 32, height: 32, borderRadius: 8, background: bg, display: 'flex', alignItems: 'center', justifyItems: 'center', color, flexShrink: 0 }}>
-    {icon}
-  </div>
-);
-
 export default function SettingsPage() {
   const t = useAppTranslations('settings');
   const { theme, resolvedTheme, setTheme } = useTheme();

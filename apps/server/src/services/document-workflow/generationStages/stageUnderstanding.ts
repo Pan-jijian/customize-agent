@@ -5,7 +5,7 @@
  */
 import * as path from 'node:path';
 import type { KbSearchResult } from '@/lib/api';
-import type { DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, RetrievalCoverageReport, TenderRequirementModel } from '../types';
+import type { DocumentEvidence, TenderRequirementModel } from '../types';
 import type { GenerationSession } from './generationSession';
 import { displayChapterTitle, effectiveTemplateChapters } from '../outline';
 import { selectEvidenceByBudget } from '../evidence';
@@ -25,7 +25,7 @@ import { assertEvidenceInProjectScope, createProjectMaterialScope, filterEvidenc
 import { buildBidProcedureJudge, evidenceSafetyKey, partitionEvidenceByContentSafety } from '../evidenceContentSafety';
 import { buildFactsModel, extractLocalFactPool } from '../factsModel';
 import { arbitrateFactPool, buildCanonicalFactModel, extractDrawingAnnotationFacts, PROJECT_BASIC_FIELD_SPECS } from '../factGovernance';
-import { emptyTenderRequirements, extractRequirementFieldGaps, extractTenderRequirements, filterMandatoryClauseEvidence, hasTenderRequirements, MANDATORY_FIELD_NAMES, mandatoryFieldGaps, mergeTenderRequirements, preselectTenderRequirementEvidence, readCachedTenderRequirements, requirementFieldGaps, requirementFieldLabel, tenderRequirementsCacheKey, tenderRequirementsSummary, writeCachedTenderRequirements } from '../tenderRequirements';
+import { emptyTenderRequirements, extractTenderRequirements, hasTenderRequirements, readCachedTenderRequirements, tenderRequirementsCacheKey, tenderRequirementsSummary, writeCachedTenderRequirements } from '../tenderRequirements';
 import { bidCompositionSummary, extractBidCompositionSpec, isBodyTableForbidden, stripRequiredTableRuleLine } from '../bidComposition';
 
 export async function stageUnderstanding(session: GenerationSession): Promise<void> {
@@ -259,20 +259,16 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
       session.global.emitProgress();
     }
   }
-  // C1 前置链并行：评分项要求提取链（招标直读→预筛→主提取∥窄通道召回→条件补提→合并→缓存）
-  // 独立任务与大纲规划并行执行——提取 LLM 时间被规划 LLM 时间覆盖（真实生成前置链省 2~4 分钟）；
-  // 提取失败独立降级为空模型 + skipped 显性警示（提取失败不得阻断生成，与串行路径 skipped 语义一致）
+  // C1 前置链并行：招标要求提取链（条款穷举切分 → 逐条判定 → 重复合并 → 对账闭合 → 缓存 v4）
+  // 独立任务与大纲规划并行执行——判定 LLM 时间被规划 LLM 时间覆盖；
+  // 提取失败独立降级为空模型 + skipped 显性警示（提取失败不得阻断生成）
   session.understanding.tenderRequirementsTask = (async (): Promise<TenderRequirementModel> => {
     try {
-      // 招标文件“要求与标准”层提取（round-13）：LLM 结构化提取全文评分项要求（创优目标/绿色等级/奖项条款/体系基准/禁编日期），
-      // 不限于评审章节——投标人须知前附表（如 10.9）、专用合同条款（如 5.1.1）、技术标准章节（如第七章）等位置的要求均覆盖。
-      // 提取失败/无绑定资料时返回空模型，零响应检测自动跳过。
-      // W4/P3：提取证据预算上调（36→60 条 / 50k→100k 字符），要求层证据优先保留（截断即提取缺失）；
-      // round-21 S6 修复：maxItemsPerFile 12→60（历史缺陷：招标文件.pdf 200+ 切片被单文件 12 条上限硬砍，
-      // 评标办法正文（位于文件中后部）进不了提取输入 → 零响应 skipped → 评标结构约束整体失效）
-      // round-21 S6 修复二（根因）：提取阶段 allEvidence 仅含 24 条基础事实（collectProjectBasicEvidence 按
-      // projectBasicFactScore 过滤 + slice(0,24)），评标办法正文不含基础事实字段被整体过滤掉 → 提取输入无米下锅。
-      // 改为招标/补疑/答疑文件直读全文（绕开检索与事实过滤，评标办法正文完整进入提取输入）；无直读内容时回退检索预算通道。
+      // 招标要求条款穷举提取：LLM 对条款单元逐条判定（要求/排除/未判定），位置不限于评审章节——
+      // 投标人须知前附表（如 10.9）、专用合同条款（如 5.1.1）、技术标准章节（如第七章）等均覆盖。
+      // 提取失败/无绑定资料时返回空模型，章级验收自动跳过。
+      // 证据来源：招标/补疑/答疑/评标文件直读全文（绕开检索与事实过滤，条款完整进入提取输入——
+      // 历史缺陷：allEvidence 仅含基础事实切片，评标办法正文被整体过滤）；无直读内容时回退检索预算通道。
       const tenderFileEvidence: DocumentEvidence[] = [];
       for (const relativePath of [...session.understanding.evidenceScopePaths].sort()) {
         if (!/招标|补疑|答疑|评标/u.test(relativePath)) continue;
@@ -291,110 +287,53 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
           });
         }
       }
-      // 有用数据预筛（上下文聚焦治理）：招标文件直读全量中含约半数投标程序/清单/目录/格式类
-      // 无用切片，全量吞入既浪费上下文又稀释模型注意力（真实生成回归：12 万字符全量分片下
-      // 黄山杯等短条款被噪声稀释漏提）。预筛只召回义务词形/语义命中的切片进主提取；
-      // 全量 tenderFileEvidence 仍保留作窄通道召回池（filterMandatoryClauseEvidence 全量参与）。
-      const tenderRequirementEvidence = tenderFileEvidence.length > 0
-        ? await preselectTenderRequirementEvidence(tenderFileEvidence)
+      // 提取输入=直读全量切片（条款化层全文穷举切分，不预筛不剔除——预筛剔除即提取缺失）；
+      // 无直读内容时回退检索预算通道（要求层文件优先）
+      const extractionEvidence = tenderFileEvidence.length > 0
+        ? tenderFileEvidence
         : selectEvidenceByBudget(
           [...session.understanding.allEvidence.filter(item => /招标|评标|投标须知|专用合同|合同条款|技术标准|技术要求/u.test(`${item.filePath || ''}${item.sectionTitle || ''}`)), ...session.understanding.allEvidence.filter(item => !/招标|评标|投标须知|专用合同|合同条款|技术标准|技术要求/u.test(`${item.filePath || ''}${item.sectionTitle || ''}`))],
           { preservePinned: true },
         );
-      if (tenderFileEvidence.length > 0) {
-        const beforeChars = tenderFileEvidence.reduce((sum, item) => sum + (item.content?.length || 0), 0);
-        const afterChars = tenderRequirementEvidence.reduce((sum, item) => sum + (item.content?.length || 0), 0);
-        upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'tender-requirement-preselect', status: 'success', message: `评分项要求有用数据预筛：${tenderFileEvidence.length} → ${tenderRequirementEvidence.length} 条切片（${Math.round((afterChars / Math.max(1, beforeChars)) * 100)}% 字符量）`, details: ['投标程序/清单/目录/格式类切片已从主提取输入剔除（义务词形+语义命中双通道保留）', '全量切片仍作必提条款窄通道召回池，兜底不失效'] }, { subtitle: '评分项要求提取·预筛', order: session.global.progressStages.length }));
-        session.global.emitProgress();
-      }
-      // B 阶段：提取结果磁盘缓存（防脏双门禁+哈希失效）——同一项目资料未变化时跳过主提取/窄通道 LLM，
+      // 提取结果磁盘缓存 v4（对账闭合门禁 + 全内容指纹哈希）——同一项目资料未变化时跳过判定 LLM，
       // 命中时显性标注「复用上次提取」；env DOCUMENT_EXTRACTION_CACHE=0 显式关闭
       const extractionCacheEnabled = process.env.DOCUMENT_EXTRACTION_CACHE !== '0';
-      const extractionCacheKey = extractionCacheEnabled ? tenderRequirementsCacheKey({ collectionEvidence: tenderFileEvidence, preselectEvidence: tenderRequirementEvidence }) : undefined;
+      const extractionCacheKey = extractionCacheEnabled ? tenderRequirementsCacheKey({ collectionEvidence: extractionEvidence }) : undefined;
       const cachedTenderRequirements = extractionCacheKey ? readCachedTenderRequirements(session.prepare.projectRoot, extractionCacheKey) : undefined;
       let tenderRequirements: TenderRequirementModel;
       if (cachedTenderRequirements) {
         tenderRequirements = cachedTenderRequirements;
         // roleId 与提取成功阶段分离：upsertProgressStage 按 type+roleId 覆盖，同 roleId 会吞掉「复用」标注
-        upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'tender-requirements-cache', status: 'success', message: '复用上次提取结果（招标文件与预筛输入哈希命中，跳过主提取/窄通道 LLM）', details: tenderRequirementsSummary(tenderRequirements) }, { subtitle: '评分项要求提取·缓存复用', order: session.global.progressStages.length }));
+        upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'tender-requirements-cache', status: 'success', message: '复用上次提取结果（招标资料哈希命中，跳过判定 LLM）', details: tenderRequirementsSummary(tenderRequirements) }, { subtitle: '招标要求提取·缓存复用', order: session.global.progressStages.length }));
         session.global.emitProgress();
       } else {
-        tenderRequirements = await session.global.withProgressHeartbeat(() => extractTenderRequirements(tenderRequirementEvidence, { signal: session.global.input.signal }));
-        // W4/P3 提取失败重试：一次调用失败不静默跳过（要求层整体失效 = 评标失分级风险），重试一次仍失败才走 skipped stage 显式可见
-        if (!hasTenderRequirements(tenderRequirements) && tenderRequirementEvidence.length > 0) {
-          tenderRequirements = await session.global.withProgressHeartbeat(() => extractTenderRequirements(tenderRequirementEvidence, { signal: session.global.input.signal }));
-        }
-        // round-23 P0-1：必提条款窄通道双路提取——主提取 150k 全量输入会稀释模型注意力，
-        // 黄山杯/绿色等级/智慧工地等短条必提条款漏提（外部评分否决级：全文零落位且写作层杜撰替代奖项）。
-        // 召回由本地 bge 语义模型完成（语义特征集余弦排序取 top-k），语义提取仍归 LLM 独立小输入，字段级合并补齐主结果缺失字段。
-        const mandatoryEvidence = await filterMandatoryClauseEvidence(tenderFileEvidence);
-        const initialGaps = mandatoryFieldGaps(tenderRequirements);
-        if (mandatoryEvidence.length > 0 && initialGaps.length > 0) {
-          const narrowRequirements = await session.global.withProgressHeartbeat(() => extractTenderRequirements(mandatoryEvidence, { signal: session.global.input.signal }));
-          if (hasTenderRequirements(narrowRequirements)) {
-            tenderRequirements = mergeTenderRequirements(tenderRequirements, narrowRequirements);
-            upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'tender-mandatory-extraction', status: 'success', message: '必提条款窄通道补提完成（主提取漏提字段已补齐）', details: tenderRequirementsSummary(narrowRequirements) }, { subtitle: '评分项要求提取·必提补提', order: session.global.progressStages.length }));
+        tenderRequirements = await session.global.withProgressHeartbeat(() => extractTenderRequirements(extractionEvidence, {
+          signal: session.global.input.signal,
+          diagnostics: session.planning.generationDiagnostics,
+          onPhase: (message, details) => {
+            upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'tender-requirements-extraction', status: 'running', message, details }, { subtitle: '招标要求提取', order: session.global.progressStages.length }));
             session.global.emitProgress();
-          }
-        }
-        // round-26 字段级定向补提闭环（独立于窄通道，覆盖全部评分项要求字段——必提 6 字段 +
-        // 特殊质量/前附表/禁编/禁止性；评标办法/篇幅要求按项目需求不提取）：
-        // 主提取+窄通道后仍缺失的字段，做句级窗口聚焦提取（真实生成回归：招标文件 5.1.1 切片
-        // 含全部字段原文，主提取+窄通道两轮均漏提）。窗口无证据的字段判定「资料无此要求」，
-        // 降级为信息提示而非告警；证据存在但 LLM 仍漏提的字段分级告警（必提=告警，常规=提示）。
-        // 字段补提残余真漏提字段（窗口证据存在但 LLM 仍漏提）：缓存防脏写门禁用——
-        // 常规字段缺失会被旧门禁（仅查必提字段）放行固化，下次读缓存命中跳过补提闭环 → 永久丢失
-        let stillMissingFields: string[] = [];
-        const fieldGapsBefore = requirementFieldGaps(tenderRequirements);
-        if (fieldGapsBefore.length > 0 && tenderFileEvidence.length > 0) {
-          const gapResult = await session.global.withProgressHeartbeat(() => extractRequirementFieldGaps(tenderRequirements, tenderFileEvidence, { signal: session.global.input.signal }));
-          tenderRequirements = gapResult.model;
-          stillMissingFields = gapResult.stillGaps;
-          const noEvidence = gapResult.noEvidenceGaps;
-          // stillGaps 与 noEvidenceGaps 语义互斥（见 extractRequirementFieldGaps）：stillGaps 即窗口证据存在但 LLM 仍漏提的真漏提字段
-          const missingByEvidence = gapResult.stillGaps;
-          if (gapResult.stillGaps.length === 0) {
-            upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'tender-field-gap-extraction', status: 'success', message: '评分项要求字段定向补提完成（字段级聚焦提取，全部评分项要求字段已提取）', details: tenderRequirementsSummary(tenderRequirements) }, { subtitle: '评分项要求提取·字段补提', order: session.global.progressStages.length }));
-            session.global.emitProgress();
-          }
-          const isMandatory = (name: string) => (MANDATORY_FIELD_NAMES as readonly string[]).includes(name);
-          if (missingByEvidence.length > 0) {
-            const stillMandatory = missingByEvidence.filter(isMandatory);
-            const stillOptional = missingByEvidence.filter(name => !isMandatory(name));
-            const parts = [
-              stillMandatory.length > 0 ? `必提字段 ${stillMandatory.map(name => requirementFieldLabel(name as (typeof MANDATORY_FIELD_NAMES)[number])).join('、')}` : '',
-              stillOptional.length > 0 ? `常规字段 ${stillOptional.map(name => requirementFieldLabel(name as (typeof MANDATORY_FIELD_NAMES)[number])).join('、')}` : '',
-            ].filter(Boolean);
-            upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'tender-field-gap-missing', status: 'skipped', message: `字段定向补提后仍缺失：${parts.join('；')}（条款窗口证据存在但 LLM 提取失败）`, details: ['请检查 LLM 可用性与输出质量；正文将无法显性响应上述评分项要求'] }, { subtitle: '评分项要求提取·字段缺口', order: session.global.progressStages.length }));
-            session.global.emitProgress();
-          }
-          if (noEvidence.length > 0) {
-            const noEvidenceMandatory = noEvidence.filter(isMandatory);
-            const noEvidenceOptional = noEvidence.filter(name => !isMandatory(name));
-            const parts = [
-              noEvidenceMandatory.length > 0 ? `必提字段 ${noEvidenceMandatory.map(name => requirementFieldLabel(name as (typeof MANDATORY_FIELD_NAMES)[number])).join('、')}` : '',
-              noEvidenceOptional.length > 0 ? `常规字段 ${noEvidenceOptional.map(name => requirementFieldLabel(name as (typeof MANDATORY_FIELD_NAMES)[number])).join('、')}` : '',
-            ].filter(Boolean);
-            // roleId 独立于上方缺失告警 stage：同 roleId 会被 upsert 覆盖互吞（两分支可同时存在）
-            upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'tender-field-gap-no-evidence', status: 'skipped', message: `${parts.join('；')}：招标资料中未找到对应条款或条款值为「无」（判定为无此要求，非漏提）`, details: ['若项目实际存在该要求，请检查招标文件相关章节切片完整性'] }, { subtitle: '评分项要求提取·字段缺口', order: session.global.progressStages.length }));
-            session.global.emitProgress();
-          }
-        }
-        // 写缓存（防脏写门禁：空结果/必提字段缺失/字段补提仍漏提不落盘，坏数据永不固化——
-        // stillGaps 真漏提字段一旦固化，下次读缓存命中即跳过补提闭环，常规字段缺失永久丢失）
-        if (extractionCacheKey && stillMissingFields.length === 0) writeCachedTenderRequirements(session.prepare.projectRoot, extractionCacheKey, tenderRequirements);
+          },
+        }));
+        // 写缓存（门禁：对账闭合——未判定>0/结构损坏不落盘，坏数据永不固化）
+        if (extractionCacheKey) writeCachedTenderRequirements(session.prepare.projectRoot, extractionCacheKey, tenderRequirements);
       }
       if (hasTenderRequirements(tenderRequirements)) {
-        upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'tender-requirements-extraction', status: 'success', message: '招标文件评分项要求结构化提取完成', details: tenderRequirementsSummary(tenderRequirements) }, { subtitle: '评分项要求提取', order: session.global.progressStages.length }));
+        upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'tender-requirements-extraction', status: 'success', message: `招标要求结构化提取完成：要求 ${tenderRequirements.reconciliation.entryCount} 条、排除 ${tenderRequirements.reconciliation.excludedCount} 条（${tenderRequirements.reconciliation.batchCount} 批判定）`, details: tenderRequirementsSummary(tenderRequirements) }, { subtitle: '招标要求提取', order: session.global.progressStages.length }));
         session.global.emitProgress();
-      } else if (tenderRequirementEvidence.length > 0) {
-        upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'tender-requirements-extraction', status: 'skipped', message: '评分项要求提取未获得有效结果（模型不可用或资料中无要求），零响应检测自动跳过', details: [] }, { subtitle: '评分项要求提取', order: session.global.progressStages.length }));
+      } else if (extractionEvidence.length > 0) {
+        upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'tender-requirements-extraction', status: 'skipped', message: '招标要求提取未获得有效结果（模型不可用或资料中无要求条款），章级验收自动跳过', details: [] }, { subtitle: '招标要求提取', order: session.global.progressStages.length }));
+        session.global.emitProgress();
+      }
+      // 未判定>0 = 对账未闭合：独立告警（不阻断生成；缓存已由写门禁拒收）
+      if (tenderRequirements.extracted && tenderRequirements.reconciliation.undecidedCount > 0) {
+        upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'tender-requirements-undecided', status: 'skipped', message: `对账未闭合：${tenderRequirements.reconciliation.undecidedCount} 条条款未判定（LLM 输出缺号且重试后仍缺）`, details: ['未判定条款不进入分配与验收；请检查 LLM 可用性'] }, { subtitle: '招标要求提取·对账', order: session.global.progressStages.length }));
         session.global.emitProgress();
       }
       return tenderRequirements;
     } catch (error) {
-      // 提取链独立降级：bge/LLM 异常一律走空模型 + skipped 显性警示，不阻断生成
-      upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'tender-requirements-extraction', status: 'skipped', message: '评分项要求提取链异常，已降级为空模型（零响应检测自动跳过）', details: [`异常信息：${error instanceof Error ? error.message : String(error)}`, '请检查 LLM 可用性与本地语义模型状态'] }, { subtitle: '评分项要求提取', order: session.global.progressStages.length }));
+      // 提取链独立降级：LLM 异常一律走空模型 + skipped 显性警示，不阻断生成
+      upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'tender-requirements-extraction', status: 'skipped', message: '招标要求提取链异常，已降级为空模型（章级验收自动跳过）', details: [`异常信息：${error instanceof Error ? error.message : String(error)}`, '请检查 LLM 可用性'] }, { subtitle: '招标要求提取', order: session.global.progressStages.length }));
       session.global.emitProgress();
       return emptyTenderRequirements(false);
     }

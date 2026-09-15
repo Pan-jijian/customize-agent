@@ -1,5 +1,5 @@
 import type { DocumentTemplate, DocumentTemplateChapter } from './types';
-import { displayChapterTitle, isFragmentLikeSectionTitle, isInstructionLikeOutlineTitle, isTenderClauseFragmentTitle } from './outline';
+import { displayChapterTitle, isFragmentLikeSectionTitle, isInstructionLikeOutlineTitle } from './outline';
 import { isHardBannedSectionTitle } from './evidenceContentSafety';
 import { inferConstructionOrgProjectTypes, type ConstructionOrgProjectType } from './constructionOrgProjectTypes';
 

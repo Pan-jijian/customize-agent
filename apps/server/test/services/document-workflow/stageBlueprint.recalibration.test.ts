@@ -94,6 +94,9 @@ const makeSession = (options: { longformStrict: boolean; bidCompositionMissing?:
       documentBudget: { chapterTargets, targetChars: 140000, longformStrict: options.longformStrict },
       generationBudget: { chapterConcurrency: 4, reviewConcurrency: 2 },
       generationDiagnostics: { evidence: { searchQueries: 0, searchMs: 0 }, llm: { lastInfo: '' } },
+      // 前置阶段契约（stageOutlinePlanning 恒注入）：本组零要求 → 分配块零副作用（不落盘/无进度行）
+      tenderRequirements: { entries: [], excluded: [], reconciliation: { clauseCount: 0, entryCount: 0, excludedCount: 0, undecidedCount: 0, mergedCount: 0, batchCount: 0, retriedBatches: 0 }, extracted: false },
+      requirementsSimilarity: () => 0,
     },
     blueprint: {} as Record<string, unknown>,
     global: { progressStages: [] as Array<{ roleId?: string; status?: string; message?: string; details?: string[] }>, emitProgress: vi.fn(), input: { signal: undefined } },

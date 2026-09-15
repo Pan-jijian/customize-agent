@@ -2,7 +2,7 @@
  * dicAwardScheduleTableBoundary：奖项白名单（fabricatedAwardIssues，无基线全新检测器）+
  * 节点工期互斥（nodeScheduleConsistencyIssues）+ 表格重复（duplicateTableIssues）增量深挖（V 组）。
  * 覆盖增量维度（与 dicCommercialBoundary F 段 / dicTextStructureBoundary H1 段基线互补，不重复）：
- *  - V1 奖项白名单：白名单空宁漏报、facts 三源谱系、tenderRequirements 三源谱系、
+ *  - V1 奖项白名单：白名单空宁漏报、facts 三源谱系、tenderRequirements 条目谱系、
  *    前导剥离词 14 词谱系+循环叠加、GENERIC 10 词豁免谱系、负向前瞻 5 词谱系（历史缺陷回归）、
  *    奖项名 2-11 字长度边界+截断行为、多编造聚合去重；
  *  - V2 节点工期：跨形态全组合（B+C/B+D/C+C/D+D/A+D）、同 day 跨形态豁免、3 口径 message、
@@ -16,19 +16,15 @@ import { describe, expect, it } from 'vitest';
 import {
   duplicateTableIssues, fabricatedAwardIssues, nodeScheduleConsistencyIssues,
 } from '@/services/document-workflow/documentIntegrityChecks';
-import type { TenderRequirementItem, TenderRequirementModel } from '@/services/document-workflow/types';
+import type { TenderRequirementEntry, TenderRequirementModel } from '@/services/document-workflow/types';
 import { factOf, factsOf } from './boundaryKit';
 
 const EMPTY_FACTS = factsOf({});
-const ITEM = (text: string): TenderRequirementItem => ({ text, coreTerms: [] });
+const ENTRY = (text: string): TenderRequirementEntry => ({ text, coreTerms: [], sources: [{ file: '招标文件.pdf' }], category: '质量创优', policy: 'respond' });
 const TENDER_REQ = (partial: Partial<TenderRequirementModel> = {}): TenderRequirementModel => ({
-  awardObjectives: [],
-  specialQualityStandards: [],
-  awardClauses: [],
-  systematicBenchmarks: [],
-  dateFabricationProhibited: false,
-  prohibitionNotes: [],
-  frontScheduleClauses: [],
+  entries: [],
+  excluded: [],
+  reconciliation: { clauseCount: 0, entryCount: 0, excludedCount: 0, undecidedCount: 0, mergedCount: 0, batchCount: 0, retriedBatches: 0 },
   extracted: true,
   ...partial,
 });
@@ -159,21 +155,21 @@ describe('V1 奖项白名单：奖项名长度与形态边界', () => {
   });
 });
 
-describe('V1 奖项白名单：tenderRequirements 三源谱系', () => {
-  it('V1-24 awardObjectives 源 → 正文同词不报', () => {
-    const req = TENDER_REQ({ awardObjectives: [ITEM('确保黄山杯')] });
+describe('V1 奖项白名单：tenderRequirements 条目谱系', () => {
+  it('V1-24 条目源（创优条款）→ 正文同词不报', () => {
+    const req = TENDER_REQ({ entries: [ENTRY('创优目标：确保获得黄山杯。')] });
     expect(fabricatedAwardIssues('争创黄山杯。', EMPTY_FACTS, req)).toEqual([]);
   });
-  it('V1-25 specialQualityStandards 源 → 正文同词不报', () => {
-    const req = TENDER_REQ({ specialQualityStandards: [ITEM('鲁班奖')] });
+  it('V1-25 多条目聚合：白名单跨条目汇总（正文命中任一条目奖项词均不报）', () => {
+    const req = TENDER_REQ({ entries: [ENTRY('确保获得鲁班奖，支付该项300万元。'), ENTRY('绿色建筑等级要求：达到国标二星级。')] });
     expect(fabricatedAwardIssues('争创鲁班奖。', EMPTY_FACTS, req)).toEqual([]);
   });
-  it('V1-26 awardClauses 源 → 正文同词不报', () => {
-    const req = TENDER_REQ({ awardClauses: [ITEM('飞天奖')] });
-    expect(fabricatedAwardIssues('争创飞天奖。', EMPTY_FACTS, req)).toEqual([]);
+  it('V1-26 条目存在但正文出现其他奖项 → 仍报（条目谱系不扩大白名单）', () => {
+    const req = TENDER_REQ({ entries: [ENTRY('创优目标：确保获得黄山杯。')] });
+    expect(fabricatedAwardIssues('本工程争创鲁班奖。', EMPTY_FACTS, req)).toHaveLength(1);
   });
   it('V1-27 extracted=false → 源2不启用 → 白名单空不报', () => {
-    const req = TENDER_REQ({ extracted: false, awardObjectives: [ITEM('确保黄山杯')] });
+    const req = TENDER_REQ({ extracted: false, entries: [ENTRY('创优目标：确保获得黄山杯。')] });
     expect(fabricatedAwardIssues('本工程争创黄山杯。', EMPTY_FACTS, req)).toEqual([]);
   });
 });

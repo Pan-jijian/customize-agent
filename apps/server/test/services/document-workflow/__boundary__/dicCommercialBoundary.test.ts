@@ -20,7 +20,7 @@ import {
   stripCommercialDataSentences, supportSystemConflictIssues,
 } from '@/services/document-workflow/documentIntegrityChecks';
 import { buildSemanticSimilarity } from '@/services/document-workflow/semanticSimilarity';
-import type { SpecAuthorityMap } from '@/services/document-workflow/types';
+import type { SpecAuthorityMap, TenderRequirementEntry, TenderRequirementModel } from '@/services/document-workflow/types';
 import { factOf, factsOf } from './boundaryKit';
 
 vi.mock('@/services/document-workflow/semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
@@ -837,33 +837,26 @@ describe('J1 fabricatedAward 白名单判定', () => {
 
 describe('J2 fabricatedAward 白名单源谱系', () => {
   const md = '质量标准：黄山杯。';
+  const ENTRY = (text: string): TenderRequirementEntry => ({ text, coreTerms: [], sources: [{ file: '招标文件.pdf' }], category: '质量创优', policy: 'respond' });
+  const REQ = (entries: TenderRequirementEntry[], extracted = true): TenderRequirementModel => ({
+    entries, excluded: [],
+    reconciliation: { clauseCount: entries.length, entryCount: entries.length, excludedCount: 0, undecidedCount: 0, mergedCount: 0, batchCount: 1, retriedBatches: 0 },
+    extracted,
+  });
   it.each(['project', 'schedule'] as const)('J2 factsModel.%s 事实卡入白名单', (source) => {
     const model = factsOf({ [source]: [factOf({ value: '确保黄山杯' })] });
     expect(fabricatedAwardIssues(md, model)).toEqual([]);
   });
-  it('J2 tenderRequirements.awardObjectives 入白名单', () => {
-    const model = factsOf({
-      tenderRequirements: {
-        awardObjectives: [{ text: '确保黄山杯', coreTerms: [] }],
-        specialQualityStandards: [], awardClauses: [], systematicBenchmarks: [], prohibitionNotes: [],
-        frontScheduleClauses: [], dateFabricationProhibited: false, extracted: true,
-      },
-    });
-    expect(fabricatedAwardIssues(md, model)).toEqual([]);
+  it('J2 tenderRequirements.entries 文本入白名单（第三参数）', () => {
+    expect(fabricatedAwardIssues(md, factsOf({}), REQ([ENTRY('创优目标：确保黄山杯。')]))).toEqual([]);
   });
-  it('J2 tenderRequirements.specialQualityStandards / awardClauses 入白名单', () => {
-    const model = factsOf({
-      tenderRequirements: {
-        awardObjectives: [], specialQualityStandards: [{ text: '确保获得黄山杯', coreTerms: [] }],
-        awardClauses: [], systematicBenchmarks: [], prohibitionNotes: [], frontScheduleClauses: [],
-        dateFabricationProhibited: false, extracted: true,
-      },
-    });
-    expect(fabricatedAwardIssues(md, model)).toEqual([]);
+  it('J2 白名单不含正文奖项 → 报编造', () => {
+    const issues = fabricatedAwardIssues(md, factsOf({}), REQ([ENTRY('创优目标：确保鲁班奖。')]));
+    expect(issues.length).toBe(1);
+    expect(issues[0].message).toContain('黄山杯');
   });
   it('J2 tenderRequirements.extracted=false 不采白名单（无白名单不检测）', () => {
-    const model = factsOf({ tenderRequirements: { awardObjectives: [{ text: '确保黄山杯', coreTerms: [] }] } as never });
-    expect(fabricatedAwardIssues(md, model)).toEqual([]);
+    expect(fabricatedAwardIssues(md, factsOf({}), REQ([ENTRY('创优目标：确保黄山杯。')], false))).toEqual([]);
   });
 });
 
@@ -1046,10 +1039,6 @@ describe('M2 assemblyRateAuthority 提取谱系', () => {
   it('M2 label 不含装配率不采（value 含率字也不采）', () => {
     expect(extractAssemblyRateAuthority(factsOf({ project: [factOf({ fieldName: '其他', value: '30%' })] }))).toBeUndefined();
     expect(extractAssemblyRateAuthority(factsOf({ project: [factOf({ value: '装配率45%' })] }))).toBeUndefined();
-  });
-  it('M2 tenderRequirements.assemblyRate.text 兜底', () => {
-    const model = factsOf({ tenderRequirements: { assemblyRate: { text: '装配率不低于38.4%' } } as never });
-    expect(extractAssemblyRateAuthority(model)).toBe(38.4);
   });
   it('M2 数值门（0/101 不收）', () => {
     expect(extractAssemblyRateAuthority(factsOf({ project: [factOf({ fieldName: '装配率', value: '0%' })] }))).toBeUndefined();

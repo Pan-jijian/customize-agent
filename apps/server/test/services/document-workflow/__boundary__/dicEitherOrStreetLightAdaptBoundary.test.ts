@@ -30,7 +30,7 @@ vi.mock('@/services/document-workflow/semanticSimilarity', () => ({
 /** 恒值语义模拟器：全部 query 对任意句返回同值 */
 const CONST_SIM = (value: number) => async (_queries: unknown, _sentences: unknown) => (_left: string, _right: string): number => value;
 /** 门控语义模拟器：按 query 文本（left）决定分值，精确锁定逐 query 判定 */
-const GATED_SIM = (gate: (queryText: string) => number) => async (queries: string[], _sentences: unknown) => (left: string, _right: string): number => gate(left);
+const GATED_SIM = (gate: (queryText: string) => number) => async (_queries: string[], _sentences: unknown) => (left: string, _right: string): number => gate(left);
 
 // ── BB1. fixAmbiguousEitherOrCandidates：三规则顺序互作与多处计数 ──
 

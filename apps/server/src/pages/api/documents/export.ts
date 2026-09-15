@@ -437,10 +437,6 @@ function pointsValue(value: string | undefined, fallback: number) {
   return match[2]?.toLowerCase() === 'px' ? number * 0.75 : number;
 }
 
-function pointsCss(value: string | undefined, fallback: number) {
-  return `${pointsValue(value, fallback)}pt`;
-}
-
 function lengthToTwips(value: string | undefined, fallbackCm: number) {
   const match = /([\d.]+)\s*(cm|mm|in|pt)?/iu.exec(value || '');
   if (!match) return Math.round(fallbackCm * 567);

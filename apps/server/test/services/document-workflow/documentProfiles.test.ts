@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { buildDocumentProfileReport } from '@/services/document-workflow/documentProfiles';
 import type { DocumentTemplate, DocumentTemplateChapter } from '@/services/document-workflow/types';
 
-function makeTemplate(name: string, outputTitle: string, chapterTitles: string[], requirement = ''): DocumentTemplate {
+function makeTemplate(name: string, outputTitle: string, chapterTitles: string[]): DocumentTemplate {
   return {
     id: 't1',
     name,

@@ -159,7 +159,7 @@ export async function stripInternalTerminologySentences(markdown: string): Promi
     });
   }
   if (hitSet.size === 0) return markdown;
-  return lines.map((line, index) => {
+  return lines.map(line => {
     if (protectedLine(line)) return line;
     let next = line;
     for (const sentence of hitSet) {

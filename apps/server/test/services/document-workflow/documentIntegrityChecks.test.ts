@@ -3,7 +3,7 @@
  * 六个百分百与本地适配三项的纯语义判定——本地 bge 恒可用（本地 ONNX 推理），判定语义全权由 bge 负责，
  * 无不可用降级路径。语义通道全部 mock（避免测试加载 Transformers.js 重依赖）。
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, invertedDateRangeIssues, paragraphTailRepeatIssues, scanParagraphTailRepeats, collisionNumberedHeadingIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixInvertedDateRanges, fixParagraphOpeningRepeats, fixParagraphTailRepeats, fixCollisionNumberedHeadings, fixPlaceholderTableCells, fixQualityAssuranceCoverage, fixSixHundredPercentCoverage, fixTruncatedSentenceArtifacts, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
 import { markdownTableQualityIssues } from '@/services/document-workflow/qualityValidation';
 import { repairTableBlockLines } from '@/services/document-workflow/tableRepairHelpers';
@@ -489,13 +489,6 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
     expect(extractAssemblyRateAuthority(factsModel)).toBe(30);
   });
 
-  it('4.17.4 extractAssemblyRateAuthority：招标要求文本回退提取', () => {
-    const factsModel = {
-      tenderRequirements: { assemblyRate: { text: '装配式技术要求，装配率为30%' } },
-    } as unknown as DocumentFactsModel;
-    expect(extractAssemblyRateAuthority(factsModel)).toBe(30);
-  });
-
   it('4.17.4 extractProjectScaleSummary：面积+层数摘要', () => {
     const factsModel = {
       project: [{ key: '单体建筑面积', fieldName: '单体建筑面积', value: '单体建筑面积28570.36平方米' }],
@@ -919,7 +912,12 @@ describe('fabricatedAwardIssues（h14 奖项白名单）', () => {
   });
 
   it('评分项要求提取的奖项进入白名单', () => {
-    const requirements = { extracted: true, awardObjectives: [{ text: '创优目标：确保黄山杯', coreTerms: [] }], awardClauses: [], specialQualityStandards: [] } as unknown as TenderRequirementModel;
+    const requirements: TenderRequirementModel = {
+      entries: [{ text: '创优目标：确保黄山杯', coreTerms: [], sources: [{ file: '招标文件.pdf' }], category: '质量创优', policy: 'respond' }],
+      excluded: [],
+      reconciliation: { clauseCount: 1, entryCount: 1, excludedCount: 0, undecidedCount: 0, mergedCount: 0, batchCount: 1, retriedBatches: 0 },
+      extracted: true,
+    };
     expect(fabricatedAwardIssues('质量目标：确保黄山杯。', factsModel([]), requirements)).toEqual([]);
   });
 

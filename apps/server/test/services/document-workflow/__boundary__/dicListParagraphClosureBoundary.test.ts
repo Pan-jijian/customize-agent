@@ -134,7 +134,7 @@ describe('W1 危大清单：多清单矩阵与截断', () => {
   });
   it('W1-20 四清单 6 对候选 → slice(0,3) 截断为 3 条', () => {
     const md = ['深基坑工程', '模板工程', '脚手架工程', '起重吊装工程'].map(
-      (extra, i) => `## 危大工程辨识清单\n1.深基坑工程\n2.${extra}`,
+      extra => `## 危大工程辨识清单\n1.深基坑工程\n2.${extra}`,
     ).join('\n');
     expect(dangerousListConsistencyIssues(md)).toHaveLength(3);
   });

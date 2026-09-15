@@ -60,7 +60,7 @@ import type { extractLocalFactPool } from '../factsModel';
 import type { buildProfessionalDepthClassifier } from '../professionalDepthClassifier';
 import type { buildScopedProjectIntelligence } from '../projectIntelligence';
 import type { buildSemanticSimilarity } from '../semanticSimilarity';
-import type { routeTenderRequirementsToChapters } from '../tenderRequirements';
+import type { TenderRequirementAssignment } from '../tenderRequirements';
 import type { DiversityProfile } from '../diversityProfile';
 import type { SectionFingerprintPool } from '../sectionFingerprint';
 
@@ -198,7 +198,6 @@ export interface GenerationSessionPlanning {
   effectiveChapters: DocumentTemplateChapter[];
   finalBidStructureAudit: ReturnType<typeof validateBidStructureBeforeGeneration>;
   requirementsSimilarity: Awaited<ReturnType<typeof buildSemanticSimilarity>>;
-  requirementsRoutes: Awaited<ReturnType<typeof routeTenderRequirementsToChapters>>;
   factTokenScopeClassifier: Awaited<ReturnType<typeof buildFactTokenScopeClassifier>>;
   /** P17 章标题意图语义分类器（阶段 4 蓝图阻断/基础事实/扬尘注入三处判定共用同一实例） */
   chapterIntentClassifier: Awaited<ReturnType<typeof buildChapterIntentClassifier>>;
@@ -219,7 +218,7 @@ export interface GenerationSessionPlanning {
   fingerprintPool: SectionFingerprintPool;
 }
 
-/** blueprint：阶段 3 产物（蓝图/并发池/跨章基础事实缓存） */
+/** blueprint：阶段 3 产物（蓝图/要求分配/并发池/跨章基础事实缓存） */
 export interface GenerationSessionBlueprint {
   chapterConcurrency: number;
   reviewConcurrency: number;
@@ -228,6 +227,8 @@ export interface GenerationSessionBlueprint {
   basicFactSearchResults: KbSearchResult[];
   integratedBlueprint: IntegratedBlueprint | undefined;
   blueprintActive: boolean;
+  /** 要求分配（阶段 3：每条要求唯一主责章，章级注入与章级验收同源；分配对账 assignments.length===entries.length） */
+  requirementAssignments: TenderRequirementAssignment[];
   /** 清单事实锁（阶段 3 构建：条目→特征→工程量行级确定性锁，写作直读 + 生成后数值核对共用） */
   billFactLock: BillFactLock | undefined;
 }

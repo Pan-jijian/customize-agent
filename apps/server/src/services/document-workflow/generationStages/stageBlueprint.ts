@@ -4,11 +4,11 @@
  * 变量读写经 session 子对象显式化，业务生成语义与原巨型函数逐字一致（行为保持）。
  */
 import type { GenerationSession } from './generationSession';
-import type { IntegratedBlueprint } from '../integratedBlueprint';
 import { buildIntegratedBlueprint, estimateChapterMinFeasibleWords, findBlueprintChapter, renderBasicFactsForBlueprint, resolveBillOfQuantities, saveBlueprintAsset } from '../integratedBlueprint';
 import { reanchorChapterTargetsByFeasibility } from '../budget';
 import type { DocumentTemplateChapter } from '../types';
 import { buildBillFactLock } from '../billFactLock';
+import { assignTenderRequirementsToChapters, saveRequirementAssignmentsAsset } from '../tenderRequirements';
 import { displayStage, upsertProgressStage } from '../progress';
 import { Semaphore, runWithAdaptiveConcurrency } from '../utils';
 import { PROJECT_BASIC_FACT_QUERIES } from '../documentGeneratorHelpers';
@@ -99,6 +99,34 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
     } catch (error) {
       console.error(`[blueprint] 清单事实锁构建失败（章节按证据独立成稿）：${error instanceof Error ? error.message : String(error)}`);
       session.blueprint.billFactLock = undefined;
+    }
+  }
+  // ── 招标要求分配（唯一权威分配：每条要求唯一主责章；章级注入/章级验收/终局对账共用同一份分配） ──
+  // 分配对账：assignments.length === entries.length（结构性不变量：未分配恒为 0）；低置信分配标记供审计
+  {
+    const requirementEntries = session.planning.tenderRequirements.entries;
+    const assignmentResult = assignTenderRequirementsToChapters(requirementEntries, session.planning.effectiveChapters, session.planning.requirementsSimilarity);
+    session.blueprint.requirementAssignments = assignmentResult.assignments;
+    if (assignmentResult.assignments.length !== requirementEntries.length) {
+      throw new Error(`招标要求分配对账失败：要求 ${requirementEntries.length} 条，分配 ${assignmentResult.assignments.length} 条`);
+    }
+    if (requirementEntries.length > 0) {
+      const assetPath = saveRequirementAssignmentsAsset(session.prepare.projectRoot, assignmentResult.assignments);
+      const byChapter = new Map<string, number>();
+      for (const assignment of assignmentResult.assignments) byChapter.set(assignment.chapterTitle, (byChapter.get(assignment.chapterTitle) || 0) + 1);
+      upsertProgressStage(session.global.progressStages, displayStage({
+        type: 'validation',
+        roleId: 'tender-requirement-assignment',
+        status: 'success',
+        message: `招标要求分配：${assignmentResult.assignments.length} 条要求全部落位 ${byChapter.size} 个责任章${assignmentResult.lowConfidenceCount > 0 ? `（低置信 ${assignmentResult.lowConfidenceCount} 条，已分配唯一主责章）` : ''}`,
+        details: [
+          `分配对账：要求 ${requirementEntries.length} 条 = 分配 ${assignmentResult.assignments.length} 条（未分配 0）`,
+          `落盘：${assetPath}`,
+          ...[...byChapter.entries()].map(([title, count]) => `${title}：${count} 条`),
+          ...assignmentResult.assignments.filter(assignment => assignment.lowConfidence).slice(0, 8).map(assignment => `低置信：${assignment.entry.text} → ${assignment.chapterTitle}（相似度 ${assignment.score.toFixed(2)}）`),
+        ],
+      }, { subtitle: '招标要求分配', order: session.global.progressStages.length }));
+      session.global.emitProgress();
     }
   }
   // ── 4.35 容量密度可行性闭环：蓝图落盘且校验通过后，按真实要点密度重校准章预算（写作前） ──

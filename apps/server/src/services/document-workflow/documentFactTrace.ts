@@ -178,7 +178,7 @@ export function buildBoqRowTraces(markdown: string, factsModel: DocumentFactsMod
 }
 
 /** BOQ 行级落位问题（从 trace 生成） */
-export function boqRowTraceIssues(traces: BoqRowTrace[], options: { maxIssues?: number } = {}): ValidationIssue[] {
+export function boqRowTraceIssues(traces: BoqRowTrace[]): ValidationIssue[] {
   const unplaced = traces.filter(t => !t.placed);
   if (unplaced.length === 0) return [];
   const total = traces.length;

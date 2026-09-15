@@ -9,7 +9,7 @@ import type { DocumentEvidence, DocumentFact } from '../types';
 import { buildBlueprintDecisionLock } from './decisionLock';
 import { deriveQuantitiesFromBoq, deriveSpecAuthoritiesFromBoq, extractBasisRegulations, extractContractFromFacts, extractLocationFromFacts, extractRedLineFacts, extractVillageCount } from './parse';
 import { BLUEPRINT_AMOUNT_RULE } from './types';
-import type { BlueprintBuildDiagnostics, BlueprintData, BlueprintDeployment, BlueprintDifficulty, BlueprintEarthworkBalance, BlueprintEquipmentItem, BlueprintInspectionBatch, BlueprintLabor, BlueprintMaterialPlanItem, BlueprintMilestone, BlueprintQuantity, BlueprintRedLineFact, BlueprintTempUtilities } from './types';
+import type { BlueprintBuildDiagnostics, BlueprintData, BlueprintDeployment, BlueprintDifficulty, BlueprintEarthworkBalance, BlueprintEquipmentItem, BlueprintInspectionBatch, BlueprintLabor, BlueprintMaterialPlanItem, BlueprintMilestone, BlueprintTempUtilities } from './types';
 
 /** L2 推导参数已迁出至 blueprintDerivationStrategies 策略表（工程类型注册制）：
  * 工种映射/工效系数/条目归类/里程碑分组/机械映射/功率表/检验批规则/重难点模板

@@ -3,7 +3,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AutoDocumentSpecPackage } from '@/services/document-core/autoDocumentSpecTypes';
-import { DEFAULT_DOCUMENT_DOMAIN_PROFILE } from '@/services/document-core/documentDomainProfileService';
 import type { DocumentEvidence, DocumentFact, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, StructuredTableFact } from '@/services/document-workflow/types';
 import {
   buildChapterFactNeeds,

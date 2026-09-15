@@ -1,5 +1,5 @@
 import type { DocumentEvidence, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, PromptChapterStructuralRule, PromptDocumentRuleSet, RuleExtractionTrace, RuntimePromptRuleSet } from './types';
-import { documentTextLength, explicitLengthTargets } from './budget';
+import { explicitLengthTargets } from './budget';
 import { buildEvidenceBundle, evidenceBundlePrompt, evidencePromptBudgetForTarget } from './evidence';
 import { callDocumentLlmJson } from './llmClient';
 import { displayChapterTitle, isFragmentLikeSectionTitle, normalizePlannedSectionTitle } from './outline';

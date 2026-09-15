@@ -111,7 +111,6 @@ describe('A5 fabricatedStartDate 日期格式谱系', () => {
 // ── B. 字段-数值错配 ──
 
 describe('B1 fieldValueMismatch 标签×值谱系', () => {
-  const siteLabels = ['总占地面积', '占地面积'];
   const bodyLabels = ['单体建筑面积', '总建筑面积', '建筑面积'];
   const rows = bodyLabels.flatMap(label => ([
     {
