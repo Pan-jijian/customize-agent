@@ -400,11 +400,16 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     bidCompositionWritingRules(options.bidComposition),
     // A5a 前缀缓存：可变 promptTexts 已移入 user 首部，system 保持恒定（跨章共享 prefix cache）
   ].filter(Boolean).join('\n\n');
-  // 4.40 块写作字数合同（单通道指令）：提示词直接下达目标与合格区间（与块质检 [0.85,1.15] 同一合同）。
-  // 旧渲染「内容不少于 X 字，最多不超过 Y 字」有两个缺陷：①「不少于」措辞诱导模型向上界乃至以上写作；
-  // ② 上限 Y（1.1×）与质检口径（1.15×）不一致，取两套数字的并集即系统性超产的诱导源。
+  // 4.43 篇幅上限语义 + 显示校准系数（根治字数控不住）：
+  // 实验链实证（R/V8~V13 共 80+ 次直连调用）——① 模型对绝对字数无计数能力：最简指令
+  //「请写约 1500 字」实测 2434 字（1.62x，R 组 15 次调用）；② 目标语义（「约 N 字」/「篇幅目标 N」）
+  // 零咬合：全信号缩放 0.85 后产出不变（V11 实测）；③ 上限语义（「不超过 N」）有效咬合
+  //（X2 单小节 1.21x vs 目标语义 1.64x）；④ 块级/点位/骨架全信号一致缩放 0.75 后（V13 定标 22 样本）：
+  // 产出落到 0.81~1.25x 块目标、82% 直通质检窗（缩放 0.70 则 100% 直通但文档总量偏低）。
+  // 取 0.75：文档总量 ≈0.97x 用户目标（贴合要求字数），欠产侧尾距 0.7 阻断线远、
+  // 超产侧 ~18% 由二轮压缩反馈收敛。
   const writingTarget = options.targetWords || options.minWords || 1000;
-  const lengthContractLine = `- 保留章节标题；本节正文篇幅目标 ${writingTarget} 字（合格区间 ${Math.floor(writingTarget * 0.85)}~${Math.ceil(writingTarget * 1.15)} 字）：篇幅向目标收敛，不得超过上限、不得低于下限。`;
+  const lengthContractLine = renderLengthContractLine(writingTarget);
   const prompt = [
     promptTexts ? `配置写作主控提示词：\n${promptTexts}` : '',
     `文档模板：${template.name}`,
@@ -545,12 +550,31 @@ export function sectionTargets(chapter: DocumentTemplateChapter, targetWords: nu
   return sections.map((section, index) => ({ title: section, targetWords: index === 0 ? base + remainder : base }));
 }
 
+/** 4.43 块级篇幅显示校准系数（「系数」的来由与实证见 buildLlmChapterContent 内 4.43 注释）：
+ * 渲染给模型的字数 = 真实目标 × 本系数。模型对被展示数字的执行偏差 ~1.3x（无法计数），
+ * 校准后实机产出落回质检窗 [0.7,1.15]×真实目标（V13 定标：s=0.75 → 82% 直通、中位 0.9xT）。 */
+export const BLOCK_LENGTH_DISPLAY_SCALE = 0.75;
+
+/** 显示字数换算：真实目标 × 校准系数（下限 1 字防止 0 渲染）。 */
+export function displayWordCap(words: number) {
+  return Math.max(1, Math.round(words * BLOCK_LENGTH_DISPLAY_SCALE));
+}
+
+/** 块级字数合同行（4.43 上限语义）：目标语义措辞零咬合（V8~V11 实测），上限语义为唯一
+ * 有效字数指令（X2/V13 实证）；显示值经校准系数折算，实际产出回落到合同窗内。 */
+export function renderLengthContractLine(targetWords: number) {
+  const cap = displayWordCap(targetWords);
+  return `- 保留章节标题；本节正文总字数不超过 ${cap} 字（控制在 ${Math.round(cap * 0.85)}~${cap} 字之间），超出即不合格。`;
+}
+
+/** 小节篇幅上限指令（4.43 上限语义 + 显示校准）：逐点上限控制；
+ * 旧文案「首轮生成应尽量一次达成，避免后续补写」为篇幅向上诱导句（dump 法证 25/25 在案），已删除。 */
 export function buildSectionBudgetInstruction(chapter: DocumentTemplateChapter, targetWords: number, quotas?: SectionQuotaItem[]) {
   const targets = sectionTargets(chapter, targetWords, quotas);
   if (targets.length === 0) return '';
   return [
-    '本节小节篇幅计划（首轮生成应尽量一次达成，避免后续补写）：',
-    ...targets.map(item => `- ${item.title}：约 ${item.targetWords} 字，并写入与该小节相关的材料事实、适用边界和必要说明。`),
+    '本节小节篇幅上限（逐点控制、不得超出；在各自上限内按材料深度展开）：',
+    ...targets.map(item => `- ${item.title}：不超过 ${displayWordCap(item.targetWords)} 字，并写入与该小节相关的材料事实、适用边界和必要说明。`),
   ].join('\n');
 }
 
@@ -1398,7 +1422,8 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     // 容量规划配额随清单下发（指令层：告诉模型每个要点写多深）——块质检只查块总字数区间，
     // 不逐点核对配额，写作口径与检测口径同源
     const coverageList = block.subPoints.map(point => {
-      const quota = point.quotaWords && point.quotaWords > 0 ? `篇幅约 ${point.quotaWords} 字` : '';
+      // 4.43 上限语义 + 显示校准：点位配额同样按系数折算（点位目标语义零咬合，V13 全信号上限化后落窗）
+      const quota = point.quotaWords && point.quotaWords > 0 ? `篇幅不超过 ${displayWordCap(point.quotaWords)} 字` : '';
       return normalizeSubsectionTitleForDedup(point.title) === normalizedBlockTitle
         ? `- ### ${block.title}（本节标题，覆盖评分细目：${point.sources.join('、')}；正文直接展开，无需四级标题；如按细目分节，仅可使用上述细目标题作为四级标题${quota ? `；${quota}` : ''}）`
         : (point.sources.length > 1
@@ -1409,7 +1434,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     // 块级 roleContext 只保留块专属段（factsHint/coverageList）——共享前缀变长，命中率回升
     const forbiddenTitlesLine = otherBlockTitleSet.size > 0 ? `严禁将以下属于本章其他小节的标题作为本节任何标题输出（H3 仅允许「${block.title}」，H4 仅允许上面清单中的标题）：${[...otherBlockTitleSet].join('、')}。` : '';
     const blockRoleContext = [factsHint, blockSkeletonPrompt, divisionContainerPrompt, divisionElementFusionPrompt, keySectionKind && !isDivisionChapterContainer ? flowRotationDirective(index) : '', block.subPoints.length > 0
-      ? `本节是「${input.chapter.title}」章的一个主题小节，只写本节标题覆盖的内容，不得重复本章其他节内容；必须按以下清单逐点写出实施性正文，标题必须与给定标题完全一致，不得改名、合并或遗漏；每个要点必须覆盖其标注的全部评分细目内容，但不得为这些细目单独开设小节标题；清单标注的篇幅为该要点目标深度，按标注详略展开：\n${coverageList}${forbiddenTitlesLine ? `\n${forbiddenTitlesLine}` : ''}`
+      ? `本节是「${input.chapter.title}」章的一个主题小节，只写本节标题覆盖的内容，不得重复本章其他节内容；必须按以下清单逐点写出实施性正文，标题必须与给定标题完全一致，不得改名、合并或遗漏；每个要点必须覆盖其标注的全部评分细目内容，但不得为这些细目单独开设小节标题；清单标注的篇幅为该要点字数上限，按标注控制详略、不得超出：\n${coverageList}${forbiddenTitlesLine ? `\n${forbiddenTitlesLine}` : ''}`
       : `本节是「${input.chapter.title}」章的唯一小节（本章无细分小节规划）：正文在 H3 标题下直接展开为连贯的正式叙述，不使用四级标题；覆盖本节标题对应的全部实质内容，不得重复章外内容。`, '【防复读硬约束】本节内同一句话只允许出现一次：同一段落内不得复读任何已写出的句子，不同段落之间不得整句复制，同一工艺/措施只在一处完整表述、其余位置引用结论不重述原文；段落结尾不得复读段内前句（禁止“为此/综上/因此”后接照抄句）。'].filter(Boolean).join('\n\n');
     let lastMissing: string[] = [];
     let lastDuplicates: string[] = [];
@@ -1477,9 +1502,9 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           scopedProjectContext: input.scopedProjectContext,
           // F9：章级角色上下文上移 L2 共享段（同章各块完全相同 → prefix cache 共享命中）
           chapterLevelContext: input.roleContext || '',
-          // 4.40 字数合同（单通道）：minWords/targetWords = 块目标（不打折），篇幅目标与合格区间由
-          // buildLlmChapterContent 内 lengthContractLine 统一下达（目标 ±15% 双向合同，与块质检同一口径）；
-          // maxWords 旧参数已删——1.1× 上限与质检 1.15× 口径不一致，取并集即系统性超产的诱导源
+          // 4.43 字数合同（单通道）：minWords/targetWords = 块目标真实值（质检口径），展示给模型的
+          // 合同行经显示校准系数下达（上限语义）——真实值与展示值分离：质检用真实值、写作指令用
+          // 校准值，两者经 V13 定标对齐（产出回落到真实窗口内）；maxWords 旧参数保持删除
           minWords: block.targetWords,
           targetWords: block.targetWords,
           sectionQuotas: blockSectionQuotas,
@@ -1683,9 +1708,10 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         lastFormatFeedback = formatBlocking
           ? `【上一轮后台/兜底话术】以下句子属于后台处理话术（不得出现在正式正文）：${formatHits.map(line => `“${line.slice(0, 60)}”`).join('、')}。必须删除或改写为正式表述——用绑定资料中的明确事实替换“待确认/不适用/以招标文件为准”类表述；确实无资料支撑的内容直接删除该句，不得保留任何后台痕迹。`
           : '';
-        // 超产压缩反馈：合并同类工序/措施表述、相同内容只完整表述一次，保 H4 标题与关键数值
+        // 4.43 超产压缩反馈（上限语义 + 压缩目标下压到真实目标 0.8~0.95x）：压缩任务模型执行偏差
+        // ~1.3x（V9 实测），目标给到窗口下沿保证压缩后落回 [0.7,1.15]×真实目标；保 H4 标题与关键数值
         lastOverProduceFeedback = overProduceBlocking
-          ? `【上一轮篇幅超限】当前输出 ${chars} 字，超出本节篇幅上限 ${Math.ceil(block.targetWords * 1.15)} 字（目标 ${block.targetWords} 字）。必须压缩重写：同类工序/措施合并叙述，相同内容只完整表述一次，删除重复铺陈与并列复述；保留全部 H4 标题与关键数值，把总字数压缩到 ${Math.floor(block.targetWords * 0.9)}~${Math.ceil(block.targetWords * 1.1)} 字。`
+          ? `【上一轮篇幅超限】当前输出 ${chars} 字，超出本节篇幅上限 ${Math.ceil(block.targetWords * 1.15)} 字（目标 ${block.targetWords} 字）。必须压缩重写：同类工序/措施合并叙述，相同内容只完整表述一次，删除重复铺陈与并列复述；保留全部 H4 标题与关键数值，把总字数压缩到 ${Math.floor(block.targetWords * 0.8)}~${Math.floor(block.targetWords * 0.95)} 字。`
           : '';
         // 4.12.17 确定性清洗兜底（每一轮不达标都先试）：同 H3 重复 H4 去重 + 清单外标题块删除后重检字数，
         // 结构性重复/清单外骨架由代码兜底，避免内容合格的块整块作废 → 整章降级 → 字数雪崩。

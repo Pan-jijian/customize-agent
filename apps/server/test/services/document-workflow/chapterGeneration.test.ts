@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assignChapterFactsToBlocks, buildChapterFactCoverageContext, buildSectionBudgetInstruction, capFactCoverageContext, extractEngineeringObjectNames, sectionTargets } from '@/services/document-workflow/chapterGeneration';
+import { assignChapterFactsToBlocks, BLOCK_LENGTH_DISPLAY_SCALE, buildChapterFactCoverageContext, buildSectionBudgetInstruction, capFactCoverageContext, displayWordCap, extractEngineeringObjectNames, renderLengthContractLine, sectionTargets } from '@/services/document-workflow/chapterGeneration';
 import { buildChapterStructureFromBlueprint } from '@/services/document-workflow/integratedBlueprint';
 import type { DocumentEvidence, DocumentTemplateChapter, SpecAuthorityMap } from '@/services/document-workflow/types';
 
@@ -204,17 +204,19 @@ describe('4.42 小节篇幅计划守恒配额（520 固定地板移除回归）'
     expect(buildSectionBudgetInstruction(chapterOf([]), 1800)).toBe('');
   });
 
-  it('篇幅计划渲染：不再输出“至少达到 X 字”下限强化；配额上限合计不超块目标', () => {
+  it('篇幅指令渲染（4.43 上限语义 + 显示校准）：逐点「不超过 N 字」，N=配额×0.75；无下限强化', () => {
     const text = buildSectionBudgetInstruction(chapterOf(TITLES_4), 1800, [
       { title: '到货节奏安排', words: 620 },
       { title: '动态调整机制', words: 480 },
       { title: '分区堆放组织', words: 420 },
       { title: '现场存量控制', words: 280 },
     ]);
-    expect(text).toContain('本节小节篇幅计划');
-    expect(text).toContain('- 到货节奏安排：约 620 字');
+    expect(text).toContain('本节小节篇幅上限');
+    expect(text).toContain('- 到货节奏安排：不超过 465 字'); // 620 × 0.75 显示校准
     expect(text).not.toContain('至少达到');
     expect(text).not.toContain('520');
+    expect(text).not.toContain('尽量一次达成');
+    expect(text).not.toContain('篇幅计划');
   });
 
   it('组合链：规划层守恒配额直连写作层篇幅计划（Σ=块预算；无 520 固定地板残留）', () => {
@@ -233,12 +235,28 @@ describe('4.42 小节篇幅计划守恒配额（520 固定地板移除回归）'
     const chapter: DocumentTemplateChapter = { id: 'c1', title: block.title, purpose: '', queries: [], requiredFacts: [], sections: block.subPoints.map(point => point.title) };
     const quotas = block.subPoints.map(point => ({ title: point.title, words: point.quotaWords || 0 }));
     const text = buildSectionBudgetInstruction(chapter, block.targetWords, quotas);
-    const rendered = [...text.matchAll(/约 (\d+) 字/gu)].map(match => Number(match[1]));
-    const expectedQuotas = block.subPoints.filter(point => point.title !== block.title).map(point => point.quotaWords || 0);
+    const rendered = [...text.matchAll(/不超过 (\d+) 字/gu)].map(match => Number(match[1]));
+    // 4.43 显示校准：渲染值 = 配额 × 系数（写作指令用校准值，质检用真实值）
+    const expectedQuotas = block.subPoints.filter(point => point.title !== block.title).map(point => displayWordCap(point.quotaWords || 0));
     expect(rendered).toEqual(expectedQuotas);
     // 合计不超块预算（旧固定 520 地板下 4 要点必超上限 2070）
     expect(rendered.reduce((sum, value) => sum + value, 0)).toBeLessThanOrEqual(block.targetWords);
     expect(text).not.toContain('至少达到');
     expect(text).not.toContain('520');
+  });
+});
+
+describe('4.43 篇幅上限语义 + 显示校准（根治字数控不住）', () => {
+  it('合同行渲染：上限语义（不超过）、显示值=真实目标×0.75、不得超限；旧目标语义措辞已删', () => {
+    expect(BLOCK_LENGTH_DISPLAY_SCALE).toBe(0.75);
+    expect(displayWordCap(1500)).toBe(1125);
+    expect(displayWordCap(1800)).toBe(1350);
+    expect(displayWordCap(1)).toBe(1);
+    const line = renderLengthContractLine(1500);
+    expect(line).toContain('本节正文总字数不超过 1125 字');
+    expect(line).toContain('（控制在 956~1125 字之间）');
+    expect(line).toContain('超出即不合格');
+    expect(line).not.toContain('篇幅目标');
+    expect(line).not.toContain('1500');
   });
 });
