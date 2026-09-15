@@ -8,7 +8,7 @@ import { FORMAL_WRITING_RULES, SECTION_GENERATION_SAFETY_RULES, docSystemPrefix,
 import { callDocumentLlm, callDocumentLlmJson, contextLayerChars, getDocumentLlmMaxConcurrency } from './llmClient';
 import { dedupeRepeatedSubsections, findDuplicateH4Titles, findExtraneousBlockTitles, normalizeSubsectionTitleForDedup, stringifyFactValue, stripExtraneousBlockHeadings, throwIfAborted } from './utils';
 import { measureGenerationStep } from './rolePipeline';
-import { normalizePlannedSections, professionalSectionTaskCard } from './promptRuleExtraction';
+import { normalizePlannedSections, professionalSectionTaskCard, sectionTitleEquivalent } from './promptRuleExtraction';
 import { tablePlansPrompt, unassignedSectionTablePlans } from './constructionOrgTablePlan';
 import { bidCompositionWritingRules, isBodyTableForbidden, type BidCompositionSpec } from './bidComposition';
 import { constructionOrgBonusModulePrompt, constructionOrgChapterRulePrompt } from './constructionOrgQualityRules';
@@ -301,7 +301,7 @@ function factCoveredByEvidence(fact: string, evidence: DocumentEvidence[]): bool
 }
 
 /** 使用 LLM 生成单章内容，基于证据包、提示词角色和用户需求 */
-export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; twoStep?: boolean; supplementEvidenceProvider?: (missingFacts: string[]) => Promise<DocumentEvidence[]>; diagnostics?: DocumentGenerationDiagnostics; evidenceFloorChars?: number; evidenceCeilingChars?: number; compactProjectContext?: boolean; scopedProjectContext?: boolean; sharedFactLayerText?: string; evidenceRankBoost?: (item: DocumentEvidence) => number; onlyRankBoosted?: boolean; chapterLevelContext?: string; blueprintDataText?: string; blueprintSliceText?: string; skipT2Catalog?: boolean; /** 标书编制规格（阶段 1 判定）：暗标正文禁表/禁图/身份禁语写作口径注入 */ bidComposition?: BidCompositionSpec } = {}) {
+export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; sectionQuotas?: SectionQuotaItem[]; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; twoStep?: boolean; supplementEvidenceProvider?: (missingFacts: string[]) => Promise<DocumentEvidence[]>; diagnostics?: DocumentGenerationDiagnostics; evidenceFloorChars?: number; evidenceCeilingChars?: number; compactProjectContext?: boolean; scopedProjectContext?: boolean; sharedFactLayerText?: string; evidenceRankBoost?: (item: DocumentEvidence) => number; onlyRankBoosted?: boolean; chapterLevelContext?: string; blueprintDataText?: string; blueprintSliceText?: string; skipT2Catalog?: boolean; /** 标书编制规格（阶段 1 判定）：暗标正文禁表/禁图/身份禁语写作口径注入 */ bidComposition?: BidCompositionSpec } = {}) {
   const bundle = buildEvidenceBundle(chapter, evidence);
   // 证据注入预算与 generationBudget 的证据区间（7k-26k 档）对齐：未显式传入时保持旧默认，
   // 由 documentGenerator 主路径统一传入按章节目标字计算的 floor/ceiling
@@ -379,7 +379,7 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
   const sectionInstruction = chapter.sections?.length
     ? `本章小节由生成前规划得到，请完整包含并展开以下小节：\n${chapter.sections.map(section => `- ${section}`).join('\n')}`
     : '本章没有预设小节；请按用户提示词、模板章节、角色要求和绑定材料自然组织正文。';
-  const sectionBudgetInstruction = buildSectionBudgetInstruction(chapter, options.targetWords || options.minWords || 0);
+  const sectionBudgetInstruction = buildSectionBudgetInstruction(chapter, options.targetWords || options.minWords || 0, options.sectionQuotas);
   // 标书编制规格（阶段 1 判定）：暗标正文禁表（招标要求）时表格计划指令短路（不注入表格硬性要求）
   const tablePlanInstruction = isBodyTableForbidden(options.bidComposition) ? '' : tablePlansPrompt(chapter);
   const constructionOrgRuleInstruction = constructionOrgChapterRulePrompt(chapter);
@@ -513,21 +513,44 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
   return sanitizeFormalMarkdown(removeUnwantedDrawingImages(content.startsWith('## ') ? content : `## ${chapter.title}\n\n${content}`, Boolean(options.forbidDrawingImages)));
 }
 
-export function sectionTargets(chapter: DocumentTemplateChapter, targetWords: number) {
-  const sections = normalizePlannedSections(chapter.sections?.filter(Boolean) || [], chapter.title);
-  if (sections.length === 0) return [];
-  const rawBase = Math.floor(targetWords / sections.length);
-  const minimum = targetWords >= sections.length * 900 ? 900 : Math.max(520, Math.floor(rawBase * 0.9));
-  const base = Math.max(minimum, rawBase);
-  return sections.map(section => ({ title: section, targetWords: base }));
+/** 逐要点守恒配额项（容量规划 quotaWords 的写作层投影；Σ ≤ 块预算） */
+export interface SectionQuotaItem {
+  title: string;
+  words: number;
 }
 
-export function buildSectionBudgetInstruction(chapter: DocumentTemplateChapter, targetWords: number) {
-  const targets = sectionTargets(chapter, targetWords);
+/** 小节篇幅计划配额（4.42 守恒链单一来源）：优先采用容量规划点配额（quotas——与覆盖清单
+ * 「篇幅约 X 字」同源同数，Σ=块预算）；标题匹配不齐时确定性均分（floor + 余数补首项，
+ * Σ 恒 = targetWords）。任何路径下 Σ 逐点配额 ≤ 目标字数，不存在越过块合同上限的可能。
+ * 旧实现（已删除）为链外固定地板 max(520, rawBase)：块内要点数 N≥4 时 Σ=520N≥2080
+ * 必然突破 1800 块上限 2070；prompt 内双配额冲突（篇幅计划 520/要点 vs 覆盖清单 quotaWords）
+ * 是 4.41 首轮 22/22 全超产（1.19~2.29x，模型执行 Σ520N 精度 0.95~1.06x）的确定性根因——
+ * 第八轮 V 组对照实验：Σ 自洽（V3）1.04x 全达标 / Σ 超线（V1/V2）1.45x/1.57x 全超产。 */
+export function sectionTargets(chapter: DocumentTemplateChapter, targetWords: number, quotas?: SectionQuotaItem[]) {
+  const sections = normalizePlannedSections(chapter.sections?.filter(Boolean) || [], chapter.title);
+  if (sections.length === 0) return [];
+  if (quotas && quotas.length > 0) {
+    const words = sections.map(section => {
+      const exact = quotas.find(item => item.words > 0 && item.title === section);
+      if (exact) return exact.words;
+      return quotas.find(item => item.words > 0 && sectionTitleEquivalent(item.title, section))?.words;
+    });
+    if (words.every((value): value is number => typeof value === 'number' && value > 0)) {
+      return sections.map((section, index) => ({ title: section, targetWords: words[index]! }));
+    }
+  }
+  // 退化均分（防御：targetWords 小于小节数时每项至少 1 字，避免 0 字配额）
+  const base = Math.max(1, Math.floor(targetWords / sections.length));
+  const remainder = Math.max(0, targetWords - base * sections.length);
+  return sections.map((section, index) => ({ title: section, targetWords: index === 0 ? base + remainder : base }));
+}
+
+export function buildSectionBudgetInstruction(chapter: DocumentTemplateChapter, targetWords: number, quotas?: SectionQuotaItem[]) {
+  const targets = sectionTargets(chapter, targetWords, quotas);
   if (targets.length === 0) return '';
   return [
-    '本章小节篇幅计划（首轮生成应尽量一次达成，避免后续补写）：',
-    ...targets.map(item => `- ${item.title}：约 ${item.targetWords} 字，至少达到 ${Math.floor(item.targetWords * 0.9)} 字，并写入与该小节相关的材料事实、适用边界和必要说明。`),
+    '本节小节篇幅计划（首轮生成应尽量一次达成，避免后续补写）：',
+    ...targets.map(item => `- ${item.title}：约 ${item.targetWords} 字，并写入与该小节相关的材料事实、适用边界和必要说明。`),
   ].join('\n');
 }
 
@@ -1257,7 +1280,8 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     // 彻底修复同名结构：与主题块标题同名的 H4 要点由 H3 外壳直接承担，不再要求输出同名 H4
     // （历史缺陷：H3/H4 同名诱发模型把同名 H4 重复展开多轮 → 重复质检两轮失败 → dedupe 兜底字数不足 → 章阻断）
     const normalizedBlockTitle = normalizeSubsectionTitleForDedup(block.title);
-    const sectionTitles = block.subPoints.filter(point => normalizeSubsectionTitleForDedup(point.title) !== normalizedBlockTitle).map(point => point.title);
+    const blockSectionPoints = block.subPoints.filter(point => normalizeSubsectionTitleForDedup(point.title) !== normalizedBlockTitle);
+    const sectionTitles = blockSectionPoints.map(point => point.title);
     // 4.19 串章骨架防线：本章其他主题块的块标题+要点标题（归一化）作为禁词集合——
     // LLM 在主题块成稿时照抄整章其他主题块骨架（6.4 块输出 6.1~6.3 全部小节标题）属质检盲区：
     // missing 只查缺失、duplicates 只查同 H3 内重名，串章标题全数漏网（真实回归：目录小节串章实锤）
@@ -1359,6 +1383,10 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
       })
       : '';
     const blockChapter = { ...input.chapter, title: block.title, sections: sectionTitles, tablePlans: blockTablePlans[index] || [] };
+    // 4.42 逐要点守恒配额直连写作层：容量规划 quotaWords（Σ=块预算，与覆盖清单同源同数）——
+    // 旧写作层 sectionTargets 独立计算（固定 520 地板）Σ=520N 在 N≥4 时必然突破块合同上限，
+    // 是 4.41 首轮 22/22 全超产（1.19~2.29x）的确定性根因（第八轮 V 组对照实验实证）
+    const blockSectionQuotas: SectionQuotaItem[] = blockSectionPoints.map(point => ({ title: point.title, words: point.quotaWords || 0 }));
     // P3/P7 专属事实注入：blockFacts 为章级分配表分配给本块的事实行（每条只归属一个块）；
     // 蓝图规划层 block.facts 历史恒为空数组（factsHint 载体存在但从未填充），现由分配表确定性填充
     const blockFacts = [...(block.facts || []), ...blockFactAssignments[index]].slice(0, 8);
@@ -1454,6 +1482,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           // maxWords 旧参数已删——1.1× 上限与质检 1.15× 口径不一致，取并集即系统性超产的诱导源
           minWords: block.targetWords,
           targetWords: block.targetWords,
+          sectionQuotas: blockSectionQuotas,
           // deepseek 思考 token 与正文共享输出池，目标字数 ×1.5 且下限 3200 留足输出空间
           //（实测 6300 字仅耗 4202 token，8192 共享池富余充足）
           maxTokens: Math.max(3200, Math.ceil(block.targetWords * 1.5)),

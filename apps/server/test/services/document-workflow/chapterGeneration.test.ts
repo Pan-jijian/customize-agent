@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { assignChapterFactsToBlocks, buildChapterFactCoverageContext, capFactCoverageContext, extractEngineeringObjectNames } from '@/services/document-workflow/chapterGeneration';
+import { assignChapterFactsToBlocks, buildChapterFactCoverageContext, buildSectionBudgetInstruction, capFactCoverageContext, extractEngineeringObjectNames, sectionTargets } from '@/services/document-workflow/chapterGeneration';
+import { buildChapterStructureFromBlueprint } from '@/services/document-workflow/integratedBlueprint';
 import type { DocumentEvidence, DocumentTemplateChapter, SpecAuthorityMap } from '@/services/document-workflow/types';
 
 describe('capFactCoverageContext', () => {
@@ -159,5 +160,85 @@ describe('M4 事实分配工程归属隔离（extractEngineeringObjectNames / as
     expect(assignments[0]).toContain('土方工程 回填压实度 93%');
     expect(assignments[0]).not.toContain('完全无关的内容片段');
     expect(assignments[1]).toEqual([]);
+  });
+});
+
+describe('4.42 小节篇幅计划守恒配额（520 固定地板移除回归）', () => {
+  function chapterOf(sections: string[]): DocumentTemplateChapter {
+    return { id: 'c1', title: '拟投入的主要物资计划', purpose: '物资计划', queries: [], requiredFacts: [], sections };
+  }
+
+  const TITLES_4 = ['到货节奏安排', '动态调整机制', '分区堆放组织', '现场存量控制'];
+
+  it('核心回归：4 要点 × 目标 1800 → Σ=1800（旧实现固定 520 地板 Σ=2080 必然突破块上限 2070）', () => {
+    const targets = sectionTargets(chapterOf(TITLES_4), 1800);
+    expect(targets.map(item => item.targetWords)).toEqual([450, 450, 450, 450]);
+    expect(targets.reduce((sum, item) => sum + item.targetWords, 0)).toBe(1800);
+  });
+
+  it('容量规划配额优先采用（逐项精确匹配，Σ=块预算，与覆盖清单同源）', () => {
+    const targets = sectionTargets(chapterOf(TITLES_4), 1800, [
+      { title: '到货节奏安排', words: 620 },
+      { title: '动态调整机制', words: 480 },
+      { title: '分区堆放组织', words: 420 },
+      { title: '现场存量控制', words: 280 },
+    ]);
+    expect(targets.map(item => item.targetWords)).toEqual([620, 480, 420, 280]);
+    expect(targets.reduce((sum, item) => sum + item.targetWords, 0)).toBe(1800);
+  });
+
+  it('宽松标题匹配：配额标题带后缀注释时仍命中（sectionTitleEquivalent 同口径）', () => {
+    const targets = sectionTargets(chapterOf(['到货节奏安排']), 900, [{ title: '到货节奏安排与堆放管理', words: 700 }]);
+    expect(targets.map(item => item.targetWords)).toEqual([700]);
+  });
+
+  it('配额不齐或全零 → 回退均分，Σ 仍精确 = 目标字数（余数补首项）', () => {
+    const partial = sectionTargets(chapterOf(TITLES_4), 1800, [{ title: '到货节奏安排', words: 600 }]);
+    expect(partial.reduce((sum, item) => sum + item.targetWords, 0)).toBe(1800);
+    const seven = sectionTargets(chapterOf(['到货节奏管理', '动态调整机制', '分区堆放组织', '现场存量控制', '台账追溯办法', '堆放安全防护', '装卸机具配置']), 1800);
+    expect(seven.reduce((sum, item) => sum + item.targetWords, 0)).toBe(1800);
+  });
+
+  it('无小节规划 → 空数组，篇幅计划指令不发（不注入伪配额）', () => {
+    expect(sectionTargets(chapterOf([]), 1800)).toEqual([]);
+    expect(buildSectionBudgetInstruction(chapterOf([]), 1800)).toBe('');
+  });
+
+  it('篇幅计划渲染：不再输出“至少达到 X 字”下限强化；配额上限合计不超块目标', () => {
+    const text = buildSectionBudgetInstruction(chapterOf(TITLES_4), 1800, [
+      { title: '到货节奏安排', words: 620 },
+      { title: '动态调整机制', words: 480 },
+      { title: '分区堆放组织', words: 420 },
+      { title: '现场存量控制', words: 280 },
+    ]);
+    expect(text).toContain('本节小节篇幅计划');
+    expect(text).toContain('- 到货节奏安排：约 620 字');
+    expect(text).not.toContain('至少达到');
+    expect(text).not.toContain('520');
+  });
+
+  it('组合链：规划层守恒配额直连写作层篇幅计划（Σ=块预算；无 520 固定地板残留）', () => {
+    const structure = buildChapterStructureFromBlueprint({
+      blueprintChapter: undefined,
+      inputSections: TITLES_4,
+      chapterTitle: '拟投入的主要物资计划',
+      targetWords: 1800,
+    });
+    expect(structure.blocks.length).toBe(1);
+    const block = structure.blocks[0]!;
+    // capacity 层守恒：Σ点配额 = 块预算
+    const quotaSum = block.subPoints.reduce((sum, point) => sum + (point.quotaWords || 0), 0);
+    expect(quotaSum).toBe(block.targetWords);
+    // 写作层篇幅计划：非同名点逐项采用容量规划配额（同名点由 H3 外壳承担，不渲染 H4 行）
+    const chapter: DocumentTemplateChapter = { id: 'c1', title: block.title, purpose: '', queries: [], requiredFacts: [], sections: block.subPoints.map(point => point.title) };
+    const quotas = block.subPoints.map(point => ({ title: point.title, words: point.quotaWords || 0 }));
+    const text = buildSectionBudgetInstruction(chapter, block.targetWords, quotas);
+    const rendered = [...text.matchAll(/约 (\d+) 字/gu)].map(match => Number(match[1]));
+    const expectedQuotas = block.subPoints.filter(point => point.title !== block.title).map(point => point.quotaWords || 0);
+    expect(rendered).toEqual(expectedQuotas);
+    // 合计不超块预算（旧固定 520 地板下 4 要点必超上限 2070）
+    expect(rendered.reduce((sum, value) => sum + value, 0)).toBeLessThanOrEqual(block.targetWords);
+    expect(text).not.toContain('至少达到');
+    expect(text).not.toContain('520');
   });
 });
