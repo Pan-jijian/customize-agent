@@ -270,3 +270,70 @@ describe('对象名称覆盖检测', () => {
     expect(issues).toEqual([]);
   });
 });
+
+describe('r14 E1-E3（丰乐镇实测）', () => {
+  it('E1：清单/图纸派生角色的名称类事实不参与冲突（表格条目名不再误报）', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '项目名称', value: '2026年度丰乐镇20个美丽宜居自然村建设项目', roleId: 'tender_document' }),
+      makeFact({ key: 'b', fieldName: '项目名称', value: '提升泵', roleId: 'bill_of_quantities' }),
+      makeFact({ key: 'c', fieldName: '项目名称', value: 'R6C3COL3:上海开艺设计集团有限公司', roleId: 'drawing' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+
+  it('E1：非表格派生角色的真实多值仍报冲突（不误伤）', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '项目名称', value: '甲公司项目', roleId: 'tender_document' }),
+      makeFact({ key: 'b', fieldName: '项目名称', value: '乙公司项目', roleId: 'project_overview' }),
+    ]));
+    expect(issues).toHaveLength(1);
+  });
+
+  it('E2：字段名前缀粘连剥离后可归并（招标人：值 vs 值）', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '招标人', value: '肥西县丰乐镇人民政府' }),
+      makeFact({ key: 'b', fieldName: '招标人', value: '招标人：肥西县丰乐镇人民政府' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+
+  it('E3：页码表头粘连残片不参与冲突', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '项目名称', value: '2026年度丰乐镇20个美丽宜居自然村建设项目' }),
+      makeFact({ key: 'b', fieldName: '项目名称', value: '第页共页1.本报价依据本工程招标文件中投标须知、合同文件、计价依据及工程造价确' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+
+  it('E3：段落粘连残片（建设地点+规模句）不参与冲突', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '建设地点', value: '安徽省合肥市肥西县' }),
+      makeFact({ key: 'b', fieldName: '建设地点', value: '安徽省合肥市肥西县2.6建设规模：本项目建设范围覆盖20个自然村，重点实施以下配套基础设施工程' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+
+  it('E3：超长粘连值（>40 字）不参与冲突', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '项目名称', value: '2026年度丰乐镇20个美丽宜居自然村建设项目' }),
+      makeFact({ key: 'b', fieldName: '项目名称', value: '2026年度丰乐镇20个美丽宜居自然村建设项目1.2项目审批、核准或备案机关名称：肥西县发展和改革委员会' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+
+  it('E3：纯括号占位值不参与冲突', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '项目名称', value: '2026年度丰乐镇20个美丽宜居自然村建设项目' }),
+      makeFact({ key: 'b', fieldName: '项目名称', value: '（合同名称）' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+
+  it('E3：路径串值不参与冲突', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '项目名称', value: '2026年度丰乐镇20个美丽宜居自然村建设项目' }),
+      makeFact({ key: 'b', fieldName: '项目名称', value: '9.14--2026年度丰乐镇20个美丽宜居自然村建设项目(1)/2026年度丰乐镇20个美丽宜居自然村建设项目招标文件.pdf' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+});

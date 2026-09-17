@@ -13,7 +13,6 @@ import { HAS_QUANTIFIED_VALUE_RE, PRECISE_TOKEN_RE } from './parameterPatterns';
 import { stringifyFactValue, throwIfAborted } from './utils';
 import { buildSemanticSimilarity } from './semanticSimilarity';
 import { evidenceSafetyKey } from './evidenceContentSafety';
-import { filterFactsByProjectScope, type ProjectMaterialScope } from './projectMaterialScope';
 import { tuningProfile } from './tuningProfile';
 
 export function extractFacts(template: DocumentTemplate, evidence: DocumentEvidence[], spec?: AutoDocumentSpecPackage): Record<string, string> {
@@ -274,44 +273,58 @@ export async function extractFactsWithLlm(evidence: DocumentEvidence[], promptTe
   const maxItems = Math.max(8, Math.floor(tuningProfile().factExtractionMaxItems ?? 48));
   let chars = 0;
   const sampleParts: string[] = [];
+  // 证据编号映射表：模型只引用 [E编号]，路径/角色由本表回填——模型输出无法伪造来源
+  const evidenceIndex = new Map<string, DocumentEvidence>();
   // 按分数排序取最重要的证据（而非前 maxItems 个）
   const topEvidence = [...evidence].sort((a, b) => b.score - a.score).slice(0, maxItems);
   for (const item of topEvidence) {
     // round-23 P0-3：LLM 提取输入先清 PDF 标题标记噪声，防止模型面对夹断乱行输出截断坏值
     const content = cleanPdfHeadingNoise(stringifyFactValue(item.content)).replace(/\s+/gu, ' ').slice(0, Math.max(800, Math.floor(maxChars / maxItems)));
-    const part = `文件:${item.filePath}\n角色:${item.roleId || ''}\n处理:${item.processingType || ''}\n内容:${content}`;
+    const evidenceId = `E${sampleParts.length + 1}`;
+    const part = `[${evidenceId}] 文件:${item.filePath}\n角色:${item.roleId || ''}\n处理:${item.processingType || ''}\n内容:${content}`;
     if (sampleParts.length > 0 && chars + part.length > maxChars) break;
     chars += part.length;
     sampleParts.push(part);
+    evidenceIndex.set(evidenceId, item);
   }
   const sample = sampleParts.join('\n\n---\n\n');
   if (!sample.trim()) return { facts: [], stages };
   throwIfAborted(signal);
   const targets = specFactTargets(template, spec);
   const schemaText = targets.map(field => `- id=${field.id} name=${field.name} type=auto required=${field.required} sourceRoleIds=${field.sourceRoleIds.join(',') || '不限'} hint=${field.extractionHint || '无'}`).join('\n');
-  const llm = await callDocumentLlmJson<{ facts?: Array<{ fieldId?: string; fieldName?: string; key: string; value: string; sourceFile?: string; roleId?: string; processingType?: string; confidence?: number }> }>(
+  const llm = await callDocumentLlmJson<{ facts?: Array<{ fieldId?: string; fieldName?: string; key: string; value: string; evidenceId?: string; confidence?: number }> }>(
     promptTexts || '你是文档事实抽取器。',
-    `请严格按下面的动态事实 schema 从资料中抽取事实。只抽取资料明确支持的内容；如果字段限定 sourceRoleIds，必须优先来自对应文件角色；事实取舍和冲突处理遵循规范包字段说明、文件角色和提示词角色配置。\n返回 {"facts":[{"fieldId":"...","fieldName":"...","key":"...","value":"...","sourceFile":"...","roleId":"...","processingType":"reference","confidence":0.8}]}。\n\n动态事实 schema：\n${schemaText}\n\n资料：\n${sample}`,
+    `请严格按下面的动态事实 schema 从资料中抽取事实。只抽取资料明确支持的内容；如果字段限定 sourceRoleIds，必须优先来自对应文件角色；事实取舍和冲突处理遵循规范包字段说明、文件角色和提示词角色配置。\n返回 {"facts":[{"fieldId":"...","fieldName":"...","key":"...","value":"...","evidenceId":"E1","confidence":0.8}]}。evidenceId 必须取自资料行首的编号（如 E1、E2），不得自造来源。\n\n动态事实 schema：\n${schemaText}\n\n资料：\n${sample}`,
     { signal, maxTokens: 1800, temperature: 0, diagnostics },
   );
   throwIfAborted(signal);
   if (!llm?.facts?.length) return { facts: [], stages };
+  const facts: DocumentFact[] = [];
+  let droppedInvalidSource = 0;
+  for (const item of llm.facts) {
+    if (!item.key || !item.value) continue;
+    // 来源映射：编号无效/缺失的事实丢弃（来源必须可追溯，模型自由文本不进主表）
+    const evidence = evidenceIndex.get(String(item.evidenceId || '').trim().toUpperCase());
+    if (!evidence) {
+      droppedInvalidSource += 1;
+      continue;
+    }
+    const field = targets.find(target => target.id === item.fieldId || target.name === item.fieldName || target.name === item.key);
+    facts.push({
+      key: field?.name || item.key,
+      fieldId: field?.id || item.fieldId,
+      fieldName: field?.name || item.fieldName,
+      value: stringifyFactValue(item.value),
+      sourceFile: evidence.filePath,
+      roleId: evidence.roleId || 'llm',
+      processingType: evidence.processingType,
+      confidence: item.confidence ?? 0.8,
+      sourceRef: { filePath: evidence.filePath, roleId: evidence.roleId || 'llm', processingType: evidence.processingType },
+    });
+  }
   return {
-    facts: llm.facts.filter(item => item.key && item.value).map(item => {
-      const field = targets.find(target => target.id === item.fieldId || target.name === item.fieldName || target.name === item.key);
-      return {
-        key: field?.name || item.key,
-        fieldId: field?.id || item.fieldId,
-        fieldName: field?.name || item.fieldName,
-        value: stringifyFactValue(item.value),
-        sourceFile: item.sourceFile || '',
-        roleId: item.roleId || 'llm',
-        processingType: item.processingType,
-        confidence: item.confidence ?? 0.8,
-        sourceRef: { filePath: item.sourceFile || '', roleId: item.roleId || 'llm', processingType: item.processingType },
-      };
-    }),
-    stages: [{ type: 'fact_extraction', roleId: 'llm-json', status: 'success', message: `LLM 按动态 schema 抽取 ${llm.facts.length} 条事实` }],
+    facts,
+    stages: [{ type: 'fact_extraction', roleId: 'llm-json', status: 'success', message: `LLM 按动态 schema 抽取 ${facts.length} 条事实${droppedInvalidSource > 0 ? `（丢弃 ${droppedInvalidSource} 条无效来源编号）` : ''}` }],
   };
 }
 
@@ -637,8 +650,9 @@ export function sanitizeExtractedFacts(facts: DocumentFact[], evidence: Document
 }
 
 /** 本地事实池统一入口：生成准备（writerEvidence 版）与 finalize（allEvidence 版）两处抽取点
- *  共用同一组本地抽取器调用 + 项目范围过滤，消除双写漂移；structuredTables 经进程内工作簿
+ *  共用同一组本地抽取器调用，消除双写漂移；structuredTables 经进程内工作簿
  *  解析缓存（workbookTablesCache），同一批表文件两次调用间零重复磁盘 IO。
+ *  证据范围由输入证据恒保证（检索层 filters 双锁源头过滤），此处不做事实级范围二次过滤（历史冗余已删）。
  *  1.1 事实净化门：出口对三类事实统一过 sanitizeExtractedFacts（表格碎片/页码/标题标记截断、
  *  叙述段拒收、编号截断回源补全），计数进 diagnostics.factSanitize（进度页后台诊断可观测）；
  *  （原 DOCUMENT_FACT_SANITIZE 回退已固化删除：净化门恒开） */
@@ -647,14 +661,13 @@ export function extractLocalFactPool(input: {
   template: DocumentTemplate;
   spec?: AutoDocumentSpecPackage;
   profile?: DocumentDomainProfile;
-  scope?: ProjectMaterialScope;
   diagnostics?: DocumentGenerationDiagnostics;
 }): { localFacts: DocumentFact[]; projectBasicFacts: DocumentFact[]; preciseFacts: DocumentFact[]; structuredTables: StructuredTableFact[]; factSanitize: FactSanitizeStats } {
   const pool = {
-    localFacts: filterFactsByProjectScope(extractStructuredFacts(input.evidence, input.template, input.spec), input.scope),
-    projectBasicFacts: filterFactsByProjectScope(extractProjectBasicFactsFromEvidence(input.evidence), input.scope),
-    preciseFacts: filterFactsByProjectScope(extractPreciseFactsFromEvidence(input.evidence, input.profile || DEFAULT_DOCUMENT_DOMAIN_PROFILE), input.scope),
-    structuredTables: filterFactsByProjectScope(extractStructuredTables(input.evidence), input.scope),
+    localFacts: extractStructuredFacts(input.evidence, input.template, input.spec),
+    projectBasicFacts: extractProjectBasicFactsFromEvidence(input.evidence),
+    preciseFacts: extractPreciseFactsFromEvidence(input.evidence, input.profile || DEFAULT_DOCUMENT_DOMAIN_PROFILE),
+    structuredTables: extractStructuredTables(input.evidence),
   };
   const factSanitize: FactSanitizeStats = { truncated: 0, dropped: 0, repaired: 0 };
   pool.localFacts = sanitizeExtractedFacts(pool.localFacts, input.evidence, factSanitize);

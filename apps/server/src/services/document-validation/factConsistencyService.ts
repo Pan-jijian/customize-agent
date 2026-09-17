@@ -9,6 +9,15 @@ function normalize(value: string) {
   return value.replace(/[（(]\d+[）)]/gu, '').replace(/副本|最终版|扫描件|定稿/gu, '').replace(/\s+/gu, '').replace(/[，。,.;；：:《》“”‘’()（）_\-—–―─－〜～·•]/gu, '').toLowerCase();
 }
 
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+/** 名称类字段（实体名应短且纯净的字段）：多值冲突判定对其值做粘连卫生（r14 丰乐镇实测） */
+const NAME_LIKE_LABEL_RE = /项目名称|工程名称|招标人|建设单位|发包人|采购人|招标单位|建设地点|工程地点|项目地点/u;
+/** 表格派生来源角色（清单/图纸解析）：其「项目名称」事实实为清单条目名或单元格坐标粘连值 */
+const TABLE_DERIVED_ROLE_RE = /bill_of_quantities|drawing|table/iu;
+
 function comparableValue(value: string, profile: DocumentDomainProfile, label?: string) {
   const trimmed = value.trim();
   if (isDiagnosticFactValue(profile, trimmed) || isForbiddenFactValue(profile, trimmed)) return '';
@@ -25,9 +34,23 @@ function comparableValue(value: string, profile: DocumentDomainProfile, label?: 
   if (label && /招标人|建设单位|发包人|采购人|招标单位/u.test(label)) {
     if (!/局|公司|中心|政府|管委会|委员会|集团|院|大学|学校|街道|办事处|指挥部|项目部|办公室|厅|署|银行|医院/u.test(trimmed)) return '';
   }
-  if (label && /项目名称|工程名称/u.test(label)) {
+  if (label && NAME_LIKE_LABEL_RE.test(label)) {
     if (/所在地|地址|详见|见前附表|见招标/u.test(trimmed)) return '';
     if (/检查井|化粪池|机箱|碎石|路灯|井盖|监控系统|吊顶|抹灰|楼面|顶棚/u.test(trimmed)) return '';
+    // E2 标签前缀剥离（r14 丰乐镇实测）：「招标人：肥西县丰乐镇人民政府」与「肥西县丰乐镇人民政府」
+    // 因字段名前缀粘连被归一为两个 key 误报多值冲突——先剥离「label[：]」前缀再比较。
+    const stripped = trimmed.replace(new RegExp(`^${escapeRegExp(label)}\\s*[：:、,，.．]?\\s*`, 'u'), '');
+    const base = stripped || trimmed;
+    // E3 粘连残片卫生（r14 丰乐镇实测）：页码表头粘连（「第页共页1.本报价依据…」）、段落粘连
+    //（「安徽省合肥市肥西县2.6建设规模：…」）、多句标点、路径串、纯括号占位（「（合同名称）」）、
+    // 超长值（>40 字必为表格/段落残片）一律不作为比较值——名称类事实就绪值应短且纯净。
+    if (!base || base.length > 40 || /第\s*页|共\s*页/u.test(base)) return '';
+    if (/[，。；;、]/u.test(base) || /[：:]/u.test(base)) return '';
+    // 路径串（含文件扩展名/目录分隔符）与单元格坐标（R6C3COL3 式）残片
+    if (/^[（(][^）)]*[）)]$/u.test(base) || /[/\\]|\.(?:pdf|docx?|xlsx?|zip)/iu.test(base)) return '';
+    if (/R\d+C\d+/u.test(base)) return '';
+    if (normalize(base) === normalize(label)) return '';
+    return normalize(base);
   }
   const duration = /\d+(?:\.\d+)?\s*(?:日历天|天|个月|月)/u.exec(trimmed)?.[0];
   // V5 P6 label 感知工期归一（run1 实测）：「计划工期=360日历天；2.9」的 value 本身不含
@@ -55,7 +78,11 @@ export function validateFactConsistency(input: { markdown: string; facts: Docume
   for (const fact of input.facts) {
     const label = fact.fieldName || fact.key;
     if (!label || !shouldCheckStrictConflict(label, profile)) continue;
-    const value = comparableValue(String(fact.value), profile);
+    // E1（r14 丰乐镇实测）：清单/图纸表格解析派生的名称类事实实为清单条目名或单元格坐标粘连值
+    //（「提升泵」「R6C3COL3:上海开艺设计集团有限公司」「分部小计」「R6C5金额(元):100000.00」），
+    // 与招标文件真实项目名混入同一分组造成多值冲突误报——名称类字段只信主材料（招标文件/概况）来源。
+    if (NAME_LIKE_LABEL_RE.test(label) && TABLE_DERIVED_ROLE_RE.test(fact.roleId || '')) continue;
+    const value = comparableValue(String(fact.value), profile, label);
     if (!value) continue;
     factsByName.set(label, [...(factsByName.get(label) || []), { value: String(fact.value), source: fact.sourceFile }]);
   }

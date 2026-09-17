@@ -397,28 +397,28 @@ describe('startGenerateDocumentTask', () => {
     expect(record.assets?.some(asset => asset.id === `document-${documentId}`)).toBe(true);
   });
 
-  it('门禁未通过 + 实质正文 → failed（V2 批3 宁缺毋假：带病文档不作为交付件）', async () => {
+  it('门禁未通过 + 实质正文 → completed_with_issues（4.50 交付解耦：阻断不影响导出）', async () => {
     vi.mocked(generateDocumentDraft).mockResolvedValue(makeResult({
       markdown: '正文内容'.repeat(1000),
       exportGate: { passed: false, blockingIssues: [{ level: 'error', message: '空小节' }], checklist: [] },
     }));
     const { taskId } = startGenerateDocumentTask({ templateId: 't1' }, '/proj');
     const record = await getGenerateTask(taskId)!.promise;
-    expect(record.status).toBe('failed');
+    expect(record.status).toBe('completed_with_issues');
     expect(record.warningIssues?.length).toBeGreaterThan(0);
     // 未收敛阻断清单无条件置顶（不再依赖“警告为空才补泛化文案”的旧逻辑，可排查可续修）
     expect(record.warningIssues?.[0]).toContain('导出门禁未通过');
     expect(record.warningIssues?.[0]).toContain('空小节');
   });
 
-  it('门禁未通过 + 无实质正文 → failed', async () => {
+  it('门禁未通过 + 无实质正文 → completed_with_issues（交付解耦后门禁不产出 failed 终态）', async () => {
     vi.mocked(generateDocumentDraft).mockResolvedValue(makeResult({
       markdown: '短',
       exportGate: { passed: false, blockingIssues: [{ level: 'error', message: '空小节' }], checklist: [] },
     }));
     const { taskId } = startGenerateDocumentTask({ templateId: 't1' }, '/proj');
     const record = await getGenerateTask(taskId)!.promise;
-    expect(record.status).toBe('failed');
+    expect(record.status).toBe('completed_with_issues');
   });
 
   it('生成抛错 → failed；含 checkpoint 时 → warning', async () => {

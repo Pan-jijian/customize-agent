@@ -6,14 +6,17 @@
  *   （保持/控制类存量表述非分批投入口径）、负向声明行豁免、表格行豁免、多名称列举归属、
  *   多值组合「任一成立即放行」、非法台数条目静默跳过；
  * - preliminaryActionTimingIssues（N1-N8）——开工后第 N 日且 N ≥ 总工期命中、N < 总工期放行、
- *   无前期动作词放行、总工期未知不判、表格行/负向声明豁免、「第 N 个日历日」变体、
- *   动作词位于数字之后的 ±40 字窗口、「第 N 日内」范围表述豁免（4.32.0 丰乐镇复测 #77）、上限 5 条；
+ *   无前期动作词放行、总工期未知不判、表格行/负向声明豁免（负向词仅 ±40 字窗口内命中方豁免）、
+ *   「第 N 个日历日」变体、动作词位于数字之后的 ±40 字窗口、「第 N 日内」豁免收窄（r14 丰乐镇
+ *   门禁 #5b：窗口含前期动作词照报，末期语境才豁免）、尾随「内」吞并改写、上限 5 条；
  * - fixPhaseLaborValues（P1-P6）——权威值硬替换（基础通道/枚举列举通道同源）、多值降序替换
- *   互不位移、值相符零动作、无权威原样返回、阶段名拼接歧义不进确定性修复、表格行不触碰。
+ *   互不位移、值相符零动作、无权威原样返回、阶段名拼接歧义不进确定性修复、表格行不触碰；
+ * - fixEquipmentBatchConflicts（Q1-Q4，r17 丰乐镇归因 #B2/B3）——分批矛盾命中删除 later 批
+ *   「N 台」数字（前缀量词随删）、检测复检零残留、已修复文本幂等零变更、组合成立/无权威零动作。
  * 全部用例为确定性判定，无语义/网络依赖。
  */
 import { describe, expect, it } from 'vitest';
-import { equipmentBatchConflicts, fixPhaseLaborValues, preliminaryActionTimingIssues } from '@/services/document-workflow/documentIntegrityChecks';
+import { equipmentBatchConflicts, fixEquipmentBatchConflicts, fixPhaseLaborValues, fixPreliminaryActionTimingDeterministically, preliminaryActionTimingIssues } from '@/services/document-workflow/documentIntegrityChecks';
 
 const excavators = [{ name: '挖掘机', count: 5 }];
 
@@ -109,9 +112,27 @@ describe('equipmentBatchTimingBoundary · N 组：前期动作时限矛盾', () 
     expect(afterNumber).toHaveLength(1);
   });
 
-  it('N8 「第 N 日内」范围表述豁免（丰乐镇复测 #77：时限承诺「90 日内」非竣工日动作）→ 0 条', () => {
-    expect(preliminaryActionTimingIssues('消防培训与应急演练同步落实。开工后第90日内，由安全员组织全体作业人员进行1次消防器材使用培训。', 90)).toHaveLength(0);
-    expect(preliminaryActionTimingIssues('开工令下发后第90个日历日内完成技术交底。', 90)).toHaveLength(0);
+  it('N8 「第 N 日内」豁免收窄（r14 丰乐镇门禁 #5b）：±40 字窗口含前期动作词照报 → 1 条', () => {
+    // 4.32.0 曾对「内」全量豁免（丰乐镇复测 #77）；r13 实测全免漏网「开工令下发后第90日内完成
+    // 首批封样清单编制」（封样双控要求早期完成，写作红线本禁此形态）——收窄为：窗口含前期
+    // 动作词时不豁免「内」，末期语境（窗口无动作词）维持豁免
+    const train = preliminaryActionTimingIssues('消防培训与应急演练同步落实。开工后第90日内，由安全员组织全体作业人员进行1次消防器材使用培训。', 90);
+    expect(train).toHaveLength(1);
+    expect(train[0].message).toContain('前期动作时限矛盾');
+    expect(train[0].severity).toBe('blocker');
+    expect(preliminaryActionTimingIssues('开工令下发后第90个日历日内完成技术交底。', 90)).toHaveLength(1);
+  });
+
+  it('N8b 「第 N 日内」末期语境仍豁免（窗口无前期动作词）→ 0 条', () => {
+    expect(preliminaryActionTimingIssues('开工令下发后第90日内完成全部竣工资料组卷移交。', 90)).toHaveLength(0);
+  });
+
+  it('N8c 「内」形态确定性改写：尾随「内」一并吞并（无「阶段内内」），复检清零', () => {
+    const fixed = fixPreliminaryActionTimingDeterministically('项目部在开工令下发后第90日内完成首批封样清单编制。', 90);
+    expect(fixed.fixedCount).toBe(1);
+    expect(fixed.markdown).toContain('施工准备阶段内完成');
+    expect(fixed.markdown).not.toContain('内内');
+    expect(preliminaryActionTimingIssues(fixed.markdown, 90)).toHaveLength(0);
   });
 
   it('N7 上限 5 条（6 处命中截断）', () => {
@@ -172,5 +193,37 @@ describe('equipmentBatchTimingBoundary · P 组：阶段劳动力确定性修复
     expect(enumerated.markdown).toContain('污水管网工程35人');
     const tableRow = '| 污水管网工程 | 50人 |';
     expect(fixPhaseLaborValues(tableRow, phaseAuthorities).markdown).toBe(tableRow);
+  });
+});
+
+describe('equipmentBatchTimingBoundary · Q 组：机械分批台数确定性修复（r17 归因 #B2/B3，写时对齐同源）', () => {
+  const equipAuthority = [{ name: '挖掘机', count: 5 }, { name: '自卸汽车', count: 5 }];
+
+  it('Q1 分批矛盾命中：删除 later 批「N 台」数字，检测复检零残留', () => {
+    const result = fixEquipmentBatchConflicts('首批进场挖掘机5台、自卸汽车5台，剩余挖掘机5台、自卸汽车5台在第4日至第5日补充进场。', equipAuthority);
+    expect(result.fixedCount).toBe(2);
+    expect(result.markdown).toContain('剩余挖掘机、自卸汽车在第4日');
+    expect(equipmentBatchConflicts(result.markdown, equipAuthority)).toHaveLength(0);
+  });
+
+  it('Q2 幂等：已修复文本（later 批无数值）重放零变更', () => {
+    const input = '首批进场挖掘机5台、自卸汽车5台，剩余挖掘机、自卸汽车在第4日至第5日补充进场。';
+    const result = fixEquipmentBatchConflicts(input, equipAuthority);
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe(input);
+  });
+
+  it('Q3 组合成立（3+2=5）零动作；无权威/空权威原样返回', () => {
+    expect(fixEquipmentBatchConflicts('首批挖掘机3台进场，剩余挖掘机2台进场。', [{ name: '挖掘机', count: 5 }]).fixedCount).toBe(0);
+    const input = '首批挖掘机5台进场，剩余挖掘机5台进场。';
+    expect(fixEquipmentBatchConflicts(input, undefined).markdown).toBe(input);
+    expect(fixEquipmentBatchConflicts(input, []).markdown).toBe(input);
+  });
+
+  it('Q4 前缀量词随删除（「剩余挖掘机约5台」→「剩余挖掘机补充进场」）', () => {
+    const result = fixEquipmentBatchConflicts('首批挖掘机3台进场，剩余挖掘机约5台补充进场。', [{ name: '挖掘机', count: 5 }]);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('剩余挖掘机补充进场');
+    expect(result.markdown).not.toContain('约5台');
   });
 });

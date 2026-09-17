@@ -209,6 +209,14 @@ describe('dicTailFixersBoundary · K 组：末尾修复器族', () => {
       expect(result.fixedCount).toBe(0);
     });
 
+    it('K7 4.44 #31 考核管理句不改写（与检测器豁免一一对应）', () => {
+      // 4.43 实测内部考核管理句：检测器 4.44 已豁免召回，确定性通道必须同源不动
+      const md = '考核实行月度评分，质量记录缺失或整改超时的责任人当月绩效扣减，连续两次考核不合格的调离质量关键岗位。';
+      const result = fixSelfUnderminingCandidates(md);
+      expect(result.markdown).toBe(md);
+      expect(result.fixedCount).toBe(0);
+    });
+
     it('K7 同形态多处出现全替换并累计', () => {
       const md = '施工过程中如涉及危险性较大的分部分项工程，未经审批不得实施。另一章再次说明：施工过程中如涉及危险性较大的分部分项工程，未经审批不得实施。';
       const result = fixSelfUnderminingCandidates(md);

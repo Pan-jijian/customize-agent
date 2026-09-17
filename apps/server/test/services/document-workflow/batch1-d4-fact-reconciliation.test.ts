@@ -11,7 +11,7 @@
  * 权威缺失（无清单/无蓝图/无事实主表）时全部规则静默跳过（不误伤无数据项目）。
  */
 import { describe, expect, it } from 'vitest';
-import { factReconciliationIssues } from '@/services/document-workflow/factReconciliation';
+import { factReconciliationIssues, fixSpecQuantityBindings } from '@/services/document-workflow/factReconciliation';
 import { specLocationMismatchIssues } from '@/services/document-workflow/integrity/detectors/detectors';
 import type { BillFactLock, BillFactLockEntry } from '@/services/document-workflow/billFactLock';
 import type { BlueprintData } from '@/services/document-workflow/integratedBlueprint';
@@ -97,6 +97,51 @@ describe('D4.2 规格-数值绑定对账（张冠李戴拦截）', () => {
     ]);
     const issues = factReconciliationIssues({ markdown: 'DN25 11.23m。', billFactLock: crossLock });
     expect(issues.some(issue => issue.message.includes('DN25'))).toBe(true);
+  });
+
+  // r14 丰乐镇 E6：「DN110 UPVC排水管总长15m」的 15m 是 DN110 自身局部长度量，间隙词含
+  // 「总长」类长度量词且单位为长度类时数值语义上绑定该规格自身，与清单总量可不同值；
+  // 15 恰与无关条目「人行道混凝土垫层 15m³」数值相等纯属巧合，不构成归属张冠李戴
+  const lengthQuantifierLock = lockOf([
+    lockEntry({ name: '塑料管', quantity: 7525.01, unit: 'm', specQuantityPairs: [{ spec: 'DN110', quantity: '7525.01m' }] }),
+    lockEntry({ name: '人行道混凝土垫层', quantity: 15, unit: 'm3', specQuantityPairs: [{ spec: '10cm', quantity: '15m3' }] }),
+  ]);
+
+  it('DN110 UPVC排水管总长15m（长度量词句）→ 不报（r14 长度量词豁免）', () => {
+    const issues = factReconciliationIssues({ markdown: 'DN110 UPVC排水管总长15m，管沟开挖深度按设计图纸确定。', billFactLock: lengthQuantifierLock });
+    expect(issues.filter(issue => issue.message.includes('DN110'))).toEqual([]);
+  });
+
+  it('DN110 UPVC排水管15m（无长度量词）→ 张冠李戴仍报（豁免窄化正确）', () => {
+    const issues = factReconciliationIssues({ markdown: 'DN110 UPVC排水管15m，管沟开挖深度按设计图纸确定。', billFactLock: lengthQuantifierLock });
+    expect(issues.some(issue => issue.message.includes('DN110'))).toBe(true);
+  });
+
+  // r17 丰乐镇门禁 #B1：DN110 15m 无源（恰撞无关条目「人行道混凝土垫层 15m³」）——修复器原位
+  // 替换为该规格组和值（同条目名分组之和；替换后必过检测组和豁免），复检零残留 + 幂等
+  const r17Lock = lockOf([
+    lockEntry({ name: '塑料管', quantity: 1000, unit: 'm', specQuantityPairs: [{ spec: 'DN110', quantity: '1000m' }] }),
+    lockEntry({ name: '塑料管', quantity: 400, unit: 'm', specQuantityPairs: [{ spec: 'DN110', quantity: '400m' }] }),
+    lockEntry({ name: '人行道混凝土垫层', quantity: 15, unit: 'm3', specQuantityPairs: [{ spec: '10cm', quantity: '15m3' }] }),
+    lockEntry({ name: '混凝土管道铺设', quantity: 50, unit: 'm', specQuantityPairs: [{ spec: 'DN200', quantity: '50m' }] }),
+  ]);
+
+  it('D4.2 修复器：DN110 15m → 组和 1400m 替换，复检零残留 + 幂等', () => {
+    const md = '管道安装涉及DN110 UPVC排水管15m、DN200混凝土管50m，管径规格分散且单段工程量小。';
+    const fixed = fixSpecQuantityBindings(md, { billFactLock: r17Lock });
+    expect(fixed.fixedCount).toBe(1);
+    expect(fixed.markdown).toContain('DN110 UPVC排水管1400m');
+    expect(fixed.markdown).toContain('DN200混凝土管50m');
+    expect(factReconciliationIssues({ markdown: fixed.markdown, billFactLock: r17Lock }).filter(issue => issue.message.includes('DN110'))).toEqual([]);
+    expect(fixSpecQuantityBindings(fixed.markdown, { billFactLock: r17Lock }).fixedCount).toBe(0);
+  });
+
+  it('D4.2 修复器：同形句两处逐处收敛（机械章/劳动力章重复形态）', () => {
+    const md = '管道安装涉及DN110 UPVC排水管15m。\n\n管道工对应DN110 UPVC排水管15m施工。';
+    const fixed = fixSpecQuantityBindings(md, { billFactLock: r17Lock });
+    expect(fixed.fixedCount).toBe(2);
+    expect(fixed.markdown).not.toContain('15m');
+    expect(factReconciliationIssues({ markdown: fixed.markdown, billFactLock: r17Lock }).filter(issue => issue.message.includes('DN110'))).toEqual([]);
   });
 });
 

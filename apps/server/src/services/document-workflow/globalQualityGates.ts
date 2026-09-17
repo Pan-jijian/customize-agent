@@ -23,9 +23,10 @@ import { difficultyCountermeasureReport, fillerDensityReport } from './tenderBid
 import { missingWorkPackageSkeletonTitles, stripEmptyWorkPackageHeadings, stripTablesInSection, workPackageSkeletonTitles } from './chapterPostProcessing';
 import { DIVISION_SECTION_RE } from './writingSpec';
 import { majorContentGovernanceIssues, perPackageContentElementIssues } from './constructionOrgQualityRules';
-import { flowFormRepairTargets, skeletonFingerprintRepairTargets, titleRepairTargets } from './templatingGovernance';
+import { flowFormRepairTargets, isStructuralLabelTitle, skeletonFingerprintRepairTargets, titleRepairTargets } from './templatingGovernance';
 import { bodyTableDismantleIssue, isBodyTableForbidden, type BidCompositionSpec } from './bidComposition';
 import { countMarkdownTables, extractMarkdownTableTextBlocks } from './markdownComposer';
+import { nearSubsectionTitleMatch, normalizeSubsectionTitleForDedup, sectionHeadingTitleText } from './utils';
 
 export type EmitProgressFn = (checkpointChapters?: DocumentDraftChapter[], stages?: DocumentExecutionStage[]) => void;
 export type WithProgressHeartbeatFn = <T>(work: () => Promise<T>) => Promise<T>;
@@ -577,7 +578,7 @@ export async function repairTemplatingIssues(input: {
       finalFlows.length > 0 ? `工序形式相邻重复 ${finalFlows.length} 处` : '',
       finalTitles.length > 0 ? `标题缺陷 ${finalTitles.length} 处` : '',
     ].filter(Boolean).join('；');
-    upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'templating-repair', status: converged ? 'success' : 'failed', message: `模板化修复完成：套话句占比 ${(finalFiller.ratio * 100).toFixed(1)}%（达标线 ≤10%），重难点归因+量化双达标 ${(finalDifficulty.ratio * 100).toFixed(0)}%（达标线 ≥50%）${templateResidue ? `，模板化残留：${templateResidue}` : ''}`, details: converged ? [] : ['未完全收敛：残留项先由确定性修复链（终检前）收敛；复核未清零的残留经终检检测器判定，仍不达标即阻断交付（宁缺毋假）'] }, { subtitle: '模板化修复' }));
+    upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'templating-repair', status: converged ? 'success' : 'failed', message: `模板化修复完成：套话句占比 ${(finalFiller.ratio * 100).toFixed(1)}%（达标线 ≤10%），重难点归因+量化双达标 ${(finalDifficulty.ratio * 100).toFixed(0)}%（达标线 ≥50%）${templateResidue ? `，模板化残留：${templateResidue}` : ''}`, details: converged ? [] : ['未完全收敛：残留项先由确定性修复链（终检前）收敛；复核未清零的残留经终检检测器判定，仍不达标即列入终检复核清单（不阻断导出，宁缺毋假）'] }, { subtitle: '模板化修复' }));
     emitProgress(chapterDraftsFinal);
   }
   return { templatingFixApplied };
@@ -587,7 +588,7 @@ export async function repairTemplatingIssues(input: {
  * 工作包骨架确定性收口（稳定版）：关键小节（项目主要施工内容/主要分部分项工程施工方案/主要施工方法）
  * 的内部 #### 标题结构由系统从资料识别的工作包清单锁定，写作后仍有缺失时（历史缺陷：主题块管线块质检
  * 只管标题缺失/重复/越界 + 字数、不查内容要素，重难点表/节点计划表串位可通过块质检 → 终检 blocker →
- * LLM 修复不收敛 → completed_with_issues 带病交付（V2 批3 门禁升级后该状态不再产出：未收敛一律 failed，宁缺毋假）），修复链做确定性兑底：
+ * LLM 修复不收敛 → completed_with_issues 复核清单交付（4.50 交付解耦：门禁残留统一转人工复核清单，不影响查看与导出）），修复链做确定性兑底：
  * 1) 表格剥离（零 LLM）：关键小节内的重难点表/节点表等串位表格确定性删除，其他小节合法表格不动；
  * 2) 骨架锚点直连补写：以小节标题行为补写定位锚点，LLM 只输出缺失工作包小节正文（标题一字不差由系统下发）；
  * 最多 2 轮收敛，补写失败不阻断（阻断权留给终检 blocker，与 templating 修复设计边界一致）。
@@ -783,6 +784,92 @@ export async function enforceWorkPackageSkeletons(input: {
     emitProgress(chapterDraftsFinal);
   }
   return { skeletonFixApplied };
+}
+
+/**
+ * 近名小节确定性合并（r11 丰乐镇门禁 #1 兜底，与写作期 alignSectionHeadingsToPlan 近名轮同源口径）：
+ * 写作期模型对规划小节标题单字改写（「分区落位→分区落实」实测）在可比匹配口径下零命中——错字标题
+ * 未被对齐回规划名（写作期近名对齐已开，本合并兜底既有产物与评审轮 LLM 重写引入的变体）→ 缺节判定
+ * 成立触发补写轮 → 补写版与错字版并存（章内 H3 超规划小节数）直坠 section-count-overflow 硬阻断。
+ * 策略：章内近名 H3 对（nearSubsectionTitleMatch 单源，编辑距离近似）确定性合并——保留首现行
+ * （恰一侧精确命中规划且非其本身时改名为规划名）、后现行标题行摘除、其正文并入首现块末
+ * （零内容生成：只删标题行不删任何正文）。防误配：两行各有自己的精确规划归属（规划本身即近名
+ * 小节对）或双无归属且标题为结构标签（泛化无主题，标签治理另有专门修复器）时跳过。
+ * 调用点：postReviewSurface 缺节补写（plannedSectionFixFinal）之前——先合并再判定缺节，补写轮不重复补。
+ */
+export function mergeNearDuplicateSectionHeadings(chapterDraftsFinal: DocumentDraftChapter[]): { mergedCount: number; details: string[] } {
+  let mergedCount = 0;
+  const details: string[] = [];
+  /** 标题块边界：自 from 行向下第一个 H2/H3 行（含）或文末 */
+  const headingBlockEnd = (lines: string[], from: number) => {
+    for (let index = from + 1; index < lines.length; index += 1) {
+      if (/^#{2,3}\s/u.test(lines[index].trim())) return index;
+    }
+    return lines.length;
+  };
+  /** 保留原「### 编号 」前缀形态，仅替换标题文本 */
+  const headingPrefixOf = (line: string) => {
+    const base = /^(\s*###\s+)/u.exec(line)?.[1] ?? '### ';
+    const numbered = /^((?:\d+(?:\.\d+)*|[一二三四五六七八九十]+)(?:[、.．]|\s+)\s*)/u.exec(line.slice(base.length));
+    return numbered ? `${base}${numbered[1]}` : base;
+  };
+  for (const chapter of chapterDraftsFinal) {
+    if (!chapter.content?.trim()) continue;
+    const planned = (chapter.sections || [])
+      .map(section => ({ title: section, normalized: normalizeSubsectionTitleForDedup(section) }))
+      .filter(item => item.normalized);
+    // guard 循环：每轮合并一对、上限 4 轮（三个以上连环近名对逐轮收敛；正常 1 轮即无剩余近名对）
+    for (let guard = 0; guard < 4; guard += 1) {
+      const lines = chapter.content.split('\n');
+      const h3s: { line: number; title: string; normalized: string }[] = [];
+      lines.forEach((line, index) => {
+        if (!/^\s*###\s+\S/u.test(line)) return;
+        const title = sectionHeadingTitleText(line);
+        const normalized = title ? normalizeSubsectionTitleForDedup(title) : '';
+        if (normalized) h3s.push({ line: index, title, normalized });
+      });
+      if (h3s.length <= 1) break;
+      let pair: { keep: (typeof h3s)[number]; drop: (typeof h3s)[number]; plannedTitle?: string } | undefined;
+      for (let i = 0; i < h3s.length && !pair; i += 1) {
+        for (let j = i + 1; j < h3s.length && !pair; j += 1) {
+          const keep = h3s[i];
+          const drop = h3s[j];
+          if (keep.normalized === drop.normalized) continue;
+          if (!nearSubsectionTitleMatch(keep.normalized, drop.normalized)) continue;
+          const keepPlanned = planned.find(item => item.normalized === keep.normalized);
+          const dropPlanned = planned.find(item => item.normalized === drop.normalized);
+          // 双归属防线：两行各有精确规划归属（规划本身即近名小节对，如「…落位…」与「…落实…」同在
+          // 规划列表）——合法结构，不得合并
+          if (keepPlanned && dropPlanned) continue;
+          // 双无归属的泛化标签不合并：结构标签不代表确定主题，标签治理另有专门修复器
+          if (!keepPlanned && !dropPlanned && (isStructuralLabelTitle(keep.title) || isStructuralLabelTitle(drop.title))) continue;
+          pair = { keep, drop, plannedTitle: (dropPlanned || keepPlanned)?.title };
+          break;
+        }
+      }
+      if (!pair) break;
+      const { keep, drop, plannedTitle } = pair;
+      const keepEnd = headingBlockEnd(lines, keep.line);
+      const dropEnd = headingBlockEnd(lines, drop.line);
+      const keepBody = lines.slice(keep.line + 1, keepEnd);
+      while (keepBody.length > 0 && keepBody[keepBody.length - 1].trim() === '') keepBody.pop();
+      const dropBody = lines.slice(drop.line + 1, dropEnd);
+      while (dropBody.length > 0 && dropBody[dropBody.length - 1].trim() === '') dropBody.pop();
+      while (dropBody.length > 0 && dropBody[0].trim() === '') dropBody.shift();
+      const mergedBody = dropBody.length > 0 ? [...keepBody, '', ...dropBody, ''] : [...keepBody, ''];
+      const nextContent = [
+        ...lines.slice(0, keep.line),
+        plannedTitle ? `${headingPrefixOf(lines[keep.line])}${plannedTitle}` : lines[keep.line],
+        ...mergedBody,
+        ...lines.slice(keepEnd, drop.line),
+        ...lines.slice(dropEnd),
+      ];
+      chapter.content = nextContent.join('\n').replace(/\n{3,}/gu, '\n\n');
+      mergedCount += 1;
+      details.push(`「${drop.title}」并入「${plannedTitle || keep.title}」（第 ${chapterDraftsFinal.indexOf(chapter) + 1} 章）`);
+    }
+  }
+  return { mergedCount, details };
 }
 
 /**
@@ -1063,7 +1150,7 @@ export async function runGlobalConsistencyReviewLoop(input: {
     //（历史缺陷：12 项参数口径冲突 llm-patch 不收敛空转）
     const arbiterResult = await arbitrateNumericConflicts(
       chapterDraftsFinal.map(chapter => chapter.content).join('\n\n'),
-      { billFactLock, specAuthorityMap: preliminaryFactsModel.specAuthorityMap },
+      { billFactLock, specAuthorityMap: preliminaryFactsModel.specAuthorityMap, blueprintQuantities: blueprintData?.quantities },
     );
     if (arbiterResult.replacements.length > 0) {
       let chapterOffset = 0;
@@ -1183,6 +1270,12 @@ export async function runGlobalConsistencyReviewLoop(input: {
                     : '请从本章证据摘要中的图纸标注/勘察资料锁定基坑开挖深度数值，以确定性表述写入基坑支护小节（严禁「按图纸确定」类回避表述），不得编造数值。')
                   : /规格错位/u.test(issue)
                     ? '请按冲突描述中的工程量清单权威规格修正本章对应部位的规格表述：同一材料不同部位允许不同规格，同一部位只允许权威规格，禁止把多种规格全文归一为一种。'
+                    : /出现多个口径/u.test(issue)
+                    // r6 K（r5 实机 #8 归因）：参数概念多口径冲突存在两类——有锚（检测侧确定性仲裁已消解，
+                    // 不达 LLM）与无锚（多值均无权威，实测死株补植时限 7日/3日 各执一词、bge 组内平票）。
+                    // 无锚形态 LLM 无资料口径可依易空转（r5 实测修复轮后仍残留）——给出确定性决胜规则：
+                    // 冲突描述按全文出现顺序列出各口径，首现口径锁定为唯一口径，消除自由裁量
+                    ? '本冲突无权威资料口径可依：请保留冲突描述中列出的第一个口径（全文首现口径），将本章中该概念其余口径的数值表述统一为与首现口径一致；只改数值表述，不得改动动作词、句式与其余内容，不得引入新的数值。'
                     : '请严格按冲突描述中给出的资料口径修正本章对应表述，不得引入新的数值；与资料口径一致的既有表述（含分层/子项数值）不得改动；同一材料多种规格按所属部位/分部分项分别使用，禁止全文统一为一种规格。';
               return `${issue}；${repairInstruction}`;
             }),

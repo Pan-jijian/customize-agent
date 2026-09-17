@@ -893,20 +893,22 @@ export function coreTitleName(rawTitle: string): string {
 /** 合法短标题豁免（目录类结构性字词，非内容小节） */
 const TITLE_CORE_EXEMPT = new Set(['目录', '前言', '摘要', '附录', '索引', '封面', '总则']);
 
-/** 残缺标题判定（纯短汉字标题（无字母含入）不足 4 字即残缺；“BIM应用”类含字母标题不在此列）：检测与确定性补全同源 */
+/** 残缺标题判定（纯短汉字标题（无字母含入）不足 3 字即残缺；“小菜园”类 3 字完整专业词、“BIM应用”类含字母标题不在此列）：检测与确定性补全同源。
+ * 4.44 #3 根治：阈值 4→3——4.43 实测「2.1.4 小菜园」为完整专业词（项目主要专业构成之一），
+ * 旧阈值将 3 字完整词误判残缺；「危大」类 2 字残缺仍保留判定。 */
 function isTruncatedTitleCore(core: string): boolean {
   if (!core || TITLE_CORE_EXEMPT.has(core)) return false;
   const hanCount = (core.match(/[\u4e00-\u9fa5]/gu) || []).length;
-  if (hanCount === 0 || hanCount >= 4) return false;
+  if (hanCount === 0 || hanCount >= 3) return false;
   return !/[A-Za-z]/u.test(core) && core.length <= 4;
 }
 
-/** 标题缺陷判定：核心名不足 4 汉字（如「6.5 危大」）/ 含逗号句化 / 悬挂连接词结尾（如「××及」） */
+/** 标题缺陷判定：核心名不足 3 汉字（如「6.5 危大」）/ 含逗号句化 / 悬挂连接词结尾（如「××及」） */
 function titleDefectReason(core: string): string | undefined {
   if (!core || TITLE_CORE_EXEMPT.has(core)) return undefined;
   const hanCount = (core.match(/[\u4e00-\u9fa5]/gu) || []).length;
   if (hanCount === 0) return undefined;
-  if (isTruncatedTitleCore(core)) return '标题核心名不足 4 字（残缺标题）';
+  if (isTruncatedTitleCore(core)) return '标题核心名不足 3 字（残缺标题）';
   if (/[，,]/u.test(core)) return '标题含逗号（句式化标题）';
   if (/[等及和与]$/u.test(core)) return '标题以悬挂连接词结尾（残缺标题）';
   return undefined;
@@ -994,7 +996,7 @@ export interface TruncatedTitleFixOutcome {
 
 /**
  * 残缺标题确定性补全（round-2 链 / 终检前最后一道）：
- * 「2.22.1 电气」类 <4 汉字残缺标题（H4 工作包名映射常见），从标题下方正文取证
+ * 「2.22.1 电气」类 <3 汉字残缺标题（H4 工作包名映射常见），从标题下方正文取证
  * core+工程后缀的首次实锤（如正文首句「电气系统施工对象包括……」→ 补全「电气系统」）；
  * 后缀必须在正文原文出现（零编造），取证失败不改（保留 LLM 锚点修复位）。
  */

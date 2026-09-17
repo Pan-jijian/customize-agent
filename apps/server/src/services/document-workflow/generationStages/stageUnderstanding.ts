@@ -4,6 +4,7 @@
  * 变量读写经 session 子对象显式化，业务生成语义与原巨型函数逐字一致（行为保持）。
  */
 import * as path from 'node:path';
+import { materialRootsOfFiles } from '@customize-agent/knowledge';
 import type { KbSearchResult } from '@/lib/api';
 import type { DocumentEvidence, TenderRequirementModel } from '../types';
 import type { GenerationSession } from './generationSession';
@@ -21,7 +22,6 @@ import { createAgentWorkflowContext, agentWorkflowStages } from '../agentWorkflo
 import { planDocument } from '../agentPlanner';
 import { collectProjectBasicEvidence, kbIndexHealth, resolveDocumentGenerationEvidenceLimit, searchWeightsForChapter, vectorStatusLabel } from '../documentGeneratorHelpers';
 import { retrievalCoverageRisk } from '../documentEvidenceRetrieval';
-import { assertEvidenceInProjectScope, createProjectMaterialScope, filterEvidenceByProjectScope } from '../projectMaterialScope';
 import { buildBidProcedureJudge, evidenceSafetyKey, partitionEvidenceByContentSafety } from '../evidenceContentSafety';
 import { buildFactsModel, extractLocalFactPool } from '../factsModel';
 import { arbitrateFactPool, buildCanonicalFactModel, extractDrawingAnnotationFacts, PROJECT_BASIC_FIELD_SPECS } from '../factGovernance';
@@ -45,7 +45,6 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
   session.understanding.indexHealth = kbIndexHealth(session.understanding.project, [...session.understanding.evidenceScopePaths]);
   if (session.understanding.indexHealth.blockingIssues.length > 0) throw new Error(`生成前知识索引不可用：${session.understanding.indexHealth.blockingIssues.join('；')}`);
   session.understanding.availableEvidenceScopePaths = new Set(session.understanding.indexHealth.usablePaths);
-  session.understanding.projectMaterialScope = createProjectMaterialScope(session.prepare.projectId, [...session.understanding.availableEvidenceScopePaths]);
   session.understanding.requestedEvidencePerChapter = resolveDocumentGenerationEvidenceLimit(session.understanding.project, [...session.understanding.availableEvidenceScopePaths], session.global.input.maxEvidencePerChapter);
   const indexHealthHasActionableWarning = session.understanding.indexHealth.pendingJobs > 0 || session.understanding.indexHealth.usableChunkCount === 0;
   // 召回覆盖风险必须写回 session（章节循环与覆盖报告在阶段 4 消费）：P1 六阶段拆分搬迁时
@@ -83,20 +82,23 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
     }
     return fileDetailCache.get(key);
   };
-  session.understanding.searchWithCache = async (query: string, scopedFilePaths: string[], limit: number, chapterTitle: string) => {
+  session.understanding.searchWithCache = async (query: string, scopedFilePaths: string[], limit: number, chapterTitle: string, scopedMaterialRoots?: string[]) => {
     const weights = searchWeightsForChapter(chapterTitle);
+    // 资料包 ID 双锁：优先用调用方传入的范围包集合（生成链统一来自 materialScope.selectedMaterialRoots）；
+    // 未传参时按文件白名单派生兜底，任何调用点都不会退化为全库裸检索
+    const effectiveMaterialRoots = scopedMaterialRoots ?? materialRootsOfFiles(scopedFilePaths);
     // E1/E2：章节主检索为生成场景检索——generationMode:true 跳过 LLM 查询扩展（省 LLM 预算）。
     // cross-encoder 语义重排已恢复：推理下沉 worker 线程（packages/knowledge rerank-worker-thread），
     // 主线程不再被 ONNX 推理阻塞（历史：237 组查询 × 30 候选主线程推理阻塞 20-60 分钟，
     // 曾被迫 disableReranker 退化为纯 JS heuristicRerank，小节级证据相关性排序精度下降）。
     // （原 DOCUMENT_GENERATION_RERANKER 回退已固化删除：reranker 恒开；KB_RERANKER_WORKER=0 仍可回退主线程推理）
     const generationRerankerEnabled = true;
-    const key = stableHash({ query, scopedFilePaths, limit, weights, generationMode: true, reranker: generationRerankerEnabled });
+    const key = stableHash({ query, scopedFilePaths, effectiveMaterialRoots, limit, weights, generationMode: true, reranker: generationRerankerEnabled });
     const cached = searchCache.get(key);
     if (cached) return cached;
     const result = await session.understanding.manager.search(session.prepare.projectRoot, query, {
       scope: 'project',
-      filters: { filePaths: scopedFilePaths },
+      filters: { filePaths: scopedFilePaths, materialRoots: effectiveMaterialRoots },
       limit,
       weights,
       generationMode: true,
@@ -109,8 +111,8 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
   const projectUnderstandingStage = { stage: displayStage({ type: 'file_understanding', roleId: 'project-understanding', status: 'running', message: `正在理解项目资料：${session.prepare.projectMaterialProfile.files.length} 份资料，${Object.values(session.prepare.projectMaterialProfile.groups).filter(files => files.length > 0).length} 类资料类型`, progress: { current: 1, total: 3, label: '资料理解' } }, { subtitle: '项目资料理解', order: session.global.progressStages.length }) };
   upsertProgressStage(session.global.progressStages, projectUnderstandingStage.stage);
   session.global.emitProgress();
-  const projectBasicEvidence = filterEvidenceByProjectScope(await collectProjectBasicEvidence({ manager: session.understanding.manager, project: session.understanding.project, projectRoot: session.prepare.projectRoot, scopedFilePaths: [...session.understanding.evidenceScopePaths].filter(Boolean).sort(), fileRoleByPath: session.understanding.fileRoleByPath, fileProcessingByPath: session.understanding.fileProcessingByPath, signal: session.global.input.signal }), session.understanding.projectMaterialScope);
-  assertEvidenceInProjectScope(projectBasicEvidence, session.understanding.projectMaterialScope, 'project-basic-evidence');
+  // 基础证据检索口径源头化：直接按"索引可用文件"检索（历史：按全部选定文件检索后再由事后过滤剔除不可用文件证据）
+  const projectBasicEvidence = await collectProjectBasicEvidence({ manager: session.understanding.manager, project: session.understanding.project, projectRoot: session.prepare.projectRoot, scopedFilePaths: [...session.understanding.availableEvidenceScopePaths].filter(Boolean).sort(), scopedMaterialRoots: session.prepare.materialScope.selectedMaterialRoots, fileRoleByPath: session.understanding.fileRoleByPath, fileProcessingByPath: session.understanding.fileProcessingByPath, signal: session.global.input.signal });
   if (projectBasicEvidence.length > 0) {
     session.understanding.allEvidence.push(...projectBasicEvidence);
     upsertProgressStage(session.global.progressStages, displayStage({ type: 'knowledge_retrieval', roleId: 'project-basic-evidence', status: 'success', message: `已锁定项目基础事实证据 ${projectBasicEvidence.length} 条`, details: projectBasicEvidence.slice(0, 8).map(item => `${path.basename(item.filePath)}｜${item.sectionTitle || '正文片段'}｜score=${item.score.toFixed(2)}`) }, { subtitle: '基础事实召回', order: session.global.progressStages.length }));
@@ -131,9 +133,9 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
   // 排除证据内容指纹集：写作链证据（pinned/搜索召回）多为浅拷贝，按 filePath+sectionTitle 指纹比对
   session.understanding.excludedEvidenceKeys = new Set(excludedEvidence.map(evidenceSafetyKey));
   // 本地事实池统一入口（与 finalize 抽取点同源，见 factsModel.extractLocalFactPool）：
-  // 四个本地抽取器 + 项目范围过滤单点收敛；structuredTables 经工作簿解析缓存，
+  // 四个本地抽取器单点收敛；structuredTables 经工作簿解析缓存，
   // finalize 复抽取同一批表文件时零重复磁盘 IO（行为保持，抽取语义零变化）
-  session.understanding.earlyFactPool = extractLocalFactPool({ evidence: session.understanding.writerEvidence, template: session.prepare.template, spec: session.prepare.documentSpec, profile: session.prepare.domainProfile, scope: session.understanding.projectMaterialScope });
+  session.understanding.earlyFactPool = extractLocalFactPool({ evidence: session.understanding.writerEvidence, template: session.prepare.template, spec: session.prepare.documentSpec, profile: session.prepare.domainProfile });
   const earlyLocalFacts = session.understanding.earlyFactPool.localFacts;
   const earlyProjectBasicFacts = session.understanding.earlyFactPool.projectBasicFacts;
   const earlyPreciseFacts = session.understanding.earlyFactPool.preciseFacts;
@@ -152,7 +154,7 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
   session.understanding.preliminaryFactsModel = await buildFactsModel(arbitratedFacts, session.understanding.earlyFactPool.structuredTables, session.understanding.missingItems, session.prepare.documentSpec, session.prepare.domainProfile);
   session.understanding.agentWorkflow = createAgentWorkflowContext({ template: session.prepare.template, requirement: session.global.input.requirement, projectRoot: session.prepare.projectRoot, facts: arbitratedFacts, projectGraph: session.understanding.scopedIntelligence?.projectGraph, projectGraphSource: session.understanding.scopedIntelligence ? 'project-intelligence' : undefined, materialScope: session.prepare.materialScope });
   for (const stage of agentWorkflowStages(session.understanding.agentWorkflow)) upsertProgressStage(session.global.progressStages, stage);
-  if (session.understanding.scopedIntelligence) upsertProgressStage(session.global.progressStages, displayStage({ type: 'file_understanding', roleId: 'project-intelligence-cache', status: 'success', message: `已复用入库后项目理解资产与绑定 scope 快照：${session.understanding.scopedIntelligence.files.length} 份绑定资料`, details: [`项目级缓存时间：${new Date(session.understanding.scopedIntelligence.cache.createdAt).toLocaleString()}`, `scope 快照：${session.understanding.scopedIntelligence.scopeSnapshot.scopeHash.slice(0, 12)}`, `复用预计算事实：${session.understanding.scopedIntelligence.facts.length} 条`, `复用预计算项目图谱：${session.understanding.scopedIntelligence.projectGraph.works.length}工程/${session.understanding.scopedIntelligence.projectGraph.methods.length}工法/${session.understanding.scopedIntelligence.projectGraph.resources.length}资源`, `复用施工组织设计专项图谱：${session.understanding.scopedIntelligence.constructionOrganizationGraph.workPackages.length} 个工作包/${session.understanding.scopedIntelligence.constructionOrganizationGraph.controlMatrix.length} 条控制矩阵`, `图谱来源：${session.understanding.scopedIntelligence.cache.projectGraphMessage}`, `章节意图证据覆盖：${Object.keys(session.understanding.scopedIntelligence.evidenceByChapterId || {}).length}/${session.prepare.template.chapters.length} 章`, `排除正文不适用资料：${session.understanding.scopedIntelligence.files.filter(file => !file.usableForBody).length} 份`] }, { subtitle: '项目理解缓存 / Scope 快照' }));
+  if (session.understanding.scopedIntelligence) upsertProgressStage(session.global.progressStages, displayStage({ type: 'file_understanding', roleId: 'project-intelligence-cache', status: 'success', message: `已复用入库后资料包理解资产：${session.understanding.scopedIntelligence.files.length} 份资料`, details: [`项目级缓存时间：${new Date(session.understanding.scopedIntelligence.cache.createdAt).toLocaleString()}`, `资料包范围指纹：${session.understanding.scopedIntelligence.scope.scopeHash.slice(0, 12)}`, `复用预计算事实：${session.understanding.scopedIntelligence.facts.length} 条`, `复用预计算项目图谱：${session.understanding.scopedIntelligence.projectGraph.works.length}工程/${session.understanding.scopedIntelligence.projectGraph.methods.length}工法/${session.understanding.scopedIntelligence.projectGraph.resources.length}资源`, `复用施工组织设计专项图谱：${session.understanding.scopedIntelligence.constructionOrganizationGraph.workPackages.length} 个工作包/${session.understanding.scopedIntelligence.constructionOrganizationGraph.controlMatrix.length} 条控制矩阵`, `图谱来源：${session.understanding.scopedIntelligence.cache.projectGraphMessage}`, `章节意图证据覆盖：${Object.keys(session.understanding.scopedIntelligence.evidenceByChapterId || {}).length}/${session.prepare.template.chapters.length} 章`, `排除正文不适用资料：${session.understanding.scopedIntelligence.files.filter(file => !file.usableForBody).length} 份`] }, { subtitle: '项目理解缓存 / 资料包' }));
   session.global.emitProgress();
 
   // ===== 项目资料图谱：命中 project-intelligence 时复用入库后完整项目图谱；缓存缺失时临时构建完整项目图谱 =====

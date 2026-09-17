@@ -162,19 +162,23 @@ describe('stripInternalTerminologySentences', () => {
 });
 
 describe('fixInternalTermHeadingPhrases', () => {
-  it('标题行内「落位」确定性替换为「落实」（丰乐镇第五轮 10.3.2 实测）', () => {
+  it('标题行内「落位」确定性替换为「落实」（丰乐镇第五轮 10.3.2 实测；r14 扩围后正文行同替换）', () => {
     const markdown = '#### 10.3.2 分区管理与责任落位\n正文句保留落位不替换。';
     const result = fixInternalTermHeadingPhrases(markdown);
     expect(result.markdown).toContain('#### 10.3.2 分区管理与责任落实');
-    expect(result.markdown).toContain('正文句保留落位不替换。');
-    expect(result.fixedCount).toBe(1);
+    // r14 E15/E17 扩围：正文行「落位」同走词面替换（原仅标题/表格行，rebuild 回退后存在检测报/修复丢死区）
+    expect(result.markdown).toContain('正文句保留落实不替换。');
+    expect(result.fixedCount).toBe(2);
   });
 
-  it('非标题行「落位」不替换（正文句交 stripInternalTerminologySentences 删除链）', () => {
+  it('非标题行「落位/峰值口径」也替换（r14 扩围：词面替换先行，无安全替换词仍交 strip 整句删除兜底）', () => {
     const markdown = '各专业工程主要清单项逐项落位到具体管理动作。';
     const result = fixInternalTermHeadingPhrases(markdown);
-    expect(result.markdown).toBe(markdown);
-    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe('各专业工程主要清单项逐项落实到具体管理动作。');
+    expect(result.fixedCount).toBe(1);
+    const peak = fixInternalTermHeadingPhrases('劳动力配置不得突破262人峰值口径。');
+    expect(peak.markdown).toBe('劳动力配置不得突破262人上限。');
+    expect(peak.fixedCount).toBe(1);
   });
 
   it('标题行其他 L1 精确词（工作包）无安全词面替换不触碰', () => {

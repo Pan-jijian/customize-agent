@@ -1,10 +1,11 @@
 import type { DocumentWorkflowVersion } from './types';
 
 export const DOCUMENT_WORKFLOW_VERSION: DocumentWorkflowVersion = {
-  // round-26（评分项要求提取治理）：字段级定向补提闭环覆盖全部评分项要求字段（P0/P1 缓存优化
-  // L0 公共前缀/证据预算/两步瘦身/评审瘦身/patch 容错/同前缀调度/截断修复）+ 评标办法/篇幅要求
-  // 字段从提取链路移除——评分项要求提取结果口径变化，bump 使旧 checkpoint（旧提取结果快照）不再被复用
-  version: 'professional-document-workflow-v9',
+  // 4.50 交付解耦 + 门禁链两波根治（r8/r9 定因）：①终态语义变化——门禁未过由 failed 改为
+  // completed_with_issues（交付解耦：不阻断查看与导出，残留转人工复核清单）；②检测/修复口径变化
+  // （precise 池清洗与归一双端匹配、requirements-coverage 链尾收口、pump 词面分池校准等）。
+  // bump 使旧口径 checkpoint（含 failed 终态时期的章节快照）不再被复用
+  version: 'professional-document-workflow-v12',
   rules: [
     'complete-local-knowledge-assumption',
     'knowledge-coverage-recovery',

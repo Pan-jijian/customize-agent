@@ -9,15 +9,23 @@
  *   locateDecisionOptionAnchor 锚定（含 end 贴缘数据）、fixAmbiguousEitherOrCandidates
  *   决策锁裁决三态（有锁归一/无锁缺口/双侧贴缘拒绝）；决策锁多值共存（面层沥青+基层半刚性
  *   合法组合不误报语义矛盾——pavement_structure exclusive 复查修正）；
- * - B2 hasWorkInjuryInsuranceStatement：检测定位=修复定位单源（书名号剥离、邻近动词窗口）。
+ * - B2 hasWorkInjuryInsuranceStatement：检测定位=修复定位单源（书名号剥离、邻近动词窗口）；
+ * - r14 丰乐镇 B3/B1：工伤保险表述确定性改写器（fixWorkInjuryInsuranceStatement，与检测器同源
+ *   词面门控）与链尾蓝图引用数值收口重放（replayBlueprintCitationNumericFixes，stageFactDistribution
+ *   rebuild 回退后在终门禁前重放）的接线与幂等。
  */
+import { readFileSync } from 'node:fs';
+import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { renumberSectionHeadings, scanStructureDefects, structureIntegrityFeedback, structureIntegrityIssues } from '@/services/document-workflow/structureIntegrityRules';
 import { decisionLockCategoryMeta, extractDecisionLockEntries, locateDecisionOptionAnchor, matchDecisionCategory } from '@/services/document-workflow/integratedBlueprint';
 import { semanticChoiceConflicts } from '@/services/document-workflow/dataConsistencyReview';
 import { SURFACE_FIX_STEPS } from '@/services/document-workflow/deterministicFixChains';
 import { fixAmbiguousEitherOrCandidates } from '@/services/document-workflow/documentIntegrityChecks';
-import { hasWorkInjuryInsuranceStatement } from '@/services/document-workflow/utils';
+import { hasWorkInjuryInsuranceStatement, fixWorkInjuryInsuranceStatement } from '@/services/document-workflow/utils';
+import { replayBlueprintCitationNumericFixes } from '@/services/document-workflow/finalize/repairRounds/postReviewSurface';
+
+const SRC_DIR = path.resolve(__dirname, '../../../src/services/document-workflow');
 
 const occurrenceCount = (text: string, sub: string) => text.split(sub).length - 1;
 
@@ -256,5 +264,72 @@ describe('B2 hasWorkInjuryInsuranceStatement 检测定位=修复定位单源', (
 
   it('无关文本不命中', () => {
     expect(hasWorkInjuryInsuranceStatement('安全生产管理措施完善，责任落实到人。')).toBe(false);
+  });
+});
+
+describe('B3 fixWorkInjuryInsuranceStatement 工伤保险表述确定性改写（r14 丰乐镇 B3 归因）', () => {
+  it('「办理意外伤害保险」改写入并列表述且检测器同源判定通过', () => {
+    const markdown = '#### 7.2.3 工伤保险与劳动保障\n\n项目部为施工现场全部人员办理意外伤害保险并支付保险费，农民工工资按月足额支付。';
+    expect(hasWorkInjuryInsuranceStatement(markdown)).toBe(false);
+    const fixed = fixWorkInjuryInsuranceStatement(markdown);
+    expect(fixed.fixedCount).toBe(1);
+    expect(fixed.markdown).toContain('办理工伤保险（按建设项目参保）及意外伤害保险');
+    expect(hasWorkInjuryInsuranceStatement(fixed.markdown)).toBe(true);
+  });
+
+  it('幂等：改写后重跑零命中（逐字节恒等）', () => {
+    const markdown = '#### 7.2.3 工伤保险与劳动保障\n\n项目部为施工现场全部人员办理意外伤害保险并支付保险费，农民工工资按月足额支付。';
+    const first = fixWorkInjuryInsuranceStatement(markdown);
+    const second = fixWorkInjuryInsuranceStatement(first.markdown);
+    expect(second.fixedCount).toBe(0);
+    expect(second.markdown).toBe(first.markdown);
+  });
+
+  it('已满足表述零改动（不重复插入）', () => {
+    const markdown = '项目部为全体作业人员办理工伤保险并留存缴费凭证，农民工工资按月足额支付。';
+    const result = fixWorkInjuryInsuranceStatement(markdown);
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe(markdown);
+  });
+
+  it('无劳资内容零改动（与检测器同源词面门控，不误伤无关章节）', () => {
+    const markdown = '# 施工方案\n本项目按图施工，材料进场复验合格。';
+    const result = fixWorkInjuryInsuranceStatement(markdown);
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe(markdown);
+  });
+
+  it('无可改写句时按「工伤保险」标题小节插入合规短句（链尾兜底）', () => {
+    const markdown = '#### 7.2.3 工伤保险与劳动保障\n\n农民工工资实行专用账户与总包代发，按月足额支付。';
+    const result = fixWorkInjuryInsuranceStatement(markdown);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('办理工伤保险（按建设项目参保）');
+    expect(hasWorkInjuryInsuranceStatement(result.markdown)).toBe(true);
+  });
+
+  it('链尾接线：改写块位于清洗重放组内（rebuild 回退后重放恢复）', () => {
+    const source = readFileSync(path.join(SRC_DIR, 'finalize/repairRounds/postReviewSurface.ts'), 'utf8');
+    const cleansFnIndex = source.indexOf('async function runSurfaceDeterministicCleans');
+    const callIndex = source.indexOf('fixWorkInjuryInsuranceStatement(session.finalMarkdown)');
+    expect(cleansFnIndex).toBeGreaterThan(-1);
+    expect(callIndex).toBeGreaterThan(cleansFnIndex);
+  });
+});
+
+describe('B1 链尾蓝图引用数值收口重放接线（r14 丰乐镇 B1 归因）', () => {
+  it('documentPipeline：重放调用位于最后一次清洗重放之后、终门禁之前', () => {
+    const source = readFileSync(path.join(SRC_DIR, 'documentPipeline.ts'), 'utf8');
+    const replayIndex = source.indexOf('await replayBlueprintCitationNumericFixes(session);');
+    const cleansIndex = source.indexOf('await runSurfaceDeterministicCleans(session);');
+    const gateIndex = source.indexOf('await stageFinalGate(session);');
+    expect(replayIndex).toBeGreaterThan(-1);
+    expect(cleansIndex).toBeGreaterThan(-1);
+    expect(gateIndex).toBeGreaterThan(-1);
+    expect(replayIndex).toBeGreaterThan(cleansIndex);
+    expect(replayIndex).toBeLessThan(gateIndex);
+  });
+
+  it('无蓝图时零成本静默（短路返回不抛错，幂等可重放）', async () => {
+    await expect(replayBlueprintCitationNumericFixes({ blueprintData: null } as never)).resolves.toBeUndefined();
   });
 });

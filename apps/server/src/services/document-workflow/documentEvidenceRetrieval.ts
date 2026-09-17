@@ -1,3 +1,4 @@
+import { materialRootsOfFiles } from '@customize-agent/knowledge';
 import type { DocumentEvidence, DocumentTemplateChapter, RetrievalCoverageReport, ValidationIssue } from './types';
 import { selectEvidenceByBudget } from './evidence';
 import { evidenceMatchesFact } from './factMatching';
@@ -136,6 +137,7 @@ export async function retrieveDeepChapterEvidence(input: {
   projectRoot: string;
   chapter: DocumentTemplateChapter;
   scopedFilePaths: string[];
+  scopedMaterialRoots?: string[];
   fileRoleByPath: Map<string, string>;
   fileProcessingByPath: Map<string, string>;
   requiredNeeds?: string[];
@@ -172,7 +174,7 @@ export async function retrieveDeepChapterEvidence(input: {
     throwIfAborted(input.signal);
     const result = await input.manager.search(input.projectRoot, entry.text, {
       scope: 'project',
-      filters: { filePaths: input.scopedFilePaths },
+      filters: { filePaths: input.scopedFilePaths, materialRoots: input.scopedMaterialRoots ?? materialRootsOfFiles(input.scopedFilePaths) },
       limit,
       weights: { keyword: 0.62, vector: 0.32, rewrite: 0.9, hybridBonus: 0.28 },
       // E1/E2 历史：深召回曾禁用 cross-encoder（transformers v3 主线程同步 ONNX 阻塞事件循环）；
@@ -181,7 +183,8 @@ export async function retrieveDeepChapterEvidence(input: {
       // 精确数值事实（规格-数量行、标高-坡率标注）的召回排序质量；worker 不可用时自动回退启发式重排
       generationMode: true,
     });
-    return mapSearchResults({ chapter: input.chapter, results: result.results.filter(item => input.scopedFilePaths.includes(item.filePath)), fileRoleByPath: input.fileRoleByPath, fileProcessingByPath: input.fileProcessingByPath, boost: entry.boost, source: entry.source });
+    // 证据范围由检索层 filters 保证（SQL relative_path IN + material_root IN），此处不再二次过滤（历史冗余已删）
+    return mapSearchResults({ chapter: input.chapter, results: result.results, fileRoleByPath: input.fileRoleByPath, fileProcessingByPath: input.fileProcessingByPath, boost: entry.boost, source: entry.source });
   }, { kind: 'deepRetrieval', highRisk: input.highRisk });
   evidence.push(...searchResults.flat());
   // 精确 need 检索沿用原 retrieveMissingFactEvidence 的预算（needs×3 条 / 18000 字），避免挤占广谱深召回预算

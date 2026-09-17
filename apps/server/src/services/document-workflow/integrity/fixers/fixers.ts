@@ -8,7 +8,7 @@ import { PEAK_LABOR_RE, PILE_SUPPORT_LITERAL_RE, SLOPE_SUPPORT_LITERAL_RE, cnNum
 import type { SupportSystemAuthorityKind } from '../authorities/authorities';
 import { locateDecisionOptionAnchor, matchDecisionCategory } from '../../integratedBlueprint';
 import type { DecisionLockEntry, QuantityConflictAnchor } from '../../integratedBlueprint';
-import { COMMERCIAL_RATE_RE, COMMERCIAL_TERM_RE, CROSS_SECTION_ANCHORS, CROSS_SECTION_ANCHOR_ENTITY_RE, ENUMERATION_VALUE_RE, FINISH_THICKNESS_CONTEXT_WORD, LABOR_COUNT_RE, META_DECLARATION_RE, NEGATIVE_DECLARATION_RE, PARAGRAPH_START_RE, REPEATED_WORD_RE, SCHEDULE_NODE_ANCHORS, ambiguousEitherOrIssues, cellCoverage, extractMarkdownTables, jaccard, laborGroupOf, locationGroupForMatch, PARAGRAPH_TAIL_REPEAT_MIN_CHARS, paragraphFingerprint, scanCollisionNumberedHeadings, scanInvertedDateRanges, scanPhaseLaborClaims, scanUncoveredEngineeringHeadings, splitConcatenatedPhaseName, textCellsOf } from '../detectors/detectors';
+import { COMMERCIAL_RATE_RE, COMMERCIAL_TERM_RE, CROSS_SECTION_ANCHORS, CROSS_SECTION_ANCHOR_ENTITY_RE, ENUMERATION_VALUE_RE, FINISH_THICKNESS_CONTEXT_WORD, LABOR_COUNT_RE, META_DECLARATION_RE, NEGATIVE_DECLARATION_RE, PARAGRAPH_START_RE, REPEATED_WORD_RE, SCHEDULE_NODE_ANCHORS, ambiguousEitherOrIssues, cellCoverage, extractMarkdownTables, jaccard, laborGroupOf, locationGroupForMatch, PARAGRAPH_TAIL_REPEAT_MIN_CHARS, paragraphFingerprint, scanCollisionNumberedHeadings, scanEquipmentBatchConflicts, scanInvertedDateRanges, scanPhaseLaborClaims, scanUncoveredEngineeringHeadings, splitConcatenatedPhaseName, textCellsOf } from '../detectors/detectors';
 import type { AuthorityDomain, AuthorityIndex } from '../../authorityIndex';
 
 const PILE_WORD_TO_SLOPE: Array<[RegExp, string]> = [
@@ -147,6 +147,28 @@ export function fixTruncatedSentenceArtifacts(markdown: string): { markdown: str
     const before = result;
     result = result.replace(re, to);
     fixedCount += (before.match(new RegExp(re.source, 'gu')) || []).length;
+  }
+  // r15 丰乐镇 B2 归因：段落行以分号收尾且下一行为列表项（编号/项目符号）——分号在承启列表处
+  // 属标点错用（合规形态为句号收句或冒号引导），检测器 softWrapped 软换行豁免要求下一行为
+  // 普通正文，该形态未被豁免必判截断 blocker；确定性收敛：行尾「；」改「。」（仅改标点不改
+  // 字词，语义无损、幂等；列表行本身以分号收尾属合法形态、行尾冒号引导列表由检测器
+  // listLeadInColon 豁免，两者均不在本修复范围）
+  const listLineRe = /^(?:[-*+]\s+|[（(]?\d+[）).、]\s*)/u;
+  const sentenceLines = result.split('\n');
+  let tailFixed = 0;
+  for (let index = 0; index < sentenceLines.length - 1; index += 1) {
+    const line = sentenceLines[index];
+    const trimmed = line.trim();
+    if (!trimmed || /^#{1,6}\s+/u.test(trimmed) || /^\s*\|/u.test(trimmed) || listLineRe.test(trimmed)) continue;
+    if (!/[；;]$/u.test(trimmed)) continue;
+    const next = sentenceLines[index + 1].trim();
+    if (!next || !listLineRe.test(next)) continue;
+    sentenceLines[index] = line.replace(/[；;]\s*$/u, '。');
+    tailFixed += 1;
+  }
+  if (tailFixed > 0) {
+    result = sentenceLines.join('\n');
+    fixedCount += tailFixed;
   }
   if (result === markdown) return { markdown, fixedCount: 0, details: [] };
   return { markdown: result, fixedCount, details: [`截断句残留清洗 ${fixedCount} 处`] };
@@ -1854,6 +1876,11 @@ const FORBIDDEN_CONFIG_FIXES: Array<{ from: RegExp; to: string; detail: string }
   // 舒城第二轮实测：「工程量/面积按设计要求控制/考虑」留白引用触发 blocker（config forbiddenTexts）。
   // 「按设计要求」是责任模糊式留白，全文档改写为具体出处「按施工图设计文件」，与 containsForbiddenText 同口径豁免
   { from: /按设计要求(?!目录|清单|索引|汇总)/gu, to: '按施工图设计文件', detail: '按设计要求留白改写' },
+  // r6 实机归因（#10 配置禁止词「按图纸」正文残留）：留白改写规则此前只对表格数据行生效
+  //（TABLE_ROW_DEFERRAL_FIXES），正文段落（实机「道路破复按图纸上的大样施工」）不清洗直坠终检
+  // forbiddenTexts blocker——同口径并入正文级清洗（合法交叉引用后缀豁免与 containsForbiddenText 一致）
+  { from: /按图纸(?!目录|清单|索引|汇总)/gu, to: '按施工图设计文件', detail: '正文「按图纸」留白改写' },
+  { from: /见图纸(?!目录|清单|索引|汇总)/gu, to: '见施工图设计文件', detail: '正文「（详）见图纸」留白改写' },
 ];
 
 /** 表格数据行留白改写规则（舒城第二轮实测：数据行照抄清单特征「建筑物檐口高度、层数：详见图纸」
@@ -1956,47 +1983,115 @@ export function fixTocFromBody(markdown: string): { markdown: string; fixedCount
 // 整段重复，抓不到段内句级复读。本修复与检测器 paragraphTailRepeatIssues 同源复用
 // scanParagraphTailRepeats 扫描口径（检测定位=修复定位）：段内相同句（去空白 ≥15 字）
 // 只保留首次出现，删除后续复读句（含段尾复读 1~3 句形态）。
+// r11 块级同源重写（丰乐镇实测 #5 机制归因）：旧实现行级切句——真实复读形态为「行内编号版 +
+// 换行列表版」同块跨行复读（去空白后整句逐字相同），行级 seen 集合看不到跨行构成的句，
+// 且长句与行级碎片的后缀包含关系不成立（长度差远超 15 字容差）→ 检测器报 blocker、修复器零修复。
+// 新实现：与 scanParagraphTailRepeats 完全同源（块 trim → 剥标题/表格行 → join('\n') →
+// 按「。！？!?」切句 → 归一化去空白 ≥15 字 → 相同/长句以短句结尾（长度差 ≤15 字）判重），
+// 重复句经「prose 字符 → 块 index」位置映射回原块删除第二次及以后出现（含句尾终止标点，
+// 前置空白回退不跨句界），原文其余结构逐字保留。
 
 export function fixParagraphTailRepeats(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
-  const blocks = markdown.split(/(\n\s*\n)/u);
+  // split 保留分隔符：奇数位是块间分隔（\n\s*\n），偶数位是块内容（与检测器 split(/\n\s*\n/) 块边界同源）
+  const segments = markdown.split(/(\n\s*\n)/u);
   let fixedCount = 0;
   const details: string[] = [];
-  const rebuilt = blocks.map(block => {
-    if (!block || !/[。！？!?]/u.test(block)) return block;
-    // 标题行/表格行原样保留，散文行逐行句级去重（与检测器同源后缀规则：长句以短句结尾且长度差 ≤15 字视为复读）
-    const seen = new Set<string>();
-    let changed = false;
-    const rebuiltLines = block.split(/\n/u).map(line => {
-      const t = line.trim();
-      if (!t || /^#{1,6}\s/u.test(t) || t.startsWith('|')) return line;
-      const sentences = line.split(/(?<=[。！？!?])/u);
-      const kept = sentences.filter(rawSentence => {
-        const sentence = rawSentence.trim().replace(/\s+/gu, '');
-        if (sentence.length < PARAGRAPH_TAIL_REPEAT_MIN_CHARS) return true;
-        const isDup = [...seen].some(entry =>
-          entry === sentence ||
-          (entry.length > sentence.length &&
-            entry.length - sentence.length <= PARAGRAPH_TAIL_REPEAT_MIN_CHARS &&
-            entry.endsWith(sentence)),
-        );
-        if (isDup) {
-          fixedCount += 1;
-          details.push(sentence.slice(0, 24));
-          return false;
-        }
-        seen.add(sentence);
-        return true;
-      });
-      if (kept.length !== sentences.length) {
-        changed = true;
-        return kept.join('');
-      }
-      return line;
-    });
-    if (!changed) return block;
-    return rebuiltLines.join('\n');
+  const rebuilt = segments.map((segment, index) => {
+    if (index % 2 === 1 || !segment) return segment;
+    const outcome = dedupeTailRepeatsInBlock(segment);
+    if (outcome.removedCount === 0) return segment;
+    fixedCount += outcome.removedCount;
+    details.push(...outcome.samples);
+    return outcome.block;
   });
-  return { markdown: rebuilt.join(''), fixedCount, details };
+  return { markdown: rebuilt.join(''), fixedCount, details: details.slice(0, 8) };
+}
+
+/** 单块内句级复读剥离（与 scanParagraphTailRepeats 同源判定）：返回去除复读句后的块文本。
+ * 实现：①块内容构造 prose（剥标题/表格行后 join('\n')）与「prose 字符 → 块 index」位置映射；
+ * ②prose 按 [。！？!?] 切句（终止标点不入句体），归一化句子（trim + 去空白）同源判重；
+ * ③第 2 次及以后出现的重复句删除：删除区间 = 句体起止（映射回块位置）+ 句尾终止标点 +
+ * 前置空白回退（不越句界）；④删除区间重叠合并后从后往前应用（防位移）。 */
+
+function dedupeTailRepeatsInBlock(segment: string): { block: string; removedCount: number; samples: string[] } {
+  if (!/[。！？!?]/u.test(segment)) return { block: segment, removedCount: 0, samples: [] };
+  const leading = /^\s*/u.exec(segment)?.[0] ?? '';
+  const trailing = /\s*$/u.exec(segment)?.[0] ?? '';
+  const block = segment.slice(leading.length, segment.length - trailing.length);
+  if (!block || !/[。！？!?]/u.test(block)) return { block: segment, removedCount: 0, samples: [] };
+  // prose 构造 + 位置映射（与检测器逐行过滤口径一致：空行剔除、标题/表格行剔除，行间 join('\n')）
+  const proseChars: string[] = [];
+  const originIndex: number[] = [];
+  let offset = 0;
+  for (const line of block.split('\n')) {
+    const t = line.trim();
+    const keep = Boolean(t) && !/^#{1,6}\s/u.test(t) && !t.startsWith('|');
+    if (keep) {
+      if (proseChars.length > 0) {
+        proseChars.push('\n');
+        originIndex.push(Math.max(0, offset - 1));
+      }
+      for (let k = 0; k < line.length; k += 1) {
+        proseChars.push(line[k]!);
+        originIndex.push(offset + k);
+      }
+    }
+    offset += line.length + 1;
+  }
+  const prose = proseChars.join('');
+  if (!prose) return { block: segment, removedCount: 0, samples: [] };
+  // 切句区间（句体不含终止标点；尾段无标点即到 prose 尾）
+  const sentenceRanges: Array<{ start: number; end: number; terminator: number }> = [];
+  let cursor = 0;
+  for (const match of prose.matchAll(/[。！？!?]/gu)) {
+    sentenceRanges.push({ start: cursor, end: match.index, terminator: match.index });
+    cursor = match.index + 1;
+  }
+  if (cursor < prose.length) sentenceRanges.push({ start: cursor, end: prose.length, terminator: -1 });
+  const seen: string[] = [];
+  const deletes: Array<{ start: number; end: number }> = [];
+  const samples: string[] = [];
+  for (const range of sentenceRanges) {
+    const rawSentence = prose.slice(range.start, range.end);
+    const sentence = rawSentence.trim().replace(/\s+/gu, '');
+    if (sentence.length < PARAGRAPH_TAIL_REPEAT_MIN_CHARS) continue;
+    const isDup = seen.some(entry =>
+      entry === sentence ||
+      (entry.length > sentence.length &&
+        entry.length - sentence.length <= PARAGRAPH_TAIL_REPEAT_MIN_CHARS &&
+        entry.endsWith(sentence)),
+    );
+    if (!isDup) {
+      seen.push(sentence);
+      continue;
+    }
+    // 重复出现 → 计算删除区间（块坐标）
+    const bodyStart = range.start + (rawSentence.length - rawSentence.trimStart().length);
+    const bodyEnd = range.end - (rawSentence.length - rawSentence.trimEnd().length);
+    let blockStart = bodyStart < originIndex.length ? originIndex[bodyStart]! : -1;
+    const blockEnd = range.terminator >= 0
+      ? (originIndex[range.terminator] ?? -1) + 1
+      : bodyEnd > 0 && bodyEnd - 1 < originIndex.length ? originIndex[bodyEnd - 1]! + 1 : -1;
+    if (blockStart < 0 || blockEnd <= blockStart) continue;
+    // 前置空白回退（含跨行换行；不吞上一句终止标点——空白字符类不含句号）
+    while (blockStart > 0 && /\s/u.test(block[blockStart - 1]!)) blockStart -= 1;
+    deletes.push({ start: blockStart, end: blockEnd });
+    samples.push(sentence.slice(0, 24));
+  }
+  if (deletes.length === 0) return { block: segment, removedCount: 0, samples: [] };
+  // 重叠合并 + 从后往前删除（防位移）
+  deletes.sort((a, b) => a.start - b.start);
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const item of deletes) {
+    const last = merged[merged.length - 1];
+    if (last && item.start <= last.end) last.end = Math.max(last.end, item.end);
+    else merged.push({ ...item });
+  }
+  let next = block;
+  for (let i = merged.length - 1; i >= 0; i -= 1) {
+    next = next.slice(0, merged[i]!.start) + next.slice(merged[i]!.end);
+  }
+  return { block: next, removedCount: deletes.length, samples };
 }
 
 // ── 时间区间倒挂确定性剥离（十五版评分报告实测「开工令下发后第90日至第3日完成」）──
@@ -2081,4 +2176,38 @@ export function fixCollisionNumberedHeadings(markdown: string): { markdown: stri
   }
   const rebuilt = lines.filter((_, index) => !removedLines.has(index));
   return { markdown: rebuilt.join('\n'), fixedCount: details.length, details };
+}
+
+/** 机械设备分批台数矛盾确定性修复（r17 丰乐镇归因 #B2/B3：「首批进场挖掘机5台…剩余挖掘机5台…共同形成5台挖掘机…满配」——
+ * 各批组合之和 5+5 均不等于蓝图机械汇总 5）：与检测器 scanEquipmentBatchConflicts 同源单扫描——命中
+ * 「各批组合之和 ≠ 蓝图汇总」时删除 later 批「N 台/辆」数字单元（含约/共/计前缀量词，保留「剩余挖掘机、
+ * 自卸汽车在第4日至第5日补充进场」的批次表述形态）——later 批无数值后检测口径（首批+剩余并存才判）
+ * 必然不再命中；应用全部 span 后复扫至无命中（上限 3 轮防振荡）；权威缺失/零命中/空 removals 时零变更
+ * （幂等零成本；无法确定性覆盖的形态保守放弃，交 LLM 修复轮/门禁）。 */
+export function fixEquipmentBatchConflicts(
+  markdown: string,
+  equipment?: Array<{ name: string; count: number }>,
+): { markdown: string; fixedCount: number; details: string[] } {
+  if (!equipment || equipment.length === 0) return { markdown, fixedCount: 0, details: [] };
+  let result = markdown;
+  const details: string[] = [];
+  for (let round = 1; round <= 3; round += 1) {
+    const findings = scanEquipmentBatchConflicts(result, equipment);
+    if (findings.length === 0) break;
+    const spans = findings
+      .flatMap(finding => finding.removals)
+      .sort((left, right) => right.start - left.start);
+    if (spans.length === 0) break;
+    let applied = 0;
+    let lastStart = Number.POSITIVE_INFINITY;
+    for (const span of spans) {
+      if (span.end > lastStart) continue; // 区间重叠防护（理论不发生；保守跳过）
+      result = result.slice(0, span.start) + result.slice(span.end);
+      lastStart = span.start;
+      applied += 1;
+      details.push(`分批台数补数删除：「${span.excerpt}」`);
+    }
+    if (applied === 0) break;
+  }
+  return { markdown: result, fixedCount: details.length, details };
 }

@@ -29,10 +29,14 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       // 均与锚定检测器同源；顺序约束：槽位数值紧随 finish-thickness、基础表/兜底行紧随
       // table 修复族、标题覆盖紧随 collision-numbered-heading、法规补写紧随元语言清理）
       'slot-depth-value',
+      // r17 丰乐镇归因 #B1：规格-数值绑定错位原位替换（与检测器 fact-reconciliation D4.2 同源）
+      'spec-quantity-binding',
       'labor-peak',
       // V5 P4b-2 阶段劳动力确定性回写（与检测器 phase-labor-mixing 同源双通道扫描）
       'phase-labor-values',
       'resource-breakdown',
+      // r17 丰乐镇归因 #B2/B3：机械分批台数矛盾删除 later 批数字（与检测器 equipment-batch-conflict 同源）
+      'equipment-batch-values',
       'internal-table-row-dup',
       'duplicate-basic-info-tables',
       'fallback-placeholder-rows',
@@ -73,10 +77,14 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'finish-thickness',
       // 4.31 显式快照变更（同 stage5 链五类修复器：丰乐镇 v6 #3/#70/#86-87/#90/#71）
       'slot-depth-value',
+      // r17 丰乐镇归因 #B1：规格-数值绑定错位原位替换（与检测器 fact-reconciliation D4.2 同源）
+      'spec-quantity-binding',
       'labor-peak',
       // V5 P4b-2 阶段劳动力确定性回写（与检测器 phase-labor-mixing 同源双通道扫描）
       'phase-labor-values',
       'resource-breakdown',
+      // r17 丰乐镇归因 #B2/B3：机械分批台数矛盾删除 later 批数字（与检测器 equipment-batch-conflict 同源）
+      'equipment-batch-values',
       'internal-table-row-dup',
       'duplicate-basic-info-tables',
       'fallback-placeholder-rows',

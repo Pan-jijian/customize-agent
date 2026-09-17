@@ -24,12 +24,12 @@ import { WRITING_INTEGRITY_CONSTRAINTS } from '../documentWritingTaskBrief';
 import { chapterTaskPromptForPlannedStructure, planChapterTask } from '../agentPlanner';
 import { throttleAgentWorkflowNodes } from '../agentWorkflow';
 import { governEvidenceValues, renderScopeOverrideAnchors } from '../factGovernance';
-import { filterEvidenceByProjectScope, assertEvidenceInProjectScope } from '../projectMaterialScope';
 import { alignSectionHeadingsToPlan, runWithAdaptiveConcurrency, stableHash, throwIfAborted } from '../utils';
 import { displayStage, elapsedMessage, upsertProgressStage } from '../progress';
-import { evidenceInScope, measureGenerationStep } from '../rolePipeline';
+import { measureGenerationStep } from '../rolePipeline';
 import { buildRetrievalCoverageReport, resolveRolePoolRisk, retrieveDeepChapterEvidence, shouldTriggerDeepRetrieval } from '../documentEvidenceRetrieval';
 import { chapterRelevanceTokens, renderBillFactLockText } from '../billFactLock';
+import { extractBoqDivisionCoverage, formatBoqDivisionCoverage } from '../documentFactTrace';
 import { retrievePlannedMaterialEvidence, sampleProjectMaterialEvidence } from '../projectMaterialProfile';
 import { buildChapterFactCoverageContext, buildPlannedChapterContent, capFactCoverageContext, evidenceForSection } from '../chapterGeneration';
 import { isBodyTableForbidden } from '../bidComposition';
@@ -99,15 +99,8 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     // ===== 图谱驱动证据注入：优先拉取图谱匹配文件的切片内容 =====
     const graphMapping = session.understanding.chapterGraphMap.get(chapter.id);
     if (session.understanding.projectGraph && graphMapping && graphMapping.graphFiles.size > 0) {
-      const scopedPathList = [...session.understanding.availableEvidenceScopePaths];
-      // 模糊路径解析：图谱LLM可能返回短路径（如"招标文件.pdf"），解析为KB精确路径
-      const resolveExactPath = (fuzzy: string): string | undefined => {
-        if (scopedPathList.includes(fuzzy)) return fuzzy;
-        return scopedPathList.find(p => p.endsWith(fuzzy) || p.includes(fuzzy));
-      };
-      const graphFileList = [...graphMapping.graphFiles]
-        .map(f => resolveExactPath(f) || f)
-        .filter(f => evidenceInScope(session.prepare.projectRoot, f, session.understanding.availableEvidenceScopePaths));
+      // 图谱来源已标准化：图谱节点 sourceFiles 在提取时已换算为证据中的精确文件路径，直接使用
+      const graphFileList = [...graphMapping.graphFiles];
       for (const gf of graphFileList) {
         const detail = session.understanding.getCachedFileDetail(gf);
         if (!detail?.chunks?.length) continue;
@@ -178,7 +171,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     const mergedSearchQueries = [...searchQueries, ...requiredFactSearchQueries, ...requirementClueQueries];
     if (scopedFilePaths.length > 0 && mergedSearchQueries.length > 0) {
       throwIfAborted(session.global.input.signal);
-      const parallelResults = await runWithAdaptiveConcurrency(mergedSearchQueries, async query => session.understanding.searchWithCache(query, scopedFilePaths, Math.min(session.understanding.requestedEvidencePerChapter, 12), chapter.title), { kind: 'search' });
+      const parallelResults = await runWithAdaptiveConcurrency(mergedSearchQueries, async query => session.understanding.searchWithCache(query, scopedFilePaths, Math.min(session.understanding.requestedEvidencePerChapter, 12), chapter.title, session.prepare.materialScope.selectedMaterialRoots), { kind: 'search' });
       searchResults.push(...parallelResults);
     }
     session.planning.generationDiagnostics.evidence.searchQueries += mergedSearchQueries.length;
@@ -194,8 +187,8 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
     session.global.emitProgress();
     for (const results of searchResults) {
-      const scopedResults = results.filter((item: KbSearchResult) => evidenceInScope(session.prepare.projectRoot, item.filePath, session.understanding.evidenceScopePaths));
-      rawEvidence.push(...scopedResults.map((item: KbSearchResult) => ({
+      // 检索结果范围由 searchWithCache 的 filters 双锁保证（filePaths + materialRoots），此处不再二次过滤（历史冗余已删）
+      rawEvidence.push(...results.map((item: KbSearchResult) => ({
         chapterId: chapter.id,
         filePath: item.filePath,
         score: item.score,
@@ -207,13 +200,11 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       })));
       // P2-B 双通道覆盖度观测：KB 检索通道注入条数
       const channelDiag = session.planning.generationDiagnostics.evidence;
-      channelDiag.retrievedEvidenceInjected = (channelDiag.retrievedEvidenceInjected ?? 0) + scopedResults.length;
+      channelDiag.retrievedEvidenceInjected = (channelDiag.retrievedEvidenceInjected ?? 0) + results.length;
     }
     // P1-5：概况/质量/进度类章节直接取用跨章预执行的基础事实检索结果（resumed 章节跳过，与原检索语义一致）
     if (usesCachedBasicFacts && scopedFilePaths.length > 0 && session.blueprint.basicFactSearchResults.length > 0) {
-      rawEvidence.push(...session.blueprint.basicFactSearchResults
-        .filter(item => evidenceInScope(session.prepare.projectRoot, item.filePath, session.understanding.evidenceScopePaths))
-        .map(item => ({
+      rawEvidence.push(...session.blueprint.basicFactSearchResults.map(item => ({
           chapterId: chapter.id,
           filePath: item.filePath,
           score: item.score,
@@ -224,9 +215,8 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
           source: 'basic-fact-cache',
         })));
     }
-    const plannedMaterialEvidence = resumedContent ? [] : await retrievePlannedMaterialEvidence({ manager: session.understanding.manager, projectRoot: session.prepare.projectRoot, chapter, plan, profile: session.prepare.projectMaterialProfile, scopedFilePaths, limitPerQuery: Math.min(session.understanding.requestedEvidencePerChapter, 10), signal: session.global.input.signal }).catch(() => []);
+    const plannedMaterialEvidence = resumedContent ? [] : await retrievePlannedMaterialEvidence({ manager: session.understanding.manager, projectRoot: session.prepare.projectRoot, chapter, plan, profile: session.prepare.projectMaterialProfile, scopedFilePaths, scopedMaterialRoots: session.prepare.materialScope.selectedMaterialRoots, limitPerQuery: Math.min(session.understanding.requestedEvidencePerChapter, 10), signal: session.global.input.signal }).catch(() => []);
     rawEvidence.push(...plannedMaterialEvidence);
-    const pinnedEvidencePaths = new Set<string>((chapter.pinnedEvidenceFilePaths || []).filter(Boolean));
     const matchedRoleContexts: Array<{ fact: never }> = [];
     if (session.planning.chapterIntentClassifier.needsBasicFacts(chapter.title)) rawEvidence.push(...session.understanding.safeProjectBasicEvidence.map(item => ({ ...item, chapterId: chapter.id, source: 'pinned-evidence' })));
     // round-20 S5/W7 P6-2：招标文件/投标须知类文件整文件 pinned 注入到概况/总述类章节——
@@ -235,13 +225,22 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     // 证据内容安全分区后取放行子集（writerEvidence），评标纪律/评标办法章节不进写手输入
     const tenderFileEvidence = session.understanding.writerEvidence.filter(item => /招标|投标须知|评标办法|专用合同条款|投标人须知/u.test(`${item.filePath || ''}${item.sectionTitle || ''}`));
     if (/概况|工程|项目|总体|部署/u.test(chapter.title) && tenderFileEvidence.length > 0) rawEvidence.push(...tenderFileEvidence.map(item => ({ ...item, chapterId: chapter.id, source: 'pinned-evidence' as const })));
-    const chapterPinnedPaths = new Set([...pinnedEvidencePaths]);
-    // 模板 pinned 文件整文件全量注入（不再按字符预算截断，截断即要求条款丢失）
-    for (const relativePath of chapterPinnedPaths) {
-      if (!evidenceInScope(session.prepare.projectRoot, relativePath, session.understanding.evidenceScopePaths)) continue;
-      const isPinnedEvidence = pinnedEvidencePaths.has(relativePath);
+    // 模板 pinned 文件整文件全量注入（不再按字符预算截断，截断即要求条款丢失）：
+    // pinned 值为包内相对路径（跨资料包在词法上无法表达），拼接到当前资料包根后直读 KB 详情；
+    // 已存在/未索引的文件不再静默丢弃：未命中计数进诊断 + 服务端日志可见
+    const pinnedPackRoot = session.prepare.materialScope.selectedMaterialRoots[0] || '';
+    for (const pinnedPath of (chapter.pinnedEvidenceFilePaths || []).filter(Boolean)) {
+      const cleaned = pinnedPath.replace(/\\/gu, '/').replace(/^\.\//u, '').replace(/^\/+/u, '');
+      // 幂等归一化：新契约为包内相对路径；存量配置可能写作「包名/文件」全路径（旧契约），
+      // 已含包前缀时不重复拼接，避免双重前缀导致静默未命中
+      const relativePath = pinnedPackRoot && cleaned !== pinnedPackRoot && !cleaned.startsWith(`${pinnedPackRoot}/`) ? `${pinnedPackRoot}/${cleaned}` : cleaned;
       const detail = session.understanding.getCachedFileDetail(relativePath);
-      if (!detail) continue;
+      if (!detail) {
+        const diag = session.planning.generationDiagnostics?.evidence;
+        if (diag) diag.pinnedEvidenceMissed = (diag.pinnedEvidenceMissed ?? 0) + 1;
+        console.warn('[stage-chapter-loop] pinned 证据文件未命中知识库（配置漂移或文件未入库）', { chapter: chapter.title, pinnedPath, resolvedPath: relativePath });
+        continue;
+      }
       rawEvidence.push(...(detail.chunks as Array<{ content: string; sectionTitle?: string }>).map(chunk => ({
         chapterId: chapter.id,
         filePath: detail.file.relativePath,
@@ -250,20 +249,18 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
         roleId: session.understanding.fileRoleByPath.get(detail.file.relativePath),
         processingType: session.understanding.fileProcessingByPath.get(detail.file.relativePath),
         sectionTitle: chunk.sectionTitle,
-        source: isPinnedEvidence ? 'pinned-evidence' : 'bound-file',
+        source: 'pinned-evidence',
       })));
     }
-    let scopedEvidence = rawEvidence.filter(item => evidenceInScope(session.prepare.projectRoot, item.filePath, session.understanding.availableEvidenceScopePaths));
+    // 证据范围源头化：rawEvidence 各来源（检索召回/意图缓存/基础证据/pinned 直读）均已在源头按资料范围约束
+    let scopedEvidence = rawEvidence;
     if (!resumedContent && session.prepare.webAccessConfig.enabled && session.prepare.webAccessConfig.allowProjectFacts) {
       const webResult = await retrieveWebEvidence({ config: session.prepare.webAccessConfig, chapterId: chapter.id, chapterTitle: chapter.title, sectionTitles: chapter.sections || [], runtimeRules: session.prepare.runtimePromptRules, localFacts: [...session.understanding.preliminaryFactsModel.project, ...session.understanding.preliminaryFactsModel.schedule, ...session.understanding.preliminaryFactsModel.quality, ...session.understanding.preliminaryFactsModel.safety, ...session.understanding.preliminaryFactsModel.resources, ...session.understanding.preliminaryFactsModel.preciseFacts], signal: session.global.input.signal });
       session.understanding.webResearchReport.queries.push(...webResult.queries);
       session.understanding.webResearchReport.filteredCount += webResult.filtered + webResult.evidence.length;
     }
     const sampledEvidence = resumedContent ? [] : sampleProjectMaterialEvidence({ project: session.understanding.project, chapter, plan, profile: session.prepare.projectMaterialProfile, scopedFilePaths, highRisk: rolePoolRisk.highRisk });
-    // 单次过滤：rawEvidence（上方仅做过路径域过滤）与 sampledEvidence 统一在此过一次项目资料口径过滤，
-    // 不再对 sampled 先预过滤再随全量二次过滤（历史冗余：同一批 sampled 证据被过滤两遍）
     if (sampledEvidence.length > 0) scopedEvidence.push(...sampledEvidence);
-    scopedEvidence = filterEvidenceByProjectScope(scopedEvidence, session.understanding.projectMaterialScope);
     // 写作链证据安全过滤：投标/评标纪律、评标办法、商务报价类证据（含搜索召回/深召回路径）不进写手与事实需求链
     if (session.understanding.excludedEvidenceKeys.size > 0) scopedEvidence = scopedEvidence.filter(item => !session.understanding.excludedEvidenceKeys.has(evidenceSafetyKey(item)));
     // P1 语义排序：章节证据按“章查询 ↔ 证据文本”本地 bge-small 余弦排序（语义主键，证据全量保留、无预算截断）。
@@ -279,7 +276,6 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     // 源级同口径裁决前置到证据切片：资料原文（如招标正文 4645㎡）被补疑修正后，进入写作 LLM 的切片必须先改写成裁决值，
     // 否则模型看到原文旧值会照抄（历史缺陷：第 3 章 checkpoint 混用 4645/4646），只能靠事后全局审查修复
     evidence = governEvidenceValues(evidence, session.understanding.canonicalFacts.scopeConflicts);
-    assertEvidenceInProjectScope(evidence, session.understanding.projectMaterialScope, `chapter:${chapter.id}:initial`);
     let missingFacts = chapter.requiredFacts.filter((fact: string) => !evidence.some(item => evidenceMatchesFact(item, fact)));
     let deepEvidenceCount = 0;
     // P1-4：事实需求计算提前到深召回判断之前，把 requiredMissingNeeds 并入深召回一次完成，
@@ -334,7 +330,16 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     // 组件 6 跨章写作职责分工：职责载体 = 本章标题+规划小节 / 其余各章标题+各自小节（同一份规划产物），
     // 写作端源头确保无跨章重复（写时即不复制其他章主题），不再依赖事后按分数删重复
     const dutyDeclaration = buildCrossChapterDutyDeclaration(chapter, session.planning.effectiveChapters);
-    const roleContext = [graphRoleHint, chapterRequirementContext, forcedSectionContext, dutyDeclaration, sixHundredPercentContext, scopeOverrideAnchors.length ? `【数据口径强制约束】${scopeOverrideAnchors.join('；')}` : '', ...WRITING_INTEGRITY_CONSTRAINTS, plan?.writingGoal, plan?.mustCover?.length ? `本章必须覆盖：${plan.mustCover.join('、')}` : '', plan?.mustUseMaterialKinds?.length ? `本章优先使用资料类型：${plan.mustUseMaterialKinds.join('、')}` : '', billLockText].filter(Boolean).join('\n');
+    // r14 E16 清单分部覆盖义务（方法类章）：规划小节即使漏规划清单独有分项，写作正文也必须逐项覆盖
+    //（丰乐镇实机：「过路涵」「青砖步道」在主要施工方法章零命中，终检 boq-division-coverage 报 blocker）；
+    // 与规划层注入（stageOutlinePlanning）、链尾确定性兜底共用 extractBoqDivisionCoverage 单源
+    const boqCoverageContext = /施工方法|施工方案|施工工艺|主要施工内容|分部分项/u.test(chapter.title)
+      ? (() => {
+          const summary = formatBoqDivisionCoverage(extractBoqDivisionCoverage(session.understanding.preliminaryFactsModel));
+          return summary ? `【本章必须覆盖的清单分部分项全景（下列专有分项逐项写入正文施工方法，不得只写道路/铺装/绿化等大类而遗漏清单独有分项）】\n${summary}` : '';
+        })()
+      : '';
+    const roleContext = [graphRoleHint, chapterRequirementContext, forcedSectionContext, dutyDeclaration, sixHundredPercentContext, scopeOverrideAnchors.length ? `【数据口径强制约束】${scopeOverrideAnchors.join('；')}` : '', ...WRITING_INTEGRITY_CONSTRAINTS, plan?.writingGoal, plan?.mustCover?.length ? `本章必须覆盖：${plan.mustCover.join('、')}` : '', plan?.mustUseMaterialKinds?.length ? `本章优先使用资料类型：${plan.mustUseMaterialKinds.join('、')}` : '', boqCoverageContext, billLockText].filter(Boolean).join('\n');
     const chapterPromptExecution = resolveChapterPromptExecution(session.prepare.promptPlan, chapter);
     if (session.prepare.promptPlan.writerPrompts.length > 0 && !chapterPromptExecution.primaryWriter) throw new Error(`${displayChapterTitle(chapter.title)} 写作主控提示词未进入章节生成阶段`);
     const chapterPromptTexts = [chapterPromptExecution.promptTexts, session.prepare.generationControlPrompt].filter(Boolean).join('\n\n');
@@ -374,20 +379,19 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
         session.global.emitProgress();
       }
       // P1-4：缺失事实与必需事实需求并入同一次深召回（原两次调用查询集高度重叠，合并后每章深召回查询数约降 40%）
-      const deepEvidence = await retrieveDeepChapterEvidence({ manager: session.understanding.manager, projectRoot: session.prepare.projectRoot, chapter, scopedFilePaths, fileRoleByPath: session.understanding.fileRoleByPath, fileProcessingByPath: session.understanding.fileProcessingByPath, requiredNeeds: [...new Set([...missingFacts, ...requiredMissingNeeds])], extraClues: session.prepare.requirementSemantics?.factClues || [], highRisk: rolePoolRisk.highRisk || requiredMissingNeeds.length > 0, signal: session.global.input.signal }).catch(() => []);
+      const deepEvidence = await retrieveDeepChapterEvidence({ manager: session.understanding.manager, projectRoot: session.prepare.projectRoot, chapter, scopedFilePaths, scopedMaterialRoots: session.prepare.materialScope.selectedMaterialRoots, fileRoleByPath: session.understanding.fileRoleByPath, fileProcessingByPath: session.understanding.fileProcessingByPath, requiredNeeds: [...new Set([...missingFacts, ...requiredMissingNeeds])], extraClues: session.prepare.requirementSemantics?.factClues || [], highRisk: rolePoolRisk.highRisk || requiredMissingNeeds.length > 0, signal: session.global.input.signal }).catch(() => []);
       deepEvidenceCount = deepEvidence.length;
       // P2-B 双通道覆盖度观测：深召回通道注入条数
       const channelDiag = session.planning.generationDiagnostics.evidence;
       channelDiag.retrievedEvidenceInjected = (channelDiag.retrievedEvidenceInjected ?? 0) + deepEvidence.length;
       if (deepEvidence.length > 0) {
-        // 深召回增量合并：scopedEvidence 各来源均已过项目资料口径过滤，deepEvidence 此处过滤后直接合并；
+        // 深召回增量合并：deepEvidence 由检索层 filters 双锁约束，直接合并；
         // 不再对合并集先做一次 optimizeChapterEvidence 全量重排——下方 evidence 会统一重排一次
         //（历史冗余：同一输入同一参数连续重排两遍，optimizeChapterEvidence 为纯函数，中间结果随即被覆盖）
-        scopedEvidence = [...scopedEvidence, ...filterEvidenceByProjectScope(deepEvidence, session.understanding.projectMaterialScope)];
+        scopedEvidence = [...scopedEvidence, ...deepEvidence];
         if (session.understanding.excludedEvidenceKeys.size > 0) scopedEvidence = scopedEvidence.filter(item => !session.understanding.excludedEvidenceKeys.has(evidenceSafetyKey(item)));
         evidence = optimizeChapterEvidence(chapter, scopedEvidence, { preservePinned: true }, session.planning.generationDiagnostics);
         evidence = governEvidenceValues(evidence, session.understanding.canonicalFacts.scopeConflicts);
-        assertEvidenceInProjectScope(evidence, session.understanding.projectMaterialScope, `chapter:${chapter.id}:deep`);
         missingFacts = chapter.requiredFacts.filter((fact: string) => !evidence.some(item => evidenceMatchesFact(item, fact)));
       }
       // P1-4：深召回后重算事实需求，仍缺失的必需需求触发下方一次轻量补充
@@ -405,23 +409,21 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     }
     // P1-4：合并深召回后仍有必需事实缺口时做一次轻量补充（原第二次深召回，highRisk 强制；仅当新 needs 出现时触发）
     if (requiredMissingNeeds.length > 0 && scopedFilePaths.length > 0) {
-      const mergedSupplementalEvidence = filterEvidenceByProjectScope(await retrieveDeepChapterEvidence({ manager: session.understanding.manager, projectRoot: session.prepare.projectRoot, chapter, scopedFilePaths, fileRoleByPath: session.understanding.fileRoleByPath, fileProcessingByPath: session.understanding.fileProcessingByPath, requiredNeeds: requiredMissingNeeds, extraClues: session.prepare.requirementSemantics?.factClues || [], highRisk: true, signal: session.global.input.signal }).catch(() => []), session.understanding.projectMaterialScope);
+      const mergedSupplementalEvidence = await retrieveDeepChapterEvidence({ manager: session.understanding.manager, projectRoot: session.prepare.projectRoot, chapter, scopedFilePaths, scopedMaterialRoots: session.prepare.materialScope.selectedMaterialRoots, fileRoleByPath: session.understanding.fileRoleByPath, fileProcessingByPath: session.understanding.fileProcessingByPath, requiredNeeds: requiredMissingNeeds, extraClues: session.prepare.requirementSemantics?.factClues || [], highRisk: true, signal: session.global.input.signal }).catch(() => []);
       // P2-B 双通道覆盖度观测：轻量补充（required-fact-evidence）注入条数
       const channelDiag = session.planning.generationDiagnostics.evidence;
       channelDiag.retrievedEvidenceInjected = (channelDiag.retrievedEvidenceInjected ?? 0) + mergedSupplementalEvidence.length;
       if (mergedSupplementalEvidence.length > 0) {
-        // 补充证据在上方赋值时已过滤项目资料口径，直接合并后统一重排一次（同深召回路径，省一次全量重排+全量过滤）
+        // 补充证据由检索层 filters 双锁约束，直接合并后统一重排一次（同深召回路径，省一次全量重排）
         scopedEvidence = [...scopedEvidence, ...mergedSupplementalEvidence];
         if (session.understanding.excludedEvidenceKeys.size > 0) scopedEvidence = scopedEvidence.filter(item => !session.understanding.excludedEvidenceKeys.has(evidenceSafetyKey(item)));
         evidence = optimizeChapterEvidence(chapter, scopedEvidence, { preservePinned: true }, session.planning.generationDiagnostics);
         evidence = governEvidenceValues(evidence, session.understanding.canonicalFacts.scopeConflicts);
-        assertEvidenceInProjectScope(evidence, session.understanding.projectMaterialScope, `chapter:${chapter.id}:supplemental`);
         missingFacts = chapter.requiredFacts.filter((fact: string) => !evidence.some(item => evidenceMatchesFact(item, fact)));
         resolvedFactNeeds = resolveChapterFactNeeds({ needs: chapterFactNeeds, factsModel: session.understanding.preliminaryFactsModel, evidence: scopedEvidence, profile: session.prepare.domainProfile, excludedEvidenceKeys: session.understanding.excludedEvidenceKeys });
         requiredMissingNeeds = resolvedFactNeeds.filter(item => item.need.required && item.status !== 'satisfied').map(item => item.need.label);
       }
     }
-    assertEvidenceInProjectScope(evidence, session.understanding.projectMaterialScope, `chapter:${chapter.id}:writer-session.global.input`);
     // P2-B 双通道覆盖度观测：最终 evidence（语义排序+口径治理后）的两通道留存条数——
     // 与注入侧对照得出「预分配 vs 运行时召回」真实贡献占比（4.42 收敛决策数据，不改行为）
     {
@@ -458,7 +460,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
         sectionEvidenceCache.set(cacheKey, chapterSectionEvidence);
         return Promise.resolve(chapterSectionEvidence);
       }
-      return retrieveSectionEvidence({ manager: session.understanding.manager, projectRoot: session.prepare.projectRoot, chapter, sectionTitle, scopedFilePaths, fileRoleByPath: session.understanding.fileRoleByPath, fileProcessingByPath: session.understanding.fileProcessingByPath, signal: session.global.input.signal }).then(results => {
+      return retrieveSectionEvidence({ manager: session.understanding.manager, projectRoot: session.prepare.projectRoot, chapter, sectionTitle, scopedFilePaths, scopedMaterialRoots: session.prepare.materialScope.selectedMaterialRoots, fileRoleByPath: session.understanding.fileRoleByPath, fileProcessingByPath: session.understanding.fileProcessingByPath, signal: session.global.input.signal }).then(results => {
         sectionEvidenceCache.set(cacheKey, results);
         return results;
       });
@@ -569,15 +571,19 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       // 单块质检未达标即全章重写，已成功的 2/3 内容全部作废；隔离重写只补失败块，成功块内容与 token 零浪费
       // 达标契约：重写不降标（历史 0.75/0.55 紧缩预算已删除），仍失败即章阻断、文档显式失败
       const retryFailedBlocks = async (buildInput: PlannedChapterContentInput, failedBlocks: PlannedChapterContentResult['failedBlocks'], sections: Array<string | undefined>): Promise<Array<string | undefined>> => {
-        const retried = await Promise.all(failedBlocks.map(({ block }) =>
-          buildPlannedChapterContent({ ...buildInput, targetWords: block.targetWords, maxWords: Math.ceil(block.targetWords * 1.1) }, { blocks: [block], coveredSections: [], fallbackSections: [] })
+        const retried = await Promise.all(failedBlocks.map(({ block, retryFeedback }) =>
+          // 定向反馈携带（initialFeedback）：失败块单块重写 attempt=0 即注入上一轮缺陷原文（缺失要点点名等）——
+          // 历史缺陷：无反馈的隔离重写从零生成，极易复现同一漏点（4.44 丰乐镇工期章 2 块全失败于气候要点）
+          buildPlannedChapterContent({ ...buildInput, targetWords: block.targetWords, maxWords: Math.ceil(block.targetWords * 1.1), initialFeedback: retryFeedback }, { blocks: [block], coveredSections: [], fallbackSections: [] })
             .then(result => result?.markdown)
             .catch(() => undefined)
         ));
         const merged = [...sections];
         failedBlocks.forEach(({ index }, position) => {
-          const piece = retried[position];
-          if (piece) merged[index] = piece.replace(/^##\s+.+$/mu, '').trim();
+          // 剥壳后必须仍有正文才算重写成功：单块重写失败时 markdown 仅剩章标题壳（"## 标题"），
+          // 若把空串写回 merged 会在后续 every 判定中暴露为未定义缺口块（此处保持原 undefined 语义）
+          const body = retried[position]?.replace(/^##\s+.+$/mu, '').trim();
+          if (body) merged[index] = body;
         });
         return merged;
       };
@@ -699,7 +705,10 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
         ? plannedStructureRef.blocks.flatMap(block => block.subPoints.map(point => point.title))
         : [];
       let alignedContent = llmContent;
-      if (plannedH3Titles.length > 0) alignedContent = alignSectionHeadingsToPlan(alignedContent, plannedH3Titles, 3);
+      // r11 近名兜底（丰乐镇门禁 #1 归因）：H3 层开启近名轮——模型单字改写规划标题（「分区落位→分区落实」实测）
+      // 在包含口径下零命中，错字标题不进目录但缺节判定成立触发补写、补写版与错字版并存直坠 section-count-overflow；
+      // H4 层不开启（块级要点标题由 alignSimilarHeadingsToPlan 另行对齐，避免跨层认领）
+      if (plannedH3Titles.length > 0) alignedContent = alignSectionHeadingsToPlan(alignedContent, plannedH3Titles, 3, { nearMatch: true });
       if (plannedH4Titles.length > 0) alignedContent = alignSectionHeadingsToPlan(alignedContent, plannedH4Titles, 4);
       content = finalizeChapterContentQuality(alignedContent, chapter);
       content = await stripBidDisciplineSentencesSemantic(content, session.understanding.bidProcedureJudge);

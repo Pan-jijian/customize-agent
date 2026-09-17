@@ -48,7 +48,9 @@ export interface DocumentGenerationDiagnostics {
     intentEvidenceInjected?: number;
     intentEvidenceUsed?: number;
     retrievedEvidenceInjected?: number;
-    retrievedEvidenceUsed?: number };
+    retrievedEvidenceUsed?: number;
+    /** 模板 pinned 证据整文件注入未命中计数（包内相对路径解析后 KB 无此文件）：配置漂移可见化，不再静默丢弃 */
+    pinnedEvidenceMissed?: number };
   quality: { blockingCount: number; importantCount: number; minorCount: number; repairedCount: number };
   /** 1.1 事实净化门计数（本地事实池出口脏值截断/丢弃/编号回源补全，进度页后台诊断展示） */
   factSanitize?: { truncated: number; dropped: number; repaired: number };

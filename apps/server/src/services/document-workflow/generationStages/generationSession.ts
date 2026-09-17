@@ -36,7 +36,6 @@ import type {
 import type { AgentMaterialScope, AgentWorkflowContext } from '../agentWorkflow';
 import type { PromptBindingPlan } from '../templateStore';
 import type { ProjectMaterialProfile, ProjectUnderstanding, MaterialKind } from '../projectMaterialProfile';
-import type { ProjectMaterialScope } from '../projectMaterialScope';
 import type { ProjectMaterialSummary } from '../../document-core/projectMaterialService';
 import type { DocumentDomainProfile } from '../../document-core/documentDomainProfileService';
 import type { AutoDocumentSpecResult } from '../../document-core/autoDocumentSpecService';
@@ -150,7 +149,6 @@ export interface GenerationSessionUnderstanding {
   project: ProjectHandle;
   indexHealth: ReturnType<typeof kbIndexHealth>;
   availableEvidenceScopePaths: Set<string>;
-  projectMaterialScope: ProjectMaterialScope;
   requestedEvidencePerChapter: number;
   rolePoolRisk: RetrievalCoverageRisk;
   allEvidence: DocumentEvidence[];
@@ -163,7 +161,7 @@ export interface GenerationSessionUnderstanding {
   chapterGenerationStagesByOrder: Array<DocumentExecutionStage | undefined>;
   knowledgeBaseStageIndex: number;
   getCachedFileDetail: (relativePath: string) => CachedFileDetail;
-  searchWithCache: (query: string, scopedFilePaths: string[], limit: number, chapterTitle: string) => Promise<KbSearchResult[]>;
+  searchWithCache: (query: string, scopedFilePaths: string[], limit: number, chapterTitle: string, scopedMaterialRoots?: string[]) => Promise<KbSearchResult[]>;
   writerEvidence: DocumentEvidence[];
   bidProcedureJudge: Awaited<ReturnType<typeof buildBidProcedureJudge>>;
   safeProjectBasicEvidence: DocumentEvidence[];

@@ -807,7 +807,7 @@ export default function DocumentsPage() {
       timers.forEach(x => window.clearTimeout(x));
       setDraft(result); setContent(doc?.editedMarkdown || doc?.markdown || result.markdown);
       if (activeGenerationTask?.promise === promise) { activeGenerationTask.draft = result; activeGenerationTask.content = doc?.editedMarkdown || doc?.markdown || result.markdown; }
-      const recordForFlow = doc || { id: started.documentId || `draft-${Date.now()}`, templateId, title: result.title, requirement: result.requirement, projectRoot: result.projectRoot || currentProjectRoot, projectId: result.projectId, markdown: result.markdown, status: result.validationIssues.some(x => x.level === 'error' || x.level === 'warning') || !result.exportGate.passed ? 'warning' as const : 'completed' as const, draft: result, executionStages: result.executionStages, assets: result.assets || [], createdAt: result.generatedAt, updatedAt: Date.now() };
+      const recordForFlow = doc || { id: started.documentId || `draft-${Date.now()}`, templateId, title: result.title, requirement: result.requirement, projectRoot: result.projectRoot || currentProjectRoot, projectId: result.projectId, markdown: result.markdown, status: result.validationIssues.some(x => x.level === 'error' || x.level === 'warning') || !result.exportGate.passed ? 'completed_with_issues' as const : 'completed' as const, draft: result, executionStages: result.executionStages, assets: result.assets || [], createdAt: result.generatedAt, updatedAt: Date.now() };
       const { steps: finalSteps } = buildFlowStepsFromRecord(recordForFlow);
       setFlowSteps(finalSteps);
       setSnap(finalSteps, 'done', false);
@@ -1169,7 +1169,7 @@ export default function DocumentsPage() {
                       )}
                     </div>
 
-                    {(item.status === 'warning' || item.status === 'failed' || item.status === 'aborted') && (
+                    {(item.status === 'warning' || item.status === 'failed' || item.status === 'aborted' || item.status === 'completed_with_issues') && (
                       <div className={`inline-flex items-center gap-2 p-1.5 px-3 rounded-lg border text-xs ${item.status === 'failed' || item.status === 'aborted' ? 'border-red-200 bg-red-50/50' : 'border-yellow-200 bg-yellow-50/50'}`}>
                         <span className="font-medium">{item.status === 'failed' ? item.draft?.exportGate?.passed === false ? '门禁未通过' : '生成失败' : item.status === 'aborted' ? '已中止' : '需复核'}</span>
                         <span className="text-[var(--colorTextTertiary)]">|</span>

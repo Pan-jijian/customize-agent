@@ -401,11 +401,11 @@ export class KnowledgeBaseManager {
   }
 
   search(query: string, limit?: number, filters?: SearchFilters): ChunkSearchResult[] {
-    return this.store.searchChunks(query, this.resolveSearchLimit(limit, filters), { filePaths: filters?.filePaths ?? (filters?.filePath ? [filters.filePath] : undefined) });
+    return this.store.searchChunks(query, this.resolveSearchLimit(limit, filters), { filePaths: filters?.filePaths ?? (filters?.filePath ? [filters.filePath] : undefined), materialRoots: filters?.materialRoots });
   }
 
   keywordSearchItems(query: string, limit?: number, filters?: SearchFilters): FederatedSearchItem[] {
-    return this.store.searchChunks(query, this.resolveSearchLimit(limit, filters), { filePaths: filters?.filePaths ?? (filters?.filePath ? [filters.filePath] : undefined) }).map(result => this.toFederatedItem(result, 'keyword'));
+    return this.store.searchChunks(query, this.resolveSearchLimit(limit, filters), { filePaths: filters?.filePaths ?? (filters?.filePath ? [filters.filePath] : undefined), materialRoots: filters?.materialRoots }).map(result => this.toFederatedItem(result, 'keyword'));
   }
 
   private resolveSearchLimit(limit: number | undefined, filters?: SearchFilters): number {
@@ -416,8 +416,9 @@ export class KnowledgeBaseManager {
   private searchCorpusSize(filters?: SearchFilters): number {
     const paths = filters?.filePaths ?? (filters?.filePath ? [filters.filePath] : undefined);
     const pathSet = paths?.filter(Boolean) ?? [];
+    const roots = filters?.materialRoots?.filter(Boolean) ?? [];
     // 单条 SUM 聚合，避免 listRecords 全量加载每条索引记录
-    return Math.max(1, this.store.countIndexedChunks(pathSet.length > 0 ? pathSet : undefined));
+    return Math.max(1, this.store.countIndexedChunks(pathSet.length > 0 ? pathSet : undefined, roots.length > 0 ? roots : undefined));
   }
 
   expandContext(item: FederatedSearchItem): FederatedSearchItem {

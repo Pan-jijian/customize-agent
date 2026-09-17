@@ -166,6 +166,22 @@ export function collectBlueprintCitationCandidates(markdown: string, data: Bluep
     || right.name.length - left.name.length
   ));
   const quantityOccupied: Array<{ start: number; end: number }> = [];
+  // 4.44 #29 根因根治：值窗口「不跨名字取数」边界——所有命中名起点有序表（含重叠/被占用命中），
+  // 处理每个 hit 时右界 = min(40 字, 分隔符, 下一个名字起点)。短名被长词前缀误命中（「塑料管材」
+  // 含「塑料管」）时，旧 40 字窗口跨越真正条目名「塑料管铺设」取到 8205.53 产出假候选
+  // （subject=塑料管 value=8205.53 authority=7525.01），判定层合理误判 conflict 后修复器锚点直连
+  // 把正确引用改成错误值（把对的改成错的）。
+  const nameHitStarts = nameHits.map(hit => hit.start).sort((left, right) => left - right);
+  const nextNameHitStartAfter = (position: number): number => {
+    let low = 0;
+    let high = nameHitStarts.length;
+    while (low < high) {
+      const mid = (low + high) >> 1;
+      if (nameHitStarts[mid]! <= position) low = mid + 1;
+      else high = mid;
+    }
+    return low < nameHitStarts.length ? nameHitStarts[low]! : Number.POSITIVE_INFINITY;
+  };
   for (const hit of nameHits) {
     const { name, quantity } = hit;
     const ns = hit.start;
@@ -178,10 +194,10 @@ export function collectBlueprintCitationCandidates(markdown: string, data: Bluep
     // 单位变体归一（结构定位）：清单 m2/m3/t 与正文上标写法（m²/㎡/m³）同义；
     // 右边界断言排除「直径不小于10m」类 10mm 的 m 子串误匹配
     const unitSuffix = unit ? `${quantityUnitDetectVariants(unit)}(?![0-9A-Za-z])` : '';
-    // 值窗口（结构定位）：名后 40 字、截断于列举分隔符/换行，取第一个「数值+本单位」
-    // （左边界断言排除数字串截取）
+    // 值窗口（结构定位）：名后 40 字、截断于列举分隔符/换行/下一个条目名起点，取第一个「数值+本单位」
+    // （左边界断言排除数字串截取；不跨名字取数防短名误绑，见上方 nameHitStarts 注释）
     const rawWindow = masked.slice(ne, ne + 40);
-    const windowStop = Math.min(...[rawWindow.search(/[、。；;，,\n]/u)].filter(pos => pos >= 0).concat([rawWindow.length]));
+    const windowStop = Math.min(...[rawWindow.search(/[、。；;，,\n]/u)].filter(pos => pos >= 0).concat([rawWindow.length, nextNameHitStartAfter(ne) - ne]));
     const window = rawWindow.slice(0, windowStop);
     const valueRe = new RegExp(`(?<![\\dA-Za-z])(\\d+(?:\\.\\d+)?)\\s*${unitSuffix}`, 'u');
     const match = valueRe.exec(window);

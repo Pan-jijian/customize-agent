@@ -31,7 +31,7 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
   const basicFactScopePaths = [...session.understanding.availableEvidenceScopePaths].filter(Boolean).sort();
   const basicFactSearchStartedAt = Date.now();
   session.blueprint.basicFactSearchResults = basicFactScopePaths.length > 0
-    ? (await runWithAdaptiveConcurrency(PROJECT_BASIC_FACT_QUERIES, async query => session.understanding.searchWithCache(query, basicFactScopePaths, Math.min(session.understanding.requestedEvidencePerChapter, 12), ''), { kind: 'search' })).flat()
+    ? (await runWithAdaptiveConcurrency(PROJECT_BASIC_FACT_QUERIES, async query => session.understanding.searchWithCache(query, basicFactScopePaths, Math.min(session.understanding.requestedEvidencePerChapter, 12), '', session.prepare.materialScope.selectedMaterialRoots), { kind: 'search' })).flat()
     : [];
   session.planning.generationDiagnostics.evidence.searchQueries += PROJECT_BASIC_FACT_QUERIES.length;
   session.planning.generationDiagnostics.evidence.searchMs += Date.now() - basicFactSearchStartedAt;

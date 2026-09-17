@@ -4,6 +4,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { TextChunk } from '../chunking/text-chunker.js';
 import type { FileCategory, IndexStateRecord } from '../types.js';
+import { materialRootOf, materialRootSqlExpression } from './material-pack.js';
+
+/** 资料包列回填完成标记（kb_metadata key），存在即跳过整段迁移 */
+const MATERIAL_ROOT_BACKFILL_KEY = 'material_root_backfill_v1';
 
 
 export type KnowledgeJobStatus = 'PENDING' | 'PARSING' | 'CHUNKING' | 'INDEXING' | 'SUCCESS' | 'ERROR';
@@ -37,6 +41,7 @@ export interface StoredChunk {
   rowRange?: string;
   startChar?: number;
   endChar?: number;
+  materialRoot?: string;
   metadataJson?: string;
   createdAt: number;
 }
@@ -50,6 +55,12 @@ export interface ChunkSearchResult extends StoredChunk {
   };
 }
 
+/** 切片检索过滤：filePaths 为文件级白名单，materialRoots 为资料包 ID（顶层目录名）级过滤；两者同传时为 AND（双锁） */
+export interface ChunkSearchFilters {
+  filePaths?: string[];
+  materialRoots?: string[];
+}
+
 export interface StoredParentChunk {
   id: string;
   relativePath: string;
@@ -60,6 +71,7 @@ export interface StoredParentChunk {
   collectionName: string;
   sectionTitle?: string;
   chunkCount: number;
+  materialRoot?: string;
   metadataJson?: string;
   createdAt: number;
 }
@@ -73,6 +85,7 @@ export interface StoredDocumentChunk {
   collectionName: string;
   parentCount: number;
   chunkCount: number;
+  materialRoot?: string;
   metadataJson?: string;
   createdAt: number;
 }
@@ -119,6 +132,7 @@ export class IndexStateStore {
     // WAL 模式下写锁升级竞争由 busy_timeout 兜底等待，避免立即抛锁错误）
     this.db.pragma('busy_timeout = 10000');
     this.initTables();
+    this.ensureMaterialRootSchema();
   }
 
   /** 加载所有活跃的索引记录 */
@@ -140,8 +154,8 @@ export class IndexStateStore {
       INSERT INTO kb_index_state (
         relative_path, category, format, content_hash, file_size, mtime,
         chunk_count, collection_name, indexed_at, last_verified_at,
-        status, error_message, metadata_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        status, error_message, metadata_json, material_root
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(relative_path) DO UPDATE SET
         category = excluded.category,
         format = excluded.format,
@@ -153,7 +167,8 @@ export class IndexStateStore {
         last_verified_at = excluded.last_verified_at,
         status = excluded.status,
         error_message = excluded.error_message,
-        metadata_json = excluded.metadata_json
+        metadata_json = excluded.metadata_json,
+        material_root = excluded.material_root
     `).run(
       record.relativePath,
       record.category,
@@ -168,6 +183,7 @@ export class IndexStateStore {
       record.status,
       record.errorMessage ?? null,
       record.metadataJson ?? null,
+      record.materialRoot ?? materialRootOf(record.relativePath),
     );
   }
 
@@ -268,6 +284,7 @@ export class IndexStateStore {
     file: { category: FileCategory; format: string; collectionName: string },
   ): void {
     const now = Date.now();
+    const materialRoot = materialRootOf(relativePath);
     const transaction = this.db.transaction(() => {
       this.db.prepare('DELETE FROM kb_chunks WHERE relative_path = ?').run(relativePath);
       this.db.prepare('DELETE FROM kb_parent_chunks WHERE relative_path = ?').run(relativePath);
@@ -277,8 +294,8 @@ export class IndexStateStore {
         INSERT INTO kb_chunks (
           id, relative_path, chunk_index, content, search_content, category, format,
           collection_name, token_count, section_title, title_path, parent_id, chunk_kind,
-          row_range, start_char, end_char, metadata_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          row_range, start_char, end_char, material_root, metadata_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       const insertFts = this.ftsEnabled ? this.db.prepare(`
@@ -288,14 +305,14 @@ export class IndexStateStore {
       const insertParent = this.db.prepare(`
         INSERT INTO kb_parent_chunks (
           id, relative_path, parent_id, content, category, format,
-          collection_name, section_title, chunk_count, metadata_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          collection_name, section_title, chunk_count, material_root, metadata_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const insertDocument = this.db.prepare(`
         INSERT INTO kb_document_chunks (
           id, relative_path, content, category, format,
-          collection_name, parent_count, chunk_count, metadata_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          collection_name, parent_count, chunk_count, material_root, metadata_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const parentGroups = new Map<string, TextChunk[]>();
       const groupedChunks = this.splitParentGroups(relativePath, chunks);
@@ -326,6 +343,7 @@ export class IndexStateStore {
           file.collectionName,
           group.find(chunk => chunk.sectionTitle)?.sectionTitle ?? null,
           group.length,
+          materialRoot,
           JSON.stringify({ parentId, splitStrategy: this.metadataString(firstChunkMeta?.splitStrategy), chunkKind: this.metadataString(firstChunkMeta?.chunkKind), titlePath: this.metadataString(firstChunkMeta?.titlePath) }),
           now,
         );
@@ -339,6 +357,7 @@ export class IndexStateStore {
         file.collectionName,
         parentGroups.size,
         groupedChunks.length,
+        materialRoot,
         JSON.stringify({ parentType: 'document', splitStrategy: 'document_section_child_v1' }),
         now,
       );
@@ -367,6 +386,7 @@ export class IndexStateStore {
           rowRange,
           Number(chunk.metadata.startChar ?? chunk.startChar),
           Number(chunk.metadata.endChar ?? chunk.endChar),
+          materialRoot,
           JSON.stringify(chunk.metadata),
           now,
         );
@@ -522,11 +542,16 @@ export class IndexStateStore {
   }
 
   /** 聚合统计切片数：单条 SUM 查询，避免加载全部索引记录后再求和 */
-  countIndexedChunks(filePaths?: string[]): number {
+  countIndexedChunks(filePaths?: string[], materialRoots?: string[]): number {
+    const parts: string[] = [];
+    const params: string[] = [];
     const paths = filePaths?.filter(Boolean) ?? [];
-    const clause = paths.length > 0 ? ` WHERE relative_path IN (${paths.map(() => '?').join(', ')})` : '';
+    const roots = materialRoots?.filter(Boolean) ?? [];
+    if (paths.length > 0) { parts.push(`relative_path IN (${paths.map(() => '?').join(', ')})`); params.push(...paths); }
+    if (roots.length > 0) { parts.push(`material_root IN (${roots.map(() => '?').join(', ')})`); params.push(...roots); }
+    const clause = parts.length > 0 ? ` WHERE ${parts.join(' AND ')}` : '';
     const row = this.db.prepare(`SELECT COALESCE(SUM(chunk_count), 0) AS total FROM kb_index_state${clause}`)
-      .get(...paths) as { total?: number } | undefined;
+      .get(...params) as { total?: number } | undefined;
     return Math.max(0, Math.ceil(Number(row?.total) || 0));
   }
 
@@ -548,41 +573,55 @@ export class IndexStateStore {
    * @param limit 返回结果数量上限
    * @returns 搜索结果列表（按相关性得分排序）
    */
-  searchChunks(query: string, limit?: number, filters: { filePaths?: string[] } = {}): ChunkSearchResult[] {
+  searchChunks(query: string, limit?: number, filters: ChunkSearchFilters = {}): ChunkSearchResult[] {
     const terms = this.expandSearchTerms(query);
     if (terms.length === 0) return [];
-    const filePaths = [...new Set((filters.filePaths ?? []).filter(Boolean))];
-    const effectiveLimit = this.resolveChunkSearchLimit(limit, filePaths);
-    const ftsResults = this.ftsEnabled ? this.searchChunksFts(terms, effectiveLimit, filePaths) : [];
+    const effectiveLimit = this.resolveChunkSearchLimit(limit, filters);
+    const ftsResults = this.ftsEnabled ? this.searchChunksFts(terms, effectiveLimit, filters) : [];
     // FTS 返回充分结果时跳过 LIKE 全表扫描（LOWER(x) LIKE '%term%' 无法使用索引，最多 40 term × 7 列）；
     // 中文子串匹配 FTS 命中通常不足，此时 LIKE 仍会执行补齐召回，行为与原先一致
-    const likeResults = ftsResults.length >= effectiveLimit ? [] : this.searchChunksLike(terms, effectiveLimit, filePaths);
+    const likeResults = ftsResults.length >= effectiveLimit ? [] : this.searchChunksLike(terms, effectiveLimit, filters);
     return this.mergeKeywordResults([...ftsResults, ...likeResults], effectiveLimit);
   }
 
-  private filePathFilterClause(filePaths: string[], column = 'relative_path') {
-    return filePaths.length > 0 ? ` AND ${column} IN (${filePaths.map(() => '?').join(', ')})` : '';
+  /** 检索过滤子句（filePaths→relative_path / materialRoots→material_root，多值为 IN 集合）；columnPrefix 供 FTS JOIN 查询限定表别名 */
+  private searchFilterClause(filters: ChunkSearchFilters, columnPrefix = ''): { clause: string; params: string[] } {
+    const parts: string[] = [];
+    const params: string[] = [];
+    const filePaths = [...new Set((filters.filePaths ?? []).filter(Boolean))];
+    const materialRoots = [...new Set((filters.materialRoots ?? []).filter(Boolean))];
+    if (filePaths.length > 0) {
+      parts.push(`${columnPrefix}relative_path IN (${filePaths.map(() => '?').join(', ')})`);
+      params.push(...filePaths);
+    }
+    if (materialRoots.length > 0) {
+      parts.push(`${columnPrefix}material_root IN (${materialRoots.map(() => '?').join(', ')})`);
+      params.push(...materialRoots);
+    }
+    return { clause: parts.length > 0 ? ` AND ${parts.join(' AND ')}` : '', params };
   }
 
-  private resolveChunkSearchLimit(limit: number | undefined, filePaths: string[]): number {
+  private resolveChunkSearchLimit(limit: number | undefined, filters: ChunkSearchFilters): number {
     if (Number.isFinite(limit) && limit! > 0) return Math.ceil(limit!);
-    const row = this.db.prepare(`SELECT COUNT(*) as count FROM kb_chunks WHERE 1 = 1${this.filePathFilterClause(filePaths)}`)
-      .get(...filePaths) as { count?: number } | undefined;
+    const { clause, params } = this.searchFilterClause(filters);
+    const row = this.db.prepare(`SELECT COUNT(*) as count FROM kb_chunks WHERE 1 = 1${clause}`)
+      .get(...params) as { count?: number } | undefined;
     return Math.max(1, Math.ceil(Number(row?.count) || 0));
   }
 
-  private searchChunksFts(terms: string[], limit: number, filePaths: string[]): ChunkSearchResult[] {
+  private searchChunksFts(terms: string[], limit: number, filters: ChunkSearchFilters): ChunkSearchResult[] {
     try {
       const matchQuery = this.toFtsQuery(terms);
       if (!matchQuery) return [];
+      const { clause, params } = this.searchFilterClause(filters, 'c.');
       const rows = this.db.prepare(`
         SELECT c.rowid, c.*, bm25(kb_chunks_fts, 1.2, 0.8, 0.6, 1.0, 2.0) as bm25_score
         FROM kb_chunks_fts
         INNER JOIN kb_chunks c ON c.id = kb_chunks_fts.id
-        WHERE kb_chunks_fts MATCH ?${this.filePathFilterClause(filePaths, 'c.relative_path')}
+        WHERE kb_chunks_fts MATCH ?${clause}
         ORDER BY bm25_score ASC
         LIMIT ?
-      `).all(matchQuery, ...filePaths, limit * 8) as Array<Record<string, unknown>>;
+      `).all(matchQuery, ...params, limit * 8) as Array<Record<string, unknown>>;
       return rows
         .map(row => {
           const keyword = this.scoreChunkDetailed(this.searchableRowText(row), terms);
@@ -597,7 +636,7 @@ export class IndexStateStore {
     }
   }
 
-  private searchChunksLike(terms: string[], limit: number, filePaths: string[]): ChunkSearchResult[] {
+  private searchChunksLike(terms: string[], limit: number, filters: ChunkSearchFilters): ChunkSearchResult[] {
     // 兜底拆两组：小列（路径/分类/标题等，行均几十字节）对所有词全表 LIKE，成本毫秒级；
     // 大列（search_content/content）仅对 <3 字符短词扫描——trigram FTS 无法索引短词
     // （中文 2 字词如“验收”），3+ 字符词已由 FTS 覆盖，不再全表扫大列
@@ -606,15 +645,16 @@ export class IndexStateStore {
     const smallColumns = terms.map(() => '(LOWER(relative_path) LIKE ? OR LOWER(category) LIKE ? OR LOWER(format) LIKE ? OR LOWER(COALESCE(title_path, \'\')) LIKE ? OR LOWER(COALESCE(chunk_kind, \'\')) LIKE ? OR LOWER(COALESCE(section_title, \'\')) LIKE ?)').join(' OR ');
     const largeColumns = shortTerms.map(() => '(LOWER(search_content) LIKE ? OR LOWER(content) LIKE ?)').join(' OR ');
     const condition = [smallColumns, largeColumns].filter(Boolean).join(' OR ');
+    const { clause, params: filterParams } = this.searchFilterClause(filters);
     const rows = this.db.prepare(`
       SELECT rowid, * FROM kb_chunks
-      WHERE (${condition})${this.filePathFilterClause(filePaths)}
+      WHERE (${condition})${clause}
       ORDER BY created_at DESC
       LIMIT ?
     `).all(
       ...terms.flatMap(term => [`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`]),
       ...shortTerms.flatMap(term => [`%${term}%`, `%${term}%`]),
-      ...filePaths,
+      ...filterParams,
       limit * 6,
     ) as Array<Record<string, unknown>>;
 
@@ -845,6 +885,35 @@ export class IndexStateStore {
     `);
   }
 
+  /**
+   * 资料包列迁移与回填：老库一次 ALTER ADD COLUMN（O(1)）+ SQL 表达式 UPDATE + 索引，
+   * 完成后写 kb_metadata 标记短路。material_root 是 relative_path 的纯函数，
+   * 回填无需重抽取/重嵌入（表达式与 materialRootOf 同口径，保证新旧数据判定一致）。
+   */
+  private ensureMaterialRootSchema(): void {
+    const tables = ['kb_index_state', 'kb_chunks', 'kb_parent_chunks', 'kb_document_chunks'];
+    for (const table of tables) {
+      const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: unknown }>;
+      if (!columns.some(column => String(column.name) === 'material_root')) {
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN material_root TEXT`);
+      }
+    }
+    const marker = this.db.prepare('SELECT value FROM kb_metadata WHERE key = ?').get(MATERIAL_ROOT_BACKFILL_KEY) as { value?: unknown } | undefined;
+    if (marker) return;
+    const expression = materialRootSqlExpression('relative_path');
+    const backfill = this.db.transaction(() => {
+      for (const table of tables) {
+        // WHERE material_root IS NULL 幂等：中断重跑只补未回填行（空串=顶层散文件，属合法值不重复回填）
+        this.db.prepare(`UPDATE ${table} SET material_root = ${expression} WHERE material_root IS NULL`).run();
+      }
+    });
+    backfill();
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_kb_chunks_material_root ON kb_chunks(material_root)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_kb_state_material_root ON kb_index_state(material_root)');
+    this.db.prepare('INSERT INTO kb_metadata (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run(MATERIAL_ROOT_BACKFILL_KEY, String(Date.now()));
+  }
+
   private initTables(): void {
     this.resetLegacyChunkSchemaIfNeeded();
     this.db.exec(`
@@ -861,7 +930,8 @@ export class IndexStateStore {
         last_verified_at  INTEGER NOT NULL,
         status            TEXT NOT NULL DEFAULT 'active',
         error_message     TEXT,
-        metadata_json     TEXT
+        metadata_json     TEXT,
+        material_root     TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_kb_state_status ON kb_index_state(status);
       CREATE INDEX IF NOT EXISTS idx_kb_state_category ON kb_index_state(category);
@@ -886,6 +956,7 @@ export class IndexStateStore {
         start_char      INTEGER,
         end_char        INTEGER,
         metadata_json   TEXT,
+        material_root   TEXT,
         created_at      INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_kb_chunks_path ON kb_chunks(relative_path);
@@ -906,6 +977,7 @@ export class IndexStateStore {
         section_title   TEXT,
         chunk_count     INTEGER NOT NULL,
         metadata_json   TEXT,
+        material_root   TEXT,
         created_at      INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_kb_parent_path ON kb_parent_chunks(relative_path);
@@ -921,6 +993,7 @@ export class IndexStateStore {
         parent_count    INTEGER NOT NULL,
         chunk_count     INTEGER NOT NULL,
         metadata_json   TEXT,
+        material_root   TEXT,
         created_at      INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_kb_document_path ON kb_document_chunks(relative_path);
@@ -1119,6 +1192,7 @@ export class IndexStateStore {
       collectionName: String(row.collection_name),
       sectionTitle: row.section_title == null ? undefined : String(row.section_title),
       chunkCount: Number(row.chunk_count),
+      materialRoot: row.material_root == null ? undefined : String(row.material_root),
       metadataJson: row.metadata_json == null ? undefined : String(row.metadata_json),
       createdAt: Number(row.created_at),
     };
@@ -1134,6 +1208,7 @@ export class IndexStateStore {
       collectionName: String(row.collection_name),
       parentCount: Number(row.parent_count),
       chunkCount: Number(row.chunk_count),
+      materialRoot: row.material_root == null ? undefined : String(row.material_root),
       metadataJson: row.metadata_json == null ? undefined : String(row.metadata_json),
       createdAt: Number(row.created_at),
     };
@@ -1207,6 +1282,7 @@ export class IndexStateStore {
       rowRange: row.row_range == null ? undefined : String(row.row_range),
       startChar: row.start_char == null ? undefined : Number(row.start_char),
       endChar: row.end_char == null ? undefined : Number(row.end_char),
+      materialRoot: row.material_root == null ? undefined : String(row.material_root),
       metadataJson: row.metadata_json == null ? undefined : String(row.metadata_json),
       createdAt: Number(row.created_at),
       score,
@@ -1319,6 +1395,7 @@ export class IndexStateStore {
       lastVerifiedAt: Number(row.last_verified_at),
       status: String(row.status) as IndexStateRecord['status'],
       errorMessage: row.error_message == null ? undefined : String(row.error_message),
+      materialRoot: row.material_root == null ? undefined : String(row.material_root),
       metadataJson: row.metadata_json == null ? undefined : String(row.metadata_json),
     };
   }

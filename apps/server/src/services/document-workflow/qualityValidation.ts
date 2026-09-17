@@ -6,7 +6,7 @@ import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel, DocumentTe
 import type { FactTokenScopeClassifier } from './factTokenClassifier';
 import type { SemanticSimilarityFn } from './semanticSimilarity';
 import { buildSemanticSimilarity, SEMANTIC_COVERAGE_THRESHOLD } from './semanticSimilarity';
-import type { DepthDimension, ProfessionalDepthAnalysis } from './professionalDepthClassifier';
+import type { ContentNeedKey, DepthDimension, ProfessionalDepthAnalysis } from './professionalDepthClassifier';
 import { documentTextLength, estimateDocumentPages } from './budget';
 import { extractEngineeringMeasureTokens, normalizeEngineeringTextForFactMatch } from './engineeringUnits';
 import { displayChapterTitle, isTenderClauseFragmentTitle } from './outline';
@@ -23,7 +23,7 @@ import { DIVISION_SECTION_RE } from './writingSpec';
 import { fiveElementBlockStats } from './tenderBidChecks';
 import { buildSemanticGate } from './semanticGate';
 import { longestCommonHanSubstring } from './numericalConsistency';
-import { scanUncoveredEngineeringHeadings } from './integrity/detectors/detectors';
+import { isUnitPairRatioMatch, scanUncoveredEngineeringHeadings } from './integrity/detectors/detectors';
 
 export function isExportBlockingIssue(issue: ValidationIssue) {
   return EXPORT_BLOCKING_ISSUE_RE.test(issue.message);
@@ -761,24 +761,29 @@ export function markdownTableQualityIssues(markdown: string): ValidationIssue[] 
   return issues;
 }
 
-/** 提取「编制依据/编制说明」小节文本（H2-H4 或粗体标题，到下一同级/更高级标题止；找不到返回空串） */
+/** 提取「编制依据/编制说明」小节文本（H2-H4 或粗体标题，到下一同级/更高级标题止；找不到返回空串）。
+ * r16 丰乐镇 B3-B7 归因：单轮「包含匹配」被「编制说明与工程概况」类复合标题抢先命中（首个命中即
+ * 返回，真实「编制依据」小节位于其后被整体跳过，法规 5 项检查全落空报缺）——两轮扫描：先精确
+ * 「编制依据」候选，无再退回「编制说明/编制原则/编制目的」；均无时静默跳过（模板结构差异不误伤）。 */
 function extractBasisRegulationSection(markdown: string): string {
   const lines = markdown.split(/\r?\n/u);
-  for (let i = 0; i < lines.length; i += 1) {
-    const trimmed = lines[i].trim();
-    const hashHeading = /^(#{2,4})\s+(.+)$/u.exec(trimmed);
-    const boldHeading = hashHeading ? null : /^\*\*(.+)\*\*$/u.exec(trimmed);
-    if (!hashHeading && !boldHeading) continue;
-    const title = hashHeading ? hashHeading[2] : (boldHeading?.[1] ?? '');
-    if (!/编制依据|编制说明|编制原则|编制目的/u.test(title)) continue;
-    const level = hashHeading ? hashHeading[1].length : 0;
-    const parts: string[] = [title];
-    for (let j = i + 1; j < lines.length; j += 1) {
-      const next = /^(#{1,4})\s+(.+)$/u.exec(lines[j].trim());
-      if (next && (level === 0 || next[1].length <= level)) break;
-      parts.push(lines[j]);
+  for (const titleRe of [/编制依据/u, /编制说明|编制原则|编制目的/u]) {
+    for (let i = 0; i < lines.length; i += 1) {
+      const trimmed = lines[i].trim();
+      const hashHeading = /^(#{2,4})\s+(.+)$/u.exec(trimmed);
+      const boldHeading = hashHeading ? null : /^\*\*(.+)\*\*$/u.exec(trimmed);
+      if (!hashHeading && !boldHeading) continue;
+      const title = hashHeading ? hashHeading[2] : (boldHeading?.[1] ?? '');
+      if (!titleRe.test(title)) continue;
+      const level = hashHeading ? hashHeading[1].length : 0;
+      const parts: string[] = [title];
+      for (let j = i + 1; j < lines.length; j += 1) {
+        const next = /^(#{1,4})\s+(.+)$/u.exec(lines[j].trim());
+        if (next && (level === 0 || next[1].length <= level)) break;
+        parts.push(lines[j]);
+      }
+      return parts.join('\n');
     }
-    return parts.join('\n');
   }
   return '';
 }
@@ -1323,6 +1328,10 @@ export async function crossChapterConsistencyIssues(markdown: string, factsModel
   // gap 排除顿号/逗号（4.27.0 A3 校准）：「5台挖掘机，其中3台用于…」的分配语境不得采为「挖掘机3台」口径——
   // 与修复器 CROSS_SECTION_ANCHORS excavator 模式（排除 、，）检测/修复口径对齐，防检测报冲突而修复看不到的拉扯
   for (const match of markdown.matchAll(new RegExp(`(${equipmentScopeRe.source})[^\\d。；;\\n|、，]{0,12}(\\d+)\\s*[台辆]`, 'gu'))) {
+    // r15 丰乐镇 B3 归因：配套比结构（「每台挖掘机配1台自卸汽车」）的 1台 是单位配套数非口径值，
+    // 不得采为前设备台数（5 vs 1 假冲突）——与 CROSS_SECTION_ANCHORS 修复器/检测器同源豁免
+    //（isUnitPairRatioMatch 单源，r11 配套比豁免通用化）
+    if (isUnitPairRatioMatch(markdown, match.index || 0, match[0])) continue;
     const equipment = match[1];
     const value = match[2];
     const before = markdown.slice(Math.max(0, (match.index || 0) - 20), match.index || 0);
@@ -1747,6 +1756,27 @@ function trustedFactCorpus(factsModel: DocumentFactsModel) {
   return [facts, ...tableCells].join('\n');
 }
 
+/** 工期总量口径升级锚（4.44 #43 根因根治）：就近前缀工期词 + 排布分解排除门。
+ * 4.43 实测：「本项目计划工期为90日历天…施工准备与清杂拆除7天，污水管网工程63天，道路铺装工程10天…」
+ * 阶段排布值「7天」被 ±36 字全窗口的「日历天」误升级为总量口径编造（error 阻断且修复轮无收敛路径）；
+ * 判定改为：① 工期口径词必须出现在 token 就近前缀（16 字）内（拒绝远距离词锚）；
+ * ② 上下文含阶段分解/流程节点特征词不升；③ 上下文并列 ≥2 个「数字+（日历）天」即排布分解不升。 */
+function hasDurationScopeAnchor(prefix: string, context: string): boolean {
+  if (!/总工期|计划工期|合同工期|日历天|施工周期/u.test(prefix)) return false;
+  if (/阶段|历时|用时|合计|总计|共计|累计|预留|机动|余量|剩余|养护|编制|提交|签订|划分|闭合|控制基准|持续时间|关键|节点/u.test(`${prefix}${context}`)) return false;
+  // 并列分解：上下文出现 ≥2 个「数字+天」→ 排布分解值（token 自身计 1 个）。「日历天」不计入——
+  // 它是总量权威口径的典型单位形态（「总工期180日历天」），不是排布分解证据；若计入，
+  // K1 对照「总工期180日历天，围墙修复29天」会因 180 日历天凑成 2 而漏报 29 天（升级门失效）
+  return (context.match(/\d+(?:\.\d+)?\s*(?:工作天|天)/gu) || []).length < 2;
+}
+
+/** 日历日期 token（「12月」←「9月下旬至12月下旬」）：日期表述不是总量口径编造对象（编造日期由 Writer
+ * 规则与跨章检查处理）。r17 丰乐镇实测：同步正则豁免后 bge 语义分类器仍会把工期语境中的日期 token
+ * 升级为总量口径（「12月」被报编造）——同步降级与语义升级门必须共用同一判据封印升级路径。 */
+function isCalendarDateToken(token: string, context: string): boolean {
+  return /^\d+(?:\.\d+)?(?:月|年)$/u.test(token) && /开工|竣工|日期|计划|年|月/u.test(context);
+}
+
 function generatedFactTokenClass(token: string, context: string, prefix?: string): 'scope' | 'spec' | 'soft' {
   const normalized = `${token} ${context}`;
   // 单位门控（十一度实测误伤）：token 自身单位决定口径类别，上下文关键词不得跨口径升级——
@@ -1756,9 +1786,9 @@ function generatedFactTokenClass(token: string, context: string, prefix?: string
   // 商务金额类（暂列金额/暂估价/报价/单价/税率）：招标人给定或商务条款数字，事实提取侧本就不纳入主表，
   // 反查侧不得据此判为“编造总量口径”硬阻断——正文忠实引用暂列金额（如“暂列金额60万元”）是合规写法
   if (/暂列金额|暂估价|报价|单价|合价|综合单价|税率|增值税|预留金/u.test(normalized)) return 'soft';
-  // 具体日期 token（"2026年8月8日"中的"2026年""8月"）属于日期表述，不是总量口径数字；
+  // 具体日期 token（“2026年8月8日”中的“2026年”“8月”）属于日期表述，不是总量口径数字；
   // 编造日期由 Writer 规则约束与跨章检查处理，此处降级 soft 避免把日期误判为工期口径阻断导出
-  if (/^\d+(?:\.\d+)?(?:月|年)$/u.test(token) && /开工|竣工|日期|计划|年|月/u.test(context)) return 'soft';
+  if (isCalendarDateToken(token, context)) return 'soft';
   // 项目总量口径（工期/金额/建设规模）：正文偏离资料口径属低级错误，升级为 error 走修复链。
   // token 必须携带对应口径单位才能升级，防止上下文关键词跨口径误伤（见上方单位门控说明）。
   // 上下文关键词只在 token 前导近邻窗口（prefix）内匹配：±36 字全窗口会把
@@ -1771,7 +1801,7 @@ function generatedFactTokenClass(token: string, context: string, prefix?: string
   // 4.32.0 扩围（丰乐镇复测 #99 五个时间数字全拦截）：excl 词表并入阶段分解/流程节点类
   // 特征词（阶段/历时/用时/养护/编制/提交/签订/划分/闭合/控制基准/持续时间/关键/节点），
   // 检查窗口由近邻 prefix 扩至 `${scopeContext}${context}`（覆盖 token 后置语境）
-  if (/(?:天|工作天|月|年)$/u.test(token) && /总工期|计划工期|合同工期|日历天|施工周期/u.test(scopeContext) && !/阶段|历时|用时|合计|总计|共计|累计|预留|机动|余量|剩余|养护|编制|提交|签订|划分|闭合|控制基准|持续时间|关键|节点/u.test(`${scopeContext}${context}`)) return 'scope';
+  if (/(?:天|工作天|月|年)$/u.test(token) && hasDurationScopeAnchor(scopeContext, context)) return 'scope';
   // 金额类不能裸匹配单字“元”：正文常见“结构单元/元件/元素/元器件”等词含“元”字，
   // 会把方法段工艺参数（如“拆除段单元划分”语境下的 200m2）误判为金额口径编造（十度实测误伤）
   if (/(?:万元|亿元|元)$/u.test(token) && /最高投标限价|招标控制价|合同估算价|投资估算|报价|金额|人民币/u.test(scopeContext)) return 'scope';
@@ -1792,6 +1822,48 @@ interface FactVerificationCandidate {
   prefix: string;
 }
 
+/** 归一化单位 → 原文可能形态（mirror engineeringUnits 归一化替换表；长单位在后防截尾、多字面形态并列） */
+const MEASURE_UNIT_VARIANTS: Array<[string, string]> = [
+  ['hm2', 'hm2|hm²|公顷'],
+  ['m2', 'm2|m²|㎡|平方米|平方|平米'],
+  ['m3', 'm3|m³|立方米|立方'],
+  ['工作天', '工作天|工作日'],
+  ['万元', '万元|人民币万元|万元人民币'],
+  ['天', '天|日历天|自然日|个日历天'],
+  ['月', '月|个月'],
+  ['km', 'km|千米|公里'],
+  ['mm', 'mm|毫米'],
+  ['cm', 'cm|厘米'],
+  ['kg', 'kg|千克|公斤'],
+  ['min', 'min|分钟'],
+  ['t', 't|吨'],
+  ['m', 'm|米'],
+  ['元', '元|人民币元|元人民币'],
+  ['h', 'h|小时'],
+];
+
+function escapeRegExpLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+/** 归一化 token 在原文中的定位（fix03e）：归一化 token 与原文形态常不一致（「2月」←「连续2个月」、
+ * 「30天」←「30日历天」、㎡→m2），裸 indexOf 会错位命中子串（「2月」命中「12月下旬」的「12月」——
+ * context/口径分类随之失真，工期段落被误升级为总量口径编造 blocker）。定位策略：① 数字左边界守卫的
+ * 精确搜索（防数字子串错位：2 不得命中 12）；② 单位变体还原搜索（补归一化丢失的插入字/符号形态）；
+ * 均未命中即跳过（返回 -1），绝不用裸数字回退（裸「2」会命中「2026年」）。 */
+function locateMeasureToken(markdown: string, token: string): number {
+  const numeric = /^(\d+(?:\.\d+)?)/u.exec(token)?.[1];
+  if (!numeric) return markdown.indexOf(token);
+  const guarded = new RegExp(`(?<![\\d.])${escapeRegExpLiteral(token)}(?![\\d.])`, 'u').exec(markdown);
+  if (guarded) return guarded.index;
+  const unit = token.slice(numeric.length);
+  if (!unit) return -1;
+  const variant = MEASURE_UNIT_VARIANTS.find(([normalized]) => normalized === unit);
+  const unitPattern = variant ? variant[1] : escapeRegExpLiteral(unit);
+  const match = new RegExp(`(?<![\\d.])${escapeRegExpLiteral(numeric)}\\s*(?:${unitPattern})(?![a-z0-9])`, 'iu').exec(markdown);
+  return match ? match.index : -1;
+}
+
 /** 收集待反查的工程度量 token（表格行排除、章节编号排除、上下文切片），与口径分类解耦 */
 function collectFactVerificationCandidates(markdown: string): FactVerificationCandidate[] {
   const candidates: FactVerificationCandidate[] = [];
@@ -1799,13 +1871,7 @@ function collectFactVerificationCandidates(markdown: string): FactVerificationCa
     // 章节编号（1.2、2.3 等无单位纯小数）是目录/标题编号，不是工程数字，不进反查池
     if (/^\d+\.\d+$/u.test(token)) continue;
     const normalizedToken = normalizeEngineeringTextForFactMatch(token);
-    let tokenIndex = markdown.indexOf(token);
-    if (tokenIndex < 0) {
-      // 归一化单位还原（日历天→天、㎡→m2 等）后 token 与原文形态不一致：退化为按数值部分定位，
-      // 保证工期/面积口径 token 不因归一化丢位而漏反查（“30日历天”提取为“30天”后原文找不到）
-      const numericPart = /^\d+(?:\.\d+)?/u.exec(token)?.[0];
-      tokenIndex = numericPart ? markdown.indexOf(numericPart) : -1;
-    }
+    const tokenIndex = locateMeasureToken(markdown, token);
     if (tokenIndex < 0) continue;
     // 表格行中的数值（进度计划表分项持续时间"第24～34天"、机械配置表"第X天"等）
     // 属于计划排期分解数据，不属于总量口径，不做资料事实反查
@@ -1902,11 +1968,12 @@ export async function generatedFactVerificationIssuesAsync(
     if (semanticMap && AMBIGUOUS_SCOPE_UNIT_RE.test(token)) {
       const semantic = semanticMap.get(token) || 'other';
       if (tokenClass === 'scope') tokenClass = semantic === 'scope' ? 'scope' : 'soft';
-      // 语义升级门（丰乐镇复测 #99）：语义分类器泛化会把工期排布/流程节点数字升级为总量口径编造——
-      // 仅当上下文含明确的工期口径关键词（总工期/计划工期/合同工期/日历天/施工周期）且不含
-      // 阶段分解/流程节点类特征词（阶段/历时/用时/养护/编制/提交/签订/划分/控制基准/预留…）时
-      // 才允许正则→scope 的语义升级（宁缺勿假：无关键词的漏判由 soft 计数提示兜底）
-      else if (semantic === 'scope' && /总工期|计划工期|合同工期|日历天|施工周期/u.test(context) && !/阶段|历时|用时|合计|总计|共计|累计|预留|机动|余量|剩余|养护|编制|提交|签订|划分|闭合|控制基准|持续时间|关键|节点/u.test(context)) tokenClass = 'scope';
+      // 语义升级门（丰乐镇复测 #99 + 4.44 #43 就近词锚）：语义分类器泛化会把工期排布/流程节点
+      // 数字升级为总量口径编造——仅当 token 就近前缀含明确工期口径关键词且无阶段分解/并列
+      // 排布特征时才允许正则→scope 的语义升级（宁缺勿假：无关键词的漏判由 soft 计数提示兑底）；
+      // 日历日期 token 不得升级（r17 丰乐镇归因：bge 会把「12月」按工期语境升级为编造总量口径，
+      // 同步降级判据在此必须同样生效）
+      else if (semantic === 'scope' && hasDurationScopeAnchor(prefix ?? context, context) && !isCalendarDateToken(token, context)) tokenClass = 'scope';
     }
     if (tokenClass === 'scope' && !compactCorpus.includes(normalizedToken)) scopeSuspicious.push(token);
     if (tokenClass === 'spec' && !compactCorpus.includes(normalizedToken)) specSuspicious.push(token);
@@ -1947,6 +2014,15 @@ export function professionalScoreIssues(chapters: Array<Pick<DocumentDraftChapte
   return issues;
 }
 
+/** 进度章内容要求字面要素对兜底（4.44 #38 根治）：bge 块语义对表格化/变体表述会漏判到 0.6
+ * 阈值以下误伤缺项——4.43「确保工期的技术组织措施」实测要素齐全（「三条关键线路」「滞后纠偏
+ * 措施」表列/「工序穿插」「平行施工」「流水节拍」）仍被判缺。语义判定为主，强要素对
+ * （关键线路类 AND 纠偏类）字面同时命中即判覆盖兜底；单词命中不兜底（防关键词罗列段）。 */
+function contentNeedLiteralFallback(needKey: ContentNeedKey, content: string): boolean {
+  if (needKey !== 'schedule') return false;
+  return /关键线路|关键路径/u.test(content) && /纠偏|穿插|平行施工|流水施工|赶工/u.test(content);
+}
+
 export function professionalContentIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'> & Partial<Pick<DocumentDraftChapter, 'id'>>>, analyses?: Map<string, ProfessionalDepthAnalysis>): ValidationIssue[] {
   const rules = [
     { re: /进度|工期/u, needKey: 'schedule' as const, need: /关键线路|穿插|纠偏|资源保障|节点|动态调整/u, message: '进度工期章节缺少关键线路、穿插施工或纠偏保障内容' },
@@ -1976,7 +2052,7 @@ export function professionalContentIssues(chapters: Array<Pick<DocumentDraftChap
       // 泛类命中，但该章职责是劳动力组织（不承担材料设备保管），resource 泛类锚点（含材料设备）
       // 不适用；章内存在进场/退场/调配/轮转证据时不按泛类锚点判缺（真无进场计划的章仍保留 error）
       if (rule.needKey === 'resource' && /劳动力/u.test(chapter.title) && !/资源|材料|设备/u.test(chapter.title) && /进场|入场|退场|调配|轮转/u.test(chapter.content)) continue;
-      if (!analysis.contentNeeds[rule.needKey]) issues.push({ level: 'error', message: `${chapter.title}：${rule.message}`, suggestion: '请按专业任务卡定向补写该章节，补齐可实施的控制措施、资料依据和闭环要求。', chapterId: chapter.id });
+      if (!analysis.contentNeeds[rule.needKey] && !contentNeedLiteralFallback(rule.needKey, chapter.content)) issues.push({ level: 'error', message: `${chapter.title}：${rule.message}`, suggestion: '请按专业任务卡定向补写该章节，补齐可实施的控制措施、资料依据和闭环要求。', chapterId: chapter.id });
     }
   }
   return issues;
@@ -1986,6 +2062,11 @@ function shouldIgnorePreciseToken(token: string, context: string) {
   if (/万元|元|报价|单价|合价|综合单价|预留金|税率|增值税|利润|结算/u.test(`${token} ${context}`)) return true;
   if (/OCR|识别错误|乱码|无法确认|疑似|不确定|语义断裂|页码|目录/u.test(context)) return true;
   if (/^\d+$/.test(token) && Number(token) < 10) return true;
+  // 4.49 r9 #12 根治（关键参数抽查 4/10 缺失如 cm3）：PRECISE_FACT_TOKEN_RE 首分支带 i 标志，
+  // [A-Z]{1,8}[\w.-]*\d[\w.-]* 会把「2.6g/cm3」的裸单位碎片 cm3（单位词根+平方/立方后缀，
+  // 无数值主体）误提为 token——既非可逐字补齐的工程参数，又因含 m3 子串挤占体积类目关键参数
+  // 抽查名额。纯单位片段（单位词根+可选 2/3 平方立方后缀）一律不进抽查池。
+  if (/^(?:mm|cm|dm|hm|km|kg|mg|ml|kwh|kj|kpa|mpa|kw|pa|kn|n|t|l|h|g|m|㎡|m²|m³)[23²³]?$/iu.test(token)) return true;
   // 4.31 抽查池噪声过滤（丰乐镇 v6 #83）：「1.1项」为小节编号+量词误切、「184 页」为页码、
   // 「COL/R2C3」为表格坐标，均非工程参数；「N天/日」且语境含期限时属条款期限非施工工期
   if (/^\d+(?:\.\d+)+\s*(?:项|个|份|页|批|次|条|款)$/u.test(token)) return true;
@@ -2043,10 +2124,14 @@ function collectEvidencePreciseTokens(chapters: DocumentDraftChapter[]) {
   return [...tokens];
 }
 
-function countUsedPreciseTokens(tokens: string[], normalizedMarkdown: string) {
+function countUsedPreciseTokens(tokens: string[], markdown: string) {
+  // 4.49 r9 #12 根治（使用判定归一化）：双端走 normalizeEngineeringTextForFactMatch（单位/全角/
+  // 破折号归一）——正文「28570.36平方米」与池 token「28570.36㎡」、「30 日历天」与「30天」、
+  // 「GB 51192—2016」与「GB51192-2016」等价命中，消除「已写入但形态不同」的结构性假缺口
+  const normalized = normalizeEngineeringTextForFactMatch(markdown);
   let used = 0;
   for (const token of tokens) {
-    if (normalizedMarkdown.includes(token.replace(WHITESPACE_RE, ''))) used += 1;
+    if (normalized.includes(normalizeEngineeringTextForFactMatch(token))) used += 1;
   }
   return used;
 }
@@ -2056,34 +2141,82 @@ function countUsedPreciseTokens(tokens: string[], normalizedMarkdown: string) {
 const PRECISE_FACT_CRITICAL_SPOT_COUNT = 6;
 const PRECISE_FACT_CRITICAL_MIN_RATE = 0.5;
 const CRITICAL_PRECISE_UNIT_RE = /日历天|个月|㎡|m²|m3|m³|MPa|kPa|kN|GB\/T|GB|JGJ|ISO|DN|φ|Φ|米\/秒|天$/u;
+/** 抽查池类目（4.44 #44 根治）：类内数值降序 + 跨类轮转抽样，避免字面序靠前的单类小值霸榜 */
+const CRITICAL_PRECISE_CATEGORY_RES: readonly RegExp[] = [
+  /GB|JGJ|ISO|CJJ|DB/u,
+  /DN|φ|Φ/u,
+  /MPa|kPa|kN|米\/秒/u,
+  /日历天|个月|天$/u,
+  /㎡|m²/u,
+  /m3|m³/u,
+];
 
-function criticalPreciseTokens(tokens: string[]) {
+/** token 内首个数值（类内排序键）；无数值返回 -Infinity 排在数值 token 之后 */
+function tokenFirstNumericValue(token: string): number {
+  const numeric = /\d+(?:\.\d+)?/u.exec(token)?.[0];
+  return numeric === undefined ? Number.NEGATIVE_INFINITY : Number.parseFloat(numeric);
+}
+
+/** 关键参数抽查池（导出供测试直接断言池组成，见 qualityValidation.test.ts #44 组） */
+export function criticalPreciseTokens(tokens: string[]) {
   // 先确定性排序（字典序）再分层抽样：消除上游 LLM 提取顺序对抽查池的随机影响，
   // 保证同一项目重跑时抽查池与判定结果可复现
   const sorted = [...tokens].sort((a, b) => a.localeCompare(b, "zh"));
   const critical = sorted.filter(token => CRITICAL_PRECISE_UNIT_RE.test(token));
   const rest = sorted.filter(token => !CRITICAL_PRECISE_UNIT_RE.test(token));
+  // 4.44 #44 根因根治（丰乐镇 4.43 实测「关键参数抽查 0/10（缺失如 103㎡、106㎡、1072㎡）」）：
+  // 旧实现 critical.slice(0,8) 按字典序盲选——「1」开头小值、「D」开头 DN 管径、「G」开头 GB
+  // 编号跨轮霸榜同类名额，核心大参数（总建筑面积 28570.36㎡、主给水管 DN1000）反被挤出抽查池，
+  // 使用率被结构性拉低。修复：类目分组（规范编号/管径/强度压力流速/工期/面积/体积）→
+  // 类内数值降序（大值核心参数优先）→ 跨类轮转抽样（类目均衡）→ 补 2 个常规 token 保持可复现性
+  const groups: string[][] = CRITICAL_PRECISE_CATEGORY_RES.map(() => []);
+  const other: string[] = [];
+  for (const token of critical) {
+    const index = CRITICAL_PRECISE_CATEGORY_RES.findIndex(pattern => pattern.test(token));
+    (index >= 0 ? groups[index] : other).push(token);
+  }
+  const queues = [...groups, other].map(group => group.sort((a, b) => {
+    const left = tokenFirstNumericValue(a);
+    const right = tokenFirstNumericValue(b);
+    if (Number.isFinite(left) && Number.isFinite(right)) return right - left || a.localeCompare(b, "zh");
+    if (Number.isFinite(left)) return -1;
+    if (Number.isFinite(right)) return 1;
+    return a.localeCompare(b, "zh");
+  }));
+  const picked: string[] = [];
+  let cursor = 0;
+  let emptyRounds = 0;
+  while (picked.length < 8 && emptyRounds < queues.length) {
+    const queue = queues[cursor % queues.length]!;
+    if (queue.length > 0) {
+      picked.push(queue.shift()!);
+      emptyRounds = 0;
+    } else {
+      emptyRounds += 1;
+    }
+    cursor += 1;
+  }
   // 分层抽样：关键单位优先进入抽查池，但保留少量常规规格 token，
   // 避免关键 token 过多时抽查池被单一单位类型（如大量面积值）占满而失去代表性
-  return [...critical.slice(0, 8), ...rest.slice(0, 2)].slice(0, 10);
+  return [...picked, ...rest.slice(0, 2)].slice(0, 10);
 }
 
 export async function preciseFactUsageIssues(markdown: string, factsModel: DocumentFactsModel, chapters: DocumentDraftChapter[] = []): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = [];
-  const normalized = markdown.replace(WHITESPACE_RE, '');
   // 抽查口径对齐：优先使用章节证据窗口内的精确参数（LLM 实际收到的证据），
   // 消除"全项目精确事实中从未进入证据窗口"参数的结构性假阳性；
   // 证据池过小（章节 evidence 缺失或参数过少）时回退全项目精确事实池，保持门禁兜底能力
   const evidenceTokens = collectEvidencePreciseTokens(chapters);
   const tokens = evidenceTokens.length >= PRECISE_FACT_MIN_TOKEN_COUNT ? evidenceTokens : collectPreciseFactTokens(factsModel);
-  const used = countUsedPreciseTokens(tokens, normalized);
+  const used = countUsedPreciseTokens(tokens, markdown);
   if (tokens.length >= PRECISE_FACT_MIN_TOKEN_COUNT && used / tokens.length < PRECISE_FACT_MIN_USAGE_RATE) issues.push({ level: 'warning', message: `可靠精确参数使用不足：${used}/${tokens.length}`, suggestion: '请将资料中可靠的规格、参数、数量、时间、比例和标准编号写入对应章节；商务金额、单价、税率、预留金不得写入正文。' });
   // 关键参数抽查：对高价值精确参数单独抽查使用率，过低时升级为 error，
   // 使导出门禁的"结构化精确参数已使用"检查项显式失败（有正文时不硬阻断导出，避免卡死交付）
   const criticalTokens = criticalPreciseTokens(tokens);
   if (criticalTokens.length >= PRECISE_FACT_CRITICAL_SPOT_COUNT) {
-    let criticalUsed = countUsedPreciseTokens(criticalTokens, normalized);
-    let missingCritical = criticalTokens.filter(token => !normalized.includes(token.replace(WHITESPACE_RE, '')));
+    const normalizedForMatch = normalizeEngineeringTextForFactMatch(markdown);
+    let criticalUsed = countUsedPreciseTokens(criticalTokens, markdown);
+    let missingCritical = criticalTokens.filter(token => !normalizedForMatch.includes(normalizeEngineeringTextForFactMatch(token)));
     // Q11 语义兜底：字面未命中的关键参数用本地 bge 对正文句语义判定（"建设规模4646㎡"≈"总建筑面积4646平方米"）
     if (missingCritical.length > 0 && criticalUsed / criticalTokens.length < PRECISE_FACT_CRITICAL_MIN_RATE) {
       const sentences = markdown
@@ -2099,12 +2232,31 @@ export async function preciseFactUsageIssues(markdown: string, factsModel: Docum
     }
     if (criticalUsed / criticalTokens.length < PRECISE_FACT_CRITICAL_MIN_RATE) {
       const shownMissing = missingCritical.slice(0, 3);
-      issues.push({ level: 'error', message: `可靠精确参数使用不足：关键参数抽查 ${criticalUsed}/${criticalTokens.length}${shownMissing.length ? `（缺失如 ${shownMissing.join('、')}）` : ''}`, suggestion: '请将资料中的关键工程参数（工期、面积、强度等级、材料规格、规范编号等）写入正文对应章节，不得因参数总量达标而遗漏核心参数。' });
+      // 内容深度补写轮（content-depth-repair）定位锚点：关键参数抽查 error 打 provenance
+      // （detectorId 单源，修复轮按 provenance 精确过滤消费；r8 实机 #16 归因：该类 error
+      // 此前无任何修复轮消费，直坠终门禁）
+      issues.push({ level: 'error', message: `可靠精确参数使用不足：关键参数抽查 ${criticalUsed}/${criticalTokens.length}${shownMissing.length ? `（缺失如 ${shownMissing.join('、')}）` : ''}`, suggestion: '请将资料中的关键工程参数（工期、面积、强度等级、材料规格、规范编号等）写入正文对应章节，不得因参数总量达标而遗漏核心参数。', provenance: { detectorId: 'precise-fact-usage', fingerprint: stableHash(markdown) } });
     }
   }
-  if (factsModel.bills.length > 0 && !STRUCTURED_DATA_CONTENT_RE.test(markdown)) issues.push({ level: 'error', message: '正文未体现结构化数据资料', suggestion: '请从表格、列表或明细中提取对象、单位、数量、规格和关键参数补入对应章节。' });
-  if (factsModel.drawings.length > 0 && !SPECIFICATION_CONTENT_RE.test(markdown)) issues.push({ level: 'error', message: '正文未体现设计/方案/说明类资料', suggestion: '请从设计、方案或说明资料中提取对象、流程、节点、做法、配置、规则和标准要求。' });
+  if (factsModel.bills.length > 0 && !STRUCTURED_DATA_CONTENT_RE.test(markdown)) issues.push({ level: 'error', message: '正文未体现结构化数据资料', suggestion: '请从表格、列表或明细中提取对象、单位、数量、规格和关键参数补入对应章节。', provenance: { detectorId: 'precise-fact-usage', fingerprint: stableHash(markdown) } });
+  if (factsModel.drawings.length > 0 && !SPECIFICATION_CONTENT_RE.test(markdown)) issues.push({ level: 'error', message: '正文未体现设计/方案/说明类资料', suggestion: '请从设计、方案或说明资料中提取对象、流程、节点、做法、配置、规则和标准要求。', provenance: { detectorId: 'precise-fact-usage', fingerprint: stableHash(markdown) } });
   return issues;
+}
+
+/**
+ * 关键参数缺失池（修复轮 content-depth-repair 消费口径，与 preciseFactUsageIssues 关键参数抽查严格同源）：
+ * 返回当前正文未命中的关键参数 token 列表（字面口径，确定性零嵌入成本）。检测端在此之上还有
+ * Q11 bge 语义兜底（语义已覆盖不算缺失）；修复轮用字面口径稍宽——假缺口由「每章 2 轮上限 +
+ * 残留不降即停 + 外层 recompute 复核（含语义兜底）」三层收敛机制吸收，不产生死循环。
+ */
+export function missingCriticalPreciseTokens(markdown: string, factsModel: DocumentFactsModel, chapters: DocumentDraftChapter[] = []): string[] {
+  // 4.49 r9 #12 根治：与 preciseFactUsageIssues 同源归一化字面口径（单位/全角/破折号双端归一）
+  const normalized = normalizeEngineeringTextForFactMatch(markdown);
+  const evidenceTokens = collectEvidencePreciseTokens(chapters);
+  const tokens = evidenceTokens.length >= PRECISE_FACT_MIN_TOKEN_COUNT ? evidenceTokens : collectPreciseFactTokens(factsModel);
+  const criticalTokens = criticalPreciseTokens(tokens);
+  if (criticalTokens.length < PRECISE_FACT_CRITICAL_SPOT_COUNT) return [];
+  return criticalTokens.filter(token => !normalized.includes(normalizeEngineeringTextForFactMatch(token)));
 }
 
 /** 清单落位校验（Q1 修复链）：字面匹配 + 本地 bge 语义兜底，落位率 <60% 升级 error 进修复循环 */

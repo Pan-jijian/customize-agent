@@ -250,18 +250,32 @@ describe('extractFactsWithLlm', () => {
     expect(callDocumentLlmJsonMock).not.toHaveBeenCalled();
   });
 
-  it('LLM 结果按动态 schema 映射', async () => {
+  it('LLM 结果按动态 schema 映射且来源由编号回填', async () => {
     const spec = specOf();
     const template = templateOf([templateChapter({ requiredFacts: [] })]);
-    callDocumentLlmJsonMock.mockResolvedValue({ facts: [{ fieldId: 'project_name', key: '项目名称', value: '合肥市某项目', confidence: 0.7 }] });
+    callDocumentLlmJsonMock.mockResolvedValue({ facts: [{ fieldId: 'project_name', key: '项目名称', value: '合肥市某项目', evidenceId: 'E1', confidence: 0.7 }] });
     const result = await extractFactsWithLlm([evidenceItem({ content: '项目名称：合肥市某项目' })], '你是文档事实抽取器。', template, spec);
     expect(result.facts).toHaveLength(1);
-    expect(result.facts[0]).toMatchObject({ key: '项目名称', fieldId: 'project_name', fieldName: '项目名称', value: '合肥市某项目', roleId: 'llm', confidence: 0.7 });
+    expect(result.facts[0]).toMatchObject({ key: '项目名称', fieldId: 'project_name', fieldName: '项目名称', value: '合肥市某项目', sourceFile: '/data/招标文件.txt', roleId: 'llm', confidence: 0.7 });
     expect(result.stages[0]!.status).toBe('success');
     expect(result.stages[0]!.message).toContain('1 条事实');
     const prompt = callDocumentLlmJsonMock.mock.calls[0]![1];
     expect(prompt).toContain('动态事实 schema：');
     expect(prompt).toContain('id=project_name name=项目名称');
+    expect(prompt).toContain('[E1] 文件:/data/招标文件.txt');
+    expect(prompt).toContain('evidenceId 必须取自资料行首的编号');
+  });
+
+  it('无效来源编号的事实被丢弃并计数', async () => {
+    callDocumentLlmJsonMock.mockResolvedValue({ facts: [
+      { key: '项目名称', value: '合肥市某项目', evidenceId: 'E9' },
+      { key: '项目名称', value: '合肥市某项目', evidenceId: 'e1' },
+      { key: '建设地点', value: '合肥市' },
+    ] });
+    const result = await extractFactsWithLlm([evidenceItem()], '提示词', templateOf());
+    expect(result.facts).toHaveLength(1);
+    expect(result.facts[0]!.sourceFile).toBe('/data/招标文件.txt');
+    expect(result.stages[0]!.message).toContain('丢弃 2 条无效来源编号');
   });
 
   it('LLM 无 facts 时返回 skipped', async () => {

@@ -11,18 +11,13 @@ import { resolveTemplateMaterialRoles } from '../document-core/materialRoleResol
 import { evaluateDocumentReadiness } from '../document-validation/documentReadinessService';
 import type { DocumentTemplate, ProjectBinding, PromptBinding } from './types';
 import { templateProjectBindings } from './projectMaterialProfile';
+import { isUsableKnowledgeFile, type KnowledgeFile } from './agentWorkflow';
 import { charsPerPageForSettings, explicitLengthTargets } from './budget';
 import { tuningProfile } from './tuningProfile';
 
 export type PromptExecutionCategory = 'writer' | 'chapter' | 'extraction' | 'formatting' | 'reference';
 
-type KnowledgeFilePath = { relativePath: string; chunkCount?: number; indexedAt?: number; status?: string };
-
-function isUsableKnowledgeFile(file: KnowledgeFilePath) {
-  return file.status !== 'disk' && file.status !== 'error' && Number(file.indexedAt || 0) > 0 && Number(file.chunkCount || 0) > 0;
-}
-
-function expandProjectBindings(bindings: ProjectBinding[], files: KnowledgeFilePath[]) {
+function expandProjectBindings(bindings: ProjectBinding[], files: KnowledgeFile[]) {
   if (bindings.length === 0) return [];
   const filePathSet = new Set(files.map(file => file.relativePath));
   const expanded: string[] = [];

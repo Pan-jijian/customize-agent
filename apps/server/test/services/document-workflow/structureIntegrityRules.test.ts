@@ -255,6 +255,18 @@ describe('cleanStructureDefects 确定性清理（只清不写）', () => {
     expect(result.markdown).toBe(['1. 甲项工序内容描述。', '2. 乙项工序内容描述。', '3. 丙项工序内容描述。'].join('\n'));
   });
 
+  it('r6 护栏：内联首项粘连残段跳过重排（防双 1. 编号错位）', () => {
+    const markdown = ['施工按以下编号步骤组织：1. 房前屋后杂物清理；', '2. 测量放线；', '3. 铺装施工。'].join('\n');
+    const result = cleanStructureDefects(markdown);
+    expect(result.markdown).toBe(markdown);
+  });
+
+  it('r6 护栏：无粘连标记的真缺号块仍重排 1..n', () => {
+    const markdown = ['施工按以下步骤组织：', '2. 测量放线；', '3. 铺装施工。'].join('\n');
+    const result = cleanStructureDefects(markdown);
+    expect(result.markdown).toBe(['施工按以下步骤组织：', '1. 测量放线；', '2. 铺装施工。'].join('\n'));
+  });
+
   it('孤立列表项去号并入正文 + 重复表头行删除 + 表内重复行删除 + 相邻重复句去重', () => {
     const sentence = '混凝土路面浇筑完成后应及时覆盖麻袋并洒水养护，养护期不少于7天。';
     const markdown = [

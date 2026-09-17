@@ -15,7 +15,8 @@ import {
   tablePeakLaborWithChainFallback,
 } from '@/services/document-workflow/documentIntegrityChecks';
 import type { DocumentFact, DocumentFactsModel } from '@/services/document-workflow/types';
-import { generatedFactVerificationIssues } from '@/services/document-workflow/qualityValidation';
+import type { FactTokenScopeClassifier } from '@/services/document-workflow/factTokenClassifier';
+import { generatedFactVerificationIssues, generatedFactVerificationIssuesAsync } from '@/services/document-workflow/qualityValidation';
 import { caseName, factsOf as completeFactsOf, product } from './boundaryKit';
 
 type FactsModel = DocumentFactsModel;
@@ -574,5 +575,84 @@ describe('K1 generatedFactVerificationIssues 阶段分解豁免', () => {
     const md = '本工程总工期180日历天，计划按期完成全部施工内容。';
     const issues = generatedFactVerificationIssues(md, baseFacts());
     expect(issues.some(issue => issue.message.includes('生成后事实反查失败'))).toBe(false);
+  });
+});
+
+// ── K2. 工期总量口径升级门就近词锚（4.44 #43 根治：远距离「日历天」不得拉级排布分解值） ──
+
+describe('K2 generatedFactVerificationIssues 工期升级门（就近词锚+并列分解）', () => {
+  const baseFacts = () => completeFactsOf({
+    project: [factOf({ fieldName: '工程名称', value: '丰乐镇农村生活污水治理工程' })],
+    schedule: [factOf({ fieldName: '总工期', value: '90日历天' })],
+    quality: [factOf({ fieldName: '质量目标', value: '合格，符合国家现行施工验收规范及设计文件要求，一次性验收合格' })],
+    safety: [factOf({ fieldName: '安全目标', value: '杜绝重伤及以上安全事故，轻伤事故频率控制为零，创建安全标准化示范工地' })],
+  });
+  const failedOn = (md: string, token: string) => generatedFactVerificationIssues(md, baseFacts())
+    .some(issue => issue.message.includes('生成后事实反查失败') && issue.message.includes(token));
+
+  it('K2 #43 实测句：计划工期句后的阶段排布天数（7天/63天/10天）不升级', () => {
+    const md = '本项目计划工期为90日历天，以监理工程师签发开工令之日为第1日。施工准备与清杂拆除7天，污水管网工程63天，道路铺装工程10天。';
+    expect(failedOn(md, '7天')).toBe(false);
+    expect(failedOn(md, '63天')).toBe(false);
+    expect(failedOn(md, '10天')).toBe(false);
+  });
+
+  it('K2 对照：就近前缀含工期词且无并列分解的孤立值仍升级（升级门不越界）', () => {
+    const md = '本工程总工期为7天，我方承诺按期完成。';
+    expect(failedOn(md, '7天')).toBe(true);
+  });
+
+  it('K2 边界：≥2 个并列「数字+天」即判排布分解（2 个边界值验证）', () => {
+    const md = '计划工期90日历天，施工准备7天，污水管网工程63天。';
+    expect(failedOn(md, '7天')).toBe(false);
+    expect(failedOn(md, '63天')).toBe(false);
+  });
+});
+
+// ── K3. 异步语义升级门（#43 实机路径：bge 判 scope 也不得远距离拉级） ──
+
+describe('K3 generatedFactVerificationIssuesAsync 语义升级门（就近词锚）', () => {
+  const baseFacts = () => completeFactsOf({
+    project: [factOf({ fieldName: '工程名称', value: '丰乐镇农村生活污水治理工程' })],
+    schedule: [factOf({ fieldName: '总工期', value: '90日历天' })],
+    quality: [factOf({ fieldName: '质量目标', value: '合格，符合国家现行施工验收规范及设计文件要求，一次性验收合格' })],
+    safety: [factOf({ fieldName: '安全目标', value: '杜绝重伤及以上安全事故，轻伤事故频率控制为零，创建安全标准化示范工地' })],
+  });
+  // 语义分类器恒判 scope：模拟 4.43 实机 bge 对工期排布值"总量口径"泛化升级的误判路径
+  const scopeClassifier: FactTokenScopeClassifier = { batchClassify: async queries => queries.map(() => 'scope' as const) };
+  const failedOn = async (md: string, token: string) => (await generatedFactVerificationIssuesAsync(md, baseFacts(), { scopeClassifier }))
+    .some(issue => issue.message.includes('生成后事实反查失败') && issue.message.includes(token));
+
+  it('K3 #43 实机路径：语义判 scope 但 token 就近前缀无工期口径词 → 不升级', async () => {
+    const md = '本项目计划工期为90日历天，以监理工程师签发开工令之日为第1日。施工准备与清杂拆除7天，污水管网工程63天。';
+    expect(await failedOn(md, '7天')).toBe(false);
+  });
+
+  it('K3 对照：就近词锚命中 + 孤立值 → 语义升级保留（补足能力不被削弱）', async () => {
+    const md = '本工程总工期为7天，我方承诺按期完成。';
+    expect(await failedOn(md, '7天')).toBe(true);
+  });
+});
+
+// ── K4. 日历日期 token 豁免（r17 丰乐镇门禁 B4：开工日期+90 日历天的合理推导月分，bge 误升级） ──
+
+describe('K4 日历日期 token（月/年）同步+异步升级门双链豁免', () => {
+  const baseFacts = () => completeFactsOf({
+    project: [factOf({ fieldName: '工程名称', value: '丰乐镇2026年农村人居环境整治提升项目' })],
+    schedule: [factOf({ fieldName: '总工期', value: '90日历天' })],
+    quality: [factOf({ fieldName: '质量目标', value: '合格，符合国家现行施工验收规范及设计文件要求，一次性验收合格' })],
+    safety: [factOf({ fieldName: '安全目标', value: '杜绝重伤及以上安全事故，轻伤事故频率控制为零，创建安全标准化示范工地' })],
+  });
+  const scopeClassifier: FactTokenScopeClassifier = { batchClassify: async queries => queries.map(() => 'scope' as const) };
+  const md = '本项目计划工期90日历天，计划开工日期为2026年9月24日，施工周期跨越9月下旬至12月下旬。该时段昼夜温差加大，项目部编制特殊时段施工专项措施确保节点完成。';
+
+  it('K4 同步链路：12月 被日期判据豁免（零反查失败）', () => {
+    const issues = generatedFactVerificationIssues(md, baseFacts());
+    expect(issues.some(issue => issue.message.includes('生成后事实反查失败') && /12月|9月/.test(issue.message))).toBe(false);
+  });
+
+  it('K4 异步链路：语义判 scope 时日期 token 不升级（升级门封堵，同步/异步同源）', async () => {
+    const issues = await generatedFactVerificationIssuesAsync(md, baseFacts(), { scopeClassifier });
+    expect(issues.some(issue => issue.message.includes('生成后事实反查失败') && /12月|9月/.test(issue.message))).toBe(false);
   });
 });

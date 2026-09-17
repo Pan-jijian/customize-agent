@@ -14,6 +14,7 @@ import { buildSemanticSimilarity } from '../semanticSimilarity';
 import { filterOffTopicSectionsForChapters } from '../evidenceContentSafety';
 import { hasTenderRequirements, normalizeChapterTitleLine, tenderRequirementCheckItems, tenderRequirementSemanticQuery, tenderRequirementsSummary, tenderRequirementsWritingRules } from '../tenderRequirements';
 import { applyRequirementSectionAdditions, calibrateOutlineSectionsToRequirements } from '../requirementCalibration';
+import { injectReviewModuleSections } from '../reviewModuleSections';
 import { buildFactTokenScopeClassifier } from '../factTokenClassifier';
 import { buildChapterIntentClassifier } from '../chapterIntentClassifier';
 import { buildProfessionalDepthClassifier } from '../professionalDepthClassifier';
@@ -26,6 +27,7 @@ import { raiseDocumentLlmConcurrencyForScale } from '../llmClient';
 import { createGenerationDiagnostics, selectDocumentGenerationStrategy } from '../rolePipeline';
 import { buildGenerationBudget } from '../generationBudget';
 import { cleanSectionTitleArtifacts, extractPromptStructuralRules, normalizePlannedSections, planChapterSectionsWithLlm, sectionTitleEquivalent, type PlannedTableRequest } from '../promptRuleExtraction';
+import { extractBoqDivisionCoverage, formatBoqDivisionCoverage } from '../documentFactTrace';
 import { resolveChapterPromptExecution } from '../documentGeneratorHelpers';
 import { constructionOrganizationPrompt } from '../projectIntelligence';
 import { deriveDiversityProfile, loadDiversityHistory, recordDiversityUsage } from '../diversityProfile';
@@ -139,7 +141,13 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
     const chapterEvidence = selectEvidenceByBudget(session.understanding.writerEvidence.filter(item => item.chapterId === chapter.id || evidenceMatchesFact(item, chapter.title)), { preservePinned: true });
     const roleContext = session.prepare.projectUnderstanding.chapterPlans.find(plan => plan.chapterId === chapter.id)?.writingGoal || '';
     const planningPromptExecution = resolveChapterPromptExecution(session.prepare.promptPlan, chapter);
-    const planned = await planChapterSectionsWithLlm({ template: provisionalTemplate, chapter, chapterIndex, evidence: chapterEvidence, promptTexts: planningPromptExecution.promptTexts, projectContext: session.planning.projectContext, requirement: session.global.input.requirement, roleContext, targetWords: session.planning.provisionalBudget.chapterTargets.get(chapter.id) || 1200, projectGraphSummary: session.planning.chapterGraphSummaryText(chapter.id), lockedSections, bodyTablePolicy: session.understanding.bidComposition.bodyTablePolicy, signal: session.global.input.signal, diversity: { directive: session.planning.diversityProfile.prompt, avoidSections: fingerprintAvoidTitles, overlapCheck: fingerprintOverlapCheck } });
+    // r14 E16 清单分部全景（方法类章）：规划期 LLM 此前无清单分部分项输入，「过路涵」「青砖步道」类
+    // 专有分项零规划零写作（丰乐镇实机）；注入分部全景（分部名+代表性清单条目）驱动小节覆盖，
+    // 与写作层 roleContext 注入、链尾确定性兜底同源（extractBoqDivisionCoverage 单源）
+    const chapterBoqCoverageSummary = /施工方法|施工方案|施工工艺|主要施工内容|分部分项/u.test(chapter.title)
+      ? formatBoqDivisionCoverage(extractBoqDivisionCoverage(session.understanding.preliminaryFactsModel))
+      : '';
+    const planned = await planChapterSectionsWithLlm({ template: provisionalTemplate, chapter, chapterIndex, evidence: chapterEvidence, promptTexts: planningPromptExecution.promptTexts, projectContext: session.planning.projectContext, requirement: session.global.input.requirement, roleContext, targetWords: session.planning.provisionalBudget.chapterTargets.get(chapter.id) || 1200, projectGraphSummary: session.planning.chapterGraphSummaryText(chapter.id), boqCoverageSummary: chapterBoqCoverageSummary || undefined, lockedSections, bodyTablePolicy: session.understanding.bidComposition.bodyTablePolicy, signal: session.global.input.signal, diversity: { directive: session.planning.diversityProfile.prompt, avoidSections: fingerprintAvoidTitles, overlapCheck: fingerprintOverlapCheck } });
     if (planned.diversity?.retried) {
       diversityRenameChapterCount += 1;
       diversityRemainingCollisionCount += planned.diversity.remainingCollisions;
@@ -183,14 +191,24 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
     const after = (plannedWithConstructionOrgRequiredSections[index]?.sections || []).length;
     return count + Math.max(0, before - after);
   }, 0);
+  // 评审模块承接小节（丰乐镇 R12 评分归因）：6 强制模块与劳务保障制度在规划层显性承接——小节标题即
+  // 评审查询原词（bge 实测越阈 0.64-0.93），弱承接标题规范化、缺失注入；写入后随规划结构直通写作/目录/预算
+  const reviewModuleResult = injectReviewModuleSections(plannedWithConstructionOrgRequiredSections);
+  const plannedWithReviewModules = reviewModuleResult.chapters;
+  if (reviewModuleResult.changes.length > 0) {
+    const addedCount = reviewModuleResult.changes.reduce((sum, item) => sum + item.added.length, 0);
+    const renamedCount = reviewModuleResult.changes.reduce((sum, item) => sum + item.renamed.length, 0);
+    upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'review-module-sections', status: 'success', message: `评审模块承接：补入 ${addedCount} 个评审模块小节、规范化 ${renamedCount} 个承接标题`, details: reviewModuleResult.changes.map(item => `${displayChapterTitle(item.chapterTitle)}：${[...item.added.map(section => `补入「${section}」`), ...item.renamed.map(entry => `「${entry.from}」→「${entry.to}」`)].join('；')}`) }, { subtitle: '评审模块承接', order: session.global.progressStages.length }));
+    session.global.emitProgress();
+  }
   // 大纲编辑单点统计（C2）：补挂回路（validateBidStructureBeforeGeneration）已在补挂生成点
   // 过同一硬剔闸（isHardBannedSectionTitle），不再有「补挂后二次过滤」补丁；本道统计即最终剔除数
   // 规划后章节文本已变化，重建语义相似度缓存（同一闭包缓存 key 不可跨阶段复用）
   const finalCriteriaSimilarity = await buildSemanticSimilarity(
     session.understanding.evaluationItems.map(item => item.title),
-    plannedWithConstructionOrgRequiredSections.map(chapterCriteriaText),
+    plannedWithReviewModules.map(chapterCriteriaText),
   );
-  session.planning.finalBidStructureAudit = validateBidStructureBeforeGeneration({ template: session.prepare.template, chapters: plannedWithConstructionOrgRequiredSections, requirement: session.global.input.requirement, evaluationItems: session.understanding.evaluationItems, semanticSimilarity: finalCriteriaSimilarity });
+  session.planning.finalBidStructureAudit = validateBidStructureBeforeGeneration({ template: session.prepare.template, chapters: plannedWithReviewModules, requirement: session.global.input.requirement, evaluationItems: session.understanding.evaluationItems, semanticSimilarity: finalCriteriaSimilarity });
   // 规划表格计划构建（组件 9）：表格来源 = 提示词声明的必需表格（用户声明层，必写）+ LLM 章节规划的
   // 表格需求（规划产物，应写）；无静态目录匹配、无系统创作——规划没有的表不出现。必需表格逐表全章
   // 评分归属；无归属的显性提示，交由文档合成终验的必需表格兜底链（insertRequiredTable）插入。

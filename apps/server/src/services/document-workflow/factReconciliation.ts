@@ -259,9 +259,16 @@ function aggregationClosure(total: number, unit: string, context: string, author
   return false;
 }
 
-function scanTotalClaims(markdown: string, authority: ReconciliationAuthority): ValidationIssue[] {
-  const issues: ValidationIssue[] = [];
-  if (authority.entries.length === 0) return issues;
+/** 合计句扫描命中（结构化）：issue 供检测端照常报告；matchStart/matchEnd 供交付前确定性删除定位 */
+export interface TotalClaimFinding {
+  issue: ValidationIssue;
+  matchStart: number;
+  matchEnd: number;
+}
+
+function scanTotalClaimFindings(markdown: string, authority: ReconciliationAuthority): TotalClaimFinding[] {
+  const findings: TotalClaimFinding[] = [];
+  if (authority.entries.length === 0) return findings;
   const seen = new Set<string>();
   const poolSorted = [...authority.numberPool].sort((left, right) => left - right);
   for (const match of markdown.matchAll(TOTAL_CLAIM_RE)) {
@@ -269,6 +276,7 @@ function scanTotalClaims(markdown: string, authority: ReconciliationAuthority): 
     if (total === undefined) continue;
     const unit = normalizeUnit(match[2]);
     const index = match.index ?? 0;
+    const matchEnd = index + match[0].length;
     const candidates = authority.entries.filter(entry => entry.value > 0 && normalizeUnit(entry.unit) === unit);
     if (candidates.length === 0) continue;
     const context = markdown.slice(Math.max(0, index - 40), index + match[0].length + 40);
@@ -289,10 +297,14 @@ function scanTotalClaims(markdown: string, authority: ReconciliationAuthority): 
             const message = `合计数值应分项显式：「${anchor.name} ${total}${match[2]}」= ${breakdownText}，但正文未展示分项（缺 ${missing.map(entry => `${entry.name} ${entry.value}${entry.unit}`).join('、')}），无法核对合计来源`;
             if (!seen.has(message)) {
               seen.add(message);
-              issues.push({
-                level: 'warning', severity: 'warning', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
-                message,
-                suggestion: `在合计值附近补充分项明细（${breakdownText}），使合计数值可逐项核对；分项值必须取自工程量清单原文，不得改动。`,
+              findings.push({
+                issue: {
+                  level: 'warning', severity: 'warning', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
+                  message,
+                  suggestion: `在合计值附近补充分项明细（${breakdownText}），使合计数值可逐项核对；分项值必须取自工程量清单原文，不得改动。`,
+                },
+                matchStart: index,
+                matchEnd,
               });
             }
           }
@@ -311,10 +323,14 @@ function scanTotalClaims(markdown: string, authority: ReconciliationAuthority): 
         const message = `合计值与权威不符：「${anchor.name}」清单权威 ${anchor.value}${match[2]}；正文 ${total}${match[2]} \u2248 ${anchor.value} + ${other.value}（「${other.name}」）——若「${other.name}」应计入「${anchor.name}」合计，须在正文显式分项；若不应计入（重复计入），须改回权威值 ${anchor.value}${match[2]}`;
         if (!seen.has(message)) {
           seen.add(message);
-          issues.push({
-            level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
-            message,
-            suggestion: `核对合计口径：「${anchor.name}」合计为 ${anchor.value}${match[2]}（清单权威）。若正文需表达 ${anchor.value} + ${other.value}，则显式写成「${anchor.name} ${anchor.value}${match[2]}、${other.name} ${other.value}${match[2]}，合计 ${total}${match[2]}」；否则将合计改回 ${anchor.value}${match[2]}（差额 ${Math.round(residual * 10000) / 10000}${match[2]} 属「${other.name}」，不得并入）。`,
+          findings.push({
+            issue: {
+              level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
+              message,
+              suggestion: `核对合计口径：「${anchor.name}」合计为 ${anchor.value}${match[2]}（清单权威）。若正文需表达 ${anchor.value} + ${other.value}，则显式写成「${anchor.name} ${anchor.value}${match[2]}、${other.name} ${other.value}${match[2]}，合计 ${total}${match[2]}」；否则将合计改回 ${anchor.value}${match[2]}（差额 ${Math.round(residual * 10000) / 10000}${match[2]} 属「${other.name}」，不得并入）。`,
+            },
+            matchStart: index,
+            matchEnd,
           });
         }
         continue;
@@ -324,10 +340,14 @@ function scanTotalClaims(markdown: string, authority: ReconciliationAuthority): 
       const message = `合计值与权威不符：「${anchor.name}」合计为 ${anchor.value}${match[2]}（清单权威），正文写 ${total}${match[2]}，且差额不属任何清单条目，需核对合计口径`;
       if (!seen.has(message)) {
         seen.add(message);
-        issues.push({
-          level: 'warning', severity: 'warning', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
-          message,
-          suggestion: `核对「${anchor.name}」的合计口径：若为多分项之和，请写明与权威一致的分项分解；若为单一总量，改为清单权威值 ${anchor.value}${anchor.unit || match[2]}。`,
+        findings.push({
+          issue: {
+            level: 'warning', severity: 'warning', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
+            message,
+            suggestion: `核对「${anchor.name}」的合计口径：若为多分项之和，请写明与权威一致的分项分解；若为单一总量，改为清单权威值 ${anchor.value}${anchor.unit || match[2]}。`,
+          },
+          matchStart: index,
+          matchEnd,
         });
       }
       continue;
@@ -342,10 +362,14 @@ function scanTotalClaims(markdown: string, authority: ReconciliationAuthority): 
         const message = `合计数值应分项显式：正文合计 ${total}${match[2]} = ${breakdownText}，但未展示分项（缺 ${missing.map(entry => `${entry.name} ${entry.value}${entry.unit}`).join('、')}），无法核对合计来源`;
         if (!seen.has(message)) {
           seen.add(message);
-          issues.push({
-            level: 'warning', severity: 'warning', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
-            message,
-            suggestion: `在合计值附近补充分项明细（${breakdownText}）；分项值必须取自工程量清单原文，不得改动。`,
+          findings.push({
+            issue: {
+              level: 'warning', severity: 'warning', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
+              message,
+              suggestion: `在合计值附近补充分项明细（${breakdownText}）；分项值必须取自工程量清单原文，不得改动。`,
+            },
+            matchStart: index,
+            matchEnd,
           });
         }
       }
@@ -373,14 +397,90 @@ function scanTotalClaims(markdown: string, authority: ReconciliationAuthority): 
       const message = `合计值无权威来源：正文「${match[0].trim()}」在清单事实锁与蓝图参数桶中找不到同值来源，违反无据不写`;
       if (seen.has(message)) continue;
       seen.add(message);
-      issues.push({
-        level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
-        message,
-        suggestion: '删除该合计数值或改为与清单权威一致的合计值；无权威来源的合计数不得进入交付文本。',
+      findings.push({
+        issue: {
+          level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
+          message,
+          suggestion: '删除该合计数值或改为与清单权威一致的合计值；无权威来源的合计数不得进入交付文本。',
+        },
+        matchStart: index,
+        matchEnd,
       });
     }
   }
-  return issues;
+  return findings;
+}
+
+/** 检测端入口（行为保持）：扫描命中只取 issue */
+function scanTotalClaims(markdown: string, authority: ReconciliationAuthority): ValidationIssue[] {
+  return scanTotalClaimFindings(markdown, authority).map(finding => finding.issue);
+}
+
+// ═══════════ 交付前兜底：无源合计确定性删除（r12 丰乐镇门禁 #1/#2 归因） ═══════════
+// 终检只报不修（blocker 直坠门禁）：「合计1757㎡」「总量209.49m³」在全稿 LLM 修复轮后仍残留——
+// 数值无权威来源、又无唯一可裁决替值（清单无同值条目），不得改写只能删除。按子句边界收拢：
+// 左界为分句符时连同分句符删除、右随符保留（「A合计2783㎡，B合计1757㎡，施工」删「，B合计1757㎡」）；
+// 左界为句末符/换行时右随分句符一并吞掉（「开挖。弃方总量209.49m³，回填」删「弃方总量209.49m³，」）。
+// 边界窗口 60 字、子句长度上限 40 字，超限放弃（保守不误删）；从后往前应用 + 重叠防护。
+
+export interface UnsupportedTotalClaimFixResult {
+  markdown: string;
+  fixedCount: number;
+  details: string[];
+}
+
+function unsupportedTotalClaimRemovalSpan(markdown: string, matchStart: number, matchEnd: number): { start: number; end: number; excerpt: string } | null {
+  const windowStart = Math.max(0, matchStart - 60);
+  const before = markdown.slice(windowStart, matchStart);
+  let leftIndex = -1;
+  for (let cursor = before.length - 1; cursor >= 0; cursor -= 1) {
+    if (/[，、；;。！？!?\n]/u.test(before[cursor])) {
+      leftIndex = windowStart + cursor;
+      break;
+    }
+  }
+  if (leftIndex === -1 || matchStart - leftIndex > 40) return null;
+  const clauseBoundary = /[，、；;]/u.test(markdown[leftIndex]);
+  const start = clauseBoundary ? leftIndex : leftIndex + 1;
+  const end = clauseBoundary ? matchEnd : matchEnd + (/[，、；;]/u.test(markdown[matchEnd] || '') ? 1 : 0);
+  if (end <= start) return null;
+  return { start, end, excerpt: markdown.slice(start, end).trim() };
+}
+
+/**
+ * 无源合计句确定性删除：扫描命中（检测定位=修复定位）中 message 以「合计值无权威来源」开头的
+ * blocker 句，按子句边界删除。同形合计句多章复述在扫描层 message 去重（只报首处）——单遍只删
+ * 一处，循环复扫至无残留（上限 4 轮防振荡；每轮 markdown 已变化，下一处浮出）。任一 span 超限
+ *（边界远/无边界）即跳过该处（保守）；重放时无命中即零变更（幂等零成本）。
+ */
+export function fixUnsupportedTotalClaims(
+  markdown: string,
+  input: Pick<FactReconciliationInput, 'billFactLock' | 'blueprintData' | 'factsModel'>,
+): UnsupportedTotalClaimFixResult {
+  const authority = buildReconciliationAuthority({ markdown, ...input });
+  if (authority.entries.length === 0) return { markdown, fixedCount: 0, details: [] };
+  let result = markdown;
+  const details: string[] = [];
+  for (let round = 1; round <= 4; round += 1) {
+    const spans: Array<{ start: number; end: number; excerpt: string }> = [];
+    for (const finding of scanTotalClaimFindings(result, authority)) {
+      if (!finding.issue.message.startsWith('合计值无权威来源')) continue;
+      const span = unsupportedTotalClaimRemovalSpan(result, finding.matchStart, finding.matchEnd);
+      if (span) spans.push(span);
+    }
+    if (spans.length === 0) break;
+    let applied = 0;
+    let lastStart = Number.POSITIVE_INFINITY;
+    for (const span of [...spans].sort((left, right) => right.start - left.start)) {
+      if (span.end > lastStart) continue;
+      result = result.slice(0, span.start) + result.slice(span.end);
+      lastStart = span.start;
+      applied += 1;
+      details.push(`删除无源合计「${span.excerpt.slice(0, 40)}」`);
+    }
+    if (applied === 0) break;
+  }
+  return { markdown: result, fixedCount: details.length, details };
 }
 
 // ═══════════════════════════ D4.2：规格-数值绑定 ═══════════════════════════
@@ -388,15 +488,31 @@ function scanTotalClaims(markdown: string, authority: ReconciliationAuthority): 
 /** 规格候选 token（强规格形态，宁少勿误：管径/标号/钢筋牌号/尺寸年号）：正文侧抽取 */
 const SPEC_CANDIDATE_RE = /(?:DN|De|Φ|φ|Ø|dn|de)\s*\d+(?:\.\d+)?|(?<![A-Za-z0-9])[CM]\d{2,3}(?![0-9])|HRB\d+|HPB\d+|(?<![A-Za-z0-9])\d{2,4}\s*[×xX*]\s*\d{2,4}(?![0-9])/gu;
 
-function scanSpecQuantityBindings(markdown: string, authority: ReconciliationAuthority): ValidationIssue[] {
-  const issues: ValidationIssue[] = [];
-  if (authority.specValues.size === 0) return issues;
+/** 规格-数值绑定命中（结构化）：issue 供检测端照常报告；specToken/value/unit/valueStart/valueEnd/
+ * groupSumCandidates 供修复端原位替换（检测定位=修复定位严格同源）。 */
+export interface SpecBindingHit {
+  issue: ValidationIssue;
+  specToken: string;
+  value: number;
+  unit: string;
+  valueStart: number;
+  valueEnd: number;
+  /** 修复候选：该规格同条目名分组之和（降序去重、排除与正文值近等者）——替换后通过组和/权威值豁免。
+   * r17 丰乐镇归因 #B1：DN110 的 15m 无源恰撞无关条目「人行道混凝土垫层 15m³」；组和 7435m
+   * （15 个村同名条目 DN110 拆分量之和）为该规格唯一聚合权威口径，替换后检测组和豁免必然通过。 */
+  groupSumCandidates: number[];
+}
+
+function scanSpecBindingHits(markdown: string, authority: ReconciliationAuthority): SpecBindingHit[] {
+  const hits: SpecBindingHit[] = [];
+  if (authority.specValues.size === 0) return hits;
   const seen = new Set<string>();
   for (const match of markdown.matchAll(SPEC_CANDIDATE_RE)) {
     const specKey = match[0].replace(/\s+/gu, '').toLowerCase();
     const bound = authority.specValues.get(specKey);
     if (!bound) continue;
-    const after = markdown.slice((match.index ?? 0) + match[0].length, (match.index ?? 0) + match[0].length + 36);
+    const matchEnd = (match.index ?? 0) + match[0].length;
+    const after = markdown.slice(matchEnd, matchEnd + 36);
     const valueMatch = /^([^。；;\n|]{0,16}?)([\d,，]+(?:\.\d+)?)\s*(座|个|套|米|m|km|公里|平方米|m2|㎡|m²|立方米|m3|m³|吨|t|kg)(?![a-zA-Z0-9²³])/u.exec(after);
     if (!valueMatch) continue;
     // 槽位词豁免：规格与数值之间出现埋深/厚度等属性词 → 数值是工艺参数而非该规格工程量
@@ -404,13 +520,21 @@ function scanSpecQuantityBindings(markdown: string, authority: ReconciliationAut
     // 工艺参数约束豁免（4.31 丰乐镇 v6 #2）：「DN25 管不大于 1.0m」的 1.0m 是支架间距的工艺
     // 约束上限（不大于/不超过类），非该规格的清单数量，不得与其他规格数量互比张冠李戴
     if (/不大于|不超过|不得大于|不得超过/.test(valueMatch[1])) continue;
+    // 长度量词豁免（r14 丰乐镇 E6 归因）：「DN110 UPVC排水管总长15m」的 15m 是 DN110 管自身的
+    // 长度量（生态池段局部量），间隙词含「总长」类长度量词且数值单位为长度类——数值语义上
+    // 绑定该规格自身，与其清单总量（7525.01m）天然可不同值；15 恰与无关条目「人行道混凝土
+    // 垫层 15m³」数值相等纯属巧合，不构成归属张冠李戴（检测语义为「像别的规格条目的数量」，
+    // 长度量词句不满足）。窄化判据：仅间隙词含总长/全长/长度/管长/延米且单位 m/米/km/公里 时
+    // 豁免，保「DN200 管道基础 307m」类部位词场景不放过
+    if (/总长|全长|长度|管长|延米/u.test(valueMatch[1]) && /^(?:m|米|km|公里)$/u.test(valueMatch[3])) continue;
     const value = parseNumeric(valueMatch[2]);
     if (value === undefined) continue;
     if (bound.some(item => nearlyEqual(item.value, value))) continue;
     // 规格组和豁免：值 = 该规格下同条目名的子组之和（案例：DN400 90m = 混凝土管道铺设条目 DN400 全量之和）
     const entryGroupTotals = new Map<string, number>();
     for (const item of bound) entryGroupTotals.set(item.entryName, (entryGroupTotals.get(item.entryName) || 0) + item.value);
-    if (bound.length >= 2 && [...entryGroupTotals.values()].some(sum => nearlyEqual(sum, value))) continue;
+    const groupSums = [...new Set([...entryGroupTotals.values()])].sort((left, right) => right - left);
+    if (bound.length >= 2 && groupSums.some(sum => nearlyEqual(sum, value))) continue;
     // 命中其他规格的权威数量 → 张冠李戴（确定性 blocker）
     let foreign: { spec: string; entryName: string } | undefined;
     for (const [otherSpec, items] of authority.specValues) {
@@ -424,13 +548,71 @@ function scanSpecQuantityBindings(markdown: string, authority: ReconciliationAut
     const message = `规格-数值绑定错位：正文「${match[0]} ${value}${valueMatch[3]}」中 ${value}${valueMatch[3]} 属规格「${foreign.spec}」（清单条目「${foreign.entryName}」），不属于「${match[0]}」的清单数量`;
     if (seen.has(message)) continue;
     seen.add(message);
-    issues.push({
-      level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
-      message,
-      suggestion: `「${match[0]}」的数量必须引用清单中该规格条目的原值（如 ${bound.map(item => `${item.value}${item.unit}`).join('、')}）；「${foreign.spec}」的数量不得张冠李戴至「${match[0]}」。`,
+    const valueStart = matchEnd + valueMatch[1].length;
+    hits.push({
+      issue: {
+        level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
+        message,
+        suggestion: `「${match[0]}」的数量必须引用清单中该规格条目的原值（如 ${bound.map(item => `${item.value}${item.unit}`).join('、')}）；「${foreign.spec}」的数量不得张冠李戴至「${match[0]}」。`,
+      },
+      specToken: match[0],
+      value,
+      unit: valueMatch[3],
+      valueStart,
+      valueEnd: valueStart + valueMatch[2].length,
+      groupSumCandidates: groupSums.filter(sum => !nearlyEqual(sum, value)),
     });
   }
-  return issues;
+  return hits;
+}
+
+function scanSpecQuantityBindings(markdown: string, authority: ReconciliationAuthority): ValidationIssue[] {
+  return scanSpecBindingHits(markdown, authority).map(hit => hit.issue);
+}
+
+export interface SpecQuantityBindingFixResult {
+  markdown: string;
+  fixedCount: number;
+  details: string[];
+}
+
+/**
+ * 规格-数值绑定错位确定性修复（r17 丰乐镇归因 #B1）：命中处把正文数值原位替换为该规格的组和值
+ * （同条目名分组之和降序第一候选；bound 单条目时组和即其唯一权威值——替换后检测端「权威值相等」
+ * 或「组和豁免」必然通过）。逐处应用 + 逐处位置复检（同位置 ±4 字容差重扫无残留才保留：同形句
+ * 在扫描层 message 去重只报首处，替换后下一处浮出，故不得用「消息集合包含」判定残留；替换只改
+ * 数字部分、同位置 valueStart 不变）；上位循环上限 8 轮（同形句多处分布时逐处收敛）。
+ * 权威构建不依赖 markdown（billFactLock/blueprintData/factsModel 单源），一次构建全轮复用。
+ * 替换后新值又撞其他规格值类外态由复检自动回滚（保守跳过，交 LLM 修复轮）。
+ */
+export function fixSpecQuantityBindings(
+  markdown: string,
+  input: Pick<FactReconciliationInput, 'billFactLock' | 'blueprintData' | 'factsModel'>,
+): SpecQuantityBindingFixResult {
+  const authority = buildReconciliationAuthority({ markdown, ...input });
+  if (authority.specValues.size === 0) return { markdown, fixedCount: 0, details: [] };
+  let result = markdown;
+  const details: string[] = [];
+  for (let round = 1; round <= 8; round += 1) {
+    const hits = scanSpecBindingHits(result, authority).filter(hit => hit.groupSumCandidates.length > 0);
+    if (hits.length === 0) break;
+    let applied = 0;
+    for (const hit of [...hits].sort((left, right) => right.valueStart - left.valueStart)) {
+      const replacement = `${hit.groupSumCandidates[0]}`;
+      const next = result.slice(0, hit.valueStart) + replacement + result.slice(hit.valueEnd);
+      // 复检：同位置（±4 字容差）重扫不得再命中（替换只改数字部分，同位置 valueStart 不变）
+      const residual = scanSpecBindingHits(next, authority).some(item => {
+        const offset = item.valueStart - hit.valueStart;
+        return offset >= -4 && offset <= 4;
+      });
+      if (residual) continue;
+      result = next;
+      applied += 1;
+      details.push(`「${hit.specToken}」绑定数值 ${hit.value}${hit.unit} → 组和值 ${replacement}${hit.unit}`);
+    }
+    if (applied === 0) break;
+  }
+  return { markdown: result, fixedCount: details.length, details };
 }
 
 // ═══════════════════════════ D4.3：数值语义槽位 ═══════════════════════════

@@ -2,6 +2,7 @@
  * helpers/evidenceRetrieval：证据检索/评分/优化/查询（P3 拆分，逐字机械搬移自 documentGeneratorHelpers.ts）。
  * 依赖 projectBasicInfo（PROJECT_BASIC_FACT_QUERIES/projectBasicFactScore）。
  */
+import { materialRootsOfFiles } from '@customize-agent/knowledge';
 import type { getMultiProjectManager } from '../../knowledge/kbService';
 import type { DocumentEvidence, DocumentGenerationDiagnostics, DocumentTemplateChapter } from '../types';
 import { evidencePromptImportance, selectEvidenceByBudget } from '../evidence';
@@ -13,13 +14,13 @@ export function evidenceDedupeIdentity(item: DocumentEvidence) {
   return `${item.filePath}|${item.sectionTitle || ''}|${normalizeOcrFactText(item.content).slice(0, 180)}`;
 }
 
-export async function collectProjectBasicEvidence(input: { manager: ReturnType<typeof getMultiProjectManager>; project: any; projectRoot: string; scopedFilePaths: string[]; fileRoleByPath: Map<string, string>; fileProcessingByPath: Map<string, string>; signal?: AbortSignal }): Promise<DocumentEvidence[]> {
+export async function collectProjectBasicEvidence(input: { manager: ReturnType<typeof getMultiProjectManager>; project: any; projectRoot: string; scopedFilePaths: string[]; scopedMaterialRoots?: string[]; fileRoleByPath: Map<string, string>; fileProcessingByPath: Map<string, string>; signal?: AbortSignal }): Promise<DocumentEvidence[]> {
   const evidence: DocumentEvidence[] = [];
   const scopedFileSet = new Set(input.scopedFilePaths);
   // 基础事实查询并行化（原为 5 组查询串行，每次都是一次检索往返）
   const queryResults = await Promise.all(PROJECT_BASIC_FACT_QUERIES.map(async query => {
     throwIfAborted(input.signal);
-    const result = await input.manager.search(input.projectRoot, query, { scope: 'project', filters: { filePaths: input.scopedFilePaths }, limit: 10, weights: { keyword: 0.65, vector: 0.25, rewrite: 0.8, hybridBonus: 0.2 }, generationMode: true, disableReranker: true });
+    const result = await input.manager.search(input.projectRoot, query, { scope: 'project', filters: { filePaths: input.scopedFilePaths, materialRoots: input.scopedMaterialRoots ?? materialRootsOfFiles(input.scopedFilePaths) }, limit: 10, weights: { keyword: 0.65, vector: 0.25, rewrite: 0.8, hybridBonus: 0.2 }, generationMode: true, disableReranker: true });
     return result.results.filter(item => scopedFileSet.has(item.filePath) && projectBasicFactScore(`${item.sectionTitle || ''}\n${item.content}`) > 0).map(item => ({
       chapterId: 'project-basic',
       filePath: item.filePath,
@@ -151,13 +152,13 @@ export function qualityFirstEvidenceItemLimit(requestedEvidencePerChapter: numbe
   return Math.max(12, Math.min(deepRetrieval ? 58 : 26, requestedEvidencePerChapter + 10 + complexityBonus + deepBonus));
 }
 
-export async function retrieveSectionEvidence(input: { manager: ReturnType<typeof getMultiProjectManager>; projectRoot: string; chapter: DocumentTemplateChapter; sectionTitle: string; scopedFilePaths: string[]; fileRoleByPath: Map<string, string>; fileProcessingByPath: Map<string, string>; signal?: AbortSignal }) {
+export async function retrieveSectionEvidence(input: { manager: ReturnType<typeof getMultiProjectManager>; projectRoot: string; chapter: DocumentTemplateChapter; sectionTitle: string; scopedFilePaths: string[]; scopedMaterialRoots?: string[]; fileRoleByPath: Map<string, string>; fileProcessingByPath: Map<string, string>; signal?: AbortSignal }) {
   throwIfAborted(input.signal);
   if (input.scopedFilePaths.length === 0) return [];
   const query = `${input.chapter.title} ${input.sectionTitle}`.trim();
   const result = await input.manager.search(input.projectRoot, query, {
     scope: 'project',
-    filters: { filePaths: input.scopedFilePaths },
+    filters: { filePaths: input.scopedFilePaths, materialRoots: input.scopedMaterialRoots ?? materialRootsOfFiles(input.scopedFilePaths) },
     limit: 20,
     weights: searchWeightsForChapter(query),
     // E1：生成场景检索跳过 LLM 查询扩展（省 LLM 预算，正文生成已占满 LLM 信号量）；
@@ -166,8 +167,8 @@ export async function retrieveSectionEvidence(input: { manager: ReturnType<typeo
     // rerank 后分数作为小节证据排序主键——小节证据按需逐组检索，单组 30 候选重排为短时阻塞可容忍
     generationMode: true,
   });
+  // 证据范围由检索层 filters 保证（SQL relative_path IN + material_root IN），此处不再二次过滤（历史冗余已删）
   return selectEvidenceByBudget(result.results
-    .filter(item => input.scopedFilePaths.includes(item.filePath))
     .map(item => ({
       chapterId: input.chapter.id,
       filePath: item.filePath,

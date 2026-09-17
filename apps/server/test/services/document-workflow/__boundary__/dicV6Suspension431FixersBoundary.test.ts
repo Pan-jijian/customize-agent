@@ -217,3 +217,32 @@ describe('I professionalContentIssues 泛类规则适用面收窄（v6 #57/#58�
     expect(issues.filter(issue => issue.message.includes('资源章节缺少'))).toHaveLength(1);
   });
 });
+
+// ── J. 进度章字面要素对兜底（4.44 #38 根治：4.43 实测「确保工期的技术组织措施」要素齐全仍被判缺） ──
+
+describe('J professionalContentIssues 进度章字面要素对兜底（4.44 #38）', () => {
+  const scheduleNeeds: ProfessionalDepthAnalysis = {
+    dimensions: { factuality: true, structure: true, depth: true, executable: true, specificity: true, consistency: true },
+    contentNeeds: { schedule: false, quality: true, safety: true, resource: true, construction: true },
+    concrete: true,
+    closedLoop: true,
+  };
+  const title = '确保工期的技术组织措施';
+  const scheduleIssues = (content: string) => professionalContentIssues([{ title, content }], new Map([[title, scheduleNeeds]]))
+    .filter(issue => issue.message.includes('进度工期章节缺少'));
+
+  it('#38 修复：语义判缺 + 关键线路与纠偏要素字面同现 → 兜底判覆盖不报（4.43 实测句）', () => {
+    const content = '项目部按里程碑节点倒排施工总进度计划，重点检查污水管网管道安装、道路混凝土浇筑、绿化苗木栽植三条关键线路的实际进度，偏差超过1日的节点当日启动纠偏程序，整改完成后由质检员复查确认销项。'.repeat(15);
+    expect(scheduleIssues(content)).toHaveLength(0);
+  });
+
+  it('#38 对照：仅「关键线路」单词命中（无纠偏类）→ 仍报（要素对不单侧放行）', () => {
+    const content = '项目部按里程碑节点倒排施工总进度计划，重点检查三条关键线路的实际进度，偏差超过1日的节点当日启动管理程序，整改完成后由质检员复查确认销项。'.repeat(15);
+    expect(scheduleIssues(content)).toHaveLength(1);
+  });
+
+  it('#38 对照：仅「纠偏」单词命中（无关键线路）→ 仍报（要素对不单侧放行）', () => {
+    const content = '项目部按里程碑节点倒排施工总进度计划，各节点偏差超过1日的当日启动纠偏程序，整改完成后由质检员复查确认销项。'.repeat(15);
+    expect(scheduleIssues(content)).toHaveLength(1);
+  });
+});

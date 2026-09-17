@@ -30,6 +30,7 @@ import {
   getLatestKbOperation,
   listActiveKbOperations,
   listKbOperations,
+  listKbOperationsByIdPrefix,
   upsertKbOperation,
 } from '@/services/knowledge/kbOperationLog';
 
@@ -147,6 +148,13 @@ describe('查询', () => {
       vi.useRealTimers();
     }
   });
+
+  it('listKbOperationsByIdPrefix 按 id 前缀过滤（常驻告警枚举）', () => {
+    upsertKbOperation('/proj-prefix', { id: 'intelligence-mixed-pack', type: 'reindex', title: '资料包混放告警', status: 'warning', stage: 'done' });
+    upsertKbOperation('/proj-prefix', { id: 'project-intelligence-pack-1', type: 'reindex', title: '项目理解缓存' });
+    upsertKbOperation('/proj-prefix', { id: 'op-other', type: 'upload', title: '上传' });
+    expect(listKbOperationsByIdPrefix('/proj-prefix', 'intelligence-mixed-').map(item => item.id)).toEqual(['intelligence-mixed-pack']);
+  });
 });
 
 describe('删除与清理', () => {
@@ -223,6 +231,25 @@ describe('启动恢复与容错', () => {
       expect(list).toHaveLength(201);
       expect(list[0]!.id).toBe('op-201');
       expect(list.some(item => item.id === 'op-1')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('超限裁剪按 updatedAt 保留最新：常驻告警（旧位置、最新刷新）不被挤出', () => {
+    vi.useFakeTimers();
+    try {
+      for (let i = 1; i <= 201; i += 1) {
+        upsertKbOperation('/proj-alert-keep', { id: `op-${i}`, type: 'upload', title: `任务 ${i}` });
+        vi.advanceTimersByTime(10);
+      }
+      // 刷新最早记录（模拟固定 id 告警的原地更新：数组位置不变、updatedAt 最新）
+      upsertKbOperation('/proj-alert-keep', { id: 'op-1', type: 'reindex', title: '资料包混放告警', status: 'warning', stage: 'done' });
+      const lines = fs.readFileSync(logFile('/proj-alert-keep'), 'utf8').split('\n').filter(Boolean);
+      // 按 updatedAt 最新保留 200 条：op-1（刚刷新）保留，次旧的 op-2 被挤出
+      expect(lines).toHaveLength(200);
+      expect(lines.some(line => line.includes('"id":"op-1"'))).toBe(true);
+      expect(lines.some(line => line.includes('"id":"op-2"'))).toBe(false);
     } finally {
       vi.useRealTimers();
     }

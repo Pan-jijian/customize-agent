@@ -16,6 +16,7 @@
 import { applySpanReplacements, scanSpecLocationMismatchHits } from './documentIntegrityChecks';
 import { arbitrateConceptGroup, conceptConflictGroups } from './parameterConceptConflicts';
 import type { BillFactLock } from './billFactLock';
+import type { BlueprintQuantity } from './integratedBlueprint';
 import type { SpecAuthorityMap } from './types';
 
 /** 确定性替换 span（全文坐标系）：调用方按章切片应用 */
@@ -46,6 +47,8 @@ interface TrackedReplacement extends NumericArbiterReplacement {
 export async function arbitrateNumericConflicts(markdown: string, ctx: {
   billFactLock?: BillFactLock;
   specAuthorityMap?: SpecAuthorityMap;
+  /** r9：蓝图参数桶（参数概念裁决第二源，与检测端 parameterConceptConflictIssues 同源） */
+  blueprintQuantities?: Record<string, BlueprintQuantity>;
 }): Promise<NumericArbiterResult> {
   const replacements: TrackedReplacement[] = [];
   const falsePositiveGroups: string[] = [];
@@ -55,7 +58,7 @@ export async function arbitrateNumericConflicts(markdown: string, ctx: {
   const scan = await conceptConflictGroups(markdown);
   if (!scan.degraded) {
     for (const group of scan.groups) {
-      const arbitration = arbitrateConceptGroup(group, { markdown, billFactLock: ctx.billFactLock });
+      const arbitration = arbitrateConceptGroup(group, { markdown, billFactLock: ctx.billFactLock, blueprintQuantities: ctx.blueprintQuantities });
       if (arbitration.verdict === 'distinct-lock-entries') {
         falsePositiveGroups.push(`“${group.concept}”对应${arbitration.entries}`);
         continue;

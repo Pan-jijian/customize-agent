@@ -6,7 +6,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, invertedDateRangeIssues, paragraphTailRepeatIssues, scanParagraphTailRepeats, collisionNumberedHeadingIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixInvertedDateRanges, fixParagraphOpeningRepeats, fixParagraphTailRepeats, fixCollisionNumberedHeadings, fixPlaceholderTableCells, fixTruncatedSentenceArtifacts, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
 import { markdownTableQualityIssues } from '@/services/document-workflow/qualityValidation';
-import { repairTableBlockLines } from '@/services/document-workflow/tableRepairHelpers';
+import { normalizeTableTitleInHeaders, repairTableBlockLines } from '@/services/document-workflow/tableRepairHelpers';
+import { scanStructureDefects } from '@/services/document-workflow/structureIntegrityRules';
 import { splitMarkdownTableLine, stripTableCellInvisibleChars } from '@/services/document-workflow/helpers/markdownCleanup';
 import type { DocumentFactsModel, SpecAuthorityMap, TenderRequirementModel } from '@/services/document-workflow/types';
 import type { QuantityConflictAnchor } from '@/services/document-workflow/integratedBlueprint';
@@ -162,6 +163,21 @@ describe('selfUnderminingCandidateIssues（R9 正向句豁免扩围）', () => {
     expect(issues.length).toBe(1);
     expect(issues[0].message).toContain('本工程不进行分包');
   });
+
+  it('r16c 准入校验句豁免：「复审未完成前不得继续上岗」人员证书管控句不进自伤候选', async () => {
+    // 「未完成→不得→上岗」是持证上岗前置条件校验（r16c 丰乐镇 B2 误报归因），非投标短板自述
+    mockSimilarity(0.9);
+    const markdown = '安全员在证书到期前30日提醒作业人员办理复审，复审未完成前不得继续上岗。';
+    const issues = await selfUnderminingCandidateIssues(markdown);
+    expect(issues).toEqual([]);
+  });
+
+  it('r16c 真伤护栏：无准入结构的事实自述句照常召回', async () => {
+    mockSimilarity(0.9);
+    const markdown = '专项设计文件尚未完成，待后续补充。';
+    const issues = await selfUnderminingCandidateIssues(markdown);
+    expect(issues.length).toBe(1);
+  });
 });
 
 describe('localAdaptationKeywordIssues（W2 纯语义判定）', () => {
@@ -285,6 +301,22 @@ describe('resourceConsistencyIssues（h7 劳动力数据一致性 5 模式）', 
     const issues = resourceConsistencyIssues(markdown);
     expect(issues.some(issue => /劳动力数据矛盾/u.test(issue.message) && /另一劳动力表峰值/u.test(issue.message))).toBe(true);
   });
+
+  it('r16 丰乐镇 B1 跨顿号工种列举继承阶段词：「阶段+工种列举+合计N人」不假互斥（实况复刻）', () => {
+    // 修复前：末顿号无条件截断使「污水管网工程阶段管道工、普工合计56人」阶段词被切掉，
+    // 56 与 262 两阶段值解析为空阶段互判同口径（假矛盾 79%）；修复后含工种词的列举段
+    // 不截断（与 laborPeakStageOf 条件截断同源），阶段词跨列举继承后各阶段隔离
+    const markdown = '分阶段投入计划中，施工准备与清杂拆除阶段普工、绿化工合计137人，污水管网工程阶段管道工、普工合计56人，道路铺装工程阶段混凝土工、普工、瓦工合计262人，景观与绿化工程阶段绿化工、普工合计262人。';
+    expect(resourceConsistencyIssues(markdown)).toEqual([]);
+  });
+
+  it('r16 B1 反例：纯「投入N人」列举段仍条件截断，总口径峰值不继承前段阶段（防误放行）', () => {
+    // 「施工准备阶段投入22人，高峰期199人」的 199 是总口径峰值（前段无工种词不继承阶段），
+    // 与另一处「高峰期95人」相差 >30% 仍判互斥（检测能力不削弱）
+    const markdown = '施工准备阶段投入22人，高峰期199人组织流水作业。雨季施工高峰期95人。';
+    const issues = resourceConsistencyIssues(markdown);
+    expect(issues.some(issue => /劳动力数据矛盾/u.test(issue.message) && /互斥/u.test(issue.message))).toBe(true);
+  });
 });
 
 describe('nodeScheduleConsistencyIssues（h13 节点工期口径互查）', () => {
@@ -382,6 +414,19 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
   it('4.17.2 工期顺延口径不入池：「顺延不超过30日历天」与总工期 210 并存不误报', () => {
     const markdown = '如遇不可抗力，工期相应顺延不超过30日历天。计划工期210日历天。';
     expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('r16c 管理程序时限豁免：「确保60日历天内完成响应闭环」与计划工期 90 日历天并存不互斥', () => {
+    // 60日历天是合同管理程序时限（响应闭环期限），与计划总工期不同口径（r16c 丰乐镇 B1 误报归因）
+    const markdown = '我方应在收到书面技术要求后组织编制实施方法，报发包人审核认可后交底执行，资料员同步归档审核记录，确保60日历天内完成响应闭环。计划工期90日历天。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('r16c 程序句不误伤：管理时限句并存两套真实工期，真实工期矛盾照常检出', () => {
+    // 豁免仅作用于程序词所在句（响应闭环），90 与 210 两条真实工期照常互查互斥
+    const markdown = '资料员同步归档审核记录，确保60日历天内完成响应闭环。计划工期90日历天。关键节点按210日历天总工期倒排。';
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.some(issue => /计划总工期/u.test(issue.message) && /90日历天 与 210日历天/u.test(issue.message))).toBe(true);
   });
 
   it('4.17.2 项目编号矛盾：50062 与 50112 并存检出（庐江实测）', () => {
@@ -1784,6 +1829,32 @@ describe('fixTruncatedSentenceArtifacts（B2 截断句残留确定性修复）',
     expect(result.markdown).toContain('销项……踏勘发现');
     expect(result.markdown).not.toContain('。。');
   });
+
+  it('r15 丰乐镇 B2：段落行尾分号 + 下一行列表项 → 分号改句号（softWrapped 未豁免形态，实况复刻）', () => {
+    // r15 实机阻断：土方工程段落行尾「…土壤类别按综合类处理；」+ 下一行「1. 机械开挖…」
+    // 被检测器判截断句 blocker（软换行豁免要求下一行为普通正文）；确定性收敛为句号
+    const markdown = [
+      '土方工程贯穿道路、污水、景观各专业。回填采用分层夯实，每层虚铺厚度不超过0.3m。工序按开挖深度，土壤类别按综合类处理；',
+      '1. 机械开挖配合人工清底，槽底预留300mm人工清底；',
+      '2. 原土打夯并检测压实度；',
+    ].join('\n');
+    const result = fixTruncatedSentenceArtifacts(markdown);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('土壤类别按综合类处理。\n1. 机械开挖');
+    // 列表行自身分号收尾属合法形态不被改动
+    expect(result.markdown).toContain('槽底预留300mm人工清底；');
+  });
+
+  it('r15 B2 边界：行尾分号 + 下一行普通正文（软换行）/下一行标题 均零改动', () => {
+    const markdown = [
+      '回填采用分层夯实，每层虚铺厚度不超过0.3m；',
+      '下一行仍是普通正文续写，不属于列表承启形态。',
+      '仅以分号结尾但下一行是小节标题；',
+      '###  后续小节',
+    ].join('\n');
+    const result = fixTruncatedSentenceArtifacts(markdown);
+    expect(result.fixedCount).toBe(0);
+  });
 });
 
 describe('markdownTableQualityIssues 规格型号列「—」豁免（丰乐镇实测：蛙式打夯机无型号，修复轮编造 HW-60）', () => {
@@ -1856,16 +1927,30 @@ describe('表格单元格不可见字符归一（十度实测缺陷：全角空�
     const issues = markdownTableQualityIssues(table);
     expect(issues.some(issue => issue.message.includes('空单元格'))).toBe(true);
   });
-  it('修复层：全角空格零星空单元格数据行不再删除（V2 批1-4 零兜底写入：不删行，交检测器阻断）', () => {
+  it('修复层：全角空格零星空单元格数据行不再删除，按列就近非空值填充（r18 丰乐镇 B3 归因）', () => {
     const { lines, removed } = repairTableBlockLines([
       '| 工序名称 | 检查内容 | 责任岗位 |',
       '| --- | --- | --- |',
       '| 土方开挖 | 标高检查 | \u3000 |',
       '| 回填夯实 | 压实度检测 | 试验员 |',
     ]);
-    expect(removed).toBe(0);
+    expect(removed).toBe(1);
     expect(lines.join('\n')).toContain('土方开挖');
     expect(lines.join('\n')).toContain('回填夯实');
+    // r18 丰乐镇 B3 归因：空单元格直坠交付门禁（qualityValidation 无豁免）——向上无值时
+    // 向下取同列最近非空值确定性补齐，不删行、不留空格
+    expect(lines.join('\n')).toContain('| 土方开挖 | 标高检查 | 试验员 |');
+  });
+
+  it('修复层：危险作业清单表空单元格向上取同列最近非空值（r18 B3 实况复刻）', () => {
+    const { lines, removed } = repairTableBlockLines([
+      '| 危险作业类型 | 主要风险 | 管控责任岗位 | 管控频次 |',
+      '| --- | --- | --- | --- |',
+      '| 机械作业 | 机械倾覆伤害 | 安全员 | 每日巡查 |',
+      '| 高处作业 | 坠落伤害 | \u3000 | \u200b |',
+    ]);
+    expect(removed).toBe(1);
+    expect(lines.join('\n')).toContain('| 高处作业 | 坠落伤害 | 安全员 | 每日巡查 |');
   });
   it('修复层：合计行全角空格单元格不再填「—」（V2 批1-4 零兜底写入：不伪造占位符）', () => {
     const { lines } = repairTableBlockLines([
@@ -1884,6 +1969,76 @@ describe('表格单元格不可见字符归一（十度实测缺陷：全角空�
   });
   it('清洗层：单元格中间全角空格也剥离（数字与单位间排版空格）', () => {
     expect(stripTableCellInvisibleChars('800\u3000米')).toBe('800米');
+  });
+});
+
+describe('normalizeTableTitleInHeaders（4.44 写时表名混表头确定性归一）', () => {
+  const plan = {
+    id: 'planned-table-ch-1-1',
+    title: '文明施工管控要点与检查频次表',
+    chapterTitle: '文明施工',
+    section: '',
+    required: false,
+    reason: '',
+    fields: [{ name: '管 控分项' }, { name: '具体标准' }, { name: '责任岗位' }, { name: '检查频次' }, { name: '整改闭环要求' }],
+  };
+  it('4.43 实测形态：表名顶替首列名（与表计划表名一致）→ 表题独立成行 + 规划字段名归位（折行空格清洗）', () => {
+    const markdown = [
+      '| 文明施工管控要点与检查频次表 | 检查内容 | 责任岗位 | 检查频次 | 整改闭环 |',
+      '| --- | --- | --- | --- | --- |',
+      '| 围挡与警示设施 | 围挡稳固、警示标识齐全 | 安全员 | 每日1次 | 当日整改，复查销项 |',
+      '| 道路保洁与洒水 | 施工便道无积尘、无遗撒 | 施工员 | 每日2次 | 2小时内清理复验 |',
+    ].join('\n');
+    const result = normalizeTableTitleInHeaders(markdown, [plan]);
+    expect(result.normalized).toBe(1);
+    expect(result.markdown).toContain('文明施工管控要点与检查频次表\n\n| 管控分项 | 检查内容 | 责任岗位 | 检查频次 | 整改闭环 |');
+    expect(result.markdown).not.toContain('| 文明施工管控要点与检查频次表 |');
+    // 归一后不再命中结构扫描阻断（检测定位与写时归一同源：检测到即能归一的形态不残留）
+    expect(scanStructureDefects(result.markdown).blocking).toEqual([]);
+    // 幂等：再跑一次零动作且内容不变
+    const second = normalizeTableTitleInHeaders(result.markdown, [plan]);
+    expect(second.normalized).toBe(0);
+    expect(second.markdown).toBe(result.markdown);
+  });
+  it('表名占首格偏移形态（数据行末格全空）→ 表题独立成行 + 偏移列删除（无需表计划）', () => {
+    const markdown = [
+      '| 劳动力动态投入计划表 | 工种 | 峰值人数 | 进场时段 |',
+      '| --- | --- | --- | --- |',
+      '| 钢筋工 | 24人 | 第45日 |  |',
+      '| 模板工 | 18人 | 第60日 |  |',
+    ].join('\n');
+    const result = normalizeTableTitleInHeaders(markdown);
+    expect(result.normalized).toBe(1);
+    expect(result.markdown).toContain('劳动力动态投入计划表\n\n| 工种 | 峰值人数 | 进场时段 |');
+    expect(result.markdown).toContain('| 钢筋工 | 24人 | 第45日 |');
+    expect(scanStructureDefects(result.markdown).blocking).toEqual([]);
+  });
+  it('表名顶替首列名但无表计划/计划未命中 → 不动作（列名无权威来源，交结构扫描阻断重写）', () => {
+    const markdown = [
+      '| 材料进场与工期匹配计划表 | 计划进场时间 | 责任人 |',
+      '| --- | --- | --- |',
+      '| 道牙石 | 第45日 | 张工 |',
+    ].join('\n');
+    const result = normalizeTableTitleInHeaders(markdown, [plan]);
+    expect(result.normalized).toBe(0);
+    expect(result.markdown).toBe(markdown);
+    expect(scanStructureDefects(markdown).blocking.map(defect => defect.kind)).toEqual(['table-title-in-header']);
+  });
+  it('表题已独立成行（或已归一侧）→ 幂等护栏不再动作', () => {
+    const markdown = [
+      '文明施工管控要点与检查频次表',
+      '',
+      '| 管控分项 | 检查内容 | 责任岗位 | 检查频次 | 整改闭环 |',
+      '| --- | --- | --- | --- | --- |',
+      '| 围挡与警示设施 | 围挡稳固、警示标识齐全 | 安全员 | 每日1次 | 当日整改，复查销项 |',
+    ].join('\n');
+    const result = normalizeTableTitleInHeaders(markdown, [plan]);
+    expect(result.normalized).toBe(0);
+  });
+  it('短词「报表」类首格（汉字数 <8）不动作（与扫描阈值同口径）', () => {
+    const markdown = ['| 日进度报表 | 完成量 | 备注 |', '| --- | --- | --- |', '| 第1日 | 120米 | 正常 |'].join('\n');
+    const result = normalizeTableTitleInHeaders(markdown, [plan]);
+    expect(result.normalized).toBe(0);
   });
 });
 

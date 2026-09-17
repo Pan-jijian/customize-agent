@@ -268,8 +268,8 @@ export function documentBudgetIssues(budget: DocumentBudget, markdown: string): 
     // 4.40 篇幅上限硬约束：minimum 语义旧实现「不少于 X 字」只设下限（4.33 仅升 warning 不阻断），
     // 舒城 14 万目标产出 22 万字的膨胀被静默放行。块级合同（1.15×块目标）之上的章级叠加
     // （要求补写/表格回填/终稿扩写）超出目标 20% 即为实质性膨胀：置 error → severity 自动升 blocker
-    // → 进修复/门禁/挂起链，不允许超产文档静默交付（宁缺毋假）。
-    issues.push({ level: 'error', message: `正文篇幅严重超出目标字数：当前 ${currentChars} 字，目标约 ${budget.targetChars} 字（超出 ${Math.round((currentChars / budget.targetChars - 1) * 100)}%，超过 20% 即阻断交付）`, suggestion: '按章节完成率定位超产章节，压缩重复段落与过度展开内容（保留全部事实与关键数值），使正文回到目标篇幅附近后重新验收。' });
+    // → 进修复/门禁/复核清单链，不允许超产文档静默交付（宁缺毋假）。
+    issues.push({ level: 'error', message: `正文篇幅严重超出目标字数：当前 ${currentChars} 字，目标约 ${budget.targetChars} 字（超出 ${Math.round((currentChars / budget.targetChars - 1) * 100)}%，超过 20% 即阻断）`, suggestion: '按章节完成率定位超产章节，压缩重复段落与过度展开内容（保留全部事实与关键数值），使正文回到目标篇幅附近后重新验收。' });
   } else if (budget.mode === 'minimum' && budget.targetChars && currentChars > Math.ceil(budget.targetChars * 1.15)) {
     // 超幅 15%~20%：warning 提示收敛（不阻断导出），供修复轮与人工定位篇幅异常
     issues.push({ level: 'warning', message: `正文篇幅超出目标字数：当前 ${currentChars} 字，目标约 ${budget.targetChars} 字（超出 ${Math.round((currentChars / budget.targetChars - 1) * 100)}%）`, suggestion: '建议压缩重复段落与过度展开内容，使正文接近目标篇幅。' });

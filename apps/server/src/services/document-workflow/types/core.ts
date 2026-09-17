@@ -114,6 +114,7 @@ export interface DocumentTemplateChapter {
   tableSections?: string[];
   tableRequirements?: string[];
   tablePlans?: PlannedTablePlan[];
+  /** 定格证据文件（包内相对路径，如 "招标文件.pdf"；跨资料包在词法上无法表达） */
   pinnedEvidenceFilePaths?: string[];
 }
 

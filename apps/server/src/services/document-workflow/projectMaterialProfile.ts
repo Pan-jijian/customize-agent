@@ -1,10 +1,12 @@
 import * as path from 'node:path';
+import { materialRootsOfFiles } from '@customize-agent/knowledge';
 import { listKnowledgeFiles } from '../knowledge/kbService';
 import type { DocumentEvidence, DocumentTemplate, DocumentTemplateChapter, ProjectBinding, ProjectGraph } from './types';
 import { projectGraphPrompt } from './projectGraph';
 import { cleanEvidenceText, selectEvidenceByBudget } from './evidence';
 import { chineseTokenMatch } from './textMatch';
 import { selectByScore, textImportanceScore } from './selection';
+import { isUsableKnowledgeFile, type KnowledgeFile } from './agentWorkflow';
 
 export type MaterialKind =
   | 'tender_document'
@@ -53,8 +55,6 @@ export interface ProjectUnderstanding {
   prompt: string;
 }
 
-type KnowledgeFile = { relativePath: string; chunkCount?: number; indexedAt?: number; status?: string };
-
 const ALL_KINDS: MaterialKind[] = ['tender_document', 'bill_of_quantities', 'drawing', 'addendum', 'contract', 'technical_specification', 'schedule_document', 'quality_safety_document', 'other'];
 
 const KIND_LABELS: Record<MaterialKind, string> = {
@@ -83,10 +83,6 @@ const KIND_PRIORITY: Record<MaterialKind, number> = {
 
 export function materialKindLabel(kind: MaterialKind) {
   return KIND_LABELS[kind] || '其他资料';
-}
-
-function isUsableKnowledgeFile(file: KnowledgeFile) {
-  return file.status !== 'disk' && file.status !== 'error' && Number(file.indexedAt || 0) > 0 && Number(file.chunkCount || 0) > 0;
 }
 
 function normalizePathKey(filePath: string) {
@@ -345,6 +341,7 @@ export async function retrievePlannedMaterialEvidence(input: {
   plan?: ChapterMaterialPlan;
   profile: ProjectMaterialProfile;
   scopedFilePaths: string[];
+  scopedMaterialRoots?: string[];
   limitPerQuery: number;
   signal?: AbortSignal;
 }) {
@@ -362,8 +359,9 @@ export async function retrievePlannedMaterialEvidence(input: {
     ).selected;
     for (const query of kindQueries) {
       if (input.signal?.aborted) throw new Error('aborted');
-      const result = await input.manager.search(input.projectRoot, query, { scope: 'project', filters: { filePaths }, limit: input.limitPerQuery, weights: { keyword: 0.68, vector: 0.25, rewrite: 0.85, hybridBonus: 0.3 }, generationMode: true, disableReranker: true });
-      evidence.push(...result.results.filter(item => filePaths.includes(item.filePath)).map(item => ({
+      const result = await input.manager.search(input.projectRoot, query, { scope: 'project', filters: { filePaths, materialRoots: input.scopedMaterialRoots ?? materialRootsOfFiles(input.scopedFilePaths) }, limit: input.limitPerQuery, weights: { keyword: 0.68, vector: 0.25, rewrite: 0.85, hybridBonus: 0.3 }, generationMode: true, disableReranker: true });
+      // 证据范围由检索层 filters 保证（SQL relative_path IN + material_root IN），此处不再二次过滤（历史冗余已删）
+      evidence.push(...result.results.map(item => ({
         chapterId: input.chapter.id,
         filePath: item.filePath,
         score: item.score + (KIND_PRIORITY[kind] / 100) + 2,

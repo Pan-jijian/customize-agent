@@ -32,6 +32,7 @@ import {
   rebaseCitationAnchorsForChapters,
   renderBlueprintChapterAuthorityCard,
   renderBlueprintChapterSlice,
+  renderBlueprintBlockSlice,
   renderBlueprintDataText,
   renderBlueprintMustCiteValues,
   resolveBillOfQuantities,
@@ -631,6 +632,49 @@ describe('渲染函数（执行层输入）', () => {
     // 三源规则紧随切片头部声明、先于小节正文（章切片最先注入的强约束）
     expect(slice.indexOf('蓝图切片')).toBeLessThan(slice.indexOf('【写作三源规则】'));
     expect(slice.indexOf('【写作三源规则】')).toBeLessThan(slice.indexOf('\n## '));
+  });
+
+  it('块级切片：章域锚点卡超封顶不被截断（编制依据法规清单必达写作层）', () => {
+    const boq = parseFixture();
+    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目', strategy: villageMunicipalStrategy });
+    // 制造超长锚点卡（4.43 实测：工程概况章卡 10320 字符 > 6000 封顶，编制依据清单随卡末尾被截掉）
+    for (let index = 0; index < 300; index += 1) {
+      data.quantities[`测试分项工程量条目${index}`] = { value: 1000 + index, unit: 'm3' };
+    }
+    data.basisRegulations = ['《中华人民共和国招标投标法》', '《中华人民共和国建筑法》'];
+    const chapter = { id: '1', title: '工程概况', isActive: true, requiredParams: [], subSections: [] };
+    const slice = renderBlueprintBlockSlice(chapter, data, { blockTitle: '编制基准', subPointTitles: ['编制依据'] });
+    expect(slice.length).toBeGreaterThan(6000);
+    expect(slice).toContain('中华人民共和国招标投标法');
+    expect(slice).toContain('编制依据小节必须列出法规名称及文号');
+    expect(slice).not.toContain('已截断');
+  });
+
+  it('块级切片：工作包展开段超封顶按行截断加提示，恒定段完整保留', () => {
+    const boq = parseFixture();
+    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目', strategy: villageMunicipalStrategy });
+    const subSections = Array.from({ length: 100 }, (_, index) => ({
+      id: `2.${index + 1}`,
+      title: `分部工程${index + 1}`,
+      requiredParams: [],
+      tablePlans: [],
+      workPackages: [{
+        name: `工作包${index + 1}`,
+        kind: 'major' as const,
+        quantities: { [`子项${index + 1}`]: { value: 100 + index, unit: 'm3' } },
+        processChain: ['工序A', '工序B'],
+        methods: ['清单特征原文做法'],
+        params: [],
+        acceptance: [],
+        standards: [],
+        source: 'boq' as const,
+        coveredSeqs: [],
+      }],
+    }));
+    const chapter = { id: '2', title: '主要施工方法', isActive: true, requiredParams: [], subSections };
+    const slice = renderBlueprintBlockSlice(chapter, data, { blockTitle: '工作包', subPointTitles: ['工作包'] });
+    expect(slice).toContain('已截断');
+    expect(slice).toContain('【写作三源规则】');
   });
 
   it('施工方法章小节构建：单位工程（公厕）聚合子分部为子工作包，不再平铺独立小节', () => {
@@ -1270,6 +1314,25 @@ describe('blueprintCitationVerdict：蓝图引用一致性（S5 语义判定版�
     expect(await blueprintCitationConsistencyIssues('本项目涉及 20 个自然村。', citationData(), { adjudicate: spy })).toEqual([]);
     expect(await blueprintCitationConsistencyIssues('塑料管铺设 8205.53m。', citationData(), { adjudicate: spy })).toEqual([]);
     expect(calls).toBe(0);
+  });
+
+  it('值窗口不跨名字取数（#29 根因）：短名被长词前缀误命中不产假候选（防把对改成错）', async () => {
+    const data = citationData();
+    data.quantities = { ...data.quantities, '塑料管': { value: 7525.01, unit: 'm' } };
+    let calls = 0;
+    const spy: CitationAdjudicator = async candidates => {
+      calls += 1;
+      return { records: recordsFor(candidates, 'conflict', 'spy 不应被调用') };
+    };
+    // 4.43 实测句：「塑料管材」中的「塑料管」被误命中为条目引用，旧 40 字窗口跨越真正条目名
+    // 「塑料管铺设」取到 8205.53 → 假候选 subject=塑料管 value=8205.53 authority=7525.01 →
+    // 判定误判 conflict → 修复器把正确值改成错误值
+    const sentence = '塑料管材断供风险集中在DN200塑料管铺设8205.53m与DN110塑料管7525.01m。';
+    expect(await blueprintCitationConsistencyIssues(sentence, data, { adjudicate: spy })).toEqual([]);
+    expect(calls).toBe(0);
+    // 对照：真引用不一致仍产候选（窗口截断不吞真候选）
+    const candidates = collectBlueprintCitationCandidates('DN200塑料管铺设9100m与DN110塑料管7525.01m。', data).candidates;
+    expect(candidates.some(candidate => candidate.subject === '塑料管铺设' && candidate.value === 9100)).toBe(true);
   });
 
   it('收集层零豁免：规格/分区/单体/子集句全部入候选；概念边界与单位右边界在结构层排除', () => {

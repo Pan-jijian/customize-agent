@@ -73,6 +73,8 @@ export interface IndexStateRecord {
   status: 'active' | 'outdated' | 'error' | 'deleted';
   errorMessage?: string;
   metadataJson?: string;
+  /** 资料包 ID（relativePath 首段目录名），写入索引记录时派生，检索/审计按包取数 */
+  materialRoot?: string;
 }
 
 /** 文件差异对比结果 */

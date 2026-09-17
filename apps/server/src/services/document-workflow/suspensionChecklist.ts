@@ -1,13 +1,14 @@
 /**
- * C1 挂起清单（批 1 收敛责任制收尾）：门禁未通过时把未收敛 blocker 转为结构化「精准人工清单」。
+ * C1 复核清单（批 1 收敛责任制收尾 + 4.50 交付解耦）：门禁未通过时把未收敛 blocker 转为结构化「精准人工清单」。
  *
- * 铁律三（失败响亮）：任何 failed/blocker 不允许静默收尾——要么修复收敛，要么显式挂起+精准未解决清单。
+ * 铁律三（失败响亮）：任何 blocker 不允许静默收尾——要么修复收敛，要么显式复核清单+精准未解决条目。
+ * 4.50 交付解耦：残留阻断不阻断文档查看与导出（终态 completed_with_issues），清单作为人工复核建议呈现。
  * 修复侧已为每个 blocker 提供自动路径（单锚→确定性硬替换[数值裁决器]、多义→LLM 定向修复[带锚点+证据]、
- * 表格/结构类→确定性修复器），全部修复轮执行完仍残留的阻断项 = 无进一步自动收敛路径 → 显式挂起
- * （status=failed，不放行交付）并给出人工处理清单：分类 / 定位 / 问题 / 建议动作 / 修复路径追溯 / 检测器身份。
+ * 表格/结构类→确定性修复器），全部修复轮执行完仍残留的阻断项 = 无进一步自动收敛路径 → 转人工处理清单：
+ * 分类 / 定位 / 问题 / 建议动作 / 修复路径追溯 / 检测器身份。
  *
  * 三挂载点（同源单一构建，保证三处内容一致）：
- * - 交付记录 warningIssues 首条（formatSuspensionBanner）：failed 后用户可见的挂起声明 + 摘要；
+ * - 交付记录 warningIssues 首条（formatSuspensionBanner）：用户可见的复核声明 + 摘要；
  * - 执行阶段 agent-final-gate details（formatSuspensionDetails）：逐条全量落盘（不截断），生成后审查/复盘；
  * - reviewMetadata.suspensionChecklist：结构化归档，支持基于 checkpoint 的续修定位与工具消费。
  */
@@ -54,12 +55,12 @@ export interface SuspensionChecklistItem {
 }
 
 export interface SuspensionChecklist {
-  /** 挂起终态标记（恒 true；blocker 清零时不构建清单，交付为 completed） */
+  /** 复核清单标记（恒 true；blocker 清零时不构建清单，交付为 completed） */
   suspended: true;
   generatedAt: number;
   /** 未收敛阻断总数 */
   total: number;
-  /** 自动修复链状态说明（支撑「3 轮不收敛→挂起」的升级语义） */
+  /** 自动修复链状态说明（支撑「3 轮不收敛→复核清单」的升级语义） */
   repairChainSummary: string;
   items: SuspensionChecklistItem[];
 }
@@ -79,7 +80,7 @@ function resolveLocation(issue: ValidationIssue, chapters?: ReadonlyArray<{ id: 
 }
 
 /**
- * 挂起清单构建（单一来源）：blockingIssues 全量转结构化条目，不截断、不聚合——
+ * 复核清单构建（单一来源）：blockingIssues 全量转结构化条目，不截断、不聚合——
  * 精准人工清单要求每条可独立定位与复核；数量上界由检测器侧限幅保证（同 agent-final-gate 全量持久化口径）。
  */
 export function buildSuspensionChecklist(
@@ -99,7 +100,7 @@ export function buildSuspensionChecklist(
     suspended: true,
     generatedAt: Date.now(),
     total: items.length,
-    repairChainSummary: '全部自动修复轮已执行（确定性替换与定向 LLM 修复），残留阻断项无进一步自动收敛路径，已显式挂起（宁缺毋假：带病文档不作为交付件）',
+    repairChainSummary: '全部自动修复轮已执行（确定性替换与定向 LLM 修复），残留阻断项无进一步自动收敛路径',
     items,
   };
 }
@@ -111,17 +112,17 @@ function clip(text: string, max = 80): string {
 }
 
 /**
- * 挂起声明横幅（warningIssues 置顶条）：显式挂起语义 + 阻断计数 + 前 N 条精准条目 + 完整清单指引。
- * failed 终态下用户第一眼可见「为什么不可交付、谁能修、去哪看完整清单」。
+ * 复核清单横幅（warningIssues 置顶条）：复核语义 + 阻断计数 + 前 N 条精准条目 + 完整清单指引。
+ * 4.50 交付解耦后用户第一眼可见「哪些问题待复核、修复路径、去哪看完整清单」，文档照常可查看/可导出。
  */
 export function formatSuspensionBanner(checklist: SuspensionChecklist, limit = 8): string {
   const head = checklist.items.slice(0, limit).map(item => `${item.index}.【${item.category}】${clip(item.location, 24)}：${clip(item.problem)}`);
   const more = checklist.total > limit ? `；…另 ${checklist.total - limit} 项` : '';
-  return `导出门禁未通过：存在 ${checklist.total} 项未收敛阻断，已显式挂起——${checklist.repairChainSummary}。人工处理清单：${head.join('；')}${more}（完整清单见执行阶段「Agent 最终门禁」与交付复核清单）`;
+  return `导出门禁未通过：存在 ${checklist.total} 项未收敛阻断，不影响文档查看与导出（已转人工复核清单）——${checklist.repairChainSummary}。人工处理清单：${head.join('；')}${more}（完整清单见执行阶段「Agent 最终门禁」与交付复核清单）`;
 }
 
 /**
- * 挂起清单明细行（agent-final-gate stage details）：逐条全量，含问题原文与修复路径追溯，
+ * 复核清单明细行（agent-final-gate stage details）：逐条全量，含问题原文与修复路径追溯，
  * 生成后审查可直接按行复盘每一条阻断的检测器身份与建议动作。
  */
 export function formatSuspensionDetails(checklist: SuspensionChecklist): string[] {

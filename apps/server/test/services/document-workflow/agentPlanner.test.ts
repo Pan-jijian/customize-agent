@@ -30,7 +30,7 @@ function minimalContext(overrides: Partial<AgentWorkflowContext> = {}): AgentWor
     templateId: 'tpl-1',
     requirement: '',
     projectRoot: '/tmp/project',
-    materialScope: { selectedRoots: ['/tmp/project'], selectedFiles: [], totalAvailableFiles: 0, ambiguous: false, locked: true, reason: '', rejectedRoots: [], scopeHash: 'scope-1' },
+    materialScope: { selectedRoots: ['/tmp/project'], selectedMaterialRoots: [], selectedFiles: [], totalAvailableFiles: 0, ambiguous: false, locked: true, reason: '', rejectedRoots: [], scopeHash: 'scope-1' },
     materialSnapshot: { files: [], totalFiles: 0, totalChunks: 0, roots: [], createdAt: 0, snapshotHash: '' },
     nodes: [],
     facts: [],

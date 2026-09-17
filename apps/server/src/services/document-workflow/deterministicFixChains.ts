@@ -11,6 +11,7 @@ import {
   fixAmbiguousEitherOrCandidates,
   fixCollisionNumberedHeadings,
   fixDuplicateBasicInfoTables,
+  fixEquipmentBatchConflicts,
   fixFallbackPlaceholderRows,
   fixFinishThickness,
   fixForbiddenConfigurationTerms,
@@ -38,6 +39,7 @@ import { fixInternalTermHeadingPhrases } from './internalTerminologyAnchors';
 import { stripAtlasReferencePhrases } from './documentGeneratorHelpers';
 import { fixTenderMetaLanguage, stripDuplicateResponseLines } from './tenderRequirements';
 import { fixFlowFormRepetition, fixSentenceLikeHeadingSplit, fixSkeletonFingerprintRepetition, fixTemplatedLabels, fixTruncatedTitleCompletion } from './templatingGovernance';
+import { fixSpecQuantityBindings, type FactReconciliationInput } from './factReconciliation';
 import type { DecisionLockEntry } from './integratedBlueprint';
 
 /** 修复器权威口径上下文（与检测器同源：laborPeakAuthority 由蓝图决策锁定，greeningMaintenanceAuthority 由清单事实抽取，
@@ -59,6 +61,12 @@ export interface SurfaceFixerContext {
   plannedSectionTitles?: readonly string[];
   /** V5 P4b-2 阶段劳动力权威（phase-labor-values 消费：蓝图 byPhase 推导投影；缺失时该步静默） */
   phaseLaborAuthorities?: Array<{ phase: string; value: number; trace?: string }>;
+  /** r17 机械设备汇总权威（equipment-batch-values 消费：blueprintEquipmentAuthorities 投影；
+   * 缺失时该步静默跳过——零配置零误伤） */
+  equipmentAuthorities?: Array<{ name: string; count: number }>;
+  /** r17 B1 数值对账权威输入（spec-quantity-binding 消费：billFactLock/blueprintData/factsModel
+   * 三源与检测器 fact-reconciliation 同源；缺失时该步静默跳过） */
+  reconciliationInput?: Pick<FactReconciliationInput, 'billFactLock' | 'blueprintData' | 'factsModel'>;
 }
 
 export interface SurfaceFixStep {
@@ -95,6 +103,11 @@ export const SURFACE_FIX_STEPS: readonly SurfaceFixStep[] = [
   // 误塞埋深槽）：与检测器 factReconciliation D4.3 同源正则/阈值（>10m 即删槽位短语），
   // 紧随 finish-thickness（同类数值定点修复）
   { key: 'slot-depth-value', stage5: true, round2: true, fix: markdown => { const r = fixSlotDepthValue(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
+  // r17 丰乐镇归因 #B1：规格-数值绑定错位（「DN110 UPVC排水管15m」的 15m 无源——恰与无关条目
+  // 「人行道混凝土垫层 15m³」数值相等被判张冠李戴）确定性原位替换为该规格组和值（D4.2 检测
+  // 组和豁免口径，替换后必然通过；同形句逐处收敛 + 位置复检防新值撞其他规格）；紧随
+  // slot-depth-value（同类数值定点修复，与检测器 fact-reconciliation 同源锚定）
+  { key: 'spec-quantity-binding', stage5: true, round2: true, fix: (markdown, ctx) => { const r = fixSpecQuantityBindings(markdown, ctx.reconciliationInput ?? {}); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'labor-peak', stage5: true, round2: true, fix: (markdown, ctx) => { const r = fixLaborPeakConflict(markdown, ctx.laborPeakAuthority); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   // V5 P4b-2 阶段劳动力确定性回写（12:33 评审 P0-1）：与检测器 phase-labor-mixing 同源双通道
   // 扫描（scanPhaseLaborClaims 单源）——正文阶段人数与蓝图分阶段推导不符即定点硬替换
@@ -105,6 +118,10 @@ export const SURFACE_FIX_STEPS: readonly SurfaceFixStep[] = [
   // 定点硬替换 + 复检（复检残留自动回滚）；紧随 labor-peak（峰值权威先行、组成为后），
   // 与检测器 resource-breakdown-consistency 同源同扫描（resourceBreakdownNumbers 单源）
   { key: 'resource-breakdown', stage5: true, round2: true, fix: (markdown, ctx) => { const r = fixResourceBreakdownNumbers(markdown, ctx.resourceBreakdownAuthority); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
+  // r17 丰乐镇归因 #B2/B3：机械设备分批台数矛盾（「首批进场挖掘机5台…剩余挖掘机5台…」
+  // 5+5 均不等于蓝图汇总 5 台）确定性删除 later 批「N 台」数字（批次表述形态保留；与检测器
+  // equipment-batch-conflict 同源单扫描）；紧随 resource-breakdown（机械台数类修复同族相邻）
+  { key: 'equipment-batch-values', stage5: true, round2: true, fix: (markdown, ctx) => { const r = fixEquipmentBatchConflicts(markdown, ctx.equipmentAuthorities); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'internal-table-row-dup', stage5: true, round2: true, fix: markdown => { const r = stripInternalDuplicateTableRows(markdown); return { markdown: r.markdown, fixedCount: r.removedCount }; } },
   // 4.31 基础信息表重复合并（丰乐镇 v6 #70）：多张「信息项|内容」基础表字段并集化，删除
   // 后续重复块（含「汇总成表」引导句），与检测器 markdownTableQualityIssues 同源字段词集合

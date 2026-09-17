@@ -120,8 +120,8 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
     }
   });
 
-  it('LLM patch 修复轮 7 轮全部带 patchGuard 且锚定检测器存在、guard 检测器全部 deterministicSafe', () => {
-    expect(LLM_PATCH_REPAIR_ROUNDS).toHaveLength(7);
+  it('LLM patch 修复轮 10 轮全部带 patchGuard 且锚定检测器存在、guard 检测器 全部 deterministicSafe', () => {
+    expect(LLM_PATCH_REPAIR_ROUNDS).toHaveLength(10);
     for (const entry of LLM_PATCH_REPAIR_ROUNDS) {
       expect(entry.kind).toBe('llm-patch');
       expect(entry.patchGuard).toBeDefined();
@@ -133,7 +133,16 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
     }
   });
 
-  it('LLM patch 修复轮 7 轮 id 顺序快照（P11 全链接入登记，变更必须显式改快照并附理由）', () => {
+  it('content-depth-repair 多锚定声明（alsoAnchoredTo 五类均登记，r8 六检测器统一收口）', () => {
+    const round = LLM_PATCH_REPAIR_ROUNDS.find(entry => entry.id === 'content-depth-repair');
+    expect(round?.anchoredTo).toBe('critical-section-depth');
+    expect(round?.alsoAnchoredTo).toEqual(['emergency-section-depth', 'construction-org-major-content', 'construction-org-division-section', 'precise-fact-usage', 'overview-recap']);
+    for (const anchorId of round?.alsoAnchoredTo ?? []) {
+      expect(detectorEntry(anchorId)).toBeDefined();
+    }
+  });
+
+  it('LLM patch 修复轮 10 轮 id 顺序快照（P11 全链接入登记，变更必须显式改快照并附理由）', () => {
     expect(LLM_PATCH_REPAIR_ROUNDS.map(entry => entry.id)).toEqual([
       'fact-landing',
       'table-repair',
@@ -142,6 +151,9 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
       'workpackage-skeleton-repair',
       'planned-section-repair',
       'global-consistency-repair',
+      'quotation-balance-repair',
+      'content-depth-repair',
+      'basis-regulations-repair',
     ]);
   });
 
@@ -162,7 +174,7 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
     }
   });
 
-  it('FINALIZE_REPAIR_ROUNDS 顺序快照（13 轮锁死，变更必须显式改快照并附理由）', () => {
+  it('FINALIZE_REPAIR_ROUNDS 顺序快照（19 轮锁死，变更必须显式改快照并附理由）', () => {
     expect([...FINALIZE_REPAIR_ROUNDS]).toEqual([
       'fact-landing-round',
       'table-repair-round',
@@ -173,10 +185,16 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
       'commercial-strip',
       'table-deterministic-repair',
       'numeric-verification',
+      'requirement-response-repair',
       'requirement-verification',
+      'content-depth-repair',
       'post-review-surface',
       'terminology-strip',
+      'regulation-number-typo',
+      'quotation-balance-repair',
+      'basis-regulations-repair',
       'toc-consistency',
+      'fact-distribution-round',
     ]);
   });
 });

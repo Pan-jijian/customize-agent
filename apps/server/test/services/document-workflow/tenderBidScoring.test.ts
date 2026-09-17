@@ -19,7 +19,7 @@ vi.mock('@/services/document-workflow/semanticSimilarity', () => ({
   }),
 }));
 
-import { buildTenderBidScores, buildTenderBidTemplatingReport, FORBIDDEN_EMPTY_PHRASES, FORBIDDEN_PROMPT_PHRASES } from '@/services/document-workflow/tenderBidScoring';
+import { buildTenderBidScores, buildTenderBidTemplatingReport, FORBIDDEN_EMPTY_PHRASES, FORBIDDEN_PROMPT_PHRASES, splitScoringBlocks } from '@/services/document-workflow/tenderBidScoring';
 import type { DocumentDraftChapter, DocumentFactTrace, DocumentTemplate } from '@/services/document-workflow/types';
 
 const draftChapter = (title: string, content: string): DocumentDraftChapter => ({ id: `d-${title}`, title, content, evidence: [], missingFacts: [] });
@@ -68,6 +68,40 @@ describe('禁用词库', () => {
 
   it('生成侧禁写词库 = 评分词库 + 语境敏感词', () => {
     expect(FORBIDDEN_PROMPT_PHRASES).toEqual([...FORBIDDEN_EMPTY_PHRASES, '定期检查', '系统性']);
+  });
+});
+
+describe('splitScoringBlocks 评分块切分（r14 精度修正：标题边界 + 阈值 12）', () => {
+  it('标题行为边界：单换行串联多小节 → 每小节独立成块（不再并入跨小节大块）', () => {
+    // 旧口径（仅空行分块）下无空行的「标题\n正文」链被并为一整块，标题沉入块中部；
+    // 新口径按标题行边界先行切分，每小节标题位于块首，与评审查询近词面对齐
+    const blocks = splitScoringBlocks(['#### 7.1.1 扬尘污染防治措施', '施工内容甲。', '#### 7.1.2 建筑工人实名制管理', '施工内容乙。'].join('\n'));
+    expect(blocks).toEqual([
+      '#### 7.1.1 扬尘污染防治措施\n施工内容甲。',
+      '#### 7.1.2 建筑工人实名制管理\n施工内容乙。',
+    ]);
+  });
+
+  it('短标题块保留（≥12 字）：含术语原词的标题独立参与嵌入', () => {
+    // R13 实测：空行分隔的 28 字小节标题在旧阈值 30 下被丢弃，评审查询无法与小节近面对齐
+    const blocks = splitScoringBlocks(['#### 7.1.4 生产安全事故应急预案与应急演练', '', '正文段落。'].join('\n'));
+    expect(blocks).toContain('#### 7.1.4 生产安全事故应急预案与应急演练');
+  });
+
+  it('纯编号短标题（<12 字）仍过滤（防噪声块）', () => {
+    const blocks = splitScoringBlocks(['## 7.1', '', '正文块内容足够长。'].join('\n'));
+    expect(blocks).not.toContain('## 7.1');
+    expect(blocks).toEqual([]);
+  });
+
+  it('R13 实测回归：6 小节单换行串联 → 6 块（块均字数下降，每小节独立判定单元）', () => {
+    const sections = Array.from({ length: 6 }, (_, i) => [
+      `#### 7.1.${i + 1} 小节标题第${i + 1}部分内容说明`,
+      `本小节正文内容用于验证切分粒度，段落编号 ${i + 1}。`,
+    ].join('\n'));
+    const blocks = splitScoringBlocks(sections.join('\n'));
+    expect(blocks).toHaveLength(6);
+    expect(blocks.every(block => block.startsWith('####'))).toBe(true);
   });
 });
 

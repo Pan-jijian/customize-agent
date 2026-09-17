@@ -1,11 +1,11 @@
 /**
- * 批 1 C1 挂起清单测试（收敛责任制收尾，验收#1「blocker=0 交付或显式挂起+清单」）：
+ * 批 1 C1 复核清单测试（收敛责任制收尾 + 4.50 交付解耦，验收#1「blocker=0 交付或复核清单+条」）：
  * - 结构化条目：分类中文标签 / 定位解析（chapterId→章节标题、sectionTitle、message 编号前缀、全文）/
  *   修复路径追溯（repairability 四类映射）/ 检测器身份（provenance.detectorId）；
  * - 全量保留：>12 条不截断不聚合（替代旧扁平列表「slice(0,12)」行为——人工清单必须逐条可定位）；
- * - banner（warningIssues 置顶条）：显式挂起语义 + 未收敛计数 + 分类/定位摘要 + 完整清单指引；
+ * - banner（warningIssues 置顶条）：复核语义 + 未收敛计数 + 分类/定位摘要 + 完整清单指引；
  * - details（agent-final-gate stage）：逐条全量，含问题原文/修复路径/建议/检测器；
- * - 语义护栏：挂起声明必须明确「带病文档不作为交付件」（铁律三：失败响亮），不得出现「不阻断交付」旧歧义。
+ * - 语义护栏：复核声明必须明确「不影响文档查看与导出」（4.50 交付解耦：阻断不阻止交付，仅提示复核）。
  */
 import { describe, expect, it } from 'vitest';
 import { buildSuspensionChecklist, formatSuspensionBanner, formatSuspensionDetails } from '@/services/document-workflow/suspensionChecklist';
@@ -44,7 +44,7 @@ const blockers: ValidationIssue[] = [
   },
 ];
 
-describe('C1 挂起清单：结构化条目（分类/定位/修复路径/检测器）', () => {
+describe('C1 复核清单：结构化条目（分类/定位/修复路径/检测器）', () => {
   it('chapterId + sectionTitle → 章节标题 / 小节标题定位；分类与修复路径映射', () => {
     const checklist = buildSuspensionChecklist(blockers, chapters);
     expect(checklist.suspended).toBe(true);
@@ -86,11 +86,10 @@ describe('C1 挂起清单：结构化条目（分类/定位/修复路径/检测�
   });
 });
 
-describe('C1 挂起清单：banner（warningIssues 置顶条）', () => {
-  it('显式挂起语义 + 未收敛计数 + 分类/定位摘要 + 完整清单指引', () => {
+describe('C1 复核清单：banner（warningIssues 置顶条）', () => {
+  it('复核语义 + 未收敛计数 + 分类/定位摘要 + 完整清单指引', () => {
     const banner = formatSuspensionBanner(buildSuspensionChecklist(blockers, chapters));
-    expect(banner).toContain('导出门禁未通过：存在 3 项未收敛阻断，已显式挂起');
-    expect(banner).toContain('带病文档不作为交付件');
+    expect(banner).toContain('导出门禁未通过：存在 3 项未收敛阻断，不影响文档查看与导出（已转人工复核清单）');
     expect(banner).toContain('【数值/事实一致性】');
     expect(banner).toContain('第五章 施工进度计划 / 5.1 总进度计划');
     expect(banner).toContain('完整清单见执行阶段「Agent 最终门禁」');
@@ -109,14 +108,14 @@ describe('C1 挂起清单：banner（warningIssues 置顶条）', () => {
     expect(banner).not.toContain('尾部不应出现在横幅');
   });
 
-  it('语义护栏：横幅不得出现「不阻断交付」旧歧义（挂起=不放行交付）', () => {
+  it('语义护栏：横幅明确「不影响文档查看与导出」（4.50 交付解耦：阻断不再挂起交付）', () => {
     const banner = formatSuspensionBanner(buildSuspensionChecklist(blockers, chapters));
-    expect(banner).not.toContain('不阻断交付');
-    expect(banner).toContain('不作为交付件');
+    expect(banner).toContain('不影响文档查看与导出');
+    expect(banner).not.toContain('不作为交付件');
   });
 });
 
-describe('C1 挂起清单：details（agent-final-gate stage 明细）', () => {
+describe('C1 复核清单：details（agent-final-gate stage 明细）', () => {
   it('逐条全量：含问题原文/修复路径/建议/检测器身份', () => {
     const checklist = buildSuspensionChecklist(blockers, chapters);
     const details = formatSuspensionDetails(checklist);

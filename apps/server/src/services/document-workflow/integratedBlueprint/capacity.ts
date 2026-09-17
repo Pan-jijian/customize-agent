@@ -180,7 +180,9 @@ export function capacityPlanChapterBlocks(blocks: PlannedChapterBlock[], targetW
     let current: PlannedChapterBlock[] = [];
     let currentPoints = 0;
     for (const block of planned) {
-      if (isContainerSectionTitle(block.title)) {
+      // 4.44 C2：气候/特殊时段独立单点块（outline 提取）同为归并屏障——被邻块吸收会复活
+      // 「要点拒写」故障模式（块标题≠要点标题即恢复 H4 要求）
+      if (isContainerSectionTitle(block.title) || isClimateClassPointTitle(block.title)) {
         if (current.length > 0) {
           groups.push(current);
           current = [];
@@ -327,6 +329,17 @@ export function capacityPlanChapterBlocks(blocks: PlannedChapterBlock[], targetW
  * 写作层骨架锁定的工作包 H4（每包 × 三要素），与普通单要点块的结构语义不同 */
 export function isContainerSectionTitle(title: string) {
   return MAJOR_CONTENT_SECTION_RE.test(title) || DIVISION_SECTION_RE.test(title);
+}
+
+/** C2 气候/特殊时段类要点判定（4.44 丰乐镇实机两轮实证：写作模型对「特殊时段/雨季/异常气候」
+ * 类要点系统性拒写 H4——基线轮 2/2 失守，隔离重写带点名反馈仍 4/4 拒写）。此类要点在规划层
+ * 提取为独立单点块，块标题=要点标题（提取见 buildChapterStructureFromBlueprint），同时作为
+ * 容量归并屏障——被邻块吸收会恢复「块标题≠要点标题」的 H4 要求，故障模式复活。 */
+const CLIMATE_CLASS_POINT_TITLE_RE = /^(特殊时段|异常气候|恶劣气候|恶劣天气|极端气候|极端天气|雨季|雨期|冬期|冬季|汛期|台风|高温|寒潮|全天候|节假日施工|夜间施工)/u;
+export function isClimateClassPointTitle(title: string): boolean {
+  // 先剥「编号（含中文数字）+分隔符」前缀再判定（与容器块骨架名同口径，防「3、雨季施工措施」式漏判）
+  const bare = title.replace(/^[一二三四五六七八九十百\d]+[、.．\s:：-]+/u, '').trim();
+  return CLIMATE_CLASS_POINT_TITLE_RE.test(bare);
 }
 
 /** 骨架名去重合并（与 majorConstructionSkeletonNames 同口径的去空白包含比较），并按上限截断 */

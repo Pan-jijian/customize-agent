@@ -11,7 +11,7 @@ type KnowledgeFile = { relativePath: string; chunkCount?: number; indexedAt?: nu
 const listKnowledgeFilesMock = vi.hoisted(() => vi.fn<(projectRoot: string) => KnowledgeFile[]>());
 vi.mock('@/services/knowledge/kbService', () => ({ listKnowledgeFiles: listKnowledgeFilesMock }));
 
-import { agentWorkflowStages, createAgentWorkflowContext, resolveAgentMaterialScope, type AgentMaterialScope } from '@/services/document-workflow/agentWorkflow';
+import { agentWorkflowStages, createAgentWorkflowContext, resolveAgentMaterialScope, scopedMaterialRootsOf, type AgentMaterialScope } from '@/services/document-workflow/agentWorkflow';
 import { arbitrateFactPool } from '@/services/document-workflow/factGovernance';
 import { filterBidDisciplineFacts } from '@/services/document-workflow/utils';
 import type { DocumentFact, DocumentTemplate, ProjectGraph } from '@/services/document-workflow/types';
@@ -24,6 +24,7 @@ const fact = (overrides: Partial<DocumentFact> & { key: string; value: string })
 
 const scopeFixture = (): AgentMaterialScope => ({
   selectedRoots: ['庐江项目'],
+  selectedMaterialRoots: ['庐江项目'],
   selectedFiles: ['庐江项目/招标文件.pdf', '庐江项目/工程量清单.xlsx'],
   totalAvailableFiles: 2,
   ambiguous: false,
@@ -52,6 +53,28 @@ describe('P0-2/P0-3 资料范围解析单点化', () => {
     const context = createAgentWorkflowContext({ template: template({ projectBindings: [{ materialRootPath: '庐江项目' }] }), projectRoot: '/proj', facts: [] });
     expect(context.materialScope.scopeHash).toBe(scope.scopeHash);
     expect(context.materialScope.selectedFiles).toEqual(scope.selectedFiles);
+  });
+});
+
+describe('资料包 ID 交集口径（scopedMaterialRootsOf：范围 root ∩ 文件派生）', () => {
+  it('目录绑定：目录名即包 ID，文件全部承载于该包', () => {
+    expect(scopedMaterialRootsOf(['舒城(2)'], ['舒城(2)/招标文件.pdf', '舒城(2)/图纸/总图.dwg'])).toEqual(['舒城(2)']);
+  });
+
+  it('文件级绑定：「目录/文件」范围路径归一化为首段目录', () => {
+    expect(scopedMaterialRootsOf(['舒城(2)/招标文件.pdf'], ['舒城(2)/招标文件.pdf'])).toEqual(['舒城(2)']);
+  });
+
+  it('根散文件不构成包：交集为空（回退文件白名单口径，宁缺勿错）', () => {
+    expect(scopedMaterialRootsOf(['顶层.pdf'], ['顶层.pdf'])).toEqual([]);
+  });
+
+  it('范围与入选文件不一致时剔除（不锁无文件承载的包）', () => {
+    expect(scopedMaterialRootsOf(['舒城(2)'], ['丰乐镇/a.pdf'])).toEqual([]);
+  });
+
+  it('多包交集：仅保留有入选文件承载的包', () => {
+    expect(scopedMaterialRootsOf(['舒城(2)', '丰乐镇'], ['舒城(2)/a.pdf', '丰乐镇/b.pdf', '其他/c.pdf'])).toEqual(['舒城(2)', '丰乐镇']);
   });
 });
 

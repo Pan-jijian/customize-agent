@@ -193,6 +193,54 @@ describe('splitTenderClauses 条款化（确定性结构切分，不预筛不剔
     expect(trailing.length).toBe(2);
     expect(trailing[1].text).toBe('续表');
   });
+
+  it('假标题容错：折行半句误标 ### 转正文，与跨空行续行拼回完整句（门禁链根因形态）', () => {
+    const clauses = splitTenderClauses([{
+      chapterId: 'tender-requirements',
+      filePath: '招标文件.pdf',
+      score: 1,
+      content: '### 使用时限的电子证书无效，需重新下载电子证书并再次确\n\n认使用时限。',
+    }]);
+    expect(clauses.length).toBe(1);
+    expect(clauses[0].text).toBe('使用时限的电子证书无效，需重新下载电子证书并再次确\n认使用时限。');
+  });
+
+  it('假标题容错：白名单结构标题（第X章/数字编号）仍进 section 上下文', () => {
+    const clauses = splitTenderClauses([{
+      chapterId: 'tender-requirements',
+      filePath: '招标文件.pdf',
+      score: 1,
+      content: '## 第一章 招标公告\n### 1.5合同文件的优先顺序\n3.1 创优目标：确保获得黄山杯。',
+    }]);
+    expect(clauses.length).toBe(1);
+    expect(clauses[0].section).toBe('1.5合同文件的优先顺序');
+    expect(clauses[0].clauseNo).toBe('3.1');
+  });
+
+  it('假标题容错：PDF 页标记保留 section，孤立页码残片跳过不入单元', () => {
+    const clauses = splitTenderClauses([{
+      chapterId: 'tender-requirements',
+      filePath: '招标文件.pdf',
+      score: 1,
+      content: '## PDF 第 2 页\n3.1 创优目标：确保获得黄山杯。\n\n27\n\n3.2 绿色建筑等级要求：达到国标二星级。',
+    }]);
+    expect(clauses.length).toBe(2);
+    expect(clauses[0].section).toBe('PDF 第 2 页');
+    expect(clauses[0].text).toBe('3.1 创优目标：确保获得黄山杯。');
+    expect(clauses[1].text).toBe('3.2 绿色建筑等级要求：达到国标二星级。');
+  });
+
+  it('KV 折行续段：上句未闭合时「名：值」行进续行拼接而非新开单元', () => {
+    const clauses = splitTenderClauses([{
+      chapterId: 'tender-requirements',
+      filePath: '招标文件.pdf',
+      score: 1,
+      content: '2.6 建设规模：本项目总建筑面积约5000平方米，包含配套基础\n设施工程：道路、绿化及管网工程。',
+    }]);
+    expect(clauses.length).toBe(1);
+    expect(clauses[0].clauseNo).toBe('2.6');
+    expect(clauses[0].text).toBe('2.6 建设规模：本项目总建筑面积约5000平方米，包含配套基础\n设施工程：道路、绿化及管网工程。');
+  });
 });
 
 // ═══════════════════════════ L1 逐条判定（每条必出结果） ═══════════════════════════
@@ -343,6 +391,26 @@ describe('judgeTenderClauses 逐条判定（序号严格对齐 + 确定性复核
     expect(result.entries).toEqual([]);
     expect(result.excluded.length).toBe(2);
     expect(result.excluded.every(item => item.reason === 'non_requirement')).toBe(true);
+  });
+
+  it('确定性复核：折行残片（≤10 字、无数字、无约束词）LLM 判为要求仍强制剔除 non_requirement；含数字/约束词短句保留', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValue({
+      results: [
+        { index: 0, isRequirement: true, inScope: true, policy: 'respond', coreTerms: [], category: '其他要求' },
+        { index: 1, isRequirement: true, inScope: true, policy: 'respond', coreTerms: ['黄山杯'], category: '质量创优' },
+        { index: 2, isRequirement: true, inScope: true, policy: 'respond', coreTerms: ['540天'], category: '工期进度' },
+      ],
+    });
+    const result = await judgeTenderClauses([
+      { file: '招标文件.pdf', text: '认使用时限。' },
+      { file: '招标文件.pdf', text: '确保获得黄山杯。' },
+      { file: '招标文件.pdf', text: '工期目标：540天。' },
+    ], {});
+    expect(result.entries.length).toBe(2);
+    expect(result.entries.map(item => item.text)).toEqual(['确保获得黄山杯。', '工期目标：540天。']);
+    expect(result.excluded.length).toBe(1);
+    expect(result.excluded[0].reason).toBe('non_requirement');
+    expect(result.excluded[0].text).toBe('认使用时限。');
   });
 });
 

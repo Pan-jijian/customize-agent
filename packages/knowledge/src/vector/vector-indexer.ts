@@ -1,5 +1,6 @@
 import type { EmbeddingProvider } from '../embedding/embedding-provider.js';
 import type { StoredChunk } from '../core/index-state-store.js';
+import { materialRootOf } from '../core/material-pack.js';
 import type { VectorDocument, VectorStoreInterface } from './types.js';
 
 /** 向量索引结果 */
@@ -125,6 +126,7 @@ export class VectorIndexer {
       metadata: {
         sqlite_rowid: chunk.rowid,
         file_path: chunk.relativePath,
+        material_root: chunk.materialRoot ?? materialRootOf(chunk.relativePath),
         chunk_index: chunk.chunkIndex,
         category: chunk.category,
         format: chunk.format,

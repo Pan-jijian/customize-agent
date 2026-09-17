@@ -339,6 +339,16 @@ describe('B3 resourceConsistencyIssues 模式1 正文峰值互查', () => {
     const issues = resourceConsistencyIssues('劳动力投入约220人。劳动力投入约80人。');
     expectBlockIssue(issues, '劳动力数据矛盾');
   });
+  it('B3 r7 #3 误报收口：「景观与绿化工程阶段」不判为工种口径（工程词≠绿化工）', () => {
+    // r6 实机阻断：subjectWindow 内「绿化工」⊂「绿化工程」子串误匹配→ 262 被误判 trade
+    // 与「绿化工班组57人」同工种互查报假矛盾；负向前瞻排除「X工+程」后回落 peak 口径隔离
+    const issues = resourceConsistencyIssues('景观与绿化工程阶段保持262人。劳动力投入绿化工班组57人。');
+    expect(issues.filter(issue => issue.message.includes('劳动力数据矛盾'))).toEqual([]);
+  });
+  it('B3 r7 #3 反例：「绿化工班组」同工种互查仍报（负向前瞻不过宽）', () => {
+    const issues = resourceConsistencyIssues('劳动力投入绿化工57人。劳动力投入绿化工90人。');
+    expect(issues.some(issue => issue.message.includes('劳动力数据矛盾'))).toBe(true);
+  });
 });
 
 describe('B4 模式2 多表峰值互查', () => {
@@ -1261,6 +1271,27 @@ describe('E6 selfUnderminingCandidateIssues 自伤表述候选', () => {
     expectBlockIssue(issues, '自伤表述候选');
     expect(issues[0].message).toContain('本工程不进行分包');
   });
+  it('E6 4.44 #31 考核管理句豁免：月度评分-绩效扣减-调离（恒值语义下不召回）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '考核实行月度评分，质量记录缺失或整改超时的责任人当月绩效扣减，连续两次考核不合格的调离质量关键岗位。';
+    expect(await selfUnderminingCandidateIssues(md)).toEqual([]);
+  });
+  it('E6 r6 招标条款假设句豁免：如…缺乏…发包人有权…我方应（恒值语义下不召回）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '如本工程范围内部分实施内容缺乏成文标准或规范，发包人（或其委托的第三方）有权在合理期限内（一般不超过60日历天）提出书面技术要求，我方应据此提交具体的实施方法，报经发包人审核认可后执行。';
+    expect(await selfUnderminingCandidateIssues(md)).toEqual([]);
+  });
+  it('E6 4.44 #31 考核管理句变体豁免：劳务考核-扣款/清退退场', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '劳务考核评分中质量记录缺失的责任班组当月绩效扣款，连续两次考核不合格的清退退场。';
+    expect(await selfUnderminingCandidateIssues(md)).toEqual([]);
+  });
+  it('E6 4.44 #31 无过豁免：含「评分」的真伤句（缺口/待补充）仍召回', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '评分指标存在缺口尚未明确，专项方案待后续补充。';
+    const issues = await selfUnderminingCandidateIssues(md);
+    expectBlockIssue(issues, '自伤表述候选');
+  });
   it('E6 重复句去重', async () => {
     const md = '专项设计文件尚未完成，相关内容待后续补充。\n专项设计文件尚未完成，相关内容待后续补充。';
     expect(await selfUnderminingCandidateIssues(md)).toHaveLength(1);
@@ -1291,6 +1322,31 @@ describe('E6 selfUnderminingCandidateIssues 自伤表述候选', () => {
   it('E6 4.32 无整改动作的缺失自述仍召回（豁免未过宽）', async () => {
     vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
     const md = '本工程竣工资料缺失较多，专项验收尚未完成。';
+    expect(await selfUnderminingCandidateIssues(md)).toHaveLength(1);
+  });
+  it('E6 r7 #5 人员准入管控句豁免：凡…未…人员…不得进入（恒值语义下不召回）', async () => {
+    // r6 实机阻断：「凡未完成实名登记、未纳入工伤保险覆盖范围的人员，一律不得进入作业面。」
+    // 被 bge 召回归入自伤候选；「凡…未」是管控条件枚举、「不得进入」是准入规则（实名制管理
+    // 措施标准表述），非投标短板自述——分支⑧豁免
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '凡未完成实名登记、未纳入工伤保险覆盖范围的人员，一律不得进入作业面。';
+    expect(await selfUnderminingCandidateIssues(md)).toEqual([]);
+  });
+  it('E6 r7 #5 反例：无管控条件结构的缺失自述仍召回（豁免未过宽）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '本工程尚未完成实名登记信息核验。';
+    expect(await selfUnderminingCandidateIssues(md)).toHaveLength(1);
+  });
+  it('E6 r18 B1 绩效追责句豁免：缺失/不合格…扣减绩效并责令限期整改（恒值语义下不召回）', async () => {
+    // r18 实机 B1 归因：绩效追责句与⑥考核-处罚同构（缺失/不合格是触发条件、扣减+整改是管理措施），
+    // 动作表原漏「扣减」致该分支未命中——并入后豁免（真伤护栏复验见下条）
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '当月出现死株未按期补植、回填压实度检测不合格或养护记录缺失的，按责任书约定扣减班组绩效并责令限期整改。';
+    expect(await selfUnderminingCandidateIssues(md)).toEqual([]);
+  });
+  it('E6 r18 B1 反例：无动作词+收口链的缺失自述仍召回（动作表扩围未过宽）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '养护记录缺失的责任班组未按期整改。';
     expect(await selfUnderminingCandidateIssues(md)).toHaveLength(1);
   });
 });

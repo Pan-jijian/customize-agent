@@ -125,7 +125,6 @@ export async function generateDocumentDraft(input: { templateId: string; require
   return measureGenerationStep(session.planning.generationDiagnostics, 'phase:finalize', () => finalizeGeneration({
     chapterDrafts: session.chapterLoop.chapterDraftsFinal, chapterDraftsByOrder: session.understanding.chapterDraftsByOrder, chapterGenerationStagesByOrder: session.understanding.chapterGenerationStagesByOrder,
     chapterGenerationStages: session.understanding.chapterGenerationStages, effectiveChapters: session.planning.effectiveChapters, template: session.prepare.template, allEvidence: session.understanding.allEvidence,
-    projectMaterialScope: session.understanding.projectMaterialScope,
     progressStages: session.global.progressStages,
     documentSpec: session.prepare.documentSpec, projectMaterialProfile: session.prepare.projectMaterialProfile, projectMaterialSummary: session.prepare.projectMaterialSummary,
     domainProfile: session.prepare.domainProfile, documentBudget: session.planning.documentBudget, promptTexts: session.prepare.promptTexts, reviewPromptTexts: session.prepare.reviewPromptTexts, repairPromptTexts: session.prepare.repairPromptTexts,

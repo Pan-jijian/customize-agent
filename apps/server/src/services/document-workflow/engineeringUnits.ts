@@ -10,6 +10,9 @@ export function normalizeEngineeringMeasure(value: string) {
   return value
     .replace(FULL_WIDTH_CHARS, toHalfWidthChar)
     .replace(/\s+/gu, '')
+    // 破折号/连字符族归一（r9 #12 根治）：编号「GB51192—2016」（em/en dash、不换行连字符）
+    // 与「GB51192-2016」等价，双端归一后命中，消除同编号跨形态假缺口
+    .replace(/[—–‑﹣]/gu, '-')
     .replace(/[×X＊*]/gu, 'x')
     .replace(/[％]/gu, '%')
     .replace(/‰/gu, 'permille')

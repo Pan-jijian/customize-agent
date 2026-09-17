@@ -667,12 +667,12 @@ describe('H1 公共资源交易监督管理替换', () => {
   });
 });
 
-describe('H2 数据行留白清洗（见图纸类 forbiddenTexts，舒城第二轮实测）', () => {
+describe('H2 数据行/正文留白清洗（见图纸类 forbiddenTexts，舒城第二轮实测 + r6 正文级同口径收口）', () => {
   it('H2 表格行「详见图纸」→「详见施工图设计文件」', () => {
     const result = fixForbiddenConfigurationTerms('| 屋面工程 | 檐口高度、层数 | 详见图纸 |');
     expect(result.fixedCount).toBe(1);
     expect(result.markdown).toBe('| 屋面工程 | 檐口高度、层数 | 详见施工图设计文件 |');
-    expect(result.details).toEqual(['数据行「（详）见图纸」留白 1 处']);
+    expect(result.details).toEqual(['正文「（详）见图纸」留白改写 1 处']);
   });
   it('H2 表格行「详见设计图纸」→「详见施工图设计文件」', () => {
     const result = fixForbiddenConfigurationTerms('| 节点做法 | 详见设计图纸 |');
@@ -684,12 +684,12 @@ describe('H2 数据行留白清洗（见图纸类 forbiddenTexts，舒城第二�
     expect(result.fixedCount).toBe(1);
     expect(result.markdown).toBe('| 构造做法 | 按施工图设计文件施工 |');
   });
-  it('H2 非表格正文留白不动（分层：正文由 qualityRules 打回 LLM 重写，不在此掩盖）', () => {
+  it('H2 正文「详见图纸/按图纸」同口径清洗（r6 实机证伪分层假设：正文留白直坠终检 blocker）', () => {
     const md = '建筑物檐口高度、层数详见图纸，基础做法按图纸施工。';
     const result = fixForbiddenConfigurationTerms(md);
-    expect(result.markdown).toBe(md);
-    expect(result.fixedCount).toBe(0);
-    expect(result.details).toEqual([]);
+    expect(result.fixedCount).toBe(2);
+    expect(result.markdown).toBe('建筑物檐口高度、层数详见施工图设计文件，基础做法按施工图设计文件施工。');
+    expect(result.details).toEqual(['正文「按图纸」留白改写 1 处', '正文「（详）见图纸」留白改写 1 处']);
   });
   it('H2 合法交叉引用豁免（见图纸目录/详见图纸清单）', () => {
     const md = '| 资料名称 | 见图纸目录 |\n| 附件 | 详见图纸清单 |';
@@ -704,7 +704,7 @@ describe('H2 数据行留白清洗（见图纸类 forbiddenTexts，舒城第二�
     const lines = result.markdown.split('\n');
     expect(lines[0]).toBe('| 檐口高度 | 详见施工图设计文件 | 层数 | 详见施工图设计文件 |');
     expect(lines[1]).toBe('| 基础 | 按施工图设计文件 |');
-    expect(result.details).toEqual(['数据行「（详）见图纸」留白 2 处', '数据行「按图纸」留白 1 处']);
+    expect(result.details).toEqual(['正文「按图纸」留白改写 1 处', '正文「（详）见图纸」留白改写 2 处']);
   });
   it('H2 幂等：清洗后再次执行不动', () => {
     const once = fixForbiddenConfigurationTerms('| 檐口高度 | 详见图纸 |');

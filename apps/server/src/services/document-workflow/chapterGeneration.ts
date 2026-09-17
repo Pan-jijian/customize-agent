@@ -6,7 +6,7 @@ import { buildChapterEvidencePool, buildEvidenceBundle, cleanEvidenceText, evide
 import { extractNumericTokens, reconcileContentNumbers, renderNumericFeedback } from './numericalConsistency';
 import { FORMAL_WRITING_RULES, SECTION_GENERATION_SAFETY_RULES, docSystemPrefix, removeUnwantedDrawingImages, sanitizeFormalMarkdown, writerSystemPrefix } from './markdownComposer';
 import { callDocumentLlm, callDocumentLlmJson, contextLayerChars, getDocumentLlmMaxConcurrency } from './llmClient';
-import { dedupeRepeatedSubsections, findDuplicateH4Titles, findExtraneousBlockTitles, normalizeSubsectionTitleForDedup, stringifyFactValue, stripExtraneousBlockHeadings, throwIfAborted } from './utils';
+import { alignSimilarHeadingsToPlan, dedupeRepeatedSubsections, findDuplicateH4Titles, findExtraneousBlockTitles, normalizeSubsectionTitleForDedup, stringifyFactValue, stripExtraneousBlockHeadings, throwIfAborted } from './utils';
 import { measureGenerationStep } from './rolePipeline';
 import { normalizePlannedSections, professionalSectionTaskCard, sectionTitleEquivalent } from './promptRuleExtraction';
 import { tablePlansPrompt, unassignedSectionTablePlans } from './constructionOrgTablePlan';
@@ -18,6 +18,8 @@ import type { BlueprintChapter, BlueprintData } from './integratedBlueprint';
 import { criticalSectionBlockerMinChars, ensureGroupTertiaryShell, ensureTertiarySectionShell, isCriticalDeepSection, matchBlockSkeletonNames, mergeDuplicateWorkPackageSubsections, parseMajorConstructionPackages, sectionContentBody, sectionStructureIssue, stripMarkdownTableBlocks, workPackageCrossSectionIssue, workPackageSkeletonPrompt, workPackageSkeletonTitles } from './chapterPostProcessing';
 // V2 批1 结构完整性单源（扫描/清理/反馈/终检包装四件套）：写时块质检与小节质检共用，检测定位=清理定位
 import { cleanStructureDefects, scanStructureDefects, structureIntegrityFeedback } from './structureIntegrityRules';
+// 4.44 写时表名混表头归一（门禁链源头根治）：表题独立成行后再进入结构扫描/清理（判据与 scanTables 同源）
+import { normalizeTableTitleInHeaders } from './tableRepairHelpers';
 import { HAS_QUANTIFIED_VALUE_RE, PRECISE_TOKEN_RE, QUANTIFIED_FACT_RE } from './parameterPatterns';
 import { det } from './detectorFixerRegistry';
 import { BLOCK_FACT_DENSITY_PER1000, assessBlockFactDensity, attributionBlockingOf, backstageFallbackHits, requiresAttributionQuantification, scanAttributionQuantification, scanBlockTemplating, templatingBlockingOf, type AttributionQuantificationVerdict, type BlockTemplatingVerdict } from './blockQualityExecutors';
@@ -1063,6 +1065,12 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
   // blocking 类（截断/空节/表名混入表头/空表/标点断裂）折入 structureIssue 拦截重写；
   // 4.36 B4：结构缺陷统一严格拒绝并沿 lastError 反馈重写——历史「宽松门降级验收」为死代码残骸
   // （allowLenientStructureGate 参数无任何调用方传入，且 4.19 要素硬门要求该分支永不产出放行），已整体删除
+  // 4.44 写时表名混表头归一（先于结构扫描/清理，与块级写时同源同口径）：表名挪出为独立表题行
+  const titleNormalizedSection = normalizeTableTitleInHeaders(finalContent, input.chapter.tablePlans);
+  if (titleNormalizedSection.normalized > 0) {
+    finalContent = titleNormalizedSection.markdown;
+    if (input.diagnostics) input.diagnostics.llm.lastInfo = `小节表格表题归一：${input.sectionTitle}（${titleNormalizedSection.normalized} 处表名混入表头）`;
+  }
   const structureCleaned = cleanStructureDefects(finalContent);
   if (structureCleaned.cleaned.length > 0) {
     finalContent = structureCleaned.markdown;
@@ -1168,6 +1176,9 @@ export interface PlannedChapterContentInput {
   onSectionProgress?: (event: { completed: number; total: number; sectionTitle?: string; phase: 'start' | 'complete' | 'retry'; partialSections?: Array<string | undefined> }) => void;
   diagnostics?: DocumentGenerationDiagnostics;
   signal?: AbortSignal;
+  /** C3 隔离重写定向反馈（可选）：上一轮该块失败原因原文——单块重写 attempt=0 即注入，
+   * 避免从零重写复现同一漏点（默认轮仅在 attempt≥1 注入缺陷反馈） */
+  initialFeedback?: string;
 }
 
 /** C3 块级失败隔离结果：部分块失败时返回已成功块 + 失败块清单，由上层只重试失败块，
@@ -1175,8 +1186,8 @@ export interface PlannedChapterContentInput {
 export interface PlannedChapterContentResult {
   /** 按 structure.blocks 顺序的块成稿正文（失败块为 undefined） */
   sections: Array<string | undefined>;
-  /** 成稿失败的主题块（含原 index），供上层块级隔离重试 */
-  failedBlocks: Array<{ index: number; block: PlannedChapterBlock }>;
+  /** 成稿失败的主题块（含原 index 与缺陷反馈原文），供上层 C3 块级隔离重试定向重写 */
+  failedBlocks: Array<{ index: number; block: PlannedChapterBlock; retryFeedback?: string }>;
   /** 全部块成稿成功 */
   allSucceeded: boolean;
   /** 成功块拼接的章节 Markdown（含章标题外壳；失败块缺失时不包含该块正文） */
@@ -1300,6 +1311,9 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
   // 且只保留块相关命中片段（onlyRankBoosted）——块级 L3 从 7k-26k 压缩到 1k 量级
   const blockEvidenceCeiling = tuningProfile().blockEvidenceChars || 1000;
   const blockEvidenceCeilingChars = Number.isFinite(blockEvidenceCeiling) && blockEvidenceCeiling > 0 ? Math.floor(blockEvidenceCeiling) : 1000;
+  // C3 隔离重写定向反馈收集（key=块 index）：块失败时把缺陷反馈原文交给上层——
+  // 单块重写（stageChapterLoop.retryFailedBlocks）attempt=0 注入 initialFeedback，避免从零复现同一漏点
+  const blockRetryFeedbacks = new Map<number, string>();
   const writeBlock = async (block: (typeof blocks)[number], index: number): Promise<string | undefined> => {
     // 彻底修复同名结构：与主题块标题同名的 H4 要点由 H3 外壳直接承担，不再要求输出同名 H4
     // （历史缺陷：H3/H4 同名诱发模型把同名 H4 重复展开多轮 → 重复质检两轮失败 → dedupe 兜底字数不足 → 章阻断）
@@ -1457,10 +1471,14 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     // 2.6 补写上限收紧：块级写作/反馈重试循环上限显式化（固化为 2，与既有行为一致）
     // ——上限超出即判失败转上层紧凑备用（原 DOCUMENT_BLOCK_MAX_ATTEMPTS 已固化删除）
     const blockMaxAttempts = 2;
-    for (let attempt = 0; attempt < blockMaxAttempts; attempt += 1) {
-      // 第二轮反馈针对性列出缺失/重复 H4 标题，让重试有的放矢，避免通用反馈反复缺失要点后整章失败
-      const feedback = attempt === 0 ? '' : [
-        '【上一轮未通过质检】',
+    // 质检缺陷是否出现过（供失败块隔离重写反馈收集判定：纯异常失败不携带"质检未通过"话术）
+    let sawQcDefect = false;
+    // 块缺陷反馈渲染（第二轮重试与 C3 隔离重写共用）：缺失/重复/清单外标题点名 + 各执行器定向反馈；
+    // includeCharFeedback 仅第二轮启用（此时已知上一轮字数；隔离重写为全新调用、字数反馈无锚点）。
+    // 隔离重写携带反馈的动机（4.44 丰乐镇工期章实机实证）：块两轮漏写要点后，无反馈的单块重写
+    // 从零生成极易复现同一漏点，空转最后一轮机会
+    const buildBlockDefectFeedback = (includeCharFeedback: boolean): string => [
+      '【上一轮未通过质检】',
         lastMissing.length ? `缺失 H4 要点标题：${lastMissing.join('、')}。必须逐点补齐以上 H4 标题并展开正式正文，H4 标题与给定标题完全一致。` : '',
         lastDuplicates.length ? `重复展开的 H4 要点标题：${lastDuplicates.join('、')}。同一小节内相同要点被重复展开多轮，必须只保留一轮完整展开，其余重复小节连同标题整体删除，不得以换编号方式重复同一内容。` : '',
         lastExtraneous.length ? `清单外标题（属于本章其他小节或不在本节要点清单内）：${lastExtraneous.join('、')}。这些标题连同其正文整块删除，本节只允许输出上面清单中的 H4 标题与「${block.title}」H3 标题。` : '',
@@ -1484,14 +1502,21 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         // A22 缺口数字反馈（丰乐镇第九轮）：只报“不少于目标字数”不报缺口时模型输出不升反降
         //（第八轮实测 1742→1377 字）；带当前字数与缺口数字的反馈比笼统指令收敛有效得多。
         // 块合同区间化：低于下限报缺口数字；越上限由 lastOverProduceFeedback 携带压缩指令
-        lastChars > 0
-          ? (lastChars < Math.floor(block.targetWords * 0.85)
-            ? `当前输出仅 ${lastChars} 字，距篇幅下限 ${Math.floor(block.targetWords * 0.85)} 字还缺 ${Math.floor(block.targetWords * 0.85) - lastChars} 字，必须逐点展开补足（区间上限 ${Math.ceil(block.targetWords * 1.15)} 字）。`
-            : (lastChars > Math.ceil(block.targetWords * 1.15)
-              ? ''
-              : `当前输出 ${lastChars} 字（本节合同区间 ${Math.floor(block.targetWords * 0.85)}~${Math.ceil(block.targetWords * 1.15)} 字），保持篇幅并修正上述缺陷。`))
-          : `本节篇幅合同区间为 ${Math.floor(block.targetWords * 0.85)}~${Math.ceil(block.targetWords * 1.15)} 字（目标 ${block.targetWords} 字）。`,
-      ].filter(Boolean).join('');
+        includeCharFeedback
+          ? (lastChars > 0
+            ? (lastChars < Math.floor(block.targetWords * 0.85)
+              ? `当前输出仅 ${lastChars} 字，距篇幅下限 ${Math.floor(block.targetWords * 0.85)} 字还缺 ${Math.floor(block.targetWords * 0.85) - lastChars} 字，必须逐点展开补足（区间上限 ${Math.ceil(block.targetWords * 1.15)} 字）。`
+              : (lastChars > Math.ceil(block.targetWords * 1.15)
+                ? ''
+                : `当前输出 ${lastChars} 字（本节合同区间 ${Math.floor(block.targetWords * 0.85)}~${Math.ceil(block.targetWords * 1.15)} 字），保持篇幅并修正上述缺陷。`))
+            : `本节篇幅合同区间为 ${Math.floor(block.targetWords * 0.85)}~${Math.ceil(block.targetWords * 1.15)} 字（目标 ${block.targetWords} 字）。`)
+          : '',
+    ].filter(Boolean).join('');
+    for (let attempt = 0; attempt < blockMaxAttempts; attempt += 1) {
+      // 第二轮反馈针对性列出缺失/重复 H4 标题，让重试有的放矢，避免通用反馈反复缺失要点后整章失败；
+      // C3 隔离重写（initialFeedback 注入）首轮即携带上一轮缺陷反馈——隔离重写是该块最后一次成稿
+      // 机会（同标准不降标），从零重写不携带漏点反馈时极易复现同一失败模式（4.44 丰乐镇工期章实证）
+      const feedback = attempt === 0 ? (input.initialFeedback || '') : buildBlockDefectFeedback(true);
       try {
         // 2.6 串行链观测拆解：块内每次写作调用单独记 measure（含 attempt 序），
         // 定位 chapter-planned-block-draft 总段内 写作/重试 各环节的耗时分布（观测恒开，只记数据）
@@ -1544,6 +1569,16 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         // 主题块必须挂 H3 块标题：模型未输出 H3 时强制补外壳，避免全部 H4 要点直接挂在章标题下
         // 被 normalizeFormalChapterHeadings 归并到首个小节（历史缺陷：21 个 H4 挤在 2.1 一个 H3 下）
         let withBlockShell = /^###\s+\S+/mu.test(normalized) ? normalized : `### ${block.title}\n\n${normalized}`;
+        // r7 防御纵深（主根因修复在 sanitizeFormalMarkdown 出口清洗，见 markdownComposer）：H4 要点标题
+        // 近似对齐（写层质检前确定性清洗）——模型对生僻/书面化规划标题做单字/双字同义微调
+        // （实测：「季候条件影响与工期应对」被改写为「气候条件影响与工期应对」）时，行级精确包含匹配
+        // 会误判已写要点缺失 → 重试 + 隔离重写空转 → 章阻断；对齐先于缺失判定执行，修正后标题与规划
+        // 同源（缺失判定「完全一致」口径不放松）；防误容：数字/季节气象字差异不容忍
+        const headingAlignment = alignSimilarHeadingsToPlan(withBlockShell, sectionTitles);
+        if (headingAlignment.aligned.length > 0) {
+          withBlockShell = headingAlignment.markdown;
+          if (input.diagnostics) input.diagnostics.llm.lastInfo = `块要点标题近似对齐：${block.title}（${headingAlignment.aligned.join('、')}）`;
+        }
         // 骨架锁定质检（稳定版）：关键小节块先确定性清洗（表格剥离），再做骨架工作包标题齐全校验
         let skeletonMissing: string[] = [];
         if (keySectionKind) {
@@ -1554,18 +1589,27 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         }
         // V2 批1 写时七查（块成稿输出即检）：cleanable 类结构缺陷确定性就地清理（零内容生成，与终检清理器
         // 同一扫描源）——清理先于字数/数值/结构判定，防重复行/孤立编号凑字数与缺陷进入下游链条；
-        // blocking 类（截断/空节/表名混入表头/空表/标点断裂）照 numericBlocking 首轮模式：attempt 0
-        // 阻断并把缺陷原文反馈二轮定向重写，最后一轮放行交终检链兜底（防块级无限重试）
+        // 4.44 门禁链源头根治：表名混表头先经写时确定性归一（normalizeTableTitleInHeaders：表题独立成行+
+        // 规划字段名归位）在进入扫描前消灭；残余 blocking 类（截断/空节/空表/标点断裂）任何轮次一律
+        // 阻断——末轮仍残留即块失败 → C3 块级隔离重试（同标准）→ 仍失败即章阻断、文档显式失败。
+        //（历史「最后一轮放行交终检链兜底」为虚构通道：终检仅报告阻断、无修复轮锚定 structure-integrity，
+        // 是 4.43 截断/表名混表头带病成稿的直接缺口；防块级无限重试由 blockMaxAttempts=2 上限保证）
+        const titleNormalizedBlock = normalizeTableTitleInHeaders(withBlockShell, input.chapter.tablePlans);
+        if (titleNormalizedBlock.normalized > 0) {
+          withBlockShell = titleNormalizedBlock.markdown;
+          if (input.diagnostics) input.diagnostics.llm.lastInfo = `块表格表题归一：${block.title}（${titleNormalizedBlock.normalized} 处表名混入表头）`;
+        }
         const structureCleaned = cleanStructureDefects(withBlockShell);
         if (structureCleaned.cleaned.length > 0) {
           withBlockShell = structureCleaned.markdown;
           if (input.diagnostics) input.diagnostics.llm.lastInfo = `块结构确定性清理：${block.title}（${structureCleaned.cleaned.length} 项）`;
         }
         const blockStructureScan = scanStructureDefects(withBlockShell);
-        const structureBlocking = attempt === 0 && blockStructureScan.blocking.length > 0;
+        // 4.44：结构 blocking 不再限 attempt 0——与 4.40 超产「任何轮次一律阻断」同契约
+        const structureBlocking = blockStructureScan.blocking.length > 0;
         if (structureBlocking) {
           lastStructureFeedback = structureIntegrityFeedback(blockStructureScan, block.title) || '';
-          console.error(`[gen][block-qc] 首轮结构完整性阻断（${blockStructureScan.blocking.length} 处）: ${block.title}: ${blockStructureScan.blocking.slice(0, 3).map(defect => defect.message).join(' / ')}`);
+          console.error(`[gen][block-qc] 结构完整性阻断 attempt=${attempt}（${blockStructureScan.blocking.length} 处）: ${block.title}: ${blockStructureScan.blocking.slice(0, 3).map(defect => defect.message).join(' / ')}`);
         }
         const chars = documentTextLength(withBlockShell);
         lastChars = chars;
@@ -1579,13 +1623,17 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         if (numericReconciliation.mismatched.length > 0 && input.diagnostics) {
           input.diagnostics.llm.lastInfo = `数值核验：${block.title} 发现 ${numericReconciliation.mismatched.length} 处疑似错误数值（${numericReconciliation.mismatched.map(item => `${item.found}→${item.expected}`).join('、')}）`;
         }
-        // 稳定版：骨架小缺口豁免阻断（缺口 ≤2 个包时交全卷修复链 enforceWorkPackageSkeletons 锚点直连补写兜底，
-        // 补 1-2 个包成功率高）——历史缺陷：差 1-2 个包导致整块重试耗尽 → 章失败 → 修复链根本没机会跑；
-        // 缺口 >2 仍阻断（骨架大面积缺失说明写作未遵循骨架要求，重试有价值）
-        if (skeletonMissing.length > 0 && skeletonMissing.length <= 2) {
-          console.error(`[gen][block-qc] 骨架小缺口豁免（交修复链兜底 ${skeletonMissing.length} 个）: ${block.title}: ${skeletonMissing.join('、')}`);
+        // 骨架缺口分级（4.50.x 实战修正）：首轮 >2 阻断重试（骨架大面积缺失说明写作未遵循骨架要求，重试有价值），
+        // 末轮（attempt≥1）一律放行——丰乐镇 09-17 实机实证：清单兜底骨架（资料贫瘠项目的清单行名）模型存在
+        // 系统性不写，主要施工内容块 3 次尝试缺同 3 个、道路排水与景观分区施工块 2 次缺同 5 个（LLM 调用零失败、
+        // failures=0 retries=0，纯质检判定）——全轮硬阻断 = 块死 → 章死 → 整章剔除交付（含已成功块，损失远大于缺口本身）；
+        // 缺口 ≤2 任何轮次豁免（历史既有行为）；末轮放行照数值核验「首轮阻断、二轮放行」既有模式，缺失交全卷
+        // 修复链 enforceWorkPackageSkeletons 锚点直连补写与终检结构扫描兜底（复核清单不静默）
+        if (skeletonMissing.length > 0) {
+          const skeletonHoldBack = attempt === 0 && skeletonMissing.length > 2;
+          console.error(`[gen][block-qc] 骨架缺口 ${skeletonMissing.length} 个 attempt=${attempt}（${skeletonHoldBack ? '阻断重试' : '放行交修复链'}）: ${block.title}: ${skeletonMissing.join('、')}`);
         }
-        const skeletonMissingBlocking = skeletonMissing.length <= 2 ? [] : skeletonMissing;
+        const skeletonMissingBlocking = attempt === 0 && skeletonMissing.length > 2 ? skeletonMissing : [];
         // 方案 2.2 ③ 模板化执行器（首轮模式）：套话句占比 >10%（与终检 fillerDensityReport 达标线同源，
         // filler=semantic||vague 同口径）或模糊句式 ≥3 处/块即阻断重试并反馈命中句原文（定向重写）；
         // 二轮放行交终检链兜底（照 numericBlocking 首轮模式）。
@@ -1689,6 +1737,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         lastMissing = missing;
         lastDuplicates = duplicates;
         lastExtraneous = extraneous;
+        sawQcDefect = true;
         // P5 重写保护：数值核验反馈存入下一轮 feedback（错误修正 + 正确保留清单）
         lastNumericFeedback = renderNumericFeedback(numericReconciliation);
         // WS3 工序表达形式反馈：指定形式未落地（含未见明确表达）时定向提示二轮重写
@@ -1717,7 +1766,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         // 结构性重复/清单外骨架由代码兜底，避免内容合格的块整块作废 → 整章降级 → 字数雪崩。
         // 第五次回归实证：首轮仅因清单外 H4（模型自由发挥/标题微调）不达标（4083 字达标块仍失败），
         // 首轮兜底删后字数达标即通过；二轮同样兜底（原只 attempt===1，二轮删后字数不足 → 块死亡 → 章失败）。
-        // V2 批1：结构缺陷首轮阻断时禁用本修复通道（否则未修复的截断/空节会被字数达标直接放行，破坏首轮重试）
+        // V2 批1：结构缺陷阻断时禁用本修复通道（任何轮次——否则未修复的截断/空节会被字数达标直接放行，破坏重试）
         // 方案 2.2 执行器同步排除：内容质量阻断（数值/模板化/密度/归因/格式）不得被标题层修复通道放行——
         // 修复动作（去重/剥标题）不解决内容质量问题，放行会架空「写作时阻断」（照 V2 批1 structureBlocking 先例）
         if (missing.length === 0 && !structureBlocking && !numericBlocking && !fillerBlocking && !densityBlocking && !attributionBlocking && !formatBlocking) {
@@ -1743,6 +1792,8 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         if (input.diagnostics) input.diagnostics.llm.lastError = error instanceof Error ? error.message : String(error);
       }
     }
+    // C3 隔离重写反馈收集：质检判定出现过缺陷才携带（纯异常失败不套"质检未通过"话术）
+    if (sawQcDefect) blockRetryFeedbacks.set(index, buildBlockDefectFeedback(false));
     // （原「自愈拆半 + salvage 逐点兜底」已删除：拆半在写作层之后改结构——半块重设预算使父块合同失效，
     //  与写作、检测、修复三方口径互相冲突；容量规划已在规划层一次成型保证块预算可写性。
     //  块两次尝试仍越出字数合同 → 块失败 → 上层隔离重试 → 仍失败即章阻断、文档显式失败：零降级，宁缺毋假）
@@ -1765,9 +1816,11 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     const batch = blocks.slice(offset, offset + concurrency);
     await Promise.all(batch.map((block, index) => runBlock(block, offset + index)));
   }
-  if (results.every(content => !content)) return undefined;
+  // C3 全失败也返回隔离清单（历史缺陷：全块失败早退返回 undefined → stageChapterLoop 的
+  // plannedFirst 为 falsy → C3 块级隔离重试被整体跳过 → 章直接阻断；4.44 丰乐镇实机实测：
+  // 工期章 2 块全失败因此失去隔离重写机会——失败块清单照常返回，由上层决定隔离重写或章阻断）
   const failedBlocks = blocks
-    .map((block, index) => ({ index, block }))
+    .map((block, index) => ({ index, block, retryFeedback: blockRetryFeedbacks.get(index) }))
     .filter(({ index }) => !results[index]);
   // 相邻同标题块 H3 外壳合并（防御性）：容量规划归并保序拼接时若相邻块标题归一化同名，
   // 剥离后块开头的同标题 H3（内容续接同一小节），目录不出现重复小节
@@ -1788,7 +1841,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
   if (failedBlocks.length === 0) return { sections: results, failedBlocks, allSucceeded: true, markdown };
   // C3 块级失败隔离：部分块失败时返回已成功块与失败块清单，由上层只重试失败块，不再整章降级
   if (input.diagnostics && failedBlocks.length > 0) {
-    input.diagnostics.llm.lastError = `规划块部分失败：${failedBlocks.map(({ block }) => block.title).join('、')}`;
+    input.diagnostics.llm.lastError = `规划块${failedBlocks.length === blocks.length ? '全部' : '部分'}失败：${failedBlocks.map(({ block }) => block.title).join('、')}`;
   }
   return { sections: results, failedBlocks, allSucceeded: false, markdown };
 }

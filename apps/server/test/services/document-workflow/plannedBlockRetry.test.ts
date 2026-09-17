@@ -140,11 +140,14 @@ describe('buildPlannedChapterContent（块字数分层验收 + 结构硬门 + �
   });
 
   it('首轮严重超产（>1.15×）→ 二轮携压缩反馈重写；二轮仍超产 → 块失败（零降级）', async () => {
-    // 860 字 vs 500（1.72×）两轮不变：超产侧任何轮次阻断——二轮仍超产 → 块失败 → 返回 undefined
-    //（单块章全失败 → 上层章阻断、文档显式失败）；多块章的失败块隔离重试由 stageChapterLoop.retryFailedBlocks 处理
+    // 860 字 vs 500（1.72×）两轮不变：超产侧任何轮次阻断——二轮仍超产 → 块失败 → 返回失败块隔离清单
+    //（单块章全失败同样返回清单，由上层 C3 隔离重写或章阻断；历史缺陷：全失败早退返回 undefined
+    // 使 C3 被跳过，4.44 实机工期章 2 块全失败实证）
     llmMock.mockResolvedValue(passingContent([H4A, H4B, H4C, H4D], 200));
     const result = await buildPlannedChapterContent(makeInput(), makeStructure());
-    expect(result).toBeUndefined();
+    expect(result?.allSucceeded).toBe(false);
+    expect(result?.failedBlocks).toHaveLength(1);
+    expect(result?.sections[0]).toBeUndefined();
     expect(llmMock).toHaveBeenCalledTimes(2);
     expect(llmMock.mock.calls[1][1]).toContain('【上一轮篇幅超限】');
   });
@@ -255,15 +258,55 @@ describe('buildPlannedChapterContent（块字数分层验收 + 结构硬门 + �
     expect(result?.markdown).toContain('编制说明与工程概况');
   });
 
-  it('要点缺失两轮仍不齐 → 结构硬门阻断（单块章全失败返回 undefined → 上层章阻断）', async () => {
+  it('r7 回归：要点标题单字近义变体（季候→气候）→ 确定性对齐回规划标题，首轮直通（不再误杀缺失）', async () => {
+    // r7 实机根因：规划层产出书面词「季候条件影响与工期应对」，写层模型 4 次改写为「气候条件影响与工期应对」
+    // → 行级精确包含匹配判缺失 → 重试 + 隔离重写全部耗尽 → 整章阻断；写层质检前的近似对齐把标题
+    // 回写为规划原文（内容零改动），缺失判定「完全一致」口径不放松 → 首轮直通
+    const planH4 = '季候条件影响与工期应对';
+    const variantH4 = '气候条件影响与工期应对';
+    const block: PlannedChapterBlock = { title: '工期目标与关键线路控制', subPoints: [{ title: planH4, sources: ['s1'] }], facts: [], targetWords: 500 };
+    llmMock.mockResolvedValue(`### 工期目标与关键线路控制\n\n#### ${variantH4}\n\n${bodyLine(440, 0)}`);
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure({ blocks: [block] }));
+    expect(result?.allSucceeded).toBe(true);
+    expect(llmMock).toHaveBeenCalledTimes(1);
+    expect(result?.markdown).toContain(`#### ${planH4}`);
+    expect(result?.markdown).not.toContain(variantH4);
+  });
+
+  it('要点缺失两轮仍不齐 → 结构硬门阻断（返回失败块隔离清单，不再早退 undefined）', async () => {
     // 工具链对齐：字数维度已不构成块失败（见上方分层验收用例）；短正文缺 3 个 H4 要点 → 结构硬门
-    // 两轮阻断 → 块失败；单块章全部失败 → 返回 undefined（上层解释为整章阻断、文档显式失败）。
+    // 两轮阻断 → 块失败清单返回（修复前：全失败早退 undefined → 上层 C3 被跳过直接章阻断）；
     // 不再有写作层事后拆半——半块重设预算使父块合同失效的历史机制已删除；
-    // 多块章的部分失败隔离（成功块保留）见前两个用例与 stageChapterLoop.retryFailedBlocks
+    // 多块章的部分/全部失败隔离（成功块保留）见前两个用例与 stageChapterLoop.retryFailedBlocks
     llmMock.mockResolvedValue(shortContent);
     const result = await buildPlannedChapterContent(makeInput(), makeStructure());
-    expect(result).toBeUndefined();
+    expect(result?.allSucceeded).toBe(false);
+    expect(result?.failedBlocks).toHaveLength(1);
+    expect(result?.sections[0]).toBeUndefined();
     expect(llmMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('C3 隔离重写反馈携带：失败块 retryFeedback 点名缺失要点（供上层单块重写定向反馈注入）', async () => {
+    // 4.44 丰乐镇工期章实证：块两轮漏写要点后失败；无反馈的隔离重写从零生成易复现同一漏点——
+    // 失败块清单携带缺陷反馈原文（缺失 H4 点名），由 stageChapterLoop.retryFailedBlocks 注入 initialFeedback
+    llmMock.mockResolvedValue(shortContent);
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure());
+    expect(result?.allSucceeded).toBe(false);
+    expect(result?.failedBlocks[0]?.retryFeedback).toContain('缺失 H4 要点标题');
+    expect(result?.failedBlocks[0]?.retryFeedback).toContain(H4B);
+    // 隔离重写反馈不带字数反馈（全新调用无上一轮字数锚点）
+    expect(result?.failedBlocks[0]?.retryFeedback).not.toContain('距篇幅下限');
+  });
+
+  it('initialFeedback 注入（隔离重写路径）：首轮 prompt 即携带上一轮缺陷反馈而非空反馈', async () => {
+    llmMock.mockResolvedValue(passingContent([H4A, H4B, H4C, H4D], 120));
+    const result = await buildPlannedChapterContent(
+      makeInput({ initialFeedback: '【上一轮未通过质检】缺失 H4 要点标题：沉降观测。必须逐点补齐以上 H4 标题并展开正式正文，H4 标题与给定标题完全一致。' }),
+      makeStructure(),
+    );
+    expect(result?.allSucceeded).toBe(true);
+    expect(llmMock).toHaveBeenCalledTimes(1);
+    expect(llmMock.mock.calls[0][1]).toContain('缺失 H4 要点标题：沉降观测');
   });
 
   it('4.19.5 回归：分部章容器块走总述提示词（不锁骨架不写三段式），正文直接展开成稿', async () => {
@@ -293,5 +336,65 @@ describe('buildPlannedChapterContent（块字数分层验收 + 结构硬门 + �
     expect(result?.markdown).not.toContain('#### 道路工程');
     expect(result?.markdown).not.toContain('#### 排水工程');
     expect((result?.markdown.match(/施/gu) || []).length).toBeGreaterThanOrEqual(3400);
+  });
+
+  it('4.44 写时表名混表头归一：#1 表名顶替首列名按表计划归位（表题独立成行），首轮成稿无重试', async () => {
+    // 4.43 实测形态：Writer 把表名并入表头首格顶替首列名 → 写时确定性归一（表题独立成行 +
+    // plan.fields[0] 归位）在结构扫描前消灭缺陷，块首轮直通（修复前：首轮阻断→末轮静默放行，
+    // 带病进终检挂起）
+    const chapter = makeChapter({
+      tablePlans: [{
+        id: 'planned-table-ch-1-1',
+        title: '文明施工管控要点与检查频次表',
+        chapterTitle: '施工测量',
+        section: '',
+        required: false,
+        reason: '',
+        fields: [{ name: '管 控分项' }, { name: '具体标准' }, { name: '责任岗位' }, { name: '检查频次' }, { name: '整改闭环要求' }],
+      }],
+    });
+    const table = [
+      '| 文明施工管控要点与检查频次表 | 检查内容 | 责任岗位 | 检查频次 | 整改闭环 |',
+      '| --- | --- | --- | --- | --- |',
+      '| 围挡与警示设施 | 围挡稳固、警示标识齐全 | 安全员 | 每日1次 | 当日整改，复查销项 |',
+      '| 道路保洁与洒水 | 施工便道无积尘、无遗撒 | 施工员 | 每日2次 | 2小时内清理复验 |',
+    ].join('\n');
+    const content = `### 测量放线\n\n#### ${H4A}\n\n${bodyLine(80, 0)}\n\n${table}\n\n#### ${H4B}\n\n${bodyLine(80, 1)}\n\n#### ${H4C}\n\n${bodyLine(80, 2)}\n\n#### ${H4D}\n\n${bodyLine(80, 3)}`;
+    llmMock.mockResolvedValue(content);
+    const result = await buildPlannedChapterContent(makeInput({ chapter }), makeStructure());
+    expect(result?.allSucceeded).toBe(true);
+    expect(llmMock).toHaveBeenCalledTimes(1);
+    expect(result?.markdown).toContain('文明施工管控要点与检查频次表\n\n| 管控分项 | 检查内容 | 责任岗位 | 检查频次 | 整改闭环 |');
+    expect(result?.markdown).not.toContain('| 文明施工管控要点与检查频次表 |');
+  });
+
+  it('4.44 末轮结构阻断：#2 两轮均含句尾截断 → 不再静默放行（末轮同样阻断，块失败交上层隔离重试）', async () => {
+    // 4.43 实测形态：段落末句无终止标点且后接标题（截断类内容级缺陷，确定性不可修复）——
+    // 修复前 attempt 1 的 structureBlocking 恒为 false，直通/修复通道均静默放行带病成稿；
+    // 修复后任何轮次一律阻断：二轮反馈携缺陷原文，末轮仍残留 → 块失败隔离清单返回（上层章阻断或隔离重试）
+    const truncated = `### 测量放线\n\n#### ${H4A}\n\n${bodyLine(60, 0)}\n\n垂直度偏差用靠尺实测不超过3mm，并核查门窗性能检测报告\n\n#### ${H4B}\n\n${bodyLine(60, 1)}\n\n#### ${H4C}\n\n${bodyLine(60, 2)}\n\n#### ${H4D}\n\n${bodyLine(60, 3)}`;
+    llmMock.mockResolvedValue(truncated);
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure());
+    expect(result?.allSucceeded).toBe(false);
+    expect(result?.failedBlocks).toHaveLength(1);
+    expect(llmMock).toHaveBeenCalledTimes(2);
+    expect(llmMock.mock.calls[1][1]).toContain('结构完整性未通过');
+    expect(llmMock.mock.calls[1][1]).toContain('句尾截断');
+  });
+
+  it('4.44 回归：多块全部失败 → 仍返回完整失败块隔离清单（全失败早退缺陷修复，C3 不再被跳过）', async () => {
+    // 4.44 丰乐镇实机：工期章 2 块两轮均缺 H4 → 全部失败 → 旧实现 `results.every(!content) → undefined`
+    // 早退，stageChapterLoop 的 `else if (plannedFirst)` 为 falsy → C3 块级隔离重试被整体跳过 → 章直接阻断；
+    // 修复后：全失败同样返回 failedBlocks 清单（携带全部失败块与各自 index），由上层 C3 隔离重写闭环
+    const secondBlock: PlannedChapterBlock = { title: '沉降观测专项', subPoints: [{ title: '观测点布设', sources: ['s5'] }], facts: [], targetWords: 500 };
+    llmMock.mockResolvedValue(shortContent);
+    const diag = mockDiagnostics();
+    const result = await buildPlannedChapterContent(makeInput({ diagnostics: diag }), makeStructure({ blocks: [makeBlock(), secondBlock] }));
+    expect(result?.allSucceeded).toBe(false);
+    expect(result?.failedBlocks).toHaveLength(2);
+    expect(result?.failedBlocks.map(entry => entry.block.title)).toEqual(['测量放线', '沉降观测专项']);
+    expect(result?.sections).toEqual([undefined, undefined]);
+    // 诊断文案区分全失败/部分失败（供章阻断归因展示）
+    expect(diag.llm.lastError).toContain('规划块全部失败');
   });
 });

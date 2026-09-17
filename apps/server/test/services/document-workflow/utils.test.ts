@@ -6,6 +6,7 @@ import {
   BID_DISCIPLINE_PHRASES,
   Semaphore,
   adaptiveConcurrency,
+  alignSimilarHeadingsToPlan,
   asObjectArray,
   asStringArray,
   comparableSectionHeadingMatches,
@@ -17,6 +18,7 @@ import {
   findExtraneousBlockTitles,
   hasProcessSequenceExpression,
   isBidDisciplineSentence,
+  nearSubsectionTitleMatch,
   normalizeSubsectionTitleForDedup,
   removeExtraneousBlockSections,
   runWithAdaptiveConcurrency,
@@ -25,6 +27,8 @@ import {
   stringifyFactValue,
   stripExtraneousBlockHeadings,
   throwIfAborted,
+  workPackageContentElementFlags,
+  workPackageContentElementsComplete,
 } from '@/services/document-workflow/utils';
 
 describe('hasProcessSequenceExpression', () => {
@@ -38,6 +42,21 @@ describe('hasProcessSequenceExpression', () => {
     expect(hasProcessSequenceExpression('按施工程序顺序进行')).toBe(true);
     expect(hasProcessSequenceExpression('先开挖，后浇筑，最后回填')).toBe(true);
     expect(hasProcessSequenceExpression('各工序依次流水施工')).toBe(true);
+  });
+
+  it('顺序词窗口放宽：自然成文长句可命中（4.44 实测校准，#41 根因）', () => {
+    expect(hasProcessSequenceExpression('施工按先采用小型破碎机械进行拆除，再配合人工清理碎块，随后装车外运，最后平整场地的顺序组织')).toBe(true);
+    expect(hasProcessSequenceExpression('先进行基层清理并洒水湿润，再放线定位，随后分层摊铺，然后碾压至设计压实度')).toBe(true);
+  });
+
+  it('同词前后结构：「X前…X后」自然成文工序（r16c 丰乐镇 B3 归因：绿化工程块误报缺工序顺序）', () => {
+    expect(hasProcessSequenceExpression('苗木栽植前完成种植土翻整与基肥施入，栽植后及时浇透定根水并进入养护周期')).toBe(true);
+    expect(hasProcessSequenceExpression('混凝土浇筑前完成模板拼装与钢筋隐蔽验收，浇筑后及时覆盖养护')).toBe(true);
+  });
+
+  it('同词前后结构负例：单「前」无配对 / 前后不同词不命中', () => {
+    expect(hasProcessSequenceExpression('栽植前完成场地清理')).toBe(false);
+    expect(hasProcessSequenceExpression('浇筑前检查模板，养护后覆盖保湿')).toBe(false);
   });
 
   it('编号步骤序列（至少 2 步）', () => {
@@ -64,6 +83,43 @@ describe('hasProcessSequenceExpression', () => {
   });
 });
 
+describe('workPackageContentElementFlags', () => {
+  it('scope：数值+工程量单位形态识别（清单量在正文的自然形态，#39/#40 根因）', () => {
+    expect(workPackageContentElementFlags('排水工程：塑料管铺设8205.53m，塑料检查井555座。').scope).toBe(true);
+    expect(workPackageContentElementFlags('路灯安装82套，绿化种植乔木36棵。').scope).toBe(true);
+  });
+
+  it('scope：管径/厚度类 mm 数值不误判为工程量（右断言排除）', () => {
+    expect(workPackageContentElementFlags('管径300mm的管道敷设，材质为HDPE。').scope).toBe(false);
+  });
+
+  it('process：自然成文长句工序叙述命中（窗口放宽同源）', () => {
+    expect(workPackageContentElementFlags('施工按先采用小型破碎机械进行拆除，再配合人工清理碎块，随后装车外运，最后平整场地的顺序组织').process).toBe(true);
+  });
+
+  it('method：自然行文「施工方法采用/为…」无冒号形态命中（r15 丰乐镇 B4 根治）', () => {
+    // r15 实机阻断：工程概况「景观工程」块「施工方法采用人工配合小型机具安装」无冒号标签形态
+    // 被旧词表（要求「方法[:：]」）漏判 → 方法要素误报缺失；补齐无冒号变体后自然行文命中
+    expect(workPackageContentElementFlags('施工方法采用人工配合小型机具安装，立柱基础采用C20混凝土浇筑。').method).toBe(true);
+    expect(workPackageContentElementFlags('施工方法为机械开挖配合人工清底，槽底预留300mm。').method).toBe(true);
+    expect(workPackageContentElementFlags('景观工程覆盖村内景观小品、入口标识。').method).toBe(false);
+    expect(workPackageContentElementsComplete('景观工程覆盖村内景观小品、菜园围栏、入口标识。主要作业对象为菜园围栏2360m、金属扶手栏杆224m。施工方法采用人工配合小型机具安装，基础埋深不小于0.3m。\n1. 房前屋后环境清理，清除杂物并整平场地；\n2. 菜园围栏及仿木护栏基础施工；')).toBe(true);
+  });
+
+  it('method：材料牌号/强度等级+材料性能+工艺管理闭环命中（r16 丰乐镇 B8 根治）', () => {
+    // r16 实机阻断：「景观工程」块含「MU10砌块砌筑」「连接路采用10cm厚C30混凝土」
+    // 「仿木栏杆抗压强度平均值55.6MPa」「编入施工工序卡与操作规程」仍报方法维度缺失——
+    // 旧词表未覆盖材料牌号/材料性能/工艺管理闭环证据族；补齐后整块三要素齐全
+    const block = '1.2.5 景观工程\n景观工程作业对象为村内景观小品、菜园围栏，主要工程量包括菜园围栏、砌筑渠道。\n1. 砌筑渠道及菜园围栏基础，MU10砌块砌筑；\n2. 安装金属扶手栏杆与仿木护栏，仿木栏杆抗压强度平均值55.6MPa；\n3. 铺装压膜地面及生态池连接路，连接路采用10cm厚C30混凝土。相关控制内容编入施工工序卡与操作规程。';
+    expect(workPackageContentElementFlags(block).method).toBe(true);
+    expect(workPackageContentElementsComplete(block)).toBe(true);
+  });
+
+  it('method：纯对象罗列块仍判缺失（防词表放宽误放行）', () => {
+    expect(workPackageContentElementFlags('景观工程覆盖村内景观小品、入口标识、车挡石。').method).toBe(false);
+  });
+});
+
 describe('normalizeSubsectionTitleForDedup', () => {
   it('剥离编号前缀与括号标注与分隔符', () => {
     expect(normalizeSubsectionTitleForDedup('1.3.2 室外雨污分流改造')).toBe('室外雨污分流改造');
@@ -75,6 +131,43 @@ describe('normalizeSubsectionTitleForDedup', () => {
     expect(normalizeSubsectionTitleForDedup('主体结构工程')).toBe('主体结构');
     expect(normalizeSubsectionTitleForDedup('1. 主体结构工程')).toBe('主体结构');
     expect(normalizeSubsectionTitleForDedup('土方外运及基坑支护工程')).toBe('土方外运及基坑支护');
+  });
+});
+
+describe('alignSimilarHeadingsToPlan / nearSubsectionTitleMatch', () => {
+  it('r7 根因回归：单字近义微调（季候→气候）的 H4 标题行对齐回规划标题', () => {
+    // 规划层产出书面词标题，写层模型持续同义微调为常用词——行级精确包含匹配 4 连败导致章阻断（r7 实测）
+    const markdown = ['### 工期目标与关键线路控制', '#### 气候条件影响与工期应对', '正文一。'].join('\n');
+    const result = alignSimilarHeadingsToPlan(markdown, ['季候条件影响与工期应对']);
+    expect(result.markdown).toContain('#### 季候条件影响与工期应对');
+    expect(result.markdown).not.toContain('气候条件影响与工期应对');
+    expect(result.aligned).toEqual(['气候条件影响与工期应对→季候条件影响与工期应对']);
+    // 带编号变体同样对齐（剥编号后近似命中，整行标题回写为规划原文）
+    const numbered = alignSimilarHeadingsToPlan('### 块标题\n#### 5.2 气候条件影响与工期应对\n正文。', ['季候条件影响与工期应对']);
+    expect(numbered.markdown).toContain('#### 季候条件影响与工期应对');
+  });
+
+  it('防误容：数字/季节气象字差异不容忍（冬期 vs 雨期、标段 1 vs 2）', () => {
+    expect(nearSubsectionTitleMatch('冬季施工保证措施', '雨季施工保证措施')).toBe(false);
+    expect(nearSubsectionTitleMatch('标段1西侧管沟开挖方案', '标段2西侧管沟开挖方案')).toBe(false);
+  });
+
+  it('近义容忍边界：连接词替换命中、短标题单字差异不命中', () => {
+    expect(nearSubsectionTitleMatch('季候条件影响及工期应对', '季候条件影响与工期应对')).toBe(true);
+    expect(nearSubsectionTitleMatch('雨期措施', '雨季措施')).toBe(false);
+  });
+
+  it('已被精确覆盖的规划标题不被近似行占用（行精确命中的归属优先）', () => {
+    const markdown = ['### 施工准备', '#### 雨季施工保证措施', '正文一。'].join('\n');
+    const result = alignSimilarHeadingsToPlan(markdown, ['雨季施工保证措施', '雨期施工保证措施']);
+    expect(result.aligned).toEqual([]);
+  });
+
+  it('非 H4 行不参与对齐（正文行提及标题不触发改写）', () => {
+    const markdown = ['### 工期目标与关键线路控制', '本节按气候条件影响与工期应对组织。'].join('\n');
+    const result = alignSimilarHeadingsToPlan(markdown, ['季候条件影响与工期应对']);
+    expect(result.aligned).toEqual([]);
+    expect(result.markdown).toBe(markdown);
   });
 });
 

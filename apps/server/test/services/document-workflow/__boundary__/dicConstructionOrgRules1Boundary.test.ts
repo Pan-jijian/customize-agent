@@ -748,6 +748,38 @@ describe('Y8 constructionOrgDivisionSectionIssues', () => {
     const issues = constructionOrgDivisionSectionIssues([draftChapter('主要分部分项工程施工方案', content)]);
     expect(issues.some(issue => issue.message.includes('正文过短'))).toBe(false);
   });
+
+  it('r18 B5 软词表分层：分项含「按设计确定」但工艺参数充足 → 不报概括话术', () => {
+    // r18 实机 B5 归因：楼地面装饰工程块含 9 个工艺参数仅余「按设计确定」次要参数留白，
+    // 与硬词表同报误伤——软词表改为仅当块内工艺参数不足（<4）时按概括话术报
+    const ok = '#### 1 分项1工程\n施工概况：作业范围1000㎡，数量50项，材料规格与清单一致。\n施工流程：测量放线→基层处理→铺贴→勾缝→验收。\n施工方法：面层标高按设计确定，厚度偏差控制在±20mm以内，压实度不低于95%，搭接长度150mm，检测合格后记录归档。';
+    const content = ['### 主要分部分项工程施工方案', ok, ...Array.from({ length: 4 }, (_item, index) => dpkg(`分项${index + 2}工程`, index + 2))].join('\n');
+    const issues = constructionOrgDivisionSectionIssues([draftChapter('主要分部分项工程施工方案', content)]);
+    expect(issues.some(issue => issue.message.includes('概括话术'))).toBe(false);
+  });
+
+  it('r18 B5 反例：软词表命中且工艺参数不足 → 仍报概括话术（防以留白代方案逃逸）', () => {
+    const bad = '#### 1 分项1工程\n施工概况：作业范围1000㎡。\n施工流程：先铺贴后勾缝。\n施工方法：面层标高按设计确定，检测合格后记录归档。';
+    const content = ['### 主要分部分项工程施工方案', bad, ...Array.from({ length: 4 }, (_item, index) => dpkg(`分项${index + 2}工程`, index + 2))].join('\n');
+    const issues = constructionOrgDivisionSectionIssues([draftChapter('主要分部分项工程施工方案', content)]);
+    expect(issues.some(issue => issue.message.includes('概括话术'))).toBe(true);
+  });
+
+  it('r18 B4/B6 终检 markdown 优先：drafts 残块已被链尾删除 → 不再假阳性报出', () => {
+    // r18 实机 B4/B6：drafts 章节末尾残块「其他分部分项工程施工要点」在交付 markdown 已删、
+    // drafts 仍在——终检旧行为按 drafts 提取报出交付文本中不存在的问题；markdown 命中本章
+    // 标题后以 markdown 为唯一内容源（5 个干净分项），残块不再进入校验
+    const draftsContent = ['### 主要分部分项工程施工方案', ...Array.from({ length: 4 }, (_item, index) => dpkg(`分项${index + 1}工程`, index + 1)), '#### 5 其他分部分项工程施工要点\n详见设计图纸执行。'].join('\n');
+    const markdown = `## 第五章 主要施工方法\n${divisionSection(5)}`;
+    const issues = constructionOrgDivisionSectionIssues([draftChapter('主要施工方法', draftsContent)], markdown);
+    expect(issues).toEqual([]);
+  });
+
+  it('r18 B4/B6 反例：markdown 未命中本章标题 → 回退 drafts 照常校验（防回退失效漏报）', () => {
+    const draftsContent = ['### 主要分部分项工程施工方案', ...Array.from({ length: 4 }, (_item, index) => dpkg(`分项${index + 1}工程`, index + 1)), '#### 5 其他分部分项工程施工要点\n详见设计图纸执行。'].join('\n');
+    const issues = constructionOrgDivisionSectionIssues([draftChapter('主要施工方法', draftsContent)], '## 第六章 质量管理\n正文。');
+    expect(issues.some(issue => issue.message.includes('概括话术'))).toBe(true);
+  });
 });
 
 // ═══════ Y9 关键小节逐包三要素（G1） ═══════

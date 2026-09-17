@@ -109,18 +109,20 @@ export function chapterFactDensityIssues(chapters: DocumentDraftChapter[]): Vali
   });
 }
 
+/** 关键小节深度门槛表（检测器与残差细分口径单源共享：两处漂移会让修复轮复检与终检判定不一致） */
+const CRITICAL_SECTION_DEPTH_RULES = [
+  { title: '项目特点、重点、难点分析', minChars: 1800 },
+  { title: '项目主要施工内容', minChars: 2200 },
+  { title: '主要分部分项工程施工方案', minChars: 1200, blockerMinChars: 800 },
+  { title: '主要施工方法', minChars: 2200 },
+  { title: '危大工程专项施工方案审批流程', minChars: 500, blockerMinChars: 250 },
+  { title: '原材料进场复试与见证取样', minChars: 600, blockerMinChars: 300 },
+];
+
 export function criticalSectionDepthIssues(chapters: DocumentDraftChapter[]): ValidationIssue[] {
-  const rules = [
-    { title: '项目特点、重点、难点分析', minChars: 1800 },
-    { title: '项目主要施工内容', minChars: 2200 },
-    { title: '主要分部分项工程施工方案', minChars: 1200, blockerMinChars: 800 },
-    { title: '主要施工方法', minChars: 2200 },
-    { title: '危大工程专项施工方案审批流程', minChars: 500, blockerMinChars: 250 },
-    { title: '原材料进场复试与见证取样', minChars: 600, blockerMinChars: 300 },
-  ];
   const issues: ValidationIssue[] = [];
   for (const chapter of chapters) {
-    for (const rule of rules) {
+    for (const rule of CRITICAL_SECTION_DEPTH_RULES) {
       // exact 优先、fuzzy 兜底：exact 不会把相似子小节（如"质量检验方法"）误当"主要施工方法"（fuzzy 归一化后仅剩"方法"二字），
       // 只有标题被语义重写（缺前缀/后缀）时才启用 fuzzy，兼顾"标题重写不误报"与"相似标题不漏判"
       const body = extractSection(chapter.content, rule.title) || extractSection(chapter.content, rule.title, { fuzzy: true });
@@ -130,11 +132,39 @@ export function criticalSectionDepthIssues(chapters: DocumentDraftChapter[]): Va
       if (actualChars >= blockerMinChars) {
         issues.push({ level: 'warning', severity: 'warning', message: `${chapter.title} ${rule.title} 正文深度接近目标：当前 ${actualChars} 字，目标 ${rule.minChars} 字`, suggestion: '已达到可交付深度，建议后续按项目数据继续优化扩写。' });
       } else {
-        issues.push({ level: 'error', severity: 'blocker', message: `${chapter.title} ${rule.title} 正文不足：当前 ${actualChars} 字，要求不少于 ${blockerMinChars} 字`, suggestion: '关键小节必须补足项目数据、重点难点与施工内容对应关系后方可导出。' });
+        issues.push({
+          level: 'error', severity: 'blocker',
+          message: `${chapter.title} ${rule.title} 正文不足：当前 ${actualChars} 字，要求不少于 ${blockerMinChars} 字`,
+          suggestion: '关键小节必须补足项目数据、重点难点与施工内容对应关系后方可导出。',
+          // 内容深度补写轮（content-depth-repair）定位锚点：章 id 直连 + 小节标题 + provenance（r8 实机 #18 归因：
+          // 该类 blocker 此前无任何修复轮消费，直坠终门禁）
+          chapterId: chapter.id,
+          sectionTitle: rule.title,
+          provenance: { detectorId: 'critical-section-depth', fingerprint: stableHash(`${chapter.title}\u0000${rule.title}`) },
+        });
       }
     }
   }
   return issues;
+}
+
+/** 关键小节深度残差（章级字数缺口量化，content-depth-repair 消费）：聚合条数口径下「1191 字 → 1749 字」
+ * 的实质补写被判「未下降」（同一 blocker 条数不变）→ 修复轮提前停止（r16c 丰乐镇实机归因：3 块→2 块、
+ * +558 字真实发生却因残差 2→2 停在第 1 轮）；按 blocker 线字数缺口求和后，每补写 1 字残差即下降，
+ * 收敛判定恢复灵敏度（divisionSectionDeficitCount 同族先例） */
+export function criticalSectionDeficitTotal(chapters: DocumentDraftChapter[]): number {
+  let total = 0;
+  for (const chapter of chapters) {
+    for (const rule of CRITICAL_SECTION_DEPTH_RULES) {
+      const body = extractSection(chapter.content, rule.title) || extractSection(chapter.content, rule.title, { fuzzy: true });
+      const actualChars = documentTextLength(body);
+      if (!body || actualChars >= rule.minChars) continue;
+      const blockerMinChars = criticalSectionBlockerLine(rule.title);
+      if (actualChars >= blockerMinChars) continue;
+      total += blockerMinChars - actualChars;
+    }
+  }
+  return total;
 }
 
 export function rebuildFinalMarkdown(input: { template: DocumentTemplate; requirement?: string; projectRoot: string; projectId: string; facts: Record<string, string>; structuredFacts: DocumentFact[]; factsModel: any; chapters: DocumentDraftChapter[]; sources: { filePath: string; count: number }[]; missingItems: string[]; validation: any; validationIssues: any[]; executionStages: DocumentExecutionStage[]; assets: DocumentAsset[]; promptDocumentRules: any; bodyTableForbidden?: boolean; coverForbidden?: boolean; bidComposition?: BidCompositionSpec; blueprintData?: BlueprintData }) {
@@ -181,7 +211,9 @@ export async function buildFullValidationIssues(input: {
     det('fact-coverage', () => factCoverageIssues(finalMarkdown, [...structuredFacts, ...factsModel.preciseFacts], { maxIssues: 30 }).map(issue => ({ ...issue, level: 'warning' as const, severity: 'warning' as const, suggestion: '建议后续优化事实自然落位；导出阶段不因未落位的引用型或可优化事实阻断。' }))),
     det('page-target', () => pageTargetIssues(template.generationSettings || template.exportSettings, finalMarkdown).filter(issue => !(documentBudget.minPages && /低于目标页数/u.test(issue.message)))),
     det('document-budget', () => documentBudgetIssues(documentBudget, finalMarkdown)),
-    det('planned-structure', () => plannedStructureIssues(finalMarkdown, template, bodyTableForbidden)),
+    // planned-structure 不在此重复调用：standard-final 组内（documentFinalValidation.buildStandardFinalValidationIssues）
+    // 已用同一 (finalMarkdown, template, bodyTableForbidden) 同参运行并经 collectValidationIssueGroups flat 合并，
+    // 历史双调用导致缺表类警告在最终报告 ×2（r14 丰乐镇实测）
     det('formal-text-gate', () => formalTextGateIssues(finalMarkdown)),
     await detSafe('internal-terminology-anchor', () => internalTerminologyAnchorIssues(finalMarkdown)),
     det('heading-uncovered-engineering-items', () => headingUncoveredEngineeringItems(finalMarkdown)),

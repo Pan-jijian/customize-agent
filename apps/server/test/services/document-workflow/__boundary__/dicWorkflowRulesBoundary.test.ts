@@ -46,7 +46,8 @@ describe('DEFAULT_WORKFLOW_RULES', () => {
     expect(DEFAULT_WORKFLOW_RULES.writingSpec.divisionQuality).toEqual({"blockerMinPackages":3,"minPackages":5,"minParamsPerPackage":4,"minPackageChars":150,"balanceRatio":0.3333333333333333});
   });
   it('writeRules.majorContent 长度', () => {
-    expect(DEFAULT_WORKFLOW_RULES.writingSpec.writeRules.majorContent.length).toEqual(1150);
+    // r16d F6 写作层强化：末尾追加「本小节正文总量不少于 2200 字」（+69 字：1150→1219）
+    expect(DEFAULT_WORKFLOW_RULES.writingSpec.writeRules.majorContent.length).toEqual(1219);
   });
   it('writeRules.majorContent 含清单禁词', () => {
     expect(DEFAULT_WORKFLOW_RULES.writingSpec.writeRules.majorContent.includes("分部小计") && DEFAULT_WORKFLOW_RULES.writingSpec.writeRules.majorContent.includes("综合单价")).toEqual(true);
@@ -228,7 +229,7 @@ describe('loadWorkflowRules', () => {
 });
 describe('workflowRulesHash', () => {
   it('默认配置哈希锁定', () => {
-    expect(workflowRulesHash()).toEqual("5e136aeb4e90d6fe651e16c9c408d089dabbd763");
+    expect(workflowRulesHash()).toEqual("06ae6b51df79395343daa6cb6ce24039acd70799");
   });
   it('覆盖后哈希变化', () => {
     const root = '/tmp/pr2-boundary-hash-' + process.pid;
@@ -236,8 +237,8 @@ describe('workflowRulesHash', () => {
     fs.mkdirSync(path.join(root, '.customize-agent'), { recursive: true });
     fs.writeFileSync(path.join(root, '.customize-agent', 'workflow-rules.json'), '{"factGovernance":{"weakAnchorGapThreshold":21}}');
     const h = workflowRulesHash(root);
-    expect(h).toEqual("35c7769471fc5027fbf44e2ec511bb382e0299ef");
-    expect(h === "5e136aeb4e90d6fe651e16c9c408d089dabbd763").toEqual(false);
+    expect(h).toEqual("7d762f25feff679406256ce3b24202c8be980a89");
+    expect(h === "06ae6b51df79395343daa6cb6ce24039acd70799").toEqual(false);
     fs.rmSync(root, { recursive: true, force: true });
   });
   it('同配置不同 root 哈希一致', () => {

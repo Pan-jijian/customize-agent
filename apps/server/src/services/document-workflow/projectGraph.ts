@@ -37,51 +37,63 @@ function buildPrompt(evidence: DocumentEvidence[]): string {
 
 function normalize(raw: Partial<ProjectGraph> | undefined, evidence: DocumentEvidence[]): ProjectGraph | undefined {
   if (!raw) return undefined;
-  const files = new Set(evidence.map(e => e.filePath));
-  const ok = (f: unknown) => typeof f === 'string' && (files.has(f) || evidence.some(e => path.basename(e.filePath) === path.basename(f)));
+  // 来源映射回写：模型输出的 sourceFiles 一律换算成输入证据的精确 filePath（basename 容错映射），
+  // 不可映射的剔除——图谱节点的来源恒为真实文件路径，下游不再需要模糊解析与范围过滤
+  const byExact = new Set(evidence.map(e => e.filePath));
+  const byBase = new Map<string, string>();
+  for (const e of evidence) {
+    const base = path.basename(e.filePath);
+    if (!byBase.has(base)) byBase.set(base, e.filePath);
+  }
+  const canonicalize = (f: unknown): string | undefined => {
+    if (typeof f !== 'string' || !f) return undefined;
+    if (byExact.has(f)) return f;
+    return byBase.get(path.basename(f));
+  };
+  const sources = (v: unknown, n: number) => (Array.isArray(v) ? [...new Set(v.map(canonicalize).filter((x): x is string => Boolean(x)))] : []).slice(0, n);
   const s = (v: unknown, n: number) => typeof v === 'string' ? v.slice(0, n) : typeof v === 'number' ? String(v).slice(0, n) : '';
   const a = (v: unknown, n: number) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.length > 0) : []).slice(0, n);
 
   return {
     works: (raw.works || []).filter(w => typeof w.name === 'string' && typeof w.scope === 'string').map(w => ({
       name: s(w.name, 200), scope: s(w.scope, 500),
-      sourceFiles: a(w.sourceFiles, 10).filter(ok), relatedItems: a(w.relatedItems, 20),
+      sourceFiles: sources(w.sourceFiles, 10), relatedItems: a(w.relatedItems, 20),
     })),
     methods: (raw.methods || []).filter(m => typeof m.name === 'string').map(m => ({
       name: s(m.name, 200), steps: a(m.steps, 12),
-      applicableWorks: a(m.applicableWorks, 10), sourceFiles: a(m.sourceFiles, 10).filter(ok),
+      applicableWorks: a(m.applicableWorks, 10), sourceFiles: sources(m.sourceFiles, 10),
     })),
     resources: (raw.resources || []).filter(r => typeof r.name === 'string').map(r => ({
       name: s(r.name, 200),
       type: r.type === 'material' || r.type === 'equipment' || r.type === 'labor' ? r.type : 'material',
       spec: s(r.spec, 200), quantity: s(r.quantity, 50), unit: s(r.unit, 20),
-      sourceFiles: a(r.sourceFiles, 5).filter(ok),
+      sourceFiles: sources(r.sourceFiles, 5),
     })),
     schedule: (raw.schedule || []).filter(x => typeof x.milestone === 'string').map(x => ({
       milestone: s(x.milestone, 200), duration: s(x.duration, 100),
       startDate: s(x.startDate, 50), endDate: s(x.endDate, 50),
-      sourceFiles: a(x.sourceFiles, 5).filter(ok),
+      sourceFiles: sources(x.sourceFiles, 5),
     })),
     standards: (raw.standards || []).filter(x => typeof x.code === 'string' || typeof x.description === 'string').map(x => ({
       code: s(x.code, 100), description: s(x.description, 300),
-      sourceFiles: a(x.sourceFiles, 5).filter(ok),
+      sourceFiles: sources(x.sourceFiles, 5),
     })),
     risks: (raw.risks || []).filter(r => typeof r.risk === 'string').map(r => ({
       risk: s(r.risk, 300),
       level: r.level === 'high' || r.level === 'medium' || r.level === 'low' ? r.level : 'medium',
-      mitigation: s(r.mitigation, 500), sourceFiles: a(r.sourceFiles, 5).filter(ok),
+      mitigation: s(r.mitigation, 500), sourceFiles: sources(r.sourceFiles, 5),
     })),
     requirements: (raw.requirements || []).filter(x => typeof x.category === 'string' && typeof x.detail === 'string').map(x => ({
       category: s(x.category, 100), detail: s(x.detail, 500),
-      sourceFiles: a(x.sourceFiles, 5).filter(ok),
+      sourceFiles: sources(x.sourceFiles, 5),
     })),
     siteConditions: (raw.siteConditions || []).filter(x => typeof x.condition === 'string').map(x => ({
       condition: s(x.condition, 300), impact: s(x.impact, 500),
-      sourceFiles: a(x.sourceFiles, 5).filter(ok),
+      sourceFiles: sources(x.sourceFiles, 5),
     })),
     addendumChanges: (raw.addendumChanges || []).filter(x => typeof x.original === 'string' && typeof x.revised === 'string').map(x => ({
       originalPath: s(x.originalPath, 300), original: s(x.original, 300),
-      revised: s(x.revised, 500), sourceFile: s(x.sourceFile, 200),
+      revised: s(x.revised, 500), sourceFile: canonicalize(x.sourceFile) || '',
     })),
     gaps: a(raw.gaps, 20),
     generatedAt: Date.now(),
@@ -199,7 +211,7 @@ function fileSignature(projectRoot: string | undefined, filePath: string) {
 
 function graphCacheKey(input: { evidence: DocumentEvidence[]; requirement?: string; templateId?: string; projectRoot?: string }) {
   return stableHash({
-    version: 'project-graph-v5-short-timeout-single-pass',
+    version: 'project-graph-v6-source-canonicalized',
     requirement: input.requirement || '',
     templateId: input.templateId || '',
     evidence: input.evidence.map(item => ({ filePath: item.filePath, fileSig: fileSignature(input.projectRoot, item.filePath), sectionTitle: item.sectionTitle, contentHash: stableHash({ length: item.content.length, head: item.content.slice(0, 8000), tail: item.content.slice(-8000) }) })).sort((a, b) => `${a.filePath}${a.sectionTitle}`.localeCompare(`${b.filePath}${b.sectionTitle}`)),

@@ -1,6 +1,7 @@
 import type { ValidationIssue } from './types';
 import { buildSemanticSimilarity, SEMANTIC_COVERAGE_THRESHOLD } from './semanticSimilarity';
 import { buildSemanticGate } from './semanticGate';
+import { stableHash } from './utils';
 
 /**
  * C5 应急预案小节深度门槛（round-17）：
@@ -153,6 +154,9 @@ export async function emergencySectionDepthIssues(markdown: string, embedDocumen
       suggestion: '补写应急组织体系（领导小组/抢险队与职责）、应急处置程序与演练安排、应急物资清单与保障措施，达到可落地深度。',
       // F2 小节锚点：修复循环定位优先直连应急小节，不再依赖消息关键字反查
       sectionTitle: blockTitles[0],
+      // 内容深度补写轮（content-depth-repair）定位锚点：provenance 单源过滤（r8 实机 #17 归因：
+      // 应急深度 blocker 此前无任何修复轮消费，直坠终门禁）
+      provenance: { detectorId: 'emergency-section-depth', fingerprint: stableHash(markdown) },
     });
   }
   return issues;

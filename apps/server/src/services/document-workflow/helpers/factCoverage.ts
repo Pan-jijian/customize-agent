@@ -2,15 +2,10 @@
  * helpers/factCoverage：事实覆盖检测（P3 拆分，逐字机械搬移自 documentGeneratorHelpers.ts）。
  * 依赖 projectBasicInfo（cleanInlineFactValue）。
  */
-import type { DocumentEvidence, DocumentFact } from '../types';
+import type { DocumentFact } from '../types';
 import { normalizeOcrFactText } from '../factsModel';
 import { stringifyFactValue } from '../utils';
 import { cleanInlineFactValue } from './projectBasicInfo';
-
-export function factsWithEvidenceSource(facts: DocumentFact[], evidence: DocumentEvidence[]) {
-  void evidence;
-  return facts.filter(fact => Boolean(fact.sourceFile));
-}
 
 export function normalizeForCoverage(value: string) {
   return normalizeOcrFactText(value)

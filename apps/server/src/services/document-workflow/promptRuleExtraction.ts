@@ -30,8 +30,9 @@ export function professionalSectionTaskCard(chapterTitle: string, sectionTitle: 
     /安全|文明|风险|危大/u.test(joined) ? '必须覆盖风险识别、人员设备、临电消防、现场文明、检查整改和应急响应。' : '',
     /资源|材料|设备|劳动力/u.test(joined) ? '必须说明资源配置依据、进场验收、保管调配，并与工期和质量目标一致。' : '',
     // R9 写入侧（舒城第二轮实测）：劳资小节必须写入工伤保险参保与农民工工资支付合规要求，
-    // 避免终检「工伤保险表述缺失」blocker；触发口径与最终校验词面门控一致（劳务/农民工/用工/工资）
-    /劳务|农民工|用工|工资/u.test(joined) ? '劳务用工/工资类内容必须写入政策合规硬项：按规定为全体作业人员办理工伤保险（保险费用由企业承担并计入投标报价，进场前完成参保并留存缴费凭证）；农民工工资实行专用账户与总包代发、按月足额支付，写清实名制用工与进场登记。不得只写“依法用工”“按时发放工资”等无落实细节的表述。' : '',
+    // 避免终检「工伤保险表述缺失」blocker；触发口径与最终校验词面门控一致（劳务/农民工/用工/工资/工伤）
+    // （r14 丰乐镇 B3 实机：小节标题含「工伤保险」但触发词未覆盖写作层落位「办理工伤保险」表述）
+    /劳务|农民工|用工|工资|工伤/u.test(joined) ? '劳务用工/工资类内容必须写入政策合规硬项：按规定为全体作业人员办理工伤保险（保险费用由企业承担并计入投标报价，进场前完成参保并留存缴费凭证）；农民工工资实行专用账户与总包代发、按月足额支付，写清实名制用工与进场登记。不得只写“依法用工”“按时发放工资”等无落实细节的表述。' : '',
     /施工|工艺|技术|方案/u.test(joined) ? '必须写清施工准备、工艺流程、关键控制点、验收要求和资料依据；每个分项工程方案必须落位至少 4 个工艺参数（mm、MPa、间距、偏差、坡度、养护天数、试验压力、搭接长度等），参数来自绑定资料或行业通用规范值，不得编造；纯设备配置型内容必须写型号、规格、容量、数量参数。工序顺序表达：工艺流程必须有明确的工序顺序表达，形式按小节序号轮换使用（顺序词叙述、编号步骤、有序列表、箭头链；系统已为各小节指定形式，禁止相邻小节同一形式、禁止通篇同一形式），每个含方法叙述的三级小节方法段正文至少 1 处不少于 4 个环节的工序顺序表达，不得只在单独的流程行出现。' : '',
     /流程|顺序|工序|穿插|闭环|整改|演练|转运|三检|隐蔽|排查/u.test(joined) ? '流程/顺序型叙述必须有明确的工序顺序表达，形式按小节序号轮换使用（顺序词叙述、编号步骤、有序列表、箭头链，禁止相邻小节同一形式、禁止通篇同一形式），每条序列不少于 3 个环节，把纯文字流程描述改写成顺序清晰的表达（如先发现问题并登记建档，再分析原因，随后整改落实，最后复查销号），正文中至少 2 处工序顺序表达。' : '',
   ].filter(Boolean);
@@ -503,7 +504,7 @@ export function minimumSectionCount(chapter: DocumentTemplateChapter, targetWord
  * 表格需求（表名+表头字段，写作期按此注入表格硬性要求）。小节结构只来自用户声明与 LLM 规划，
  * 系统不生成任何小节：LLM 失败时保留锁定结构继续；无锁定结构且规划失败/无产出即显性失败（throw），不凑数补位。
  */
-export async function planChapterSectionsWithLlm(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; chapterIndex?: number; evidence: DocumentEvidence[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; projectGraphSummary?: string; lockedSections?: string[]; /** 标书编制规格（阶段 1 判定）的正文表格策略：forbidden（暗标）时不规划任何表格需求 */ bodyTablePolicy?: 'forbidden' | 'allowed'; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; diversity?: { directive: string; avoidSections?: string[]; overlapCheck?: (sections: string[]) => Array<{ title: string; collidedWith: string }> } }): Promise<{ sections: string[]; tables: PlannedTableRequest[]; diversity?: { retried: boolean; remainingCollisions: number } }> {
+export async function planChapterSectionsWithLlm(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; chapterIndex?: number; evidence: DocumentEvidence[]; promptTexts: string; projectContext: string; requirement?: string; roleContext: string; targetWords: number; projectGraphSummary?: string; /** r14 E16 清单分部全景（方法类章：清单分部分项专项覆盖义务——小节规划不得只规划道路/绿化等大类而遗漏清单独有分项） */ boqCoverageSummary?: string; lockedSections?: string[]; /** 标书编制规格（阶段 1 判定）的正文表格策略：forbidden（暗标）时不规划任何表格需求 */ bodyTablePolicy?: 'forbidden' | 'allowed'; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; diversity?: { directive: string; avoidSections?: string[]; overlapCheck?: (sections: string[]) => Array<{ title: string; collidedWith: string }> } }): Promise<{ sections: string[]; tables: PlannedTableRequest[]; diversity?: { retried: boolean; remainingCollisions: number } }> {
   const locked = normalizePlannedSections(input.lockedSections || [], input.chapter.title);
   const evidenceText = evidenceBundlePrompt(buildEvidenceBundle(input.chapter, input.evidence), { maxChars: evidencePromptBudgetForTarget(input.targetWords, 5000, 12000), diagnostics: input.diagnostics });
   const minSections = minimumSectionCount(input.chapter, input.targetWords, input.evidence, locked.length);
@@ -529,6 +530,10 @@ export async function planChapterSectionsWithLlm(input: { template: DocumentTemp
       input.requirement ? `用户要求：${input.requirement}` : '',
       input.projectContext ? `上下文：\n${input.projectContext}` : '',
       input.projectGraphSummary ? `本项目专业工程与资源图谱：\n${input.projectGraphSummary}` : '',
+      // r14 E16 清单分部全景注入（丰乐镇实机：主要施工方法章无清单分部分项输入 → 规划只出道路/绿化/公厕
+      // 三类小块，「过路涵」「青砖步道（人行道板安砌）」类专有分项零规划零写作）：方法类章规划小节必须
+      // 覆盖清单独有分项，不得只规划道路、铺装、绿化等大类
+      input.boqCoverageSummary ? `本工程工程量清单分部分项全景（下列专有分项必须逐项规划对应施工小节，不得只规划道路、铺装、绿化等大类而遗漏清单独有分项）：\n${input.boqCoverageSummary}` : '',
       input.roleContext,
       input.diversity?.avoidSections?.length ? `以下小节标题已在历史文档中使用，本次命名必须避开相同或高度近似的表达（等价内容换角度、换词面，不得只调整语序或添加“工作/内容”尾词）：\n${input.diversity.avoidSections.slice(0, 60).map(title => `- ${title}`).join('\n')}` : '',
       input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',

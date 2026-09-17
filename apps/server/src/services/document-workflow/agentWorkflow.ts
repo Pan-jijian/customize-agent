@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import { materialRootsOfFiles, materialRootsOfScopeRoots } from '@customize-agent/knowledge';
 import { listKnowledgeFiles } from '../knowledge/kbService';
 import type { AgentChapterTask, AgentDocumentPlan } from './agentPlanner';
 import type { DocumentExecutionStage, DocumentFact, DocumentTemplate, ProjectBinding, ProjectGraph, ValidationIssue } from './types';
@@ -8,6 +9,8 @@ import { stableHash, stringifyFactValue } from './utils';
 
 export interface AgentMaterialScope {
   selectedRoots: string[];
+  /** 资料包 ID 集合（与索引层 material_root 同口径）：范围 root 归一化 ∩ 入选文件派生，检索按包直接取数 */
+  selectedMaterialRoots: string[];
   selectedFiles: string[];
   totalAvailableFiles: number;
   ambiguous: boolean;
@@ -66,7 +69,7 @@ export interface AgentWorkflowContext {
   createdAt: number;
 }
 
-type KnowledgeFile = { relativePath: string; chunkCount?: number; indexedAt?: number; status?: string };
+export type KnowledgeFile = { relativePath: string; chunkCount?: number; indexedAt?: number; status?: string };
 
 function normalizePathKey(filePath: string) {
   return filePath.replace(/\\/gu, '/').replace(/^\/+|\/+$/gu, '');
@@ -91,7 +94,7 @@ function scoreGroupByRequirement(group: string, requirement: string) {
     .reduce((score, token) => score + (requirement.includes(token) ? Math.min(20, token.length) : 0), 0);
 }
 
-function isUsableKnowledgeFile(file: KnowledgeFile) {
+export function isUsableKnowledgeFile(file: KnowledgeFile) {
   return file.status !== 'disk' && file.status !== 'error' && Number(file.indexedAt || 0) > 0 && Number(file.chunkCount || 0) > 0;
 }
 
@@ -103,6 +106,13 @@ function selectByRoots(files: KnowledgeFile[], roots: string[]) {
   return files.filter(file => roots.some(root => normalizePathKey(file.relativePath) === root || normalizePathKey(file.relativePath).startsWith(`${root}/`)));
 }
 
+/** 资料包 ID 交集口径：范围 root 归一化 ∩ 入选文件派生——保证包名均有真实文件承载，
+ * 避免「文件级绑定/根散文件」场景误锁不存在的包（宁缺勿错：交集为空时回退文件白名单口径） */
+export function scopedMaterialRootsOf(selectedRoots: string[], selectedFiles: string[]) {
+  const fileDerived = new Set(materialRootsOfFiles(selectedFiles));
+  return materialRootsOfScopeRoots(selectedRoots).filter(root => fileDerived.has(root));
+}
+
 function groupFiles(files: KnowledgeFile[]) {
   const groups = new Map<string, KnowledgeFile[]>();
   for (const file of files) {
@@ -112,10 +122,10 @@ function groupFiles(files: KnowledgeFile[]) {
   return groups;
 }
 
-/** 4.17.3 召回侧多项目指纹防御：同一资料集内出现 ≥2 个不同项目编号（20xxAANNGZxxxxx 族形态）
- * 即判定多项目资料混放（用户“两份项目数据互相污染”的召回侧根因通道）。同项目编号跨文件
- * 重复出现（招标文件+补疑+清单同号）按 Set 去重，不误伤单项目多文件场景。 */
-function distinctProjectNos(files: KnowledgeFile[]) {
+/** 4.17.3 多项目指纹：同一资料集内出现 ≥2 个不同项目编号（20xxAANNGZxxxxx 族形态）即判定多项目资料混放
+ * （用户“两份项目数据互相污染”的根因通道）。同项目编号跨文件重复出现（招标文件+补疑+清单同号）
+ * 按 Set 去重，不误伤单项目多文件场景。双端共用：入库构建时告警 + 生成时阻断（最终防线）。 */
+export function distinctProjectNos(files: KnowledgeFile[]) {
   const seen = new Set<string>();
   for (const file of files) {
     for (const matched of file.relativePath.match(/\b\d{4}[A-Z]{2,}\d{4,}\b/gu) || []) seen.add(matched);
@@ -146,6 +156,7 @@ export function resolveAgentMaterialScope(projectRoot: string, template: Documen
       if (mixedProjectNos.length >= 2) {
         return {
           selectedRoots: [],
+          selectedMaterialRoots: [],
           selectedFiles: [],
           totalAvailableFiles: active.length,
           ambiguous: true,
@@ -157,6 +168,7 @@ export function resolveAgentMaterialScope(projectRoot: string, template: Documen
       }
       return {
         selectedRoots,
+        selectedMaterialRoots: scopedMaterialRootsOf(selectedRoots, selectedFiles),
         selectedFiles,
         totalAvailableFiles: active.length,
         ambiguous: false,
@@ -170,6 +182,7 @@ export function resolveAgentMaterialScope(projectRoot: string, template: Documen
       const selectedRoots = scored.filter(item => item.score === scored[0].score).map(item => item.root);
       return {
         selectedRoots: [],
+        selectedMaterialRoots: [],
         selectedFiles: [],
         totalAvailableFiles: active.length,
         ambiguous: true,
@@ -188,6 +201,7 @@ export function resolveAgentMaterialScope(projectRoot: string, template: Documen
     if (mixedProjectNos.length >= 2) {
       return {
         selectedRoots: [],
+        selectedMaterialRoots: [],
         selectedFiles: [],
         totalAvailableFiles: active.length,
         ambiguous: true,
@@ -199,6 +213,7 @@ export function resolveAgentMaterialScope(projectRoot: string, template: Documen
     }
     return {
       selectedRoots: boundRoots,
+      selectedMaterialRoots: scopedMaterialRootsOf(boundRoots, selectedFiles),
       selectedFiles,
       totalAvailableFiles: active.length,
       ambiguous: false,
@@ -211,6 +226,7 @@ export function resolveAgentMaterialScope(projectRoot: string, template: Documen
 
   return {
     selectedRoots: [],
+    selectedMaterialRoots: [],
     selectedFiles: [],
     totalAvailableFiles: active.length,
     ambiguous: true,

@@ -477,13 +477,20 @@ describe('coreTitleName / titleIntegrityIssues / titleRepairTargets（标题完�
     expect(coreTitleName('一、总体安排')).toBe('一、总体安排');
   });
 
-  it('残缺标题（<4 汉字）与悬挂连接词结尾 → error', () => {
+  it('残缺标题（<3 汉字）与悬挂连接词结尾 → error', () => {
     const md = ['## 第6章 危大工程管控', '### 6.5 危大', '正文内容。', '### 现场准备及', '正文内容。'].join('\n');
     const issues = titleIntegrityIssues(md);
     expect(issues).toHaveLength(2);
     expect(issues[0].message).toContain('危大');
-    expect(issues[0].message).toContain('不足 4 字');
+    expect(issues[0].message).toContain('不足 3 字');
     expect(issues[1].message).toContain('悬挂连接词');
+  });
+
+  it('3 字完整专业词标题不判残缺（4.44 #3 根治：小菜园）', () => {
+    const md = ['## 第2章 施工部署', '### 2.1.4 小菜园', '正文内容。', '### 沟塘清淤', '正文内容。'].join('\n');
+    expect(titleIntegrityIssues(md)).toEqual([]);
+    // 确定性补全同样不动 3 字完整词（检测与补全同源）
+    expect(fixTruncatedTitleCompletion(md).fixedCount).toBe(0);
   });
 
   it('句化标题（含逗号）→ error', () => {
@@ -506,7 +513,7 @@ describe('coreTitleName / titleIntegrityIssues / titleRepairTargets（标题完�
   it('titleRepairTargets 携带标题原文与缺陷原因', () => {
     const md = ['## 甲章', '### 2.1 危大', '正文内容。'].join('\n');
     expect(titleRepairTargets(md)).toEqual([
-      { chapterTitle: '甲章', title: '2.1 危大', reason: '标题核心名不足 4 字（残缺标题）' },
+      { chapterTitle: '甲章', title: '2.1 危大', reason: '标题核心名不足 3 字（残缺标题）' },
     ]);
   });
 });

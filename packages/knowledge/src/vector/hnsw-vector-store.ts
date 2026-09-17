@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createRequire } from 'node:module';
+import { materialRootOf } from '../core/material-pack.js';
 import type { VectorDocument, VectorFilterValue, VectorSearchQuery, VectorSearchResult, VectorStoreInterface, VectorWriteOptions } from './types.js';
 
 type HierarchicalNSW = {
@@ -187,8 +188,16 @@ export class HNSWVectorStore implements VectorStoreInterface {
     return {
       id: document.id,
       content: '',
-      metadata: document.metadata,
+      metadata: this.withMaterialRoot(document.metadata),
     };
+  }
+
+  /** 资料包列兜底：老 documents.json 无 material_root（上线前写入）时从 file_path 纯函数派生，免重建索引；新写入文档幂等保留原值 */
+  private withMaterialRoot(metadata: Record<string, string | number | boolean | null>): Record<string, string | number | boolean | null> {
+    if (metadata.material_root !== undefined && metadata.material_root !== null) return metadata;
+    const filePath = metadata.file_path;
+    if (typeof filePath !== 'string') return metadata;
+    return { ...metadata, material_root: materialRootOf(filePath) };
   }
 
   private loadDocuments(): void {
@@ -202,7 +211,7 @@ export class HNSWVectorStore implements VectorStoreInterface {
       this.rowidsByFilePath.clear();
       for (const [rowid, document] of entries) {
         const numericRowid = Number(rowid);
-        const stored = { id: document.id, content: document.content ?? '', metadata: document.metadata };
+        const stored = { id: document.id, content: document.content ?? '', metadata: this.withMaterialRoot(document.metadata) };
         this.documents.set(numericRowid, stored);
         this.trackDocumentFilePath(numericRowid, stored);
       }

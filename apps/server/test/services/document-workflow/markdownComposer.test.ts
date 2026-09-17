@@ -113,6 +113,16 @@ describe('hasInlineListCollision / normalizeInlineListBreaks', () => {
   it('句末标点后列表标记拆行', () => {
     expect(normalizeInlineListBreaks('流程说明。1. 第一步')).toBe('流程说明。\n1. 第一步');
   });
+
+  it('r6 冒号引导句后列表项拆行（防首项粘连与重排双编号）', () => {
+    expect(normalizeInlineListBreaks('施工按以下编号步骤组织：1. 清理场地；2. 测量放线；3. 铺装施工。'))
+      .toBe('施工按以下编号步骤组织：\n1. 清理场地；\n2. 测量放线；\n3. 铺装施工。');
+  });
+
+  it('r6 冒号后非列表编号内容不拆（小数/普通冒号句）', () => {
+    expect(normalizeInlineListBreaks('配合比为1:2.5 的水泥砂浆。')).toBe('配合比为1:2.5 的水泥砂浆。');
+    expect(normalizeInlineListBreaks('注意事项：本工程按图纸施工。')).toBe('注意事项：本工程按图纸施工。');
+  });
 });
 
 describe('normalizeMarkdownTableDividers', () => {
@@ -169,6 +179,26 @@ describe('sectionHeadingIssues', () => {
     const issues = sectionHeadingIssues('#### 给排水及消防水系统安装工程施工方案');
     expect(issues).toHaveLength(0);
   });
+
+  it('跨章同名（H4 与另一章 H3）不报结构重复（r14 丰乐镇「1.2.3 道路工程」实测形态）', () => {
+    const markdown = ['## 第一章 工程概况', '### 1.2 主要施工内容', '#### 1.2.3 道路工程', '正文。', '## 第二章 主要施工方法', '### 2.1 道路工程', '正文二。'].join('\n');
+    expect(sectionHeadingIssues(markdown)).toHaveLength(0);
+  });
+
+  it('同章同名（H4 与本章 H3）仍报结构重复', () => {
+    const markdown = ['## 第二章 主要施工方法', '### 2.2 绿化工程', '#### 2.2.1 绿化工程', '正文。'].join('\n');
+    expect(sectionHeadingIssues(markdown).some(item => item.message.includes('与本章三级小节同名'))).toBe(true);
+  });
+
+  it('「A与B」并列标题重复词与 16 字法定名词标题不报（r14 丰乐镇四类实测）', () => {
+    const markdown = [
+      '#### 5.2.2 农民工工资专用账户与工资支付保障', '正文。',
+      '#### 7.1.3 危险性较大的分部分项工程安全管理', '正文二。',
+      '#### 7.1.4 生产安全事故应急预案与应急演练', '正文三。',
+      '#### 10.2.3 临时占地与临时设施布置', '正文四。',
+    ].join('\n');
+    expect(sectionHeadingIssues(markdown)).toHaveLength(0);
+  });
 });
 
 describe('sectionDuplicateIssues', () => {
@@ -216,6 +246,36 @@ describe('sanitizeFormalMarkdown', () => {
     const result = sanitizeFormalMarkdown('本节内容围绕知识库证据组织。\n\n正文正常内容。');
     expect(result).not.toContain('知识库证据');
     expect(result).toContain('正文正常内容。');
+  });
+
+  it('r7 回归：以「对」结尾的合法 H4 标题整行保留（修复前被引导词残片规则无条件误删）', () => {
+    const result = sanitizeFormalMarkdown('#### 季候条件影响与工期应对\n\n正文段落内容。');
+    expect(result).toContain('#### 季候条件影响与工期应对');
+    expect(result).toContain('正文段落内容。');
+  });
+
+  it('r7 回归：以「和与在为将」结尾的 H4 标题同样保留（标题行是结构行，不属断句残片）', () => {
+    expect(sanitizeFormalMarkdown('#### 资源配置与工期')).toContain('#### 资源配置与工期');
+    expect(sanitizeFormalMarkdown('#### 现场组织与')).toContain('#### 现场组织与');
+  });
+
+  it('正文行引导词残片判定：后方无可承接（下一行为标题/文档尾）仍删除', () => {
+    const result = sanitizeFormalMarkdown('控制措施主要包括安全防护和\n\n#### 后续安排\n\n正文。');
+    expect(result).not.toContain('安全防护和');
+    expect(result).toContain('#### 后续安排');
+  });
+
+  it('正文行以「应对」结尾但后方有正文承接 → 保留（复合词尾不得误杀）', () => {
+    const result = sanitizeFormalMarkdown('各专业须按既定节点组织应对\n持续开展过程管控。');
+    expect(result).toContain('组织应对');
+    expect(result).toContain('持续开展过程管控。');
+  });
+
+  it('r8 加固：以「如下/包括」结尾的 H4 标题保留（标题行豁免引导词结尾删除，防同类死锁）', () => {
+    const withFollowing = sanitizeFormalMarkdown('#### 施工内容主要包括\n\n具体内容展开。');
+    expect(withFollowing).toContain('#### 施工内容主要包括');
+    const atEnd = sanitizeFormalMarkdown('#### 具体安排如下');
+    expect(atEnd).toContain('#### 具体安排如下');
   });
 });
 
@@ -494,6 +554,13 @@ describe('dedupeTertiaryH4Titles（F4 H4-H3 同名确定性重命名）', () => 
     const first = dedupeTertiaryH4Titles(markdown);
     const second = dedupeTertiaryH4Titles(first.markdown);
     expect(second.fixedCount).toBe(0);
+  });
+
+  it('跨章同名（H4 与另一章 H3）不重命名（r14 丰乐镇「1.2.3 道路工程」实测形态）', () => {
+    const markdown = ['## 第一章 工程概况', '### 1.2 主要施工内容', '#### 1.2.3 道路工程', '正文。', '## 第二章 主要施工方法', '### 2.1 道路工程', '正文二。'].join('\n');
+    const result = dedupeTertiaryH4Titles(markdown);
+    expect(result.markdown).toBe(markdown);
+    expect(result.fixedCount).toBe(0);
   });
 });
 

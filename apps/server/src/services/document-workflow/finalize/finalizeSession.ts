@@ -29,7 +29,6 @@ import type {
 import type { FactTokenScopeClassifier } from '../factTokenClassifier';
 import type { ProfessionalDepthClassifier } from '../professionalDepthClassifier';
 import type { TenderRequirementAssignment } from '../tenderRequirements';
-import type { ProjectMaterialScope } from '../projectMaterialScope';
 import type { ProjectMaterialProfile, ProjectUnderstanding } from '../projectMaterialProfile';
 import type { DocumentBudget } from '../budget';
 import type { PromptBindingPlan } from '../templateStore';
@@ -67,7 +66,6 @@ export interface FinalizeGenerationInput {
   effectiveChapters: DocumentTemplateChapter[];
   // ── 模板与证据 ──
   template: DocumentTemplate; allEvidence: DocumentEvidence[];
-  projectMaterialScope: ProjectMaterialScope;
   // ── 进度与基础设施 ──
   progressStages: DocumentExecutionStage[];
   input: { requirement?: string; signal?: AbortSignal; onProgress?: (stages: DocumentExecutionStage[], checkpoint?: { chapters?: DocumentDraftChapter[] }) => void };
@@ -177,7 +175,6 @@ export interface FinalizeSession {
   webResearchReport: { enabled: boolean; queries: string[]; evidenceCount: number; filteredCount: number; chapters: string[] };
   hasExplicitOutline: boolean;
   retrievalCoverageReports: RetrievalCoverageReport[];
-  projectMaterialScope: ProjectMaterialScope;
   writingTaskBrief?: WritingTaskBrief;
   globalConsistencyIssues?: string[];
   agentWorkflow: AgentWorkflowContext;
@@ -220,7 +217,7 @@ export interface FinalizeSession {
   /** V5 P5 无主数值审计报告（M6）：正文数值 ↔ AuthorityIndex 三分类（一致/登记豁免/无主分流），
    * 修复轮重算校验组后刷新，随 reviewMetadata 交付归档（验收口径「0 未登记项」= unattributed 为空） */
   authorityAuditReport?: AuthorityAuditReport;
-  /** C1 挂起清单（批 1 收敛责任制）：finalGate 构建（门禁失败时），reviewMetadata 归档 + warningIssues 置顶消费 */
+  /** C1 复核清单（批 1 收敛责任制）：finalGate 构建（门禁失败时），reviewMetadata 归档 + warningIssues 置顶消费 */
   suspensionChecklist?: SuspensionChecklist;
   // ── 组装产物 ──
   assets: DocumentAsset[];
@@ -270,7 +267,6 @@ export function createFinalizeSession(input: FinalizeGenerationInput): FinalizeS
     webResearchReport: input.webResearchReport,
     hasExplicitOutline: input.hasExplicitOutline,
     retrievalCoverageReports: input.retrievalCoverageReports,
-    projectMaterialScope: input.projectMaterialScope,
     writingTaskBrief: input.writingTaskBrief,
     globalConsistencyIssues: input.globalConsistencyIssues,
     agentWorkflow: input.agentWorkflow,

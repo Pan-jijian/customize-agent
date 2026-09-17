@@ -113,6 +113,23 @@ const OCR_NATIVE_NOISE_PATTERNS = [/^Image too small to scale!!/u, /^Line cannot
  *  向量检索无法按行召回完整参数）。与 markdown 表格 escape 的换行处理一致。 */
 const foldKvCellText = (value: unknown): string => String(value ?? '').replace(/\s*\n\s*/gu, ' ');
 
+/**
+ * PDF 折行半句检测（行级 markdown 化护栏）：排版折行把正文句断成「半句（无句末标点）+ 续行」，
+ * 行级标题化规则（字号/首行/长度 + 无句末标点）会把半句误标为 # 标题行：① chunk 被误判小节边界；
+ * ② 下游招标要求切分器把假标题当章节上下文（该行内容静默丢失）而其裸续行成孤立碎片——
+ * 丰乐镇门禁 45 项挂起根因链的第一张骨牌。命中即不标题化（保持正文行，下游跨行拼接兜住语义）。
+ */
+export function isPdfWrappedClauseLike(text: string): boolean {
+  if (/[。！？.!?]$/u.test(text)) return true; // 以句末标点整句收尾（标题不会如此）
+  if (/[。！？!?]/u.test(text.slice(0, -1))) return true; // 中段含句末标点 = 段落中段
+  if (/[，、；：,;:—…～]$/u.test(text)) return true; // 行尾句内标点 = 句子被折行裁断
+  if (/^(?:目录|附录|附件)/u.test(text)) return false; // 目录/附录/附件题（结构标题，保持标题化）
+  if (/[，、,]/u.test(text) && text.length >= 16) return true; // 长行含逗号/顿号 = 连句
+  if (/[（）()]/u.test(text) && text.length >= 16) return true; // 长行含括号 = 括注句
+  if (/[：:]/u.test(text) && text.length >= 24) return true; // 长名值行
+  return text.length >= 28; // 超长行不像标题
+}
+
 /** 文件内容提取器，支持文档、表格、图片、CAD 等多种文件格式的内容抽取 */
 export class ContentExtractor {
   async extract(file: ClassifiedFile): Promise<ExtractionResult> {
@@ -2231,6 +2248,8 @@ export class ContentExtractor {
   }
 
   private pdfRowToMarkdown(text: string, height: number, index: number): string {
+    // 折行半句/整句收尾的正文行不标题化（字号与首行规则只对结构标题生效，详见 isPdfWrappedClauseLike）
+    if (isPdfWrappedClauseLike(text)) return text;
     if (index === 0 && text.length <= 100) return `# ${text}`;
     if (height >= 14 && text.length <= 120) return `## ${text}`;
     if (/^(第[一二三四五六七八九十\d]+[章节]|\d+(?:\.\d+)*\s+)/u.test(text) && text.length <= 120) return `### ${text}`;
@@ -2253,6 +2272,7 @@ export class ContentExtractor {
       if (/^#{1,6}\s/u.test(line) || /^\|/u.test(line)) return line;
       if (line.length <= 80 && !/[。！？.!?]$/u.test(line)) {
         if (index === 0) return `# ${line}`;
+        if (isPdfWrappedClauseLike(line)) return line; // 折行半句不标题化（门禁链根因第一张骨牌）
         if (/^(第[一二三四五六七八九十\d]+[章节]|\d+(?:\.\d+)*\s+)/u.test(line)) return `## ${line}`;
         return `### ${line}`;
       }

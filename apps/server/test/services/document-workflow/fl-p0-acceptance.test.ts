@@ -120,3 +120,102 @@ describe('4.19.8 division 分部章容量规划（丰乐镇第三轮实测：块
     expect(targets.every(target => target > 0 && target <= 4500)).toBe(true);
   });
 });
+
+describe('C2 气候类要点独立成块（4.44 丰乐镇实机两轮：此类要点被写作模型系统性拒写 H4）', () => {
+  it('工期章蓝图块内的气候要点提取为独立单点块（原块保留其余要点，要点零丢失）', () => {
+    const structure = buildChapterStructureFromBlueprint({
+      blueprintChapter: {
+        title: '确保工期的技术组织措施',
+        subSections: [
+          { title: '工期滞后纠偏闭环', workPackages: [{ name: '工期滞后动态纠偏' }, { name: '特殊时段工期应对' }] },
+          { title: '总控计划与节点时限', workPackages: [{ name: '进度计划编制' }, { name: '异常气候工期应对' }] },
+        ],
+      } as never,
+      inputSections: ['工期滞后纠偏闭环', '总控计划与节点时限'],
+      chapterTitle: '确保工期的技术组织措施',
+      targetWords: 8000,
+    });
+    // 独立单点同名块（块标题=要点标题）：写作层同名过滤 → sectionTitles 空集 → 「缺 H4 要点」判定结构性为空
+    const climate = structure.blocks.find(block => block.title === '特殊时段工期应对');
+    expect(climate?.subPoints.map(point => point.title)).toEqual(['特殊时段工期应对']);
+    // 原块保留其余要点、不再携带气候要点（故障模式消灭）
+    const origin = structure.blocks.find(block => block.title === '工期滞后纠偏闭环');
+    expect(origin?.subPoints.map(point => point.title)).toEqual(['工期滞后动态纠偏']);
+    // 第二处气候要点同样提取
+    expect(structure.blocks.some(block => block.title === '异常气候工期应对' && block.subPoints.length === 1)).toBe(true);
+    // 要点零丢失（提取块承载 sources 原样）
+    const carried = structure.blocks.flatMap(block => block.subPoints.map(point => point.title));
+    for (const name of ['工期滞后动态纠偏', '特殊时段工期应对', '进度计划编制', '异常气候工期应对']) expect(carried).toContain(name);
+  });
+
+  it('边界：同名点与已有同题块不重复提取（防结构抖动），非气候要点不误伤', () => {
+    const structure = buildChapterStructureFromBlueprint({
+      blueprintChapter: {
+        title: '工期保证措施',
+        subSections: [
+          { title: '特殊时段工期应对', workPackages: [{ name: '特殊时段工期应对' }] },
+          { title: '工期管理', workPackages: [{ name: '特殊时段工期应对' }, { name: '进度考核' }] },
+        ],
+      } as never,
+      inputSections: [],
+      chapterTitle: '工期保证措施',
+      // 4000（份额 2666≤拆块阈值 2800）：避开既有 §1.5 对半拆块，聚焦 C2 边界
+      targetWords: 4000,
+    });
+    // 同名单点块保持原形态；第二个同名要点因已有同题块不再拆出（无新块、无改写）
+    expect(structure.blocks.length).toBe(2);
+    expect(structure.blocks.filter(block => block.title === '特殊时段工期应对').length).toBe(1);
+    // 「工期管理」块原样保留两个要点（气候要点未被抽走）
+    expect(structure.blocks.find(block => block.title === '工期管理')?.subPoints.length).toBe(2);
+  });
+
+  it('非气候工期要点不误伤（普通块结构原样）', () => {
+    const structure = buildChapterStructureFromBlueprint({
+      blueprintChapter: {
+        title: '工期计划',
+        subSections: [{ title: '工期管理', workPackages: [{ name: '进度考核' }, { name: '工期奖惩制度' }] }],
+      } as never,
+      inputSections: [],
+      chapterTitle: '工期计划',
+      // 2500（单块份额 2500≤拆块阈值 2800）：避开容量拆块阈值，与本修复无关
+      targetWords: 2500,
+    });
+    expect(structure.blocks.length).toBe(1);
+    expect(structure.blocks[0]?.subPoints.length).toBe(2);
+  });
+
+  it('编号前缀要点同样命中（「3、雨季施工措施」不因编号漏判）', () => {
+    const structure = buildChapterStructureFromBlueprint({
+      blueprintChapter: {
+        title: '季节性施工保障',
+        subSections: [{ title: '季节性施工组织', workPackages: [{ name: '3、雨季施工措施' }, { name: '组织保障' }] }],
+      } as never,
+      inputSections: [],
+      chapterTitle: '季节性施工保障',
+      targetWords: 6000,
+    });
+    const climate = structure.blocks.find(block => block.title === '3、雨季施工措施');
+    expect(climate?.subPoints.map(point => point.title)).toEqual(['3、雨季施工措施']);
+  });
+
+  it('容量归并屏障：章块超容量归并时气候单点块保持独立（不被邻块吸收复活 H4 要求），Σ预算守恒', () => {
+    const divisions = ['楼地面装饰工程', '门窗安装工程', '栏杆安装工程', '外墙保温工程', '屋面防水工程'];
+    const structure = buildChapterStructureFromBlueprint({
+      blueprintChapter: {
+        title: '工期计划与保证',
+        subSections: [
+          ...divisions.map(title => ({ title, workPackages: [{ name: title }] })),
+          { title: '工期管理', workPackages: [{ name: '进度考核' }, { name: '雨季施工与不利天气应对' }] },
+        ],
+      } as never,
+      inputSections: [],
+      chapterTitle: '工期计划与保证',
+      targetWords: 4000,
+    });
+    // 归并后气候块仍以独立单点同名块存在（归并屏障不被吸收）
+    const climate = structure.blocks.find(block => block.title === '雨季施工与不利天气应对');
+    expect(climate?.subPoints.map(point => point.title)).toEqual(['雨季施工与不利天气应对']);
+    // Σ块预算守恒不受屏障影响
+    expect(structure.blocks.reduce((sum, block) => sum + block.targetWords, 0)).toBe(4000);
+  });
+});

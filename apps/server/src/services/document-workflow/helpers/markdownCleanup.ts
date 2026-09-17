@@ -742,10 +742,13 @@ export function dedupeChapterDuplicateParagraphs(content: string): string {
 }
 
 /** 最终组装路径的重复/空壳兜底清理：rebuildFinalMarkdown 不再逐章跑 finalizeChapterContentQuality，
- * 补跑同 H3 重复 H4 去重与空壳小节删除，避免 Final Gate 补写与章节拼接残留的重复/空壳进入成品文档。 */
-
+ * 补跑同 H3 重复 H4 去重与空壳小节删除，避免 Final Gate 补写与章节拼接残留的重复/空壳进入成品文档。
+ * r11 补充段内整句复制去重（dedupeRepeatedSentencesWithinBlocks，丰乐镇门禁 #10 归因）：终链此前
+ * 缺该收口——LLM 修复轮补写的段内复读（「…按『就近调配、挖填平衡、余土外弃』原则组织。【各自然村…】
+ * 施工按…顺序组织：【各自然村…】」同段同句连写两遍）在 finalizeChapterContentQuality 之后引入后
+ * 无任何环节消费，直坠终门禁；与生成链（finalizeChapterContentQuality）同口径补齐，幂等零成本。 */
 export function finalizeFinalMarkdownStructure(markdown: string): string {
-  return stripDataConsistencyLeakSentences(stripTenderClauseFragmentHeadings(removeEmptySubSectionHeadings(dedupeRepeatedSubsections(dedupeCrossSectionSkeletonH4s(dedupeCrossLevelHeadingDuplicates(dedupeRepeatedBlocksWithinSections(normalizeWorkPackageLabels(cleanChineseWordBreakSpaces(splitGluedTableHeaderLines(rewriteWorkPackageTerminology(dedupeCrossSectionDuplicateSentences(markdown))))))))))));
+  return stripDataConsistencyLeakSentences(stripTenderClauseFragmentHeadings(removeEmptySubSectionHeadings(dedupeRepeatedSubsections(dedupeCrossSectionSkeletonH4s(dedupeCrossLevelHeadingDuplicates(dedupeRepeatedBlocksWithinSections(normalizeWorkPackageLabels(cleanChineseWordBreakSpaces(splitGluedTableHeaderLines(rewriteWorkPackageTerminology(dedupeRepeatedSentencesWithinBlocks(dedupeCrossSectionDuplicateSentences(markdown)))))))))))));
 }
 
 export function promptMatchesChapter(prompt: ResolvedPromptContent, _chapter: DocumentTemplateChapter) {

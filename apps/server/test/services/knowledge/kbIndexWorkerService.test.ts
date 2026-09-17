@@ -5,13 +5,13 @@ vi.mock('child_process', () => ({ fork: vi.fn() }));
 vi.mock('@customize-agent/knowledge', () => ({ runIndexLoop: vi.fn() }));
 vi.mock('@/services/knowledge/kbService', () => ({ getMultiProjectManager: vi.fn() }));
 vi.mock('@/services/knowledge/kbOperationLog', () => ({ upsertKbOperation: vi.fn() }));
-vi.mock('@/services/document-workflow/projectIntelligence', () => ({ startProjectIntelligenceBuild: vi.fn() }));
+vi.mock('@/services/document-workflow/projectIntelligence', () => ({ startProjectIntelligenceBuildForLibrary: vi.fn() }));
 
 import { fork } from 'child_process';
 import { runIndexLoop } from '@customize-agent/knowledge';
 import { getMultiProjectManager } from '@/services/knowledge/kbService';
 import { upsertKbOperation } from '@/services/knowledge/kbOperationLog';
-import { startProjectIntelligenceBuild } from '@/services/document-workflow/projectIntelligence';
+import { startProjectIntelligenceBuildForLibrary } from '@/services/document-workflow/projectIntelligence';
 import {
   enqueueKnowledgeIndex,
   getActiveKnowledgeIndex,
@@ -29,7 +29,7 @@ beforeEach(() => {
   vi.mocked(fork).mockReset();
   vi.mocked(runIndexLoop).mockReset();
   vi.mocked(upsertKbOperation).mockReset();
-  vi.mocked(startProjectIntelligenceBuild).mockReset();
+  vi.mocked(startProjectIntelligenceBuildForLibrary).mockReset();
   vi.mocked(getMultiProjectManager).mockReset();
   delete process.env.CUSTOMIZE_AGENT_DISABLE_KB_CHILD_PROCESS;
 });
@@ -56,7 +56,7 @@ describe('子进程模式（runInChildProcess）', () => {
       message: '后台索引输出：line one\nline two',
     }));
     expect(result).toEqual({ success: true });
-    expect(startProjectIntelligenceBuild).toHaveBeenCalledWith('/proj-idx');
+    expect(startProjectIntelligenceBuildForLibrary).toHaveBeenCalledWith('/proj-idx');
     expect(isKnowledgeIndexing('/proj-idx')).toBe(false);
   });
 
@@ -86,7 +86,7 @@ describe('子进程模式（runInChildProcess）', () => {
     expect(result.success).toBe(true);
     expect(runIndexLoop).toHaveBeenCalled();
     expect(upsertKbOperation).toHaveBeenCalledWith('/proj-idx3', expect.objectContaining({ id: 'job-3', stage: 'parsing', status: 'processing', message: expect.stringContaining('已自动切换为主进程内索引') }));
-    expect(startProjectIntelligenceBuild).toHaveBeenCalledWith('/proj-idx3');
+    expect(startProjectIntelligenceBuildForLibrary).toHaveBeenCalledWith('/proj-idx3');
   });
 
   it('exit 非 0 且已上报过 IPC（运行中途崩溃）：仍按失败处理', async () => {
@@ -98,7 +98,7 @@ describe('子进程模式（runInChildProcess）', () => {
     const result = await promise;
     expect(result).toEqual({ success: false, error: '知识库后台进程退出，退出码 1' });
     expect(upsertKbOperation).toHaveBeenCalledWith('/proj-idx3b', expect.objectContaining({ id: 'job-3b', stage: 'error', status: 'error', percent: 100, error: '知识库后台进程退出，退出码 1' }));
-    expect(startProjectIntelligenceBuild).not.toHaveBeenCalled();
+    expect(startProjectIntelligenceBuildForLibrary).not.toHaveBeenCalled();
   });
 
   it('子进程 spawn 失败（error 事件）：自动切换进程内索引并完成', async () => {
@@ -113,7 +113,7 @@ describe('子进程模式（runInChildProcess）', () => {
     expect(result.success).toBe(true);
     expect(runIndexLoop).toHaveBeenCalled();
     expect(upsertKbOperation).toHaveBeenCalledWith('/proj-idx4', expect.objectContaining({ id: 'job-4', stage: 'parsing', status: 'processing', message: expect.stringContaining('已自动切换为主进程内索引') }));
-    expect(startProjectIntelligenceBuild).toHaveBeenCalledWith('/proj-idx4');
+    expect(startProjectIntelligenceBuildForLibrary).toHaveBeenCalledWith('/proj-idx4');
   });
 
   it('IPC 消息转发操作日志补丁（单写者）', async () => {
@@ -149,7 +149,7 @@ describe('进程内模式（runInProcess）', () => {
     expect(upsertKbOperation).toHaveBeenCalledWith('/proj-inproc', expect.objectContaining({ id: 'job-6', stage: 'chunking', chunkCount: 5, filePath: 'a.pdf' }));
     expect(upsertKbOperation).toHaveBeenCalledWith('/proj-inproc', expect.objectContaining({ id: 'job-6', stage: 'vectorizing' }));
     expect(upsertKbOperation).toHaveBeenCalledWith('/proj-inproc', expect.objectContaining({ id: 'job-6', stage: 'done', status: 'success', percent: 100, fileName: 'a.pdf' }));
-    expect(startProjectIntelligenceBuild).toHaveBeenCalledWith('/proj-inproc');
+    expect(startProjectIntelligenceBuildForLibrary).toHaveBeenCalledWith('/proj-inproc');
   });
 
   it('vectorStatus 错误：向量降级不阻断，操作以 warning 完成', async () => {
@@ -162,7 +162,7 @@ describe('进程内模式（runInProcess）', () => {
     expect(result.success).toBe(true);
     expect(result.warning).toBe('HNSWLib 向量入库失败');
     expect(upsertKbOperation).toHaveBeenCalledWith('/proj-inproc2', expect.objectContaining({ id: 'job-7', stage: 'done', status: 'warning', error: 'HNSWLib 向量入库失败' }));
-    expect(startProjectIntelligenceBuild).toHaveBeenCalledWith('/proj-inproc2');
+    expect(startProjectIntelligenceBuildForLibrary).toHaveBeenCalledWith('/proj-inproc2');
   });
 
   it('索引抛错：触发 failPendingIndexJobs 并写入错误日志', async () => {
@@ -220,11 +220,11 @@ describe('队列编排', () => {
     await p1;
     // 第一个 job 完成但队列还有 job-2 待消费：不得触发（旧实现每个 job 完成都触发，
     // 缓存构建只基于部分已入库文件且重复跑 LLM 图谱）
-    expect(startProjectIntelligenceBuild).not.toHaveBeenCalled();
+    expect(startProjectIntelligenceBuildForLibrary).not.toHaveBeenCalled();
     childB.emit('exit', 0);
     await p2;
-    await vi.waitFor(() => expect(startProjectIntelligenceBuild).toHaveBeenCalledTimes(1));
-    expect(startProjectIntelligenceBuild).toHaveBeenCalledWith('/proj-chain-intel');
+    await vi.waitFor(() => expect(startProjectIntelligenceBuildForLibrary).toHaveBeenCalledTimes(1));
+    expect(startProjectIntelligenceBuildForLibrary).toHaveBeenCalledWith('/proj-chain-intel');
   });
 
   it('startKnowledgeIndex 触发后台入队', async () => {

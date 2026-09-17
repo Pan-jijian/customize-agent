@@ -9,6 +9,7 @@ import {
   constructionOrgDivisionSectionIssues,
   constructionOrgGenericLanguageIssues,
   constructionOrgMajorContentIssues,
+  majorContentDeficitCount,
   constructionOrgProfessionalChainIssues,
   constructionOrgProjectTypePrompt,
   majorContentGovernanceIssues,
@@ -263,6 +264,44 @@ describe('constructionOrgMajorContentIssues（项目主要施工内容门禁）'
   });
 });
 
+// ── r16c 丰乐镇 B3 归因：majorContentDeficitCount 残差细分为缺陷项数 ──
+
+describe('majorContentDeficitCount（主要施工内容残差细分，r16c 聚合口径误停根治）', () => {
+  // 缺 process 维度的弱块（有工程量有方法、无流程/顺序表达）；修复形态补入流程句后残差下降
+  const weakPackage = (index: number, name: string, body: string) => `#### 1.2.${index} ${name}\n${body}`;
+  const WEAK_PIPE = weakPackage(2, '污水工程', '污水工程作业范围含村内主支管网，工程量1200m。\n施工方法：采用机械开挖并组织专业班组铺设，逐层检查验收并形成记录报告归档。');
+  const WEAK_GREEN = weakPackage(3, '绿化工程', '绿化工程作业范围栽植苗木320株。\n施工方法：苗木进场后逐株检查验收，栽植后养护期内定期巡查加固，并记录成活率与整改情况。');
+  const FIXED_PIPE = weakPackage(2, '污水工程', '污水工程作业范围含村内主支管网，工程量1200m。\n施工流程：测量放线→沟槽开挖→管道铺设→闭水试验→分层回填。\n施工方法：采用机械开挖并组织专业班组铺设，逐层检查验收并形成记录报告归档。');
+  const FIXED_GREEN = weakPackage(3, '绿化工程', '绿化工程作业范围栽植苗木320株。\n施工流程：场地清理→种植土翻整→苗木栽植→浇透定根水→养护管理。\n施工方法：苗木进场后逐株检查验收，栽植后养护期内定期巡查加固，并记录成活率与整改情况。');
+  const GOOD_ROAD = weakPackage(4, '道路工程', '道路工程作业范围为主村道拓宽改造，工程量820m。\n施工流程：测量放线→路基整平→宕渣回填→碾压成型→验收记录。\n施工方法：采用压路机分层碾压，压实度98%检测合格后进入下道工序并形成检测记录。');
+  const beforeContent = `### 1.2 项目主要施工内容\n${WEAK_PIPE}\n${WEAK_GREEN}\n${GOOD_ROAD}`;
+  const afterContent = `### 1.2 项目主要施工内容\n${FIXED_PIPE}\n${WEAK_GREEN}\n${GOOD_ROAD}`;
+  const blockerCountOf = (issues: Array<{ severity?: string }>) => issues.filter(issue => issue.severity === 'blocker').length;
+
+  it('部分修复（1 个块补全工序）在聚合条数不变时细分残差下降', () => {
+    const beforeDeficit = majorContentDeficitCount([chapter('项目主要施工内容', beforeContent)]);
+    const afterDeficit = majorContentDeficitCount([chapter('项目主要施工内容', afterContent)]);
+    expect(beforeDeficit).toBeGreaterThan(afterDeficit);
+    expect(afterDeficit).toBeGreaterThan(0);
+    // 聚合口径不可见：要素不全 blocker 条数两侧相同（旧口径恒判「未下降」提前停止修复轮）
+    expect(blockerCountOf(constructionOrgMajorContentIssues([chapter('项目主要施工内容', beforeContent)])))
+      .toBe(blockerCountOf(constructionOrgMajorContentIssues([chapter('项目主要施工内容', afterContent)])));
+  });
+
+  it('要素不全 blocker 消息携带逐块明细（块名 + 缺维，修复轮可定向补写）', () => {
+    const issues = constructionOrgMajorContentIssues([chapter('项目主要施工内容', beforeContent)]);
+    const incomplete = issues.find(issue => issue.message.includes('内容要素不全'));
+    expect(incomplete).toBeDefined();
+    expect(incomplete!.message).toContain('污水工程（缺工序顺序）');
+    expect(incomplete!.message).toContain('绿化工程（缺工序顺序）');
+  });
+
+  it('全部块达标时细分残差零', () => {
+    const content = `### 1.2 项目主要施工内容\n${FIXED_PIPE}\n${FIXED_GREEN}\n${GOOD_ROAD}`;
+    expect(majorContentDeficitCount([chapter('项目主要施工内容', content)])).toBe(0);
+  });
+});
+
 describe('constructionOrgBonusModuleIssues（隐藏高分模块建议）', () => {
   it('触发加分模块但正文未覆盖报 info 建议', () => {
     const issues = constructionOrgBonusModuleIssues([chapter('质量保证措施', '隐蔽工程验收按规范执行。')]);
@@ -349,6 +388,18 @@ describe('constructionOrgDivisionSectionIssues（分部分项专项验收器）'
     const content = `### 主要分部分项工程施工方案\n${[noParamPackage(1, '土方开挖'), noParamPackage(2, '基础工程'), noParamPackage(3, '主体结构'), noParamPackage(4, '防水工程'), noParamPackage(5, '装饰装修')].join('\n')}`;
     const issues = constructionOrgDivisionSectionIssues([chapter('主要分部分项工程施工方案', content)]);
     expect(issues.some(issue => issue.message.includes('工艺参数不足'))).toBe(true);
+  });
+
+  it('r15 丰乐镇 B5：「砌筑检查井2座」计入工艺参数（单位表补座，实况复刻）', () => {
+    // r15 实机阻断：2.5 章「其他分部分项工程施工要点」块工艺参数为 8205.53m/7525.01m/240.53m 共 3 个，
+    // 「砌筑检查井2座」的 2座 因单位表漏「座」不计 → 误报参数不足（阈值 4）；补座后计数 4 → 收口
+    const pipePackage = (withWell: boolean) => `#### 分项1 管网衔接\n公厕雨水管网与室外管网衔接部位，管道铺设总长8205.53m，其中塑料管DN200共7525.01m、未标规格240.53m${withWell ? '，砌筑检查井2座' : ''}。雨水管接入检查井时管口与井壁平齐，接口缝隙用防水砂浆填塞密实。施工先复核检查井井位与管道标高，再安装井筒与井盖，随后进行管道闭水试验，最后分层回填并夯实。施工员每日检查接口处理与回填压实情况，不合格部位当日整改复查销项。`;
+    const others = ['土方开挖', '管道安装', '井室砌筑', '路面恢复'].map((name, index) => divisionPackage(index + 2, name)).join('\n');
+    const build = (withWell: boolean) => `### 主要分部分项工程施工方案\n${pipePackage(withWell)}\n${others}`;
+    const withWell = constructionOrgDivisionSectionIssues([chapter('主要分部分项工程施工方案', build(true))]);
+    expect(withWell.some(issue => issue.message.includes('工艺参数不足'))).toBe(false);
+    const withoutWell = constructionOrgDivisionSectionIssues([chapter('主要分部分项工程施工方案', build(false))]);
+    expect(withoutWell.some(issue => issue.message.includes('工艺参数不足'))).toBe(true);
   });
 
   it('分项正文过短报 blocker', () => {

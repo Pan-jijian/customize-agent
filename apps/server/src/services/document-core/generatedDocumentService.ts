@@ -813,17 +813,17 @@ function launchTask(job: {
     const sectionGaps = collectSectionContentGaps(result.markdown, result.chapters).filter(gap => gap.reason === 'empty');
     if (sectionGaps.length > 0) warningIssues.unshift(`小节内容补写未完成：仍有 ${sectionGaps.length} 个空洞小节，请继续生成或补充资料后重试`);
     if (!result.exportGate.passed) {
-      // V2 批3 宁缺毋假 + 批1 C1 挂起清单：未通过导出门禁=显式挂起不放行交付（failed）。未收敛阻断转为
-      // 结构化精准人工清单（分类/定位/问题/建议/修复路径/检测器身份）置顶——优先复用流水线归档清单
+      // 4.50 交付解耦 + 批1 C1 复核清单：未收敛阻断不再挂起交付（failed），转结构化精准人工清单
+      //（分类/定位/问题/建议/修复路径/检测器身份）置顶——优先复用流水线归档清单
       //（reviewMetadata.suspensionChecklist，三挂载点同一构建），兜底路径就地构建，保证 banner 与归档同源。
       const blockers = result.exportGate.blockingIssues || [];
       const checklist = result.reviewMetadata?.suspensionChecklist ?? buildSuspensionChecklist(blockers, result.chapters);
       warningIssues.unshift(formatSuspensionBanner(checklist));
     }
-    // V2 批3 状态语义收紧（宁缺毋假）：门禁通过=completed；未通过=failed（不再以「有实质正文」粉饰为
-    // completed_with_issues 带病交付——代价是偶尔拿不到文档，但拿到的每一份都通过全部门禁）。
-    // failed 后可基于 checkpoint 增量续修重试。
-    const completedStatus: GeneratedDocumentStatus = result.exportGate.passed ? 'completed' : 'failed';
+    // 4.50 交付与修复解耦（根治「阻断=永远拿不到文档」）：门禁通过=completed；未通过=completed_with_issues
+    // —— 文档照常可查看/可导出/可基于 checkpoint 续修，修复机制继续尽力收敛、残留项以复核清单呈现；
+    // failed 终态仅保留给异常中断路径（生成抛错且无 checkpoint）。V2 批3「宁缺毋假=failed」策略废弃。
+    const completedStatus: GeneratedDocumentStatus = result.exportGate.passed ? 'completed' : 'completed_with_issues';
     const completedBase = trimEvidenceContent({
       ...current,
       templateName: result.templateName,
@@ -847,15 +847,16 @@ function launchTask(job: {
       ...completedBase,
       assets: generatedAsset ? [generatedAsset, ...(completedBase.assets || []).filter(asset => asset.id !== generatedAsset.id)] : completedBase.assets,
     }, resolvedProjectRoot);
-    // 多文档反雷同（L3）：定稿后写指纹池（只存标题与结构、无正文；失败静默不阻断主链）
-    if (completedStatus !== 'failed' && result.markdown) {
+    // 多文档反雷同（L3）：定稿后写指纹池（只存标题与结构、无正文；失败静默不阻断主链）；
+    // 4.50 交付解耦后 completedStatus 恒为 completed / completed_with_issues 两值，有正文即入池
+    if (result.markdown) {
       const headingTitles = extractHeadingTitles(result.markdown);
       if (headingTitles.h3.length > 0 || headingTitles.h4.length > 0) {
         appendFingerprintEntry({ documentId, templateId: record.templateId || input.templateId, h3: headingTitles.h3, h4: headingTitles.h4, createdAt: new Date().toISOString() });
       }
     }
     upsertGeneratedAssets(result.assets || [], documentId, resolvedProjectRoot);
-    upsertDocumentOperation(resolvedProjectRoot, { taskId, title: `生成 ${record.title}`, status: record.status === 'completed' ? 'success' : 'error', percent: 100, message: record.status === 'completed' ? '文档生成完成，已通过导出门禁' : `文档生成未通过导出门禁（宁缺毋假：带病文档不作为交付件），存在 ${warningIssues.length || 1} 个阻断问题`, stages: result.executionStages, error: record.status === 'completed' ? undefined : warningIssues.join('；') });
+    upsertDocumentOperation(resolvedProjectRoot, { taskId, title: `生成 ${record.title}`, status: record.status === 'completed' ? 'success' : 'warning', percent: 100, message: record.status === 'completed' ? '文档生成完成，已通过导出门禁' : `文档生成完成，存在 ${result.exportGate.blockingIssues.length || warningIssues.length || 1} 项质量提示待人工复核（不影响导出）`, stages: result.executionStages });
     return record;
   }).catch(error => {
     const current = getGeneratedDocument(documentId, resolvedProjectRoot);

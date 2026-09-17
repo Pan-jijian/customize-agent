@@ -362,8 +362,11 @@ function scanTables(lines: string[], result: StructureScanResult): void {
 export function scanTableNumberingDefects(markdown: string): StructureDefect[] {
   const lines = markdown.replace(/\r\n?/gu, '\n').split('\n');
   const defects: StructureDefect[] = [];
-  const entities = new Map<number, number[]>();
-  const entityRe = /^表\s*(\d+)\s+\S/u;
+  // r6 子编号支持（r5 实机 #1-3 归因）：编号捕获扩展为 N[-子号]（「表7-1」不得截为「表7」），
+  // key 统一全角连字符，实体与引用同口径比对
+  const normalizeTableNumber = (raw: string) => raw.replace(/[—–]/gu, '-');
+  const entities = new Map<string, number[]>();
+  const entityRe = /^表\s*(\d+(?:[-—–]\d+)?)\s+\S/u;
   for (let index = 0; index < lines.length; index += 1) {
     const match = entityRe.exec((lines[index] || '').trim());
     if (!match) continue;
@@ -371,7 +374,7 @@ export function scanTableNumberingDefects(markdown: string): StructureDefect[] {
     let next = index + 1;
     while (next < lines.length && !(lines[next] || '').trim()) next += 1;
     if (next >= lines.length || !/^\s*\|/u.test(lines[next] || '')) continue;
-    const number = Number.parseInt(match[1], 10);
+    const number = normalizeTableNumber(match[1]);
     entities.set(number, [...(entities.get(number) || []), index + 1]);
   }
   for (const [number, at] of entities) {
@@ -384,20 +387,26 @@ export function scanTableNumberingDefects(markdown: string): StructureDefect[] {
     });
   }
   const REFERENCE_RULES = [
-    /[按如]\s*表\s*(\d+)/gu,
-    /(?<![\u4e00-\u9fa5])见\s*表\s*(\d+)/gu,
-    /(?:参见|详见|根据|依据|按照|参照|比照|遵照|结合)\s*表\s*(\d+)/gu,
+    /[按如]\s*表\s*(\d+(?:[-—–]\d+)?)/gu,
+    /(?<![\u4e00-\u9fa5])见\s*表\s*(\d+(?:[-—–]\d+)?)/gu,
+    /(?:参见|详见|根据|依据|按照|参照|比照|遵照|结合)\s*表\s*(\d+(?:[-—–]\d+)?)/gu,
   ];
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] || '';
     if (!line.includes('表')) continue;
-    const reported = new Set<number>();
+    const reported = new Set<string>();
     for (const rule of REFERENCE_RULES) {
       rule.lastIndex = 0;
       let match: RegExpExecArray | null;
       while ((match = rule.exec(line))) {
-        const number = Number.parseInt(match[1], 10);
+        const number = normalizeTableNumber(match[1]);
         if (reported.has(number) || entities.has(number)) continue;
+        // r6 无表题表格锚定豁免（r5 实机 #1-3）：引用行后首个非空行为表格块起始行
+        // （引导句→表格，表格无表题）时，该表格即引用所指实体——r5 三处「按表7-1/7-2/7-3
+        // 执行」后随对应表格但表格无题行，被静态实体判据误判孤儿引用直坠终门禁
+        let next = index + 1;
+        while (next < lines.length && !(lines[next] || '').trim()) next += 1;
+        if (next < lines.length && /^\s*\|/u.test(lines[next] || '')) continue;
         reported.add(number);
         defects.push({
           kind: 'table-number-orphan-reference',
@@ -576,6 +585,19 @@ export function scanStructureDefects(markdown: string): StructureScanResult {
   return result;
 }
 
+/** 截断行尾残片闭合（r11 丰乐镇门禁 #2 归因）：行内已有句界标点、句界后仅剩 ≤40 汉字尾随残片时，
+ * 删残片到最后一个句界——只删不生成，零内容生成（残片本身是不完整内容，无处可补）；
+ * 行内无句界或残片过长（>40 汉字，可能是整句截断的中段内容）时返回 undefined 交阻断域，不得强删。 */
+const TRUNCATED_TAIL_MAX_HAN = 40;
+function closeTruncatedLineTail(line: string): { line: string; removed: string } | undefined {
+  const match = /^([\s\S]*[。；！？])([^。；！？]+)$/u.exec(line);
+  if (!match) return undefined;
+  const tail = match[2].trim();
+  const tailHan = hanCount(tail);
+  if (tailHan === 0 || tailHan > TRUNCATED_TAIL_MAX_HAN) return undefined;
+  return { line: match[1], removed: tail.slice(0, 30) };
+}
+
 function dedupeAdjacentSentences(line: string): string {
   const sentences = line.split(SENTENCE_SPLIT_RE);
   const out: string[] = [];
@@ -594,7 +616,12 @@ export function cleanStructureDefects(markdown: string): { markdown: string; cle
   for (let round = 0; round < 4; round += 1) {
     const lines = current.split('\n');
     const scan = scanStructureDefects(current);
-    if (scan.cleanable.length === 0) break;
+    // r11 截断行尾残片闭合（丰乐镇门禁 #2 归因）：truncated-line 属 blocking 域（不可确定性重写），
+    // 但「行内句界 + ≤40 汉字尾随残片」形态可零信息损失闭合（见 closeTruncatedLineTail）——
+    // 该形态此前无任何修复轮消费直坠终门禁（truncated-sentence 修复器处理的是另一族形态），
+    // 本步收口把可闭合的「结构性阻断」降为「内容略短」，不可闭合的仍留阻断域交门禁
+    const closableTruncations = scan.blocking.filter(defect => defect.kind === 'truncated-line');
+    if (scan.cleanable.length === 0 && closableTruncations.length === 0) break;
     const deletions = new Set<number>();
     const replacements = new Map<number, string>();
     // 有序列表：孤立编号去号 / 块内重排（一次处理全部块，防逐缺陷相互干扰）
@@ -610,6 +637,15 @@ export function cleanStructureDefects(markdown: string): { markdown: string; cle
         continue;
       }
       if (block.items.length > 1 && !numbers.every((value, index) => value === index + 1)) {
+        // r6 重排护栏（r5 实机构性 root-fix 第二道防线）：块首编号 > 1 且上一非空行残留“标点+编号”
+        // 内联列表粘连（「…组织：1. …；」形态）时，本块是内联首项粘连行的拆行残段——重排为 1..n
+        // 会与上一行粘连的首项编号形成重复编号（双 1.）；拆行器（normalizeInlineListsInLine）
+        // 已优先在冒号后拆行，此处拦截未覆盖形态，保留原编号交检测链，不静默改写
+        if (numbers[0] > 1) {
+          let prevNonEmpty = block.items[0].index - 1;
+          while (prevNonEmpty >= 0 && !lines[prevNonEmpty].trim()) prevNonEmpty -= 1;
+          if (prevNonEmpty >= 0 && /[:：。；;]\s*\d{1,3}[.、]\s*\S/u.test(lines[prevNonEmpty])) continue;
+        }
         block.items.forEach((item, position) => {
           const replaced = lines[item.index].replace(/^([ \u3000]*)\d{1,3}\.\s+/u, `$1${position + 1}. `);
           if (replaced !== lines[item.index]) replacements.set(item.index, replaced);
@@ -640,6 +676,16 @@ export function cleanStructureDefects(markdown: string): { markdown: string; cle
           replacements.set(index, deduped);
           cleaned.push(`相邻重复句去重：第 ${index + 1} 行`);
         }
+      }
+    }
+    // 截断行尾残片闭合（与 cleanable 同轮处理；行冲突时让位已有删改）
+    for (const defect of closableTruncations) {
+      const index = defect.line - 1;
+      if (deletions.has(index) || replacements.has(index)) continue;
+      const closed = closeTruncatedLineTail(lines[index]);
+      if (closed !== undefined && closed.line !== lines[index]) {
+        replacements.set(index, closed.line);
+        cleaned.push(`截断行尾残片闭合：第 ${index + 1} 行（删尾「${closed.removed}」）`);
       }
     }
     const next = lines

@@ -148,20 +148,22 @@ describe('buildWritingTaskBrief', () => {
       templateName: '某项目施工组织设计',
     });
     expect(brief.documentType).toBe('施工组织设计');
-    // 基础 7 条 + 写作红线 5 条（V2 批1-5 四条 + 批2-1 工期时序与分批口径，与结构/表格/口径检测口径同源）+ 招标硬性要求 + 规模事实卡 + 可信基础事实卡 = 15 条
-    expect(brief.globalWritingFocus).toHaveLength(15);
+    // 基础 7 条（含五要素链与规范术语显性落位 2 条 R12 新增）+ 写作红线 5 条（V2 批1-5 四条 + 批2-1 工期时序与分批口径，与结构/表格/口径检测口径同源）+ 招标硬性要求 + 规模事实卡 + 可信基础事实卡 = 17 条
+    expect(brief.globalWritingFocus).toHaveLength(17);
     expect(brief.globalWritingFocus[0]).toContain('模板化空话');
-    expect(brief.globalWritingFocus[5]).toContain('属地创优目标');
-    expect(brief.globalWritingFocus[6]).toContain('表格数据一致性');
-    expect(brief.globalWritingFocus[7]).toContain('结构完整性红线');
-    expect(brief.globalWritingFocus[8]).toContain('表格规范红线');
-    expect(brief.globalWritingFocus[9]).toContain('数据口径红线');
-    expect(brief.globalWritingFocus[10]).toContain('禁止资料堆砌伪段落');
-    expect(brief.globalWritingFocus[11]).toContain('工期时序与分批口径红线');
-    expect(brief.globalWritingFocus[12]).toContain('招标硬性要求必须逐项明确响应');
-    expect(brief.globalWritingFocus[13]).toContain('项目规模事实卡');
-    expect(brief.globalWritingFocus[13]).toContain('建设规模=总建筑面积 28570.36㎡');
-    expect(brief.globalWritingFocus[14]).toContain('项目可信基础事实');
+    expect(brief.globalWritingFocus[2]).toContain('五要素链');
+    expect(brief.globalWritingFocus[3]).toContain('规范术语显性落位');
+    expect(brief.globalWritingFocus[7]).toContain('属地创优目标');
+    expect(brief.globalWritingFocus[8]).toContain('表格数据一致性');
+    expect(brief.globalWritingFocus[9]).toContain('结构完整性红线');
+    expect(brief.globalWritingFocus[10]).toContain('表格规范红线');
+    expect(brief.globalWritingFocus[11]).toContain('数据口径红线');
+    expect(brief.globalWritingFocus[12]).toContain('禁止资料堆砌伪段落');
+    expect(brief.globalWritingFocus[13]).toContain('工期时序与分批口径红线');
+    expect(brief.globalWritingFocus[14]).toContain('招标硬性要求必须逐项明确响应');
+    expect(brief.globalWritingFocus[15]).toContain('项目规模事实卡');
+    expect(brief.globalWritingFocus[15]).toContain('建设规模=总建筑面积 28570.36㎡');
+    expect(brief.globalWritingFocus[16]).toContain('项目可信基础事实');
   });
 
   it('规模事实卡只收录规模口径事实（前 8 条），非规模事实不进卡', () => {
@@ -189,7 +191,7 @@ describe('buildWritingTaskBrief', () => {
       templateName: '某项目施工组织设计',
     });
     expect(brief.documentType).toBe('施工组织设计');
-    expect(brief.globalWritingFocus).toHaveLength(13); // 基础 7 条 + 写作红线 5 条 + 招标硬性要求
+    expect(brief.globalWritingFocus).toHaveLength(15); // 基础 7 条（含 R12 五要素链/术语显性 2 条）+ 写作红线 5 条 + 招标硬性要求
     const chapter = brief.chapters[0];
     expect(chapter.drawingTargets).toEqual([]);
     expect(chapter.gaps).toEqual([]);

@@ -3,6 +3,8 @@
  * 本地语义模型 mock 为「语义桶 one-hot 向量」：每个桶对应一个锚点原型前缀（正文复述原型即命中该桶），
  * dot = 共同桶数（≥1 即相似度 ≥0.6 阈值），判定结果确定可控。
  */
+import { readFileSync } from 'node:fs';
+import * as path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const embedMock = vi.hoisted(() => vi.fn<(texts: string[]) => Promise<number[][]>>());
@@ -149,5 +151,14 @@ describe('analyze 分块与缓存', () => {
     expect(analysis).toBeDefined();
     const lastCall = embedMock.mock.calls.at(-1)!;
     expect(lastCall[0].length).toBe(1); // 10 段 × <40 字 → 单块
+  });
+});
+
+describe('CONTENT_NEED_ANCHORS 内容锚点组（源级锁）', () => {
+  it('safety 组含第三锚点「文明施工责任分区…」（r6 实机 #7：文明施工章未被认定 safety 覆盖）', () => {
+    const source = readFileSync(path.resolve(__dirname, '../../../src/services/document-workflow/professionalDepthClassifier.ts'), 'utf8');
+    const safetyBlock = source.slice(source.indexOf('safety: ['), source.indexOf('resource: ['));
+    expect(safetyBlock).toContain('风险源辨识、临电消防管理、安全检查与隐患整改闭环');
+    expect(safetyBlock).toContain('文明施工责任分区、现场保洁与防尘降噪、检查整改销项闭环管理');
   });
 });

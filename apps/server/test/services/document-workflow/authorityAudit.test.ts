@@ -189,6 +189,18 @@ describe('V5 P5 无主数值审计（M6）', () => {
     expect(report.processGaps).toEqual([]);
   });
 
+  it('r6 实机校准：避雷支撑卡/预留/配电箱语境未命中进收编清单（不落未登记）', () => {
+    // r6 审计 3 项未登记（0.5m/0.35m/0.3m）归因：避雷带支撑卡（防雷安装）、基础预留宽度
+    // （构造几何）归工艺语境；配电箱基础（设备器材）归推导缺口——词表扩充后同句同值
+    // 全部收编，unregisteredCount 为 0
+    const markdown = '配电箱底距地0.3m。避雷带支撑卡间距0.5m。基础预留0.35m。';
+    const report = auditAuthorityCoverage(markdown, makeBlueprintData());
+    expect(report.unregisteredCount).toBe(0);
+    expect(report.unattributed).toEqual([]);
+    expect(report.derivationGaps.map(finding => finding.token)).toEqual(expect.arrayContaining(['0.3m']));
+    expect(report.processGaps.map(finding => finding.token)).toEqual(expect.arrayContaining(['0.5m', '0.35m']));
+  });
+
   it('无蓝图数据边界：全部未命中仍按语境分流（推导语境暴露投影层未接管）', () => {
     const report = auditAuthorityCoverage('总工期 240 日历天。', undefined);
     expect(report.scanned).toBe(1);

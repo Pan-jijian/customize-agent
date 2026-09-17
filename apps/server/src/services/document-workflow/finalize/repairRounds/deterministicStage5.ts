@@ -5,7 +5,7 @@
  */
 import { applyDeterministicConsistencyFixes, applyDeterministicConsistencyFixesToMarkdown } from '../../qualityValidation';
 import { applyNumericConsistencyDeterministicFixes, extractGreeningMaintenanceAuthority, stripDuplicateTablesAcrossChapters, runFixUntilClean } from '../../documentIntegrityChecks';
-import { blueprintLaborPeakAuthority, blueprintPhaseLaborAuthorities, buildAuthorityIndex } from '../../authorityIndex';
+import { blueprintEquipmentAuthorities, blueprintLaborPeakAuthority, blueprintPhaseLaborAuthorities, buildAuthorityIndex } from '../../authorityIndex';
 import { blueprintCitationVerdict, type QuantityConflictAnchor } from '../../integratedBlueprint';
 import { cleanFormalSourcePhrases } from '../../markdownComposer';
 import { SURFACE_FIX_STEPS, type SurfaceFixerContext } from '../../deterministicFixChains';
@@ -53,6 +53,16 @@ export async function stageDeterministicStage5(session: FinalizeSession): Promis
       ...session.template.chapters.flatMap(chapter => chapter.sections || []),
       ...session.finalChapterDrafts.flatMap(chapter => chapter.sections || []),
     ].filter(Boolean))],
+    // r17 B2/B3 机械设备汇总权威（blueprintEquipmentAuthorities 投影；equipment-batch-values 消费，
+    // 与检测器 equipment-batch-conflict 同源；缺失时该步静默）
+    equipmentAuthorities: blueprintEquipmentAuthorities(session.blueprintData),
+    // r17 B1 数值对账权威输入（billFactLock/blueprintData/factsModel 三源；spec-quantity-binding 消费，
+    // 与检测器 fact-reconciliation 同源——权威构建不依赖 markdown，一次构建全轮复用）
+    reconciliationInput: {
+      billFactLock: session.billFactLock,
+      blueprintData: session.blueprintData,
+      factsModel: session.factsModel,
+    },
   };
   const surfaceFixCounts = new Map<string, number>();
   const addSurfaceFixCount = (key: string, count: number) => { if (count > 0) surfaceFixCounts.set(key, (surfaceFixCounts.get(key) ?? 0) + count); };

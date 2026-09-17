@@ -78,6 +78,17 @@ describe('A5b 表编号体系检查（全文档级）', () => {
     expect(defects.some(item => item.kind === 'table-number-orphan-reference')).toBe(true);
   });
 
+  it('r6 子编号引用 + 无表题表格锚定豁免（按表7-1执行 → 后随表格）', () => {
+    const md = '安全生产责任分工与履职频次按表7-1执行。\n\n| 管理岗位 | 安全职责 |\n| --- | --- |\n| 项目经理 | 全面管理 |';
+    expect(scanTableNumberingDefects(md)).toEqual([]);
+  });
+
+  it('r6 子编号引用无后随表格仍报孤儿（引用与实体一一对应不屈从）', () => {
+    const md = '安全物资按表7-3配置。\n\n上述物资由材料员统一验收。';
+    const defects = scanTableNumberingDefects(md);
+    expect(defects.some(item => item.kind === 'table-number-orphan-reference' && item.message.includes('表7-3'))).toBe(true);
+  });
+
   it('structureIntegrityIssues 终检合并表编号缺陷（全文档级专属）', () => {
     const issues = structureIntegrityIssues('# 第一章 总则\n\n各项参数按表3执行。');
     expect(issues.some(issue => issue.message.includes('表3') && issue.suggestion.includes('一一对应'))).toBe(true);

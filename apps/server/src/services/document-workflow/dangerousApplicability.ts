@@ -15,6 +15,14 @@ const extractNumberNear = (body: string, pattern: RegExp): number | undefined =>
   return Number.isFinite(value) && value > 0 ? value : undefined;
 };
 
+/** 负向危大宣称判定（r11 丰乐镇门禁 #7 归因）：正文以判定标准为依据宣称「不涉及危大工程」时，
+ * 作业形态弱词（吊装/起重伤害/垂直运输）不构成适用前提——否则「化粪池吊装就位」「管材吊装打击」
+ * 等常规吊运描述会与排除声明并存，判出清单遗漏。硬设备名（塔吊/汽车吊/履带吊/卷扬机等非常规起重
+ * 设备）不受本豁免约束——设备在册即真实适用前提，与 hazard-exclusion-contradiction 检测器互补。 */
+function declaresNoDangerousWork(body: string): boolean {
+  return /(?:不涉及|不存在|不属于|未涉及)[^。；\u000A]{0,16}危大|(?:不涉及|不存在|不属于|未涉及)[^。；\u000A]{0,16}危险性较大|(?:参数|高度|深度)[^。；\u000A]{0,12}未达[^。；\u000A]{0,60}危大/u.test(body);
+}
+
 /** 危大工程封闭集项：适用前提判定 + 辨识别名（检测器 dangerousApplicabilityIssues 消费；4.41 起确定性补写器已删除） */
 export const DANGEROUS_APPLICABLE_ITEMS = [
   {
@@ -48,7 +56,13 @@ export const DANGEROUS_APPLICABLE_ITEMS = [
     // 而旧词表只收设备名（塔吊/塔式起重机/汽车吊/履带吊/吊车/起重机械），“起重伤害/垂直运输/提升机”
     // 等作业形态词面永不命中 → 适用项漏辨识不被检出。补全为设备名+作业形态词双覆盖。
     aliases: ['起重吊装', '塔吊', '塔式起重机', '汽车吊', '履带吊', '起重机械安拆', '物料提升机', '提升机', '起重机械', '吊装'],
-    applicable: (body: string) => /塔吊|塔式起重机|汽车吊|履带吊|吊车|起重机械|起重设备|起重机|卷扬机|物料提升机|提升机|电动葫芦|起重伤害|垂直运输|吊装/u.test(body),
+    // r11 豁免分层（丰乐镇门禁 #7 归因）：作业形态词（起重伤害/垂直运输/吊装）是普通工序描述的常用词——
+    // 「化粪池吊装就位」「管材吊装打击」「人工配合机械下管」等常规吊运不构成非常规起重设备适用前提；
+    // 正文明确宣称「不涉及危大工程/参数未达判定标准」时弱词不再判适用（硬设备名保留——见 declaresNoDangerousWork）
+    applicable: (body: string) => {
+      if (/塔吊|塔式起重机|汽车吊|履带吊|吊车|起重机械|起重设备|起重机|卷扬机|物料提升机|提升机|电动葫芦/u.test(body)) return true;
+      return /起重伤害|垂直运输|吊装/u.test(body) && !declaresNoDangerousWork(body);
+    },
   },
   {
     name: '吊篮作业工程',
@@ -58,7 +72,9 @@ export const DANGEROUS_APPLICABLE_ITEMS = [
   {
     name: '拆除工程',
     aliases: ['拆除工程', '爆破拆除', '机械拆除'],
-    applicable: (body: string) => /拆除工程|爆破拆除/u.test(body),
+    // r11 修正（丰乐镇门禁 #7 归因）：「拆除工程量按现场实测范围控制」中「拆除工程」四字与量词
+    // 粘连误命中——加负向断言 (?![量])，工程量口径描述不再判「拆除工程」适用
+    applicable: (body: string) => /拆除工程(?![量])|爆破拆除/u.test(body),
   },
 ] as const;
 

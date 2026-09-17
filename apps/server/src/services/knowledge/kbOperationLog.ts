@@ -38,12 +38,22 @@ function readAll(projectRoot: string): KbOperationRecord[] {
   });
 }
 
+/** 落盘上限：按 updatedAt 保留最新的 200 条（而非数组尾部切片，保持原数组顺序）。
+ * 常驻状态记录（如固定 id 的资料包混放告警）只在原地刷新 updatedAt、数组位置不变，
+ * 尾部切片会在长期活跃项目中被新记录挤出丢失 */
+const OPERATION_LOG_LIMIT = 200;
+function trimToRecentEntries(records: KbOperationRecord[]): KbOperationRecord[] {
+  if (records.length <= OPERATION_LOG_LIMIT) return records;
+  const keepIds = new Set([...records].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, OPERATION_LOG_LIMIT).map(record => record.id));
+  return records.filter(record => keepIds.has(record.id));
+}
+
 function writeAll(projectRoot: string, records: KbOperationRecord[]) {
   const file = logPath(projectRoot);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   // 原子写：先写临时文件再 rename，避免并发写盘时读到半截 JSON 导致日志损坏
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmp, `${records.slice(-200).map(record => JSON.stringify(record)).join('\n')}\n`, 'utf8');
+  fs.writeFileSync(tmp, `${trimToRecentEntries(records).map(record => JSON.stringify(record)).join('\n')}\n`, 'utf8');
   fs.renameSync(tmp, file);
   // 同步本实例缓存的文件 mtime，避免刚写盘又被本实例误判为“外部改写”而重复读盘
   const cached = logCache.get(projectRoot);
@@ -140,6 +150,11 @@ export function upsertKbOperation(projectRoot: string, patch: Omit<Partial<KbOpe
 
 export function listKbOperations(projectRoot: string, limit = 50): KbOperationRecord[] {
   return cachedRecords(projectRoot).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, limit);
+}
+
+/** 按 id 前缀列出记录：固定 id 常驻状态（如资料包混放告警 intelligence-mixed-*）的枚举/清理场景 */
+export function listKbOperationsByIdPrefix(projectRoot: string, prefix: string): KbOperationRecord[] {
+  return cachedRecords(projectRoot).filter(record => record.id.startsWith(prefix));
 }
 
 export function getKbOperation(projectRoot: string, id: string): KbOperationRecord | undefined {

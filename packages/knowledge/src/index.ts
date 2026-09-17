@@ -21,6 +21,7 @@ export { MultiProjectManager } from './core/multi-project-manager.js';
 export { computeProjectId } from './core/project-id.js';
 export { ensureProjectCustomizeFile, getProjectConfigPath, getProjectKbPath, ProjectConfigManager } from './core/project-config.js';
 export { ProjectRegistry } from './core/project-registry.js';
+export { MATERIAL_ROOT_NONE, materialRootOf, materialRootsOfFiles, materialRootFromScopeRoot, materialRootsOfScopeRoots } from './core/material-pack.js';
 
 export { HNSWVectorStore } from './vector/hnsw-vector-store.js';
 export { CollectionManager, globalCollectionName, projectCollectionName } from './vector/collection-manager.js';

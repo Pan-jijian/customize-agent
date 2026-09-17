@@ -87,7 +87,7 @@ describe('buildProjectGraph', () => {
     expect(result.stage.subtitle).toBe('项目图谱分析');
   });
 
-  it('归一化：非法条目过滤、超长截断、来源文件按路径或 basename 校验、枚举回退', async () => {
+  it('归一化：非法条目过滤、超长截断、来源文件按路径或 basename 映射回写、枚举回退', async () => {
     llmJsonMock.mockImplementation(async (system: string) => {
       if (domainTitleOf(system).includes('项目基本信息')) {
         return {
@@ -104,7 +104,7 @@ describe('buildProjectGraph', () => {
     const result = await buildProjectGraph({ evidence: [evidence()], projectRoot: tempRoot });
     expect(result.graph?.works).toHaveLength(1);
     expect(result.graph?.works[0]?.name).toHaveLength(200);
-    expect(result.graph?.works[0]?.sourceFiles).toEqual(['/data/招标文件.docx', '/elsewhere/招标文件.docx']);
+    expect(result.graph?.works[0]?.sourceFiles).toEqual(['/data/招标文件.docx']);
     expect(result.graph?.resources[0]?.type).toBe('material');
     expect(result.graph?.risks[0]?.level).toBe('medium');
   });

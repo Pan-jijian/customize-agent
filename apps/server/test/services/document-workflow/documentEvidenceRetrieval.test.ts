@@ -3,6 +3,7 @@
  * 深召回执行（预算/来源标记/BOQ 加权）、检索覆盖报告与风险提示。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { materialRootsOfFiles } from '@customize-agent/knowledge';
 import {
   buildDeepRetrievalQueries,
   buildRetrievalCoverageReport,
@@ -172,11 +173,10 @@ describe('retrieveDeepChapterEvidence', () => {
     expect(searchMock).not.toHaveBeenCalled();
   });
 
-  it('检索结果过滤范围外文件并标记来源与加权', async () => {
+  it('检索按 filters 双锁约束范围（filePaths + materialRoots 派生）并标记来源与加权', async () => {
     searchMock.mockImplementation(async (_root, _query, _options) => ({
       results: [
         { filePath: '/data/招标文件.docx', score: 1, content: '总工期420日历天' },
-        { filePath: '/data/范围外文件.docx', score: 9, content: '不应被保留' },
       ],
     }));
     const result = await retrieveDeepChapterEvidence({
@@ -187,7 +187,11 @@ describe('retrieveDeepChapterEvidence', () => {
       fileRoleByPath,
       fileProcessingByPath,
     });
-    expect(result.every(item => scopedFiles.includes(item.filePath))).toBe(true);
+    // 范围约束由检索层 filters 源头保证（SQL relative_path IN + material_root IN）；
+    // 未传 scopedMaterialRoots 时按文件白名单派生兜底，任何调用都不得退化为全库裸检索
+    const options = searchMock.mock.calls[0]![2] as { filters?: { filePaths?: string[]; materialRoots?: string[] } };
+    expect(options.filters?.filePaths).toEqual(scopedFiles);
+    expect(options.filters?.materialRoots).toEqual(materialRootsOfFiles(scopedFiles));
     expect(result.some(item => item.source === 'deep-retrieval')).toBe(true);
     // score 经 uniqueEvidence 质量因子重算，不锁定精确值，只断言高于原始基础分（有 boost 加权）
     const kept = result.find(item => item.filePath === '/data/招标文件.docx')!;

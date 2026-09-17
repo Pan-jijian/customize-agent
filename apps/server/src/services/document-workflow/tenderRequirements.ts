@@ -14,7 +14,7 @@ import { generatedRoot } from '../document-core/generatedDocumentService';
 import { cleanPdfHeadingNoise } from './factsModel';
 import type { SemanticSimilarityFn } from './semanticSimilarity';
 import { isBidDisciplineSentence, isBidEvaluationRuleText, stableHash, systemConstraintLine } from './utils';
-import { isBidderQualificationText } from './evidenceContentSafety';
+import { isBidderQualificationText, isContractProcedureClause } from './evidenceContentSafety';
 import { docSystemPrefix } from './markdownComposer';
 
 /**
@@ -126,6 +126,43 @@ function isMicroFragmentText(text: string): boolean {
   return text.length <= 8 && !/[。；;！？!?]/u.test(text) && !/\d/u.test(text);
 }
 
+/** 行尾闭合判定（跨空行续行拼接用）：句末标点/闭合引号括号结尾视为行语义完整，空行即真段落边界 */
+function lineClosedForJoin(text: string): boolean {
+  return /[。！？!?；;）)】」》”]$/u.test(text.trim());
+}
+
+/** 断尾字（标题残片结尾）：以虚词/连接词结尾的短行是被竖切/折行裁断的残片，不像标题末字 */
+const SECTION_TAIL_BREAK_RE = /[的其不或在和与及等被把将为以对从向就但而则即如若因所该本此录]$/u;
+const SECTION_HAN2_RE = /[\p{Script=Han}A-Za-z]{2,}/u;
+
+/**
+ * 假标题判定（提取器行级 markdown 化的误标容错）：PDF 提取器对「≤80 字且无句末标点」的行
+ * 会加 ### 前缀（折行半句与真标题同形）。假标题进 section 会静默吞字、其裸续行成孤立碎片
+ * （丰乐镇门禁链根因）。误吞代价（真标题当内容→判定层排除）≈0；误判代价（内容当 section→丢字）高——
+ * 仅高置信结构标题保留 section，其余一律转正文（跨空行续行拼接兜住语义完整、内容零丢失）。
+ * 返回 true = 假标题（转正文行）。
+ */
+function isExtractorFalseHeading(text: string): boolean {
+  if (!text) return false;
+  if (/(?:\.{3,}|…)/u.test(text)) return false; // 目录项（省略号结尾，保持 section 行为）
+  if (/^(?:PDF 第 \d+ 页|PDF 表格区域)/u.test(text)) return false; // 页/表格区标记（位置定位有价值）
+  if (/[☑□■☐☒√×]/u.test(text)) return true; // 勾选符号行 = 表格内容
+  if (text.length <= 3 && !/^\d/u.test(text)) return true; // 超短残片（「室」「录」）
+  // 白名单①：第X章/条/部分/编（无冒号逗号）
+  if (/^第[一二三四五六七八九十\d]+[章节部分条编]/u.test(text) && text.length <= 40 && !/[：:，,]/u.test(text)) return false;
+  // 白名单②：目录/附录/附件行
+  if (/^(?:目录|附录|附件)/u.test(text) && text.length <= 30 && !/[：:，,]/u.test(text)) return false;
+  // 白名单③：数字编号标题（「1.5合同文件的优先顺序」），剥编号后≥2 汉字且非断尾
+  if (/^\d+(?:[.．]\d+)*[.．、]?\s*\S/u.test(text) && text.length <= 24 && !/[：:，,。；;（）]/u.test(text) && !SECTION_TAIL_BREAK_RE.test(text)
+    && SECTION_HAN2_RE.test(text.replace(/^\d+(?:[.．]\d+)*[.．、]?\s*\d*\s*/u, ''))) return false;
+  // 白名单④：中文编号标题（「一、总则」「（一）概述」），剥编号后≥2 汉字
+  if (/^[一二三四五六七八九十]{1,3}[、．.](?!\d)/u.test(text) && text.length <= 24 && !/[：:，,。；;（）]/u.test(text)
+    && SECTION_HAN2_RE.test(text.replace(/^[一二三四五六七八九十]{1,3}[、．.\s]*/u, ''))) return false;
+  if (/^[（(][一二三四五六七八九十\d]{1,3}[）)]/u.test(text) && text.length <= 24 && !/[：:，,。；;（）]/u.test(text.replace(/^[（(][一二三四五六七八九十\d]{1,3}[）)]/u, ''))
+    && SECTION_HAN2_RE.test(text.replace(/^[（(][一二三四五六七八九十\d]{1,3}[）)]\s*\d*\s*/u, ''))) return false;
+  return true; // 其余一律转正文
+}
+
 /** 超长单元二次切分：按句末标点打包为 ≤2000 字符的子单元（不丢任何句子） */
 const CLAUSE_UNIT_MAX_CHARS = 2000;
 
@@ -193,17 +230,36 @@ export function splitTenderClauses(evidence: DocumentEvidence[]): TenderClauseUn
       // markdown 标题行（# 是结构标记而非噪声，清洗前判定）：更新 section 上下文，不作为条款单元
       const rawTrimmed = rawLine.trim();
       if (/^#{1,6}\s/u.test(rawTrimmed)) {
-        if (buffer.length > 0) flush();
         const heading = cleanPdfHeadingNoise(rawTrimmed).trim();
-        if (heading) section = heading;
+        if (!heading) continue;
+        // 假标题容错（提取器折行半句可能被误标为任意级别 #，见 isExtractorFalseHeading）：
+        // 白名单外一律转正文行并入缓冲，与相邻断句续行拼回完整句（内容零丢失）；
+        // 真结构标题（页标记/第X章/目录附录等）仍进 section
+        if (isExtractorFalseHeading(heading)) {
+          if (/^\d{1,3}$/u.test(heading)) continue; // 孤立页码残片（页脚数字）不参与拼接
+          if (isShortKeyValueLine(heading)) {
+            // 折行续段（上句未闭合）：接续上缓冲而非新开 KV 单元
+            if (buffer.length > 0 && !lineClosedForJoin(buffer[buffer.length - 1])) { buffer.push(heading); continue; }
+            if (buffer.length > 0) flush();
+            buffer.push(heading);
+            if (!QUESTION_SUSPEND_RE.test(heading) && lineClosedForJoin(heading)) flush();
+            continue;
+          }
+          buffer.push(heading);
+          continue;
+        }
+        if (buffer.length > 0) flush();
+        section = heading;
         continue;
       }
       const line = cleanPdfHeadingNoise(rawTrimmed).trim();
       if (!line) {
-        // 空行=段落边界：当前缓冲收口，下一非空行开始新单元
-        if (buffer.length > 0) flush();
+        // 空行=段落边界（仅当缓冲尾部语义闭合时才收口）：PDF 折行会跨空行断句
+        // （「…并再次确」/空行/「认使用时限。」），无条件 flush 会把续行切成孤立碎片（门禁假阳性源）
+        if (buffer.length > 0 && lineClosedForJoin(buffer[buffer.length - 1])) flush();
         continue;
       }
+      if (/^\d{1,3}$/u.test(line)) continue; // 孤立页码残片（页脚数字）不参与拼接
       // 答疑回复行：与上文（问题/编号）同缓冲配对；缓冲为空即悬空回复，独立成单元交判定层复核
       if (REPLY_LEAD_RE.test(line)) {
         buffer.push(line);
@@ -218,10 +274,12 @@ export function splitTenderClauses(evidence: DocumentEvidence[]): TenderClauseUn
         continue;
       }
       if (isShortKeyValueLine(line)) {
+        // 折行续段（上句未闭合）：接续上缓冲而非新开 KV 单元（「2.6建设规模：…配套基础」+「设施工程：…」）
+        if (buffer.length > 0 && !lineClosedForJoin(buffer[buffer.length - 1])) { buffer.push(line); continue; }
         if (buffer.length > 0) flush();
         buffer.push(line);
         // 答疑问题行暂挂等待「回复：」配对（配对单元上下文完整，判定更准）；其余键值行独立成单元
-        if (!QUESTION_SUSPEND_RE.test(line)) flush();
+        if (!QUESTION_SUSPEND_RE.test(line) && lineClosedForJoin(line)) flush();
         continue;
       }
       buffer.push(line);
@@ -295,18 +353,23 @@ const CLAUSE_JUDGE_PROMPT = [
   '   - false：纯投标程序事务（开标时间地点/保证金账户信息/递交解密方式/评标委员会组成）、投标资格条件',
   '     （营业执照/资质证书/业绩要求）、评标否决规则（否决其投标/废标情形）、商务纪律承诺（廉洁承诺）、格式签章要求、',
   '     商务与造价条款（付款/进度款/工程款/结算/保证金/违约金/保函/预付款/税金/税率/报价/综合单价/暂列金额/暂估价/限价/调差等，',
-  '     属商务标响应内容，技术标正文不出现）',
+  '     属商务标响应内容，技术标正文不出现）、',
+  '     合同履约管理程序条款（施工合同通用/专用条款及合同附件的程序性与责任性约定：资料报送/审批/备案期限、',
+  '     违约责任与违约金罚款明细、人员请假/更换/离场批准程序、保险投保办理程序、工程质量保修书程序与保修期限明细、',
+  '     试验条件自理、工程照管责任起止、治安保卫程序、分包审批程序、采购与评标程序——属合同管理范畴，技术标正文不逐条抄写；',
+  '     但质量/安全/文明/工期目标、人员资格与配置、技术工艺与验收标准类实质要求仍按 true 判定）',
   '3. policy（isRequirement 且 inScope 时必填，其余省略）：',
   '   - "respond"：必须在正文显性写出的要求（创优目标/奖项、质量目标、等级指标、体系基准、技术工艺条款、人员与分包约束、验收标准）',
   '   - "comply"：不逐条抄写但全文必须遵守的约束（以开工令为准的日期约束、工期总日历天数基准、全局禁止性事项）',
   '4. coreTerms：2-4 个用于正文核对的核心词（专有名词/等级名/体系名/关键数字参数，如「黄山杯」「二星级」「六个百分百」「300万元」）；',
-  '   数字参数必须保留数字与单位；不要泛化词（「施工」「工程」类不能作为核心词）',
+  '   数字参数必须保留数字与单位；不要泛化词（「施工」「工程」类不能作为核心词）；',
+  '   必须是正文中可自然逐字出现的完整词/短语（括号/标点保持原文形态），不得使用去标点拼接的短语碎片或合同填空语言（如「承包人自理」）',
   '5. category：按招标语义命名类别（如「质量创优」「工期进度」「安全文明」「绿色施工」「人员管理」「商务支付」「禁止性要求」），',
   '   同类要求使用同一类别名',
   '',
   'isRequirement=false 或 inScope=false 时须给出 reason（枚举）：',
   '- "non_requirement"：非约束性内容（目录/导语/说明/描述）',
-  '- "out_of_scope"：超出施组职责（投标程序/资格/评标规则/纪律/格式/商务与造价）',
+  '- "out_of_scope"：超出施组职责（投标程序/资格/评标规则/纪律/格式/商务与造价/合同履约管理程序）',
   '- "no_value"：条款值为「无」或不适用',
   '',
   '输出 JSON 结构（覆盖全部序号，每序号必出结果）：',
@@ -415,10 +478,21 @@ export interface TenderClauseJudgmentResult {
   retriedBatches: number;
 }
 
+/** 条款实现约束词（碎片形态复核用）：含任一即视为有实质语义的短句，保留交判定层处理 */
+const CLAUSE_CONSTRAINT_WORD_RE = /(?:确保|保证|达到|满足|符合|不低于|不超过|不得|禁止|严禁|必须|应当|须|应按|执行|遵守|落实|实施|采用|提供|提交|出具|配备|设置|建立|安装|配置|负责|完成|参加|组织|验收|检测|检验|控制|管理|保护|防止|杜绝|承诺|响应|要求|规定|标准|等级|目标|措施|方案|制度|计划|工期|质量|安全)/u;
+
+/** 碎片形态判定（判定层兼底闸）：≤10 字、无数字、无约束谓词的残片（折行半句/表格残片/跨页断句，
+ *  如「认使用时限。」「币）。」）不构成独立要求（宁缺毋假）；含数字（参数）或约束词的短句保留 */
+function clauseFragmentLike(text: string): boolean {
+  const compact = text.replace(/\s+/gu, '');
+  return compact.length <= 10 && !/\d/u.test(compact) && !CLAUSE_CONSTRAINT_WORD_RE.test(compact);
+}
+
 /**
  * 逐条判定：分批（40 条/批，并发 3 路）LLM 判定全部条款单元，序号严格对齐（缺号重试一次，
  * 仍缺记入 undecided 显式告警——未判定 >0 即对账未闭合）。
- * 判定后确定性复核：无值条款（☑无/值为无）→ no_value；商务纪律/资格条件/评标规则 → out_of_scope；
+ * 判定后确定性复核：碎片形态（无数字/无约束词的超短残片）→ non_requirement；
+ * 无值条款（☑无/值为无）→ no_value；商务纪律/资格条件/评标规则 → out_of_scope；
  * 商务与造价条款（付款/保证金/结算/报价/税金等）→ commercial_scope（词表判定，LLM 漏判时本地纠正，
  * 技术标正文零商务句——商务响应由商务标承接）。
  */
@@ -451,7 +525,11 @@ export async function judgeTenderClauses(
         excluded.push({ text: clause.text, source: formatClauseSource(clause), reason: normalizeExclusionReason(judgment) });
         return;
       }
-      // 确定性复核：无值条款/纯引导词碎片/商务纪律/资格条件/评标规则不进 entries（判定 LLM 漏判时本地纠正）
+      // 确定性复核：碎片形态/无值条款/纯引导词碎片/商务纪律/资格条件/评标规则不进 entries（判定 LLM 漏判时本地纠正）
+      if (clauseFragmentLike(clause.text)) {
+        excluded.push({ text: clause.text, source: formatClauseSource(clause), reason: 'non_requirement' });
+        return;
+      }
       if (EMPTY_CLAUSE_VALUE_RE.test(clause.text) || clauseSentenceHasNoValue(clause.text)) {
         excluded.push({ text: clause.text, source: formatClauseSource(clause), reason: 'no_value' });
         return;
@@ -460,7 +538,7 @@ export async function judgeTenderClauses(
         excluded.push({ text: clause.text, source: formatClauseSource(clause), reason: 'non_requirement' });
         return;
       }
-      if (isBidDisciplineSentence(clause.text) || isBidderQualificationText(clause.text) || isBidEvaluationRuleText(clause.text)) {
+      if (isBidDisciplineSentence(clause.text) || isBidderQualificationText(clause.text) || isBidEvaluationRuleText(clause.text) || isContractProcedureClause(clause.text)) {
         excluded.push({ text: clause.text, source: formatClauseSource(clause), reason: 'out_of_scope' });
         return;
       }
@@ -552,8 +630,10 @@ export async function extractTenderRequirements(
  * 提取结果磁盘缓存：同一项目资料未变化时跳过判定 LLM。门禁=对账闭合（非旧「必提字段齐全」）——
  * 无要求项目（entries=0 但全部条款 excluded）同样对账闭合，缓存可命中（旧门禁在此场景永不命中）。
  * 哈希失效：key = 提取器版本 + 招标文件直读集合全量指纹；判定 prompt / 复核口径变更时递增版本。
+ * v7：合同履约管理程序条款口径（报送审批/违约罚则/请假离场/投保程序/保修书明细/照管起止/治安保卫/
+ * 分包审批/采购评标 → out_of_scope，r3 实机大量该类条目被误判 respond 致验收零命中）+ coreTerms 可命中性口径。
  */
-const TENDER_REQUIREMENTS_CACHE_VERSION = 'tender-requirements-extraction-v5';
+const TENDER_REQUIREMENTS_CACHE_VERSION = 'tender-requirements-extraction-v7';
 
 function tenderRequirementsCacheRoot(projectRoot?: string) {
   const root = path.join(process.env.HOME || process.cwd(), '.customize-agent', 'cache', 'document-workflow', stableHash(projectRoot || 'default'));
@@ -969,6 +1049,19 @@ function stripAwardLeadVerb(award: string): string {
 }
 
 /**
+ * 锚点等价命中判定（r8 实机 #4 复核）：「0.25-0.5m宽」类范围复合锚点，正文写作
+ * 「0.25～0.5m」「0.25~0.5m」或省后缀「预留0.25-0.5m」时字面 includes 因连接符/
+ * 后缀差异失配 → 假部分响应。范围锚点降级为「两端数字均出现即命中」（范围数字组合
+ * 巧合概率极低）；非范围锚点维持字面包含（不放宽）。
+ */
+function anchorHit(anchor: string, normalizedMarkdown: string): boolean {
+  if (normalizedMarkdown.includes(anchor)) return true;
+  const range = anchor.match(/(\d+(?:\.\d+)?)\s*[-–—~～至]\s*(\d+(?:\.\d+)?)/u);
+  if (!range) return false;
+  return normalizedMarkdown.includes(range[1]) && normalizedMarkdown.includes(range[2]);
+}
+
+/**
  * 条款锚点覆盖判定（300万缺失根治）：条款内全部关键锚点（每个 coreTerms 专有名词、每个"数字+单位"、
  * 每个具名奖项/等级）必须各自字面命中正文。字面兜底保留（黄山杯实测 bge 0.50 < 0.6 被误报零响应），
  * 升级为锚点全覆盖：全部命中才算完全响应，部分命中报"部分响应"定向补写缺失锚点。
@@ -1001,7 +1094,7 @@ function requirementAnchorCoverage(
   const hit: string[] = [];
   const missing: string[] = [];
   for (const anchor of anchors) {
-    (normalizedMarkdown.includes(anchor) ? hit : missing).push(anchor);
+    (anchorHit(anchor, normalizedMarkdown) ? hit : missing).push(anchor);
   }
   return { total: anchors.size, hit, missing };
 }
@@ -1024,11 +1117,14 @@ function clauseSegmentCoverage(text: string, normalizedMarkdown: string): { tota
 /**
  * 投标人口吻转换（4.27.2 语气泄漏治理 · P0）：条款抄写句中的第三人称指代改为投标人口吻——
  * 「承包人/投标人/施工单位/承包方/中标人」→「我方」；「投标人本单位」→「本公司」；
- * 「本招标项目」→「本项目」；「发包人认为视同」→「视为」。
+ * 「本招标项目」→「本项目」；「发包人认为视同」→「视为」；招标文件表格勾选标记（☑√■等，
+ * r11：前附表资格条款「☑具备…」随提取进入条款原文，不做清洗则补写插入句把模板符号带进正文）。
  * 转换三端同源：补写句生成、检测端 voice 分句兜底、交付前元语言清理器（fixTenderMetaLanguage）。
+ * 导出供要求响应补写轮（requirementResponseRepair）生成定向补写素材。
  */
-function bidderVoiceClauseText(text: string): string {
+export function bidderVoiceClauseText(text: string): string {
   return text
+    .replace(/[☑☐☒√✓✔×✗■●◼⊠]\s*/gu, '')
     .replace(/投标人本单位|承包人本单位/gu, '本公司')
     .replace(/本招标项目/gu, '本项目')
     .replace(/(?:承包人|发包人)认为视同/gu, '视为')
@@ -1050,6 +1146,22 @@ function clauseSatisfied(item: { text: string; coreTerms: string[] }, normalized
   const voiceCoverage = clauseSegmentCoverage(bidderVoiceClauseText(item.text), normalizedMarkdown);
   if (voiceCoverage.total > 0 && voiceCoverage.missing.length === 0) return true;
   return false;
+}
+
+/**
+ * 要求响应复检（确定性三通道，修复轮专用包装）：对给定条目逐条判定当前 markdown 中的响应状态
+ * （命中/缺失锚点 + 是否已满足），与 clauseSatisfied 严格同源——要求响应补写轮
+ * （requirementResponseRepair）的修复前定位与修复后收敛复检共用本口径。
+ */
+export function tenderRequirementResponseGaps(
+  entries: TenderRequirementEntry[],
+  markdown: string,
+): Array<{ entry: TenderRequirementEntry; hit: string[]; missing: string[]; satisfied: boolean }> {
+  const normalized = markdown.replace(/\s+/gu, '');
+  return entries.map(entry => {
+    const coverage = requirementAnchorCoverage(entry, normalized);
+    return { entry, hit: coverage.hit, missing: coverage.missing, satisfied: clauseSatisfied(entry, normalized) };
+  });
 }
 
 // 商务域条款排除词表（4.40.0 零商务句根治，取代旧「定性响应句」通道）：丰乐镇与舒城实测均出现
@@ -1140,6 +1252,7 @@ export async function requirementAcceptanceIssues(input: {
       repairability: 'llm_repairable',
       message: `招标要求未响应：${kind}“${entry.text}”在正文中零命中（最佳语义相似度 ${bestSimilarity.toFixed(2)}）`,
       suggestion: `招标文件明确要求的${kind}必须显性响应：在对应章节以投标人口吻补写“${entry.text}”对应内容及配套保证措施（不得使用“按招标文件要求：”条幅前缀）。`,
+      provenance: { detectorId: 'requirements-coverage', fingerprint: stableHash(entry.text) },
     });
   }
   // 部分响应：LLM 批量判定锚点是否"或/及"关系（任一即可），非或选型报部分响应定向补写缺失锚点
@@ -1158,6 +1271,7 @@ export async function requirementAcceptanceIssues(input: {
         repairability: 'llm_repairable',
         message: `招标要求部分响应：${candidate.kind}“${candidate.item.text}”已命中“${candidate.hit.join('、')}”，但缺少“${candidate.missing.join('、')}”（最佳语义相似度 ${candidate.bestSimilarity.toFixed(2)}）`,
         suggestion: `条款内全部关键数据与奖项必须逐项显性响应：在对应章节补写“${candidate.missing.join('、')}”对应内容（缺一即部分响应）。`,
+        provenance: { detectorId: 'requirements-coverage', fingerprint: stableHash(candidate.item.text) },
       });
     }
   }

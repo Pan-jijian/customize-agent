@@ -184,30 +184,28 @@ export function fixInternalTermHeadingPhrases(markdown: string): { markdown: str
   const replacePhrase = (text: string): string => text
     .replace(/(职责|责任|分工|任务|措施|要求|管理|控制|工作|专项|标准|管控|验收|培训|教育|巡检|检查)落位/gu, '$1落实')
     .replace(/(作业面|平面|现场|位置|点位|布局|空间|场地|工序|区域|临时设施|堆场|通道|道路|设备|设施|材料|构件|管线|照明|灯具|站房|楼层|部位)落位/gu, '$1布置')
-    .replace(/落位/gu, '落实');
+    .replace(/落位/gu, '落实')
+    // r14 扩围（r13 丰乐镇实测）：正文行「峰值口径/控制口径/数据口径」词面安全替换——
+    // stripInternalTerminologySentences 整句删除会损失信息（「不得突破262人峰值口径」等句
+    // 含实质管理规则），词面改写无损伤失：「N人峰值口径」→「N人上限」、统称→「上限/
+    // 控制基准/统计口径」；替换后 L1 精确词消失，strip 不再命中这些句子
+    .replace(/(\d+\s*人)峰值口径/gu, '$1上限')
+    .replace(/峰值口径/gu, '上限')
+    .replace(/控制口径/gu, '控制基准')
+    .replace(/数据口径/gu, '统计口径')
+    .replace(/全文统一口径/gu, '全篇取值一致');
   const next = markdown
     .split(/\r?\n/u)
     .map(line => {
-      const heading = /^(#{1,6}\s+)(.*)$/u.exec(line);
-      if (heading) {
-        const title = heading[2];
-        if (!INTERNAL_TERM_EXACT_TEST_RE.test(title)) return line;
-        const replaced = replacePhrase(title);
-        if (replaced === title) return line;
-        fixedCount += 1;
-        return `${heading[1]}${replaced}`;
-      }
-      // 4.31 表格行兜底（丰乐镇 v6 #66/#88 实测）：`| 施工分组 | 主要作业面落位 | 平面管控要点 |`
-      // 中「落位」位于表格单元格——stripInternalTerminologySentences 保护表格行不删、标题替换不碰表格，
-      // blocker 永不收敛；表格行内「落位」按同一词面安全替换确定性收敛
-      if (line.includes('|') && line.includes('落位')) {
-        const replaced = replacePhrase(line);
-        if (replaced !== line) {
-          fixedCount += 1;
-          return replaced;
-        }
-      }
-      return line;
+      // r14 扩围：标题行/表格行/正文行统一词面替换（原仅标题/表格行——正文行的「落位」
+      // 此前只走整句删除通道，与 rebuild 回退后「检测报/修复丢」死区叠加；词面替换先行
+      // 后，无安全替换的 L1 词（工作包/事实卡/事实主表/后台数据库）仍由 strip 整句删除兜底）
+      if (!line.trim()) return line;
+      if (!INTERNAL_TERM_EXACT_TEST_RE.test(line) && !line.includes('全文统一口径')) return line;
+      const replaced = replacePhrase(line);
+      if (replaced === line) return line;
+      fixedCount += 1;
+      return replaced;
     })
     .join('\n');
   return { markdown: next, fixedCount };

@@ -1,4 +1,3 @@
-import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { BLOCKING_CHAPTER_ISSUE_RE, QUALITY_REPAIR_INSTRUCTIONS, QUALITY_REPAIR_TYPE_RULES, REPAIRABLE_QUALITY_ISSUE_RE } from '../constants';
 import { listDocumentRoles } from '../document-core/documentRoleService';
@@ -586,30 +585,6 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
   // producedCount（F4）：LLM 已产出但未应用的 patch 条数，供修复循环区分「未产出 patch」与
   // 「产出但锚点失配未应用」两种失败诊断（历史缺陷：补表类 patch 锚点失配全部落空仍报“未产出”）
   return { content, appliedCount, producedCount: patches.length, repairType };
-}
-
-export function fileScopeKeys(projectRoot: string, filePath: string) {
-  const absolutePath = path.isAbsolute(filePath) ? filePath : path.join(projectRoot, filePath);
-  const relativePath = path.isAbsolute(filePath) ? path.relative(projectRoot, filePath) : filePath;
-  return [filePath, absolutePath, relativePath, path.join(projectRoot, relativePath)];
-}
-
-export function evidenceProjectPath(projectRoot: string, filePath: string) {
-  const normalizedRoot = path.resolve(projectRoot);
-  if (path.isAbsolute(filePath)) return path.resolve(filePath);
-  const kbPath = path.resolve(normalizedRoot, 'knowledgeBase', filePath);
-  if (fs.existsSync(kbPath)) return kbPath;
-  return path.resolve(normalizedRoot, filePath);
-}
-
-export function evidenceInCurrentProject(projectRoot: string, filePath: string) {
-  const normalizedRoot = path.resolve(projectRoot);
-  const absolute = evidenceProjectPath(normalizedRoot, filePath);
-  return absolute === normalizedRoot || absolute.startsWith(`${normalizedRoot}${path.sep}`);
-}
-
-export function evidenceInScope(projectRoot: string, filePath: string, scopePaths: Set<string>) {
-  return evidenceInCurrentProject(projectRoot, filePath) && scopePaths.size > 0 && fileScopeKeys(projectRoot, filePath).some(key => scopePaths.has(key));
 }
 
 function preservePromptCodeBlock(block: string) {

@@ -222,6 +222,20 @@ describe('processParameterDensityIssues（工艺参数密度）', () => {
     const body = '概况。'.repeat(100);
     expect(processParameterDensityIssues([chapter('工程概况', `### 工程概况\n${body}`)])).toHaveLength(0);
   });
+
+  // r17 丰乐镇门禁 #B5：管理程序型小节（编制/报审/交底/修订流程，载体是管理动作）被「施工方案」
+  // 泛类模式误纳——按工作包要求 mm/MPa 工艺参数属语义错位；真作业方案小节不受影响
+  it('管理程序型小节（专项施工方案管理）豁免不检查', () => {
+    const body = '专项施工方案由项目技术负责人牽头编制，经项目经理审核签字后报总监理工程师审查。交底双方签字确认，交底记录由安全员归档保存，发现擅自改变施工顺序的立即下达整改通知并复查销项。'.repeat(6);
+    expect(processParameterDensityIssues([chapter('确保安全生产的技术组织措施', `### 专项施工方案管理\n${body}`)])).toHaveLength(0);
+  });
+
+  it('真作业方案小节（沟槽开挖专项施工方案）仍检查（豁免不过宽）', () => {
+    const body = '沟槽开挖作业按设计断面分层下挖，严禁超挖，开挖土方随挖随运。'.repeat(30);
+    const issues = processParameterDensityIssues([chapter('确保安全生产的技术组织措施', `### 沟槽开挖专项施工方案\n${body}`)]);
+    expect(issues.length).toBe(1);
+    expect(issues[0].severity).toBe('blocker');
+  });
 });
 
 describe('sectionCardStructureIssues（分部分项内容要素完整性）', () => {

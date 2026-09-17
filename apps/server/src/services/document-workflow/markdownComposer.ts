@@ -121,8 +121,12 @@ export function hasInlineListCollision(line: string) {
 
 function normalizeInlineListsInLine(line: string) {
   if (/^\s*\|/u.test(line) || /^\s*\|?\s*:?-{3,}:?/u.test(line)) return line;
+  // r6 拆行口扩围（r5 实机 #10-12 根因）：引导句「施工按以下编号步骤组织：1. …；2. …」
+  // 冒号后首项不拆则首项与引导句粘连（行尾「；」），cleanStructureDefects 又把后继 [2..n]
+  // 块重排为 [1..n-1]，形成双 1. 编号错位且粘连行行尾「；」不匹配列表豁免被判截断句；
+  // 冒号与句读标点同口径拆行后块编号保持 1..n（重排 no-op），引导句行由列表引导句豁免链接管
   return line
-    .replace(/([。；;])\s*(?=(?:\d+[.、](?=\s|\*\*)\s*|[（(]\d+[）)]\s*|[-*+]\s+)\S)/gu, '$1\n')
+    .replace(/([。；;：:])\s*(?=(?:\d+[.、](?=\s|\*\*)\s*|[（(]\d+[）)]\s*|[-*+]\s+)\S)/gu, '$1\n')
     .replace(/([^\n])\s+(?=(?:\d+[.、](?=\s|\*\*)\s*|[（(]\d+[）)]\s*|[-*+]\s+)\*\*)/gu, '$1\n');
 }
 
@@ -336,23 +340,40 @@ const H4_COMMON_SECTION_WORDS_RE = /(?:安全|管理|施工|质量|工期|进度
  * 主体为单一专业工程名（可含「与/及」并列组合），「施工方案」为固定后缀，不属于多主题拼接 */
 const PROFESSIONAL_PLAN_TITLE_RE = /(?:工程施工方案|安装工程施工方案|专业工程施工方案|专项施工方案)$/u;
 
+/** 分章 H3 标题集合（r14 丰乐镇实测：「#### 1.2.3 道路工程」与第二章「### 2.1 道路工程」
+ * 跨章同名被全文级基准误报「与本章三级小节同名」——同名判定的「本章」必须真实限定在 H4 所属 H2 章内。
+ * 返回每行所属章号与各章 H3 去编号标题集合；无 H2 的片段（章节级检查/单测）归单一 root 章） */
+function chapterScopedTertiaryTitles(lines: string[]): { chapterOfLine: number[]; titleSets: Array<Set<string>> } {
+  const chapterOfLine: number[] = [];
+  const titleSets: Array<Set<string>> = [new Set<string>()];
+  let chapter = 0;
+  lines.forEach((line, index) => {
+    const trimmed = line.trim();
+    if (/^##\s+/u.test(trimmed)) {
+      chapter += 1;
+      titleSets.push(new Set<string>());
+    }
+    chapterOfLine[index] = chapter;
+    const match = /^###\s+(.+)$/u.exec(trimmed);
+    if (match) titleSets[chapter].add(match[1].trim().replace(/^\d+(?:\.\d+)*\s*/u, ''));
+  });
+  return { chapterOfLine, titleSets };
+}
+
 /** H4 小节标题治理：成稿层自由生成的 H4 可能词尾粘连（「现场踏勘施工条件现场条件」）、
- * 多主题拼接（超过 14 字）或与本章三级小节同名（重复结构）。这里只做确定性标记，
+ * 多主题拼接（超过 16 字）或与本章三级小节同名（重复结构）。这里只做确定性标记，
  * 标题改写归语义模型——由 Reviewer 按 suggestion 反馈重写，不在清洗层硬改。 */
 export function sectionHeadingIssues(markdown: string): ValidationIssue[] {
   const lines = markdown.split(/\r?\n/u);
   const issues: ValidationIssue[] = [];
-  const tertiaryTitles = new Set<string>();
-  for (const line of lines) {
-    const match = /^###\s+(.+)$/u.exec(line.trim());
-    if (match) tertiaryTitles.add(match[1].trim().replace(/^\d+(?:\.\d+)*\s*/u, ''));
-  }
+  const { chapterOfLine, titleSets } = chapterScopedTertiaryTitles(lines);
   lines.forEach((line, index) => {
     const match = /^####\s+(.+)$/u.exec(line.trim());
     if (!match) return;
     const title = match[1].trim();
     const plain = title.replace(/^\d+(?:\.\d+)*\s*/u, '').trim();
     if (!plain) return;
+    const tertiaryTitles = titleSets[chapterOfLine[index]] || new Set<string>();
     if (tertiaryTitles.has(plain) || tertiaryTitles.has(title)) {
       issues.push({
         level: 'warning', severity: 'warning', category: 'structure', owner: 'system', repairability: 'llm_repairable',
@@ -361,15 +382,19 @@ export function sectionHeadingIssues(markdown: string): ValidationIssue[] {
       });
       return;
     }
-    // 非豁免 2 字滑窗重复：标题内部同一词出现两次以上 → 疑似词尾粘连/多主题拼接
-    const counts = new Map<string, number>();
-    for (let cursor = 0; cursor < plain.length - 1; cursor += 1) {
-      const pair = plain.slice(cursor, cursor + 2);
-      if (H4_COMMON_SECTION_WORDS_RE.test(pair)) continue;
-      counts.set(pair, (counts.get(pair) || 0) + 1);
-    }
-    const dups = [...counts.entries()].filter(([, count]) => count >= 2).map(([word]) => word);
-    if (dups.length > 0) {
+    // 词尾粘连特征（r14 丰乐镇实测）：「现场踏勘施工条件现场条件」式拼接的判据是结尾 2 字词块
+    // 在标题前部重现；「A与B」并列标题中部词块重复属正常构词（「农民工工资专用账户与工资支付保障」
+    // 「生产安全事故应急预案与应急演练」「临时占地与临时设施布置」），不再按滑窗计数误报
+    const tailPair = plain.slice(-2);
+    const tailRepeated = plain.length > 2 && !H4_COMMON_SECTION_WORDS_RE.test(tailPair) && plain.slice(0, -2).includes(tailPair);
+    if (tailRepeated) {
+      const counts = new Map<string, number>();
+      for (let cursor = 0; cursor < plain.length - 1; cursor += 1) {
+        const pair = plain.slice(cursor, cursor + 2);
+        if (H4_COMMON_SECTION_WORDS_RE.test(pair)) continue;
+        counts.set(pair, (counts.get(pair) || 0) + 1);
+      }
+      const dups = [...counts.entries()].filter(([, count]) => count >= 2).map(([word]) => word);
       issues.push({
         level: 'warning', severity: 'warning', category: 'structure', owner: 'system', repairability: 'llm_repairable',
         message: `H4 标题疑似词尾粘连或多主题拼接：${title}（重复词：${dups.join('、')}，第 ${index + 1} 行）`,
@@ -377,7 +402,7 @@ export function sectionHeadingIssues(markdown: string): ValidationIssue[] {
       });
       return;
     }
-    if (plain.length > 14 && !PROFESSIONAL_PLAN_TITLE_RE.test(plain)) {
+    if (plain.length > 16 && !PROFESSIONAL_PLAN_TITLE_RE.test(plain)) {
       issues.push({
         level: 'warning', severity: 'warning', category: 'structure', owner: 'system', repairability: 'llm_repairable',
         message: `H4 标题过长疑似多主题拼接：${title}（${plain.length} 字，第 ${index + 1} 行）`,
@@ -393,21 +418,18 @@ export function sectionHeadingIssues(markdown: string): ValidationIssue[] {
  * llm_repairable，但修复轮 patch 焦点在正文句，标题行残留进交付（「#### 2.24.2 绿化工程」
  * 与同章「### 绿化工程」同名）。同名属结构重复（H4 与父级 H3 同名让目录出现两级完全相同的标题），
  * 确定性追加「要点」二字消除重复且零内容损失（工程文档「XX要点」是自然子主题标题）；
- * 判定口径与检测器同源：去编号后与全文 H3 标题（去编号）完全一致。
+ * 判定口径与检测器同源（r14 起同为章内局部基准：跨章同名不属结构重复，不得改写）。
  */
 export function dedupeTertiaryH4Titles(markdown: string): { markdown: string; fixedCount: number } {
   const lines = markdown.split(/\r?\n/u);
-  const tertiaryTitles = new Set<string>();
-  for (const line of lines) {
-    const match = /^###\s+(.+)$/u.exec(line.trim());
-    if (match) tertiaryTitles.add(match[1].trim().replace(/^\d+(?:\.\d+)*\s*/u, ''));
-  }
+  const { chapterOfLine, titleSets } = chapterScopedTertiaryTitles(lines);
   let fixedCount = 0;
-  const next = lines.map(line => {
+  const next = lines.map((line, index) => {
     const match = /^(####\s+)(.*)$/u.exec(line);
     if (!match) return line;
     const title = match[2].trim();
     const plain = title.replace(/^\d+(?:\.\d+)*\s*/u, '').trim();
+    const tertiaryTitles = titleSets[chapterOfLine[index]] || new Set<string>();
     if (!plain || !tertiaryTitles.has(plain) && !tertiaryTitles.has(title)) return line;
     fixedCount += 1;
     return `${match[1]}${title}要点`;
@@ -597,10 +619,24 @@ export function sanitizeFormalMarkdown(markdown: string) {
       const isHeadingLine = /^#{1,6}\s/u.test(trimmed);
       const isBareTitleCandidate = plain.length <= 30 && !/[。；！？]$/u.test(plain);
       if ((isHeadingLine || isBareTitleCandidate) && isInstructionLikeTitle(plain)) return false;
-      if (/[和与在为对将]$/u.test(plain)) return false;
+      // 引导词结尾断句残片的删除条件（r7 实机根因修正，两处收窄）：
+      // ① # 标题行是明确结构行，不属「截断断句残片」——旧实现无条件删除以「和与在为对将」
+      //   结尾的行，把以「对」结尾的合法标题整行误删（r7 实证：规划要点标题「季候条件影响与
+      //   工期应对」每次被删 → 写层质检永久缺该 H4 → 重试与隔离重写全部空转 → 章阻断；
+      //   模型其实每次都写对了该标题，死锁根源在本行）；
+      // ② 正文行按本规则注释原意补「后方承接」判定（与下方「通过/包括」分支同模式）：下一非空行
+      //   为标题行或文档尾（无可承接）才是残片；后方有正文承接的叙述句（以「应对/面对/作为/
+      //   参与」等复合词结尾）保留——误容忍代价远小于误杀代价。
+      if (!isHeadingLine && /[和与在为对将]$/u.test(plain)) {
+        const nextContent = lines.slice(index + 1).map(item => item.trim()).find(item => item.length > 0) || '';
+        if (!nextContent || /^#{1,6}\s/u.test(nextContent)) return false;
+      }
       const isShortLine = plain.length <= 40;
       if (isShortLine && /[，、]$/u.test(plain)) return false;
-      if (isShortLine && /(通过|包括|如下|主要包括)$/u.test(plain)) {
+      // r8 同模式加固（与上方引导词结尾规则同源）：# 标题行是明确结构行，不属断句残片，
+      // 永不因「引导词结尾」被删——否则写层质检仍期待该标题时复现 r7 式缺失死锁；
+      // 正文行保留既有承接判定（后接正文删/后接标题或文尾留，特征化用例锁定）
+      if (!isHeadingLine && isShortLine && /(通过|包括|如下|主要包括)$/u.test(plain)) {
         const nextContent = lines.slice(index + 1).map(item => item.trim()).find(item => item.length > 0) || '';
         return /^#{1,6}\s/u.test(nextContent) || !nextContent;
       }

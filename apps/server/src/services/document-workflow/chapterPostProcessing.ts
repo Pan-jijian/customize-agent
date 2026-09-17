@@ -300,6 +300,28 @@ function stripEnumTail(name: string): string {
   return match[1].length >= 3 ? match[1] : name;
 }
 
+/** 非实体条目噪声（计价/结算类行）与标签残留形态：骨架名通道（图谱聚合/招标范围窗口/清单兜底）共用过滤。
+ * 4.50.x 实战（丰乐镇 09-17 实机）：图谱"特定要求"渲染行「- [结算管理要求] 工程竣工结算时，…」
+ * 「执行暂估价的材料、设备、专业工程及其金额：无」经招标范围窗口通道泄漏为工作包骨架名 →
+ * 交付正文出现「#### 1.3.5 - [结算管理要求] 工程竣工结算时」垃圾 H4（上轮更因块质检强制输出致死章） */
+const NON_PACKAGE_ITEM_RE = /计价|费用|税金|规费|暂列|暂估|合计|汇总|小计|措施项目|其他项目|税金项目|金额|结算管理|竣工结算/u;
+const LABEL_RESIDUE_RE = /[[\]【】]/u;
+
+/** 「招标范围」锚点选取：跳过方括号标签行内的伪锚点（- [工程范围] 招标范围具体详见…——项目图谱
+ * "特定要求"渲染形态）。窗口自标签行起将吞掉相邻管理要求行（[结算管理要求]/[施工依据要求]/
+ * [暂估价]…），把行政条款碎片与"参照设计师要求"式伪名当成专业工程名（丰乐镇 09-17 实证：
+ * 车行道路面标高/区域排水系统 实为施工依据条款顿号片段、非工作包）。返回首个非标签行锚点，无则 -1 */
+function clauseAnchorIndex(text: string): number {
+  for (let from = 0; from < text.length;) {
+    const idx = text.indexOf('招标范围', from);
+    if (idx < 0) return -1;
+    const lineStart = text.lastIndexOf('\n', idx - 1) + 1;
+    if (!/^\s*[-*]?\s*(?:\*\*)?\s*\[/u.test(text.slice(lineStart, idx))) return idx;
+    from = idx + '招标范围'.length;
+  }
+  return -1;
+}
+
 /**
  * 招标范围确定性提取专业工程名（骨架锁定兑底通道）：PDF 清单类项目（如合肥师范）没有 Excel 目录结构，
  * 工作包图谱为空，但招标文件「招标范围」条款列明专业工程清单（顿号分隔），是权威的骨架来源；
@@ -320,7 +342,7 @@ export function scopeEngineeringNames(projectContext: string, evidence: Document
     return undefined;
   })();
   for (const text of texts) {
-    const idx = text.indexOf('招标范围');
+    const idx = clauseAnchorIndex(text);
     if (idx < 0) continue;
     let window = text.slice(idx, idx + 600);
     if (currentPlace) {
@@ -361,7 +383,10 @@ export function scopeEngineeringNames(projectContext: string, evidence: Document
       // 被误提为工作包名 → 模型面对疑问句标题无从写“作业对象与工程量”概况段 → 三要素丢两要素；
       // 「水沟及其他所有构筑物拆除」类含“及其他”的叙述组合不是独立工程名
       .filter(item => !/^是否/u.test(item))
-      .filter(item => !/及其他|以及其他/u.test(item));
+      .filter(item => !/及其他|以及其他/u.test(item))
+      // 标签残留/计价结算类行不是专业工程名（渠道兜底，与清单通道同口径——垃圾名两条通道均已实测泄漏）
+      .filter(item => !LABEL_RESIDUE_RE.test(item))
+      .filter(item => !NON_PACKAGE_ITEM_RE.test(item));
     const result: string[] = [];
     for (const item of items) {
       const compact = item.replace(/\s+/gu, '');
@@ -382,12 +407,15 @@ function billItemSkeletonNames(evidence: DocumentEvidence[]): string[] {
   const facts = extractBillItemFacts(tables);
   const names: string[] = [];
   const seen = new Set<string>();
-  // 非实体条目噪声（计价类行）不进骨架候选
-  const BILL_ENTITY_NOISE = /计价|费用|税金|规费|暂列|暂估|合计|汇总|小计|措施项目|其他项目|税金项目/u;
+  // 非实体条目噪声（计价类行）与标签残留不进骨架候选（NON_PACKAGE_ITEM_RE/LABEL_RESIDUE_RE 模块级共用：
+  // 同一批垃圾名（「- [结算管理要求] 工程竣工结算时」「专业工程及其金额：无」）在招标范围窗口与
+  // F10 清单兜底两条通道均已实测泄漏，两处必须同口径拦截）
   for (const fact of facts) {
     const name = fact.key.replace(/^清单条目：/u, '').trim();
     if (!name || name.length < 2 || name.length > 24) continue;
-    if (BILL_ENTITY_NOISE.test(name)) continue;
+    if (NON_PACKAGE_ITEM_RE.test(name)) continue;
+    // 方括号标签残留行（表格错位/备注列串入）不是工作包名
+    if (LABEL_RESIDUE_RE.test(name)) continue;
     if (seen.has(name)) continue;
     seen.add(name);
     names.push(name);

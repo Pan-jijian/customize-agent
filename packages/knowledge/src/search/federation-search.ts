@@ -55,6 +55,8 @@ export interface SearchFilters {
   category?: string;
   filePath?: string;
   filePaths?: string[];
+  /** 资料包 ID（知识库顶层资料目录名，如「舒城(2)」）：按资料包直接取数；与 filePaths 同传时为 AND（双锁） */
+  materialRoots?: string[];
 }
 
 /** 各检索方式权重配置 */
@@ -147,7 +149,9 @@ export class FederationSearch {
     if (!filters) return undefined;
     const where: Record<string, VectorFilterValue> = {};
     const filePaths = filters.filePaths?.filter(Boolean);
+    const materialRoots = filters.materialRoots?.filter(Boolean);
     if (filters.category) where.category = filters.category;
+    if (materialRoots?.length) where.material_root = materialRoots;
     if (filePaths?.length) where.file_path = filePaths;
     else if (filters.filePath) where.file_path = filters.filePath;
     return Object.keys(where).length > 0 ? where : undefined;

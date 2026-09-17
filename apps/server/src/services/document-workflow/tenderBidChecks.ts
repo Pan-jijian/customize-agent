@@ -213,6 +213,17 @@ export const FIVE_ELEMENT_SEMANTIC_QUERIES = {
   acceptance: '经检查验收合格后整改销项闭环',
 } as const;
 
+/** 五要素词面封闭表（L2 确定性判定单源）：plan/process 为方案类/工序类正式表述，
+ * role/frequency/acceptance 为岗位/频次/闭环封闭词。评分（本文件 fiveElementBlockStats）
+ * 与链尾补强（fiveElementClosureBoost）同源引用，禁止双口径漂移。 */
+export const FIVE_ELEMENT_WORD_RES = {
+  plan: /专项施工方案|专项方案|施工方案|施工组织设计|技术措施|管理制度|技术交底|作业指导书|操作规程/u,
+  process: /施工工序|工艺流程|施工流程|作业流程|施工顺序|施工步骤|工艺步骤|流水段|流水作业|依次施工|工序/u,
+  role: /项目经理|技术负责人|施工员|质检员|安全员|材料员|资料员|测量员|劳资员|班组长|监理工程师|试验员/u,
+  frequency: /每日|每天|每周|每月|每季度|每批|不少于\s*\d+\s*次|至少\s*\d+\s*次|每周\s*\d+\s*次|每日\s*\d+\s*次|每\s*\d+\s*日/u,
+  acceptance: /整改|复查|销项|复验|闭环|返工/u,
+} as const;
+
 export interface FiveElementBlockStats {
   blocks: number;
   /** 五要素至少 4 项齐全的块数（方案/流程/责任人/时间节点/验收标准） */
@@ -236,14 +247,15 @@ export async function fiveElementBlockStats(
   // L2 确定性三要素词面前置判定（bge 语义判定前）：岗位/频次/闭环三类词面属封闭词表，
   // 词面命中即可确定要素存在（bge 对长块嵌入式判定在块粒度放大时漏判——合肥师范实测
   // 17 块 0 闭环、可落地性 0 分误报：块内「项目经理每周组织…质检员复查销项」词面三要素齐全）。
-  const ROLE_WORD_RE = /项目经理|技术负责人|施工员|质检员|安全员|材料员|资料员|测量员|劳资员|班组长|监理工程师|试验员/u;
-  const FREQUENCY_WORD_RE = /每日|每天|每周|每月|每季度|每批|不少于\s*\d+\s*次|至少\s*\d+\s*次|每周\s*\d+\s*次|每日\s*\d+\s*次|每\s*\d+\s*日/u;
-  const CLOSURE_WORD_RE = /整改|复查|销项|复验|闭环|返工/u;
+  // 词表已提升为模块级 FIVE_ELEMENT_WORD_RES（链尾补强同源引用）。
+  const ROLE_WORD_RE = FIVE_ELEMENT_WORD_RES.role;
+  const FREQUENCY_WORD_RE = FIVE_ELEMENT_WORD_RES.frequency;
+  const CLOSURE_WORD_RE = FIVE_ELEMENT_WORD_RES.acceptance;
   // B6 方案/工序两要素同样加词面前置（丰乐镇第五轮实测）：正文词面五要素齐全块 30 处
   // 被 bge 长块嵌入仅判出约 2 处，可落地性 6 分误报；plan/process 词表取封闭性强的
   // 正式表述（方案类文件名词/工序链词），命中即确定要素存在，与三要素口径同源。
-  const PLAN_WORD_RE = /专项施工方案|专项方案|施工方案|施工组织设计|技术措施|管理制度|技术交底|作业指导书|操作规程/u;
-  const PROCESS_WORD_RE = /施工工序|工艺流程|施工流程|作业流程|施工顺序|施工步骤|工艺步骤|流水段|流水作业|依次施工|工序/u;
+  const PLAN_WORD_RE = FIVE_ELEMENT_WORD_RES.plan;
+  const PROCESS_WORD_RE = FIVE_ELEMENT_WORD_RES.process;
   const hasDeterministicElement = (block: string, query: string): boolean | undefined => {
     if (query === FIVE_ELEMENT_SEMANTIC_QUERIES.plan && !PLAN_WORD_RE.test(block)) return false;
     if (query === FIVE_ELEMENT_SEMANTIC_QUERIES.plan && PLAN_WORD_RE.test(block)) return true;

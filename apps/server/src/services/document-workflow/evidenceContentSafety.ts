@@ -232,8 +232,33 @@ export function isBidderQualificationText(text: string): boolean {
   if (!normalized) return false;
   const hasBidderAnchor = /投标人|投标方|承包人资格|资格要求|资格审查|资格预审|资质要求|资质条件|资质等级|资格条件|财务状况|业绩要求|业绩证明|信用要求|联合体/u.test(normalized);
   if (!hasBidderAnchor) return false;
-  const hasQualificationTerm = /营业执照|资质证书|安全生产许可证|级及以上资质|财务状况|财务报告|审计报告|银行资信|业绩证明|类似业绩|信用记录|信用评价|不良行为记录|投标保证金|履约保证金/u.test(normalized);
+  // r8 扩围（实机 #2 复核：社保证明条款漏网）：「技术负责人…连续三个月社保缴费证明…社保缴纳单位应当是投标人」
+  // 是资格审查材料条款（投标资格文件），非施组技术响应要求——资格词表补「社保」族
+  // r11 扩围（丰乐镇门禁 #3「人员管理 ☑」直坠归因）：执业资格类证照同族漏网——「具备…二级及以上
+  // 注册建造师，具备…安全生产考核合格证书（B证），且必须是本单位人员」是投标人资格材料条款，
+  // 语义判定 0.57 边缘分（正文仅在机械章提「一级建造师」错位句）无法稳定判响应——资格词表补
+  // 「注册建造师/建造师注册证书/安全生产考核合格证书/职称证书」执业资格族，词面出池断根
+  const hasQualificationTerm = /营业执照|资质证书|安全生产许可证|级及以上资质|注册建造师|建造师注册证书|安全生产考核合格证书|职称证书|财务状况|财务报告|审计报告|银行资信|业绩证明|类似业绩|信用记录|信用评价|不良行为记录|投标保证金|履约保证金|社保/u.test(normalized);
   return hasQualificationTerm;
+}
+
+/**
+ * 合同程序条款判定（r8 实机 #1/#3 复核：合同范本/监理程序条文被误当施组响应要求）：
+ * ① 合同范本对偶语（「你方…我方…」）是合同条款特有语言（招标技术条款用「投标人/招标人」），
+ *    非对投标人施工组织的实质要求；
+ * ② 「发包人+审批/批准/备案/同意」是合同管理程序约定（资料报送/审批/备案属合同范畴，
+ *    prompt 合同履约管理程序条款规则同口径，LLM 漏判时本地兜底）；
+ * ③ 以「监理人」开头（含编号前缀）的条款描述监理方自身职责与程序（监理规范条文照抄形态），
+ *    非施组响应要求——「隐蔽工程验收须提前48小时通知监理人」类（投标人为主语的验收
+ *    要求）不以监理人开头，不受影响。
+ */
+export function isContractProcedureClause(text: string): boolean {
+  const normalized = text.trim().replace(/\s+/gu, '');
+  if (!normalized) return false;
+  if (/你方/u.test(normalized) && /我方/u.test(normalized)) return true;
+  if (/发包人[^。；;]{0,30}?(?:审批|批准|备案|同意|许可)/u.test(normalized)) return true;
+  if (/^[\d（(、.．\s]{0,8}监理人/u.test(normalized) && /(?:提交|报送|审批|延期|通知|检查|验收)/u.test(normalized)) return true;
+  return false;
 }
 
 /**

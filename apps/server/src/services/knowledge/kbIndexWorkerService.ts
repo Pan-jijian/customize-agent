@@ -4,7 +4,7 @@ import path from 'path';
 import { runIndexLoop, type KnowledgeIndexProgress } from '@customize-agent/knowledge';
 import { getMultiProjectManager } from './kbService';
 import { upsertKbOperation, type KbOperationStage } from './kbOperationLog';
-import { startProjectIntelligenceBuild } from '../document-workflow/projectIntelligence';
+import { startProjectIntelligenceBuildForLibrary } from '../document-workflow/projectIntelligence';
 
 interface WorkerResult {
   success: boolean;
@@ -224,7 +224,7 @@ export function enqueueKnowledgeIndex(job: IndexJob): Promise<WorkerResult> {
   void promise.then(result => {
     if (activeJobs.get(job.projectRoot) !== entry) return;
     activeJobs.delete(job.projectRoot);
-    if (result.success) startProjectIntelligenceBuild(job.projectRoot);
+    if (result.success) startProjectIntelligenceBuildForLibrary(job.projectRoot);
   }, () => {
     if (activeJobs.get(job.projectRoot) === entry) activeJobs.delete(job.projectRoot);
   });

@@ -10,7 +10,7 @@ import { normalizeSubsectionTitleForDedup } from '../utils';
 import { DIVISION_SECTION_RE, MAJOR_CONTENT_SECTION_RE, isCriticalSectionTitle } from '../writingSpec';
 import type { BillOfQuantitiesResult, BoqEntry } from '../billOfQuantitiesParser';
 import type { DocumentEvidence } from '../types';
-import { buildThemedBlocksForSubSection, bigramOverlap, capacityPlanChapterBlocks, isContainerSectionTitle, isResourceTriadSection, mergeUniqueSkeletonNames, sameSectionText, sectionDomain, CAPACITY_MAX_BLOCK_WORDS, CAPACITY_MIN_BLOCK_WORDS, CAPACITY_SKELETON_WORDS_PER_PACKAGE, DEFAULT_SUBSECTION_TARGET_WORDS, MAX_SUB_POINTS_PER_BLOCK, TITLE_MERGE_OVERLAP_THRESHOLD } from './capacity';
+import { buildThemedBlocksForSubSection, bigramOverlap, capacityPlanChapterBlocks, isClimateClassPointTitle, isContainerSectionTitle, isResourceTriadSection, mergeUniqueSkeletonNames, sameSectionText, sectionDomain, CAPACITY_MAX_BLOCK_WORDS, CAPACITY_MIN_BLOCK_WORDS, CAPACITY_SKELETON_WORDS_PER_PACKAGE, DEFAULT_SUBSECTION_TARGET_WORDS, MAX_SUB_POINTS_PER_BLOCK, TITLE_MERGE_OVERLAP_THRESHOLD } from './capacity';
 import type { PlannedChapterBlock, PlannedChapterSubPoint, PlannedChapterStructure } from './capacity';
 import { extractFeatureClauses, extractMethodPhrases } from './parse';
 import type { BlueprintChapter, BlueprintOutline, BlueprintSubSection, BlueprintWorkPackage, BlueprintWorkPackageQuantity } from './types';
@@ -378,6 +378,11 @@ export function buildChapterStructureFromBlueprint(input: {
       };
     });
   }
+  // C2 气候/特殊时段要点独立成块（4.44 丰乐镇实机两轮实证：写作模型系统性拒写此类要点 H4——
+  // 基线轮 2/2 失守、隔离重写带点名反馈仍 4/4 拒写 → 块两轮质检失败 → 工期章阻断 → 整单 warning）。
+  // 独立单点块的要点标题与块标题同名 → 写作层同名过滤后 sectionTitles 空集 → 「缺 H4 要点」
+  // missing 判定结构性为空，H3 外壳承担标题存在性，该类要点改走正文直接展开路径
+  blocks = extractClimatePointsAsBlocks(blocks);
   // 命名治理收口（L1）：章内块标题唯一化——重名者注入序号兜底（极端：续块首包名与域标签同名）
   const governedTitles = disambiguateBlockTitles(blocks.map(block => ({ title: block.title })));
   blocks.forEach((block, index) => { block.title = governedTitles[index]!; });
@@ -392,6 +397,35 @@ export function buildChapterStructureFromBlueprint(input: {
     blocks = [{ title: chapterTitle, subPoints: [], facts: [], targetWords: Math.min(CAPACITY_MAX_BLOCK_WORDS, Math.max(CAPACITY_MIN_BLOCK_WORDS, targetWords)) }];
   }
   return { blocks, coveredSections, fallbackSections };
+}
+
+/** C2 气候/特殊时段要点独立成块（调用点见 buildChapterStructureFromBlueprint 规划链）：
+ * 4.44 丰乐镇实机两轮实证——写作模型对此类要点系统性拒写 H4（基线 2/2 失守，隔离重写带点名
+ * 反馈仍 4/4 拒写），块两轮质检失败 → 工期章阻断 → 整单 warning。提取为独立单点块后，要点标题
+ * 与块标题同名：写作层 blockSectionPoints 同名过滤 → sectionTitles 空集 → 「缺 H4 要点」missing
+ * 判定结构性为空，H3 外壳承担标题存在性，该类要点改由正文直接展开。三类边界不提取（防结构/
+ * 覆盖损失）：同名点（块外壳已承担）、已有同题块（不重复拆分）、提取后原块将空（保留原结构）。 */
+function extractClimatePointsAsBlocks(blocks: PlannedChapterBlock[]): PlannedChapterBlock[] {
+  if (!blocks.some(block => block.subPoints.some(point => isClimateClassPointTitle(point.title)))) return blocks;
+  const occupiedTitles = new Set(blocks.map(block => normalizeSubsectionTitleForDedup(block.title)).filter(Boolean));
+  const result: PlannedChapterBlock[] = [];
+  for (const block of blocks) {
+    const blockTitle = normalizeSubsectionTitleForDedup(block.title);
+    const extracted = block.subPoints.filter(point => isClimateClassPointTitle(point.title)
+      && normalizeSubsectionTitleForDedup(point.title) !== blockTitle
+      && !occupiedTitles.has(normalizeSubsectionTitleForDedup(point.title)));
+    const kept = block.subPoints.filter(point => !extracted.includes(point));
+    if (extracted.length === 0 || kept.length === 0) {
+      result.push(block);
+      continue;
+    }
+    result.push({ ...block, subPoints: kept });
+    for (const point of extracted) {
+      occupiedTitles.add(normalizeSubsectionTitleForDedup(point.title));
+      result.push({ title: point.title, subPoints: [{ ...point }], facts: [], targetWords: 0 });
+    }
+  }
+  return result;
 }
 
 /** 章预算可行性估算（4.35 容量密度可行性闭环，章预算重校准输入；确定性无 LLM）：

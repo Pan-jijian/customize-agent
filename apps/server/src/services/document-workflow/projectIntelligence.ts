@@ -1,16 +1,15 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { computeProjectId, locateTableColumns, scoreTableHeaderRow } from '@customize-agent/knowledge';
+import { computeProjectId, locateTableColumns, materialRootOf, scoreTableHeaderRow } from '@customize-agent/knowledge';
 import { getMultiProjectManager, getStorageRoot, listKnowledgeFiles } from '../knowledge/kbService';
-import { upsertKbOperation, type KbOperationStage } from '../knowledge/kbOperationLog';
-import { buildBaseProjectGraph, buildAgentMaterialSnapshot, resolveAgentMaterialScope, type AgentMaterialScope } from './agentWorkflow';
+import { deleteKbOperation, listKbOperationsByIdPrefix, upsertKbOperation, type KbOperationStage } from '../knowledge/kbOperationLog';
+import { buildBaseProjectGraph, buildAgentMaterialSnapshot, resolveAgentMaterialScope, isUsableKnowledgeFile, distinctProjectNos, type AgentMaterialScope } from './agentWorkflow';
 import { buildProjectGraph } from './projectGraph';
 import { dedupeQuantityFacts, filterConstructionSteps } from './chapterGeneration';
 import type { DocumentEvidence, DocumentFact, DocumentTemplate, ProjectGraph } from './types';
 import { filterBidDisciplineFacts, stableHash } from './utils';
 
-const INTELLIGENCE_VERSION = 'project-intelligence-v12' as const;
-const SCOPE_VERSION = 'material-scope-v7' as const;
+const INTELLIGENCE_VERSION = 'project-intelligence-v13' as const;
 
 export interface ProjectIntelligenceFileAsset {
   relativePath: string;
@@ -73,6 +72,8 @@ export interface ConstructionOrganizationGraph {
 export interface ProjectIntelligenceCache {
   version: typeof INTELLIGENCE_VERSION;
   projectRoot: string;
+  /** 资料包 ID（知识库顶层目录名）：缓存按包独立构建与落盘，其他包的文件不存在于本缓存 */
+  packRoot: string;
   projectId: string;
   createdAt: number;
   sourceHash: string;
@@ -84,37 +85,22 @@ export interface ProjectIntelligenceCache {
   projectGraphMessage: string;
   /** LLM 图谱增强失败时降级为确定性 base 图谱落盘（缓存仍可用，自愈机制会在后续构建中重试增强） */
   graphDegraded?: boolean;
+  /** 包内检测到的不同项目编号（≥2 即疑似多份项目资料混放）：入库构建时告警（操作日志 warning），生成时阻断为最终防线 */
+  mixedProjectNos?: string[];
   constructionOrganizationGraph: ConstructionOrganizationGraph;
-}
-
-export interface MaterialScopeSnapshot {
-  version: typeof SCOPE_VERSION;
-  projectRoot: string;
-  createdAt: number;
-  scopeHash: string;
-  selectedRoots: string[];
-  selectedFiles: string[];
-  sourceHash: string;
-  files: ProjectIntelligenceFileAsset[];
-  facts: DocumentFact[];
-  projectGraph: ProjectGraph;
-  constructionOrganizationGraph: ConstructionOrganizationGraph;
-  evidenceByChapterId: Record<string, DocumentEvidence[]>;
 }
 
 function intelligenceDir(projectRoot: string) {
   const dir = path.join(getStorageRoot(), 'projects', computeProjectId(projectRoot), 'project-intelligence');
   fs.mkdirSync(dir, { recursive: true });
-  fs.mkdirSync(path.join(dir, 'scopes'), { recursive: true });
   return dir;
 }
 
-function cachePath(projectRoot: string) {
-  return path.join(intelligenceDir(projectRoot), 'project-intelligence.json');
-}
-
-function scopePath(projectRoot: string, scopeHash: string) {
-  return path.join(intelligenceDir(projectRoot), 'scopes', `${scopeHash}.json`);
+/** 资料包缓存路径：packs/{encodeURIComponent(packRoot)}.json——包 ID 直接映射文件名，跨包在存储层不可见 */
+function packCachePath(projectRoot: string, packRoot: string) {
+  const dir = path.join(intelligenceDir(projectRoot), 'packs');
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, `${encodeURIComponent(packRoot)}.json`);
 }
 
 /** 原子写 JSON：先写临时文件再 rename 替换，防进程中断留下半写文件（读取侧 JSON.parse 失败会拒绝缓存）。 */
@@ -124,8 +110,10 @@ function writeJsonAtomic(filePath: string, data: unknown) {
   fs.renameSync(tmp, filePath);
 }
 
-function topLevelGroup(relativePath: string) {
-  return relativePath.split(/[\\/]/u).filter(Boolean)[0];
+/** 资料包混放告警的固定操作日志 id（按包编码）：构建时覆盖刷新，混放解除或包消失时删除 */
+const MIXED_ALERT_ID_PREFIX = 'intelligence-mixed-';
+function mixedAlertIdFor(packRoot: string) {
+  return `${MIXED_ALERT_ID_PREFIX}${encodeURIComponent(packRoot)}`;
 }
 
 function fileRoles(relativePath: string) {
@@ -409,71 +397,69 @@ function filterGraphByFiles(graph: ProjectGraph, selectedFiles: Set<string>): Pr
   };
 }
 
-function selectedFilesAreFresh(projectRoot: string, files: ProjectIntelligenceFileAsset[]) {
-  const currentFilesByPath = new Map(listKnowledgeFiles(projectRoot).map(file => [file.relativePath, file]));
-  return files.every(file => {
-    const current = currentFilesByPath.get(file.relativePath);
-    return current && current.status !== 'error' && current.status !== 'disk' && Number(current.chunkCount || 0) === file.chunkCount && (current.contentHash || '') === (file.contentHash || '');
-  });
-}
-
-function currentProjectSourceHash(projectRoot: string) {
+/** 当前资料包的源指纹：仅统计该包内可用文件（其他包的入库变化不使本包缓存失效） */
+function currentPackSourceHash(projectRoot: string, packRoot: string) {
   const currentFiles = listKnowledgeFiles(projectRoot)
-    .filter(file => file.status !== 'disk' && file.status !== 'error' && Number(file.chunkCount || 0) > 0)
+    .filter(file => materialRootOf(file.relativePath) === packRoot)
+    // 与构建/新鲜度判据完全同源（isUsableKnowledgeFile 含 indexedAt>0）：过滤条件不一致会导致
+    // 缓存指纹恒不匹配 → 每次读取都判失效并触发自愈重建
+    .filter(isUsableKnowledgeFile)
     .map(file => ({ relativePath: file.relativePath, contentHash: file.contentHash, chunkCount: file.chunkCount, status: file.status, indexedAt: file.indexedAt } as ProjectIntelligenceFileAsset));
   return sourceHash(currentFiles);
 }
 
-function normalizeCachedIntelligence(projectRoot: string, raw: Partial<ProjectIntelligenceCache>): ProjectIntelligenceCache | undefined {
-  if (raw.version !== INTELLIGENCE_VERSION) return undefined;
+function normalizeCachedIntelligence(projectRoot: string, packRoot: string, raw: Partial<ProjectIntelligenceCache>): ProjectIntelligenceCache | undefined {
+  if (raw.version !== INTELLIGENCE_VERSION || raw.packRoot !== packRoot) return undefined;
   if (!raw.projectGraph || !Array.isArray(raw.files) || raw.files.length === 0) return undefined;
   const cachedHash = sourceHash(raw.files as ProjectIntelligenceFileAsset[]);
-  if (cachedHash !== currentProjectSourceHash(projectRoot)) return undefined;
+  if (cachedHash !== currentPackSourceHash(projectRoot, packRoot)) return undefined;
   const cache = raw as ProjectIntelligenceCache;
   const constructionOrganizationGraph = raw.constructionOrganizationGraph || buildConstructionOrganizationGraph(cache.projectGraph, cache.files);
   const normalized: ProjectIntelligenceCache = {
     ...cache,
     version: INTELLIGENCE_VERSION,
     projectRoot,
+    packRoot,
     projectId: cache.projectId || computeProjectId(projectRoot),
     sourceHash: cachedHash,
     constructionOrganizationGraph,
   };
-  if (raw.version !== INTELLIGENCE_VERSION || !raw.constructionOrganizationGraph || raw.sourceHash !== cachedHash) {
-    writeJsonAtomic(cachePath(projectRoot), normalized);
+  if (!raw.constructionOrganizationGraph || raw.sourceHash !== cachedHash) {
+    writeJsonAtomic(packCachePath(projectRoot, packRoot), normalized);
   }
   return normalized;
 }
 
-/** 惰性自愈节流窗口：读取时发现缓存失效/损坏/降级即触发后台重建，同一项目 1 分钟内不重复触发
- * （构建进行中由并发守卫合并），使旧项目的脏缓存无需手动操作即可自我修复 */
+/** 惰性自愈节流窗口：读取时发现缓存失效/损坏/降级即触发后台重建，同一资料包 1 分钟内不重复触发
+ * （构建进行中由并发守卫合并），使旧资料包的脏缓存无需手动操作即可自我修复 */
 const SELF_HEAL_THROTTLE_MS = 60_000;
 const selfHealTriggeredAt = new Map<string, number>();
 
-function triggerSelfHeal(projectRoot: string) {
+function triggerSelfHeal(projectRoot: string, packRoot: string) {
+  const key = `${projectRoot}::${packRoot}`;
   const now = Date.now();
-  const last = selfHealTriggeredAt.get(projectRoot) || 0;
+  const last = selfHealTriggeredAt.get(key) || 0;
   if (now - last < SELF_HEAL_THROTTLE_MS) return;
-  selfHealTriggeredAt.set(projectRoot, now);
-  startProjectIntelligenceBuild(projectRoot);
+  selfHealTriggeredAt.set(key, now);
+  startProjectIntelligenceBuild(projectRoot, packRoot);
 }
 
-export function readProjectIntelligence(projectRoot: string): ProjectIntelligenceCache | undefined {
-  const file = cachePath(projectRoot);
+export function readProjectIntelligence(projectRoot: string, packRoot: string): ProjectIntelligenceCache | undefined {
+  const file = packCachePath(projectRoot, packRoot);
   if (!fs.existsSync(file)) return undefined;
   try {
-    const normalized = normalizeCachedIntelligence(projectRoot, JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<ProjectIntelligenceCache>);
+    const normalized = normalizeCachedIntelligence(projectRoot, packRoot, JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<ProjectIntelligenceCache>);
     if (!normalized) {
-      // 缓存存在但失效（文件集变化/版本升级）：惰性自愈重建，避免长期停留在降级路径
-      triggerSelfHeal(projectRoot);
+      // 缓存存在但失效（包内文件集变化）：惰性自愈重建，避免长期停留在降级路径
+      triggerSelfHeal(projectRoot, packRoot);
       return undefined;
     }
     // LLM 增强降级的缓存：后台重试补齐（缓存仍可用，直接返回）
-    if (normalized.graphDegraded) triggerSelfHeal(projectRoot);
+    if (normalized.graphDegraded) triggerSelfHeal(projectRoot, packRoot);
     return normalized;
   } catch {
     // 半写/损坏文件：自愈重建（原子写已防止新增半写，历史损坏文件在此覆盖）
-    triggerSelfHeal(projectRoot);
+    triggerSelfHeal(projectRoot, packRoot);
     return undefined;
   }
 }
@@ -764,12 +750,21 @@ function projectEvidenceFromFiles(files: ProjectIntelligenceFileAsset[]): Docume
   })));
 }
 
-export async function buildProjectIntelligence(projectRoot: string, onProgress?: (stage: string, percent: number, message: string) => void): Promise<ProjectIntelligenceCache> {
+export async function buildProjectIntelligence(projectRoot: string, packRoot: string, onProgress?: (stage: string, percent: number, message: string) => void): Promise<ProjectIntelligenceCache> {
   onProgress?.('files', 15, '正在扫描已入库文件并抽样提取内容事实');
   const project = await getMultiProjectManager().getProject(projectRoot);
-  const kbFiles = listKnowledgeFiles(projectRoot).filter(file => file.status !== 'disk' && file.status !== 'error' && Number(file.indexedAt || 0) > 0 && Number(file.chunkCount || 0) > 0);
+  const kbFiles = listKnowledgeFiles(projectRoot)
+    .filter(file => materialRootOf(file.relativePath) === packRoot)
+    // 与 currentPackSourceHash/packCacheIsFresh 同源判据（isUsableKnowledgeFile）：三处过滤必须一致，
+    // 否则缓存指纹与构建输入分叉，读侧恒判失效并反复自愈重建
+    .filter(isUsableKnowledgeFile);
+  if (kbFiles.length === 0) {
+    // 包内已无可用文件（资料被清空/拆分/改名后）：同步清除历史混放告警，避免“已修复仍持续告警”
+    deleteKbOperation(projectRoot, mixedAlertIdFor(packRoot));
+    throw new Error(`资料包「${packRoot}」内无可用入库文件，跳过项目理解缓存构建`);
+  }
   const files: ProjectIntelligenceFileAsset[] = kbFiles.map(file => {
-    const root = topLevelGroup(file.relativePath);
+    const root = materialRootOf(file.relativePath);
     const roles = fileRoles(file.relativePath);
     // 步长抽样（上限 64 块并强制含最后一块）：前缀 16 块覆盖不到文件中部/尾部的
     // 工期、质量标准等核心条款，是图谱缺口（如「计划工期 540 天未找到」）的直接根因；
@@ -804,16 +799,20 @@ export async function buildProjectIntelligence(projectRoot: string, onProgress?:
   // 词面判定确定性无 LLM 依赖），避免纪律类事实经缓存通道污染 Planner 任务书与写作上下文
   const facts = filterBidDisciplineFacts(files.flatMap(buildFileFacts));
   const chapterIntentIndex = buildIntentIndex(files);
+  // 入库化混放告警（D1）：构建时按包指纹检测（与生成时阻断同源 distinctProjectNos），
+  // 用户在知识库页即可见混放风险；生成时另有 resolveAgentMaterialScope 阻断作最终防线
+  const mixedProjectNos = distinctProjectNos(files);
   onProgress?.('facts', 45, `内容事实与章节意图索引已提取：${facts.length} 条事实、${chapterIntentIndex.length} 条章节意图证据`);
-  const materialScope = { selectedRoots: [...new Set(files.map(file => file.root).filter(Boolean))] as string[], selectedFiles: files.map(file => file.relativePath), totalAvailableFiles: files.length, ambiguous: false, locked: true, reason: '项目入库完成后预计算的项目级资料范围', rejectedRoots: [], scopeHash: sourceHash(files) };
+  const packFiles = files.map(file => file.relativePath);
+  const materialScope: AgentMaterialScope = { selectedRoots: [packRoot], selectedMaterialRoots: [packRoot], selectedFiles: packFiles, totalAvailableFiles: files.length, ambiguous: false, locked: true, reason: '资料包入库完成后预计算包内资料范围', rejectedRoots: [], scopeHash: sourceHash(files) };
   const materialSnapshot = buildAgentMaterialSnapshot(projectRoot, materialScope);
   const baseProjectGraph = buildBaseProjectGraph({ facts, materialSnapshot });
-  onProgress?.('graph', 65, '正在构建项目图谱（LLM 分域结构化提取，确定性 base 图谱兑底）');
+  onProgress?.('graph', 65, '正在构建资料包图谱（LLM 分域结构化提取，确定性 base 图谱兑底）');
   let projectGraph: ProjectGraph;
   let projectGraphMessage: string;
   let graphDegraded = false;
   try {
-    const enhancedResult = await buildProjectGraph({ evidence: projectEvidenceFromFiles(files), projectRoot, requirement: '项目入库后预计算项目图谱', templateId: 'project-intelligence' });
+    const enhancedResult = await buildProjectGraph({ evidence: projectEvidenceFromFiles(files), projectRoot, requirement: '资料包入库后预计算资料包图谱', templateId: 'project-intelligence' });
     if (!enhancedResult.graph) throw new Error(`项目图谱预计算失败：${enhancedResult.stage.message || enhancedResult.stage.status}`);
     projectGraph = mergeProjectGraphs(baseProjectGraph, enhancedResult.graph);
     projectGraphMessage = enhancedResult.stage.message || '项目图谱已预计算';
@@ -831,6 +830,7 @@ export async function buildProjectIntelligence(projectRoot: string, onProgress?:
   const cache: ProjectIntelligenceCache = {
     version: INTELLIGENCE_VERSION,
     projectRoot,
+    packRoot,
     projectId: computeProjectId(projectRoot),
     createdAt: Date.now(),
     sourceHash: sourceHash(files),
@@ -841,134 +841,157 @@ export async function buildProjectIntelligence(projectRoot: string, onProgress?:
     projectGraph,
     projectGraphMessage,
     graphDegraded: graphDegraded || undefined,
+    mixedProjectNos: mixedProjectNos.length >= 2 ? mixedProjectNos : undefined,
     constructionOrganizationGraph,
   };
-  writeJsonAtomic(cachePath(projectRoot), cache);
+  writeJsonAtomic(packCachePath(projectRoot, packRoot), cache);
+  // 混放告警落库操作日志：固定 id 按包覆盖（每次构建刷新）；混放解除时删除历史告警避免残留误导
+  const mixedAlertId = mixedAlertIdFor(packRoot);
+  if (mixedProjectNos.length >= 2) {
+    const message = `资料包「${packRoot}」内检测到 ${mixedProjectNos.length} 个不同项目编号（${mixedProjectNos.join('、')}），疑似多份项目资料混放，请拆分到独立资料包目录；生成时将阻断以避免跨项目污染`;
+    upsertKbOperation(projectRoot, {
+      id: mixedAlertId,
+      type: 'reindex',
+      title: '资料包混放告警',
+      stage: 'done',
+      status: 'warning',
+      percent: 100,
+      message,
+      details: [`检测到项目编号：${mixedProjectNos.join('、')}`, `资料包共 ${files.length} 份资料；资料包=知识库顶层目录，混放资料请拆分到独立顶层目录`],
+    });
+    console.warn('[project-intelligence] mixed project nos detected in pack', packRoot, mixedProjectNos.join('、'));
+  } else {
+    deleteKbOperation(projectRoot, mixedAlertId);
+  }
   return cache;
 }
 
-function buildMaterialScopeSnapshot(input: { projectRoot: string; template: DocumentTemplate; cache: ProjectIntelligenceCache; selectedFiles: string[]; selectedRoots: string[]; scopeHash: string }): MaterialScopeSnapshot | undefined {
-  const selected = new Set(input.selectedFiles);
-  const files = input.cache.files.filter(file => selected.has(file.relativePath));
-  if (files.length === 0) return undefined;
-  if (!selectedFilesAreFresh(input.projectRoot, files)) return undefined;
-  const facts = input.cache.facts.filter(fact => selected.has(fact.sourceFile));
-  const projectGraph = filterGraphByFiles(input.cache.projectGraph, selected);
-  const constructionOrganizationGraph = filterConstructionOrganizationGraph(input.cache.constructionOrganizationGraph, selected);
-  const evidenceByChapterId = evidenceFromIntentIndex({ template: input.template, entries: input.cache.chapterIntentIndex || [], selected });
-  const snapshot: MaterialScopeSnapshot = {
-    version: SCOPE_VERSION,
-    projectRoot: input.projectRoot,
-    createdAt: Date.now(),
-    scopeHash: input.scopeHash,
-    selectedRoots: input.selectedRoots,
-    selectedFiles: input.selectedFiles,
-    sourceHash: stableHash(files.map(file => ({ path: file.relativePath, hash: file.contentHash, chunkCount: file.chunkCount })).sort((a, b) => a.path.localeCompare(b.path))),
-    files,
-    facts,
-    projectGraph,
-    constructionOrganizationGraph,
-    evidenceByChapterId,
-  };
-  writeJsonAtomic(scopePath(input.projectRoot, input.scopeHash), snapshot);
-  return snapshot;
-}
-
-function readMaterialScopeSnapshot(projectRoot: string, scopeHash: string): MaterialScopeSnapshot | undefined {
-  const file = scopePath(projectRoot, scopeHash);
-  if (!fs.existsSync(file)) return undefined;
-  try {
-    const snapshot = JSON.parse(fs.readFileSync(file, 'utf8')) as MaterialScopeSnapshot;
-    if (snapshot.version !== SCOPE_VERSION) return undefined;
-    if (!selectedFilesAreFresh(projectRoot, snapshot.files)) return undefined;
-    return snapshot;
-  } catch {
-    return undefined;
-  }
-}
-
 export function buildScopedProjectIntelligence(input: { projectRoot: string; template: DocumentTemplate; requirement?: string; materialScope?: AgentMaterialScope }) {
-  const cache = readProjectIntelligence(input.projectRoot);
-  if (!cache) return undefined;
   const scope = input.materialScope || resolveAgentMaterialScope(input.projectRoot, input.template, input.requirement || '');
   if (scope.ambiguous || !scope.locked || scope.selectedFiles.length === 0) return undefined;
-  const scopeHash = stableHash({ version: SCOPE_VERSION, selectedFiles: scope.selectedFiles.slice().sort(), templateId: input.template.id, chapters: input.template.chapters.map(chapter => ({ id: chapter.id, title: chapter.title, sections: chapter.sections || [] })) });
-  const snapshot = readMaterialScopeSnapshot(input.projectRoot, scopeHash)
-    || buildMaterialScopeSnapshot({ projectRoot: input.projectRoot, template: input.template, cache, selectedFiles: scope.selectedFiles, selectedRoots: scope.selectedRoots, scopeHash });
-  if (!snapshot) return undefined;
+  // 资料组锁定后必为单包（需求唯一匹配/绑定唯一组分支）；散文件资料组无包缓存，走调用方临时构建兜底
+  const packRoot = scope.selectedMaterialRoots[0];
+  if (!packRoot) return undefined;
+  const cache = readProjectIntelligence(input.projectRoot, packRoot);
+  if (!cache) return undefined;
+  // 消费端按选中文件投影（与历史 scope 快照同口径；包级隔离已在构建端落地）
+  const selected = new Set(scope.selectedFiles);
+  const files = cache.files.filter(file => selected.has(file.relativePath));
+  if (files.length === 0) return undefined;
+  const facts = cache.facts.filter(fact => selected.has(fact.sourceFile));
+  const projectGraph = filterGraphByFiles(cache.projectGraph, selected);
+  const constructionOrganizationGraph = filterConstructionOrganizationGraph(cache.constructionOrganizationGraph, selected);
+  const evidenceByChapterId = evidenceFromIntentIndex({ template: input.template, entries: cache.chapterIntentIndex || [], selected });
   return {
     cache,
     scope,
-    scopeSnapshot: snapshot,
-    files: snapshot.files,
-    facts: snapshot.facts,
-    evidenceByChapterId: snapshot.evidenceByChapterId,
-    projectGraph: snapshot.projectGraph,
-    constructionOrganizationGraph: snapshot.constructionOrganizationGraph,
-    constructionOrganizationContext: constructionOrganizationPrompt(snapshot.constructionOrganizationGraph),
+    files,
+    facts,
+    evidenceByChapterId,
+    projectGraph,
+    constructionOrganizationGraph,
+    constructionOrganizationContext: constructionOrganizationPrompt(constructionOrganizationGraph),
   };
 }
 
-/** 构建进行中的项目集合（promise 供同步等待方复用结果）：多次触发合并为串行重跑，防并发构建
+/** 构建进行中的资料包集合（promise 供同步等待方复用结果）：同一包多次触发合并为串行重跑，防并发构建
  * （上传分批入队的队列排空触发、自愈触发与手动 API 触发重叠时，多个 buildProjectIntelligence
- * 并发跑 LLM 图谱并写同一缓存文件竞态） */
+ * 并发跑 LLM 图谱并写同一缓存文件竞态）；不同包的构建互相独立，可并行 */
 const buildInFlight = new Map<string, Promise<ProjectIntelligenceCache>>();
 const buildPending = new Set<string>();
+
+function buildKey(projectRoot: string, packRoot: string) {
+  return `${projectRoot}::${packRoot}`;
+}
 
 function notifyBuildProgress(projectRoot: string, id: string, patch: { stage: KbOperationStage; status: 'processing' | 'success' | 'error'; percent: number; message: string; error?: string }) {
   upsertKbOperation(projectRoot, { id, type: 'reindex', title: '项目理解缓存', ...patch });
 }
 
-export function startProjectIntelligenceBuild(projectRoot: string) {
-  if (buildInFlight.has(projectRoot)) {
+/** 资料包缓存是否新鲜（版本/包 ID/文件集指纹三重比对）：库级触发只用它做“需不需要重建”判定，无自愈副作用 */
+function packCacheIsFresh(projectRoot: string, packRoot: string) {
+  const file = packCachePath(projectRoot, packRoot);
+  if (!fs.existsSync(file)) return false;
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<ProjectIntelligenceCache>;
+    if (raw.version !== INTELLIGENCE_VERSION || raw.packRoot !== packRoot) return false;
+    if (!raw.projectGraph || !Array.isArray(raw.files) || raw.files.length === 0) return false;
+    return sourceHash(raw.files as ProjectIntelligenceFileAsset[]) === currentPackSourceHash(projectRoot, packRoot);
+  } catch {
+    return false;
+  }
+}
+
+/** 库级触发（入库非空排空后）：枚举知识库全部资料包，仅对缓存缺失/失效的包启动构建（其他包零开销） */
+export function startProjectIntelligenceBuildForLibrary(projectRoot: string) {
+  const usable = listKnowledgeFiles(projectRoot).filter(isUsableKnowledgeFile);
+  const packRoots = [...new Set(usable.map(file => materialRootOf(file.relativePath)).filter(Boolean))];
+  // 混放告警孤儿清理：告警指引用户拆分/改名资料包后，旧包不再参与构建（构建内的解除分支不会执行），
+  // 历史告警需在此清除，避免“已修复仍持续告警”与真实状态脱节
+  const existingPacks = new Set(packRoots);
+  for (const record of listKbOperationsByIdPrefix(projectRoot, MIXED_ALERT_ID_PREFIX)) {
+    let alertPack: string;
+    try { alertPack = decodeURIComponent(record.id.slice(MIXED_ALERT_ID_PREFIX.length)); } catch { alertPack = ''; }
+    if (!existingPacks.has(alertPack)) deleteKbOperation(projectRoot, record.id);
+  }
+  for (const packRoot of packRoots) {
+    if (packCacheIsFresh(projectRoot, packRoot)) continue;
+    startProjectIntelligenceBuild(projectRoot, packRoot);
+  }
+}
+
+export function startProjectIntelligenceBuild(projectRoot: string, packRoot: string) {
+  const key = buildKey(projectRoot, packRoot);
+  if (buildInFlight.has(key)) {
     // 构建进行中：标记待重跑，当前构建结束后串行再跑一次（合并期间所有触发为一次重跑，
     // 保证落盘缓存基于触发时刻最新的文件列表）
-    buildPending.add(projectRoot);
+    buildPending.add(key);
     return;
   }
-  const id = `project-intelligence-${Date.now()}`;
-  notifyBuildProgress(projectRoot, id, { stage: 'generating', status: 'processing', percent: 5, message: '正在构建项目级蓝图、图谱、事实索引和章节意图索引' });
-  const run = buildProjectIntelligence(projectRoot, (_stage, percent, message) => {
+  const id = `project-intelligence-${encodeURIComponent(packRoot)}-${Date.now()}`;
+  notifyBuildProgress(projectRoot, id, { stage: 'generating', status: 'processing', percent: 5, message: `正在构建资料包「${packRoot}」的蓝图、图谱、事实索引和章节意图索引` });
+  const run = buildProjectIntelligence(projectRoot, packRoot, (_stage, percent, message) => {
     notifyBuildProgress(projectRoot, id, { stage: 'generating', status: 'processing', percent, message });
   });
-  buildInFlight.set(projectRoot, run);
+  buildInFlight.set(key, run);
   void run.then(cache => {
-    notifyBuildProgress(projectRoot, id, { stage: 'done', status: 'success', percent: 100, message: `项目理解缓存完成：${cache.fileCount} 份资料，${cache.facts.length} 条事实，${cache.chapterIntentIndex.length} 条章节意图证据` });
+    notifyBuildProgress(projectRoot, id, { stage: 'done', status: 'success', percent: 100, message: `资料包「${packRoot}」理解缓存完成：${cache.fileCount} 份资料，${cache.facts.length} 条事实，${cache.chapterIntentIndex.length} 条章节意图证据` });
   }).catch(error => {
     const message = error instanceof Error ? error.message : String(error);
     notifyBuildProgress(projectRoot, id, { stage: 'error', status: 'error', percent: 100, message, error: message });
     console.warn('[project-intelligence] build failed', message);
   }).finally(() => {
-    buildInFlight.delete(projectRoot);
-    if (buildPending.delete(projectRoot)) {
-      startProjectIntelligenceBuild(projectRoot);
+    buildInFlight.delete(key);
+    if (buildPending.delete(key)) {
+      startProjectIntelligenceBuild(projectRoot, packRoot);
     }
   });
 }
 
-/** 同步构建（API POST 非 async 模式）：构建进行中时复用其结果（不重复启动），否则启动并等待；
+/** 同步构建（API POST 非 async 模式）：同一包构建进行中时复用其结果（不重复启动），否则启动并等待；
  * 与排空触发/自愈触发的后台构建共享同一并发守卫，避免并发写同一缓存文件 */
-export async function buildProjectIntelligenceSync(projectRoot: string): Promise<ProjectIntelligenceCache> {
-  const inflight = buildInFlight.get(projectRoot);
+export async function buildProjectIntelligenceSync(projectRoot: string, packRoot: string): Promise<ProjectIntelligenceCache> {
+  const key = buildKey(projectRoot, packRoot);
+  const inflight = buildInFlight.get(key);
   if (inflight) return inflight;
-  const id = `project-intelligence-${Date.now()}`;
-  notifyBuildProgress(projectRoot, id, { stage: 'generating', status: 'processing', percent: 5, message: '正在构建项目级蓝图、图谱、事实索引和章节意图索引' });
-  const run = buildProjectIntelligence(projectRoot, (_stage, percent, message) => {
+  const id = `project-intelligence-${encodeURIComponent(packRoot)}-${Date.now()}`;
+  notifyBuildProgress(projectRoot, id, { stage: 'generating', status: 'processing', percent: 5, message: `正在构建资料包「${packRoot}」的蓝图、图谱、事实索引和章节意图索引` });
+  const run = buildProjectIntelligence(projectRoot, packRoot, (_stage, percent, message) => {
     notifyBuildProgress(projectRoot, id, { stage: 'generating', status: 'processing', percent, message });
   });
-  buildInFlight.set(projectRoot, run);
+  buildInFlight.set(key, run);
   try {
     const cache = await run;
-    notifyBuildProgress(projectRoot, id, { stage: 'done', status: 'success', percent: 100, message: `项目理解缓存完成：${cache.fileCount} 份资料，${cache.facts.length} 条事实，${cache.chapterIntentIndex.length} 条章节意图证据` });
+    notifyBuildProgress(projectRoot, id, { stage: 'done', status: 'success', percent: 100, message: `资料包「${packRoot}」理解缓存完成：${cache.fileCount} 份资料，${cache.facts.length} 条事实，${cache.chapterIntentIndex.length} 条章节意图证据` });
     return cache;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     notifyBuildProgress(projectRoot, id, { stage: 'error', status: 'error', percent: 100, message, error: message });
     throw error;
   } finally {
-    buildInFlight.delete(projectRoot);
-    if (buildPending.delete(projectRoot)) {
-      startProjectIntelligenceBuild(projectRoot);
+    buildInFlight.delete(key);
+    if (buildPending.delete(key)) {
+      startProjectIntelligenceBuild(projectRoot, packRoot);
     }
   }
 }

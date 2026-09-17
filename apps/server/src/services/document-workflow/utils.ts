@@ -21,6 +21,29 @@ export function hasWorkInjuryInsuranceStatement(text: string): boolean {
   return /(?:办理|缴纳|参保|缴费|投保).{0,8}工伤保险|工伤保险.{0,8}(?:办理|缴纳|参保|缴费|投保)/u.test(stripped);
 }
 
+/** 工伤保险表述确定性改写（r14 丰乐镇 B3 归因：终检 blocker 无修复轮消费）——写作层把
+ * 「办理工伤保险」写成「办理意外伤害保险」时 hasWorkInjuryInsuranceStatement 恒 false 直坠门禁：
+ * 交付前将「（办理|缴纳|投保|购买）意外伤害保险」确定性改写为含「办理工伤保险（按建设项目参保）」
+ * 的并列表述（改写后检测器同源判定恒通过）；无可改写句时在「工伤保险」标题小节后插入合规短句兜底；
+ * 已满足表述或正文无劳资内容时零成本静默（与检测器词面门控同源，幂等可重放）。 */
+export function fixWorkInjuryInsuranceStatement(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+  const noop = { markdown, fixedCount: 0, details: [] as string[] };
+  if (hasWorkInjuryInsuranceStatement(markdown)) return noop;
+  // 劳资内容门控（与检测器 localAdaptationKeywordIssues 同源）：书名号引用剥离后无劳资词不处理
+  if (!/(?:劳务|农民工|工资)/u.test(markdown.replace(BOOK_TITLE_CITATION_RE, ''))) return noop;
+  const rewriteRe = /(办理|缴纳|投保|购买)意外伤害保险/u;
+  if (rewriteRe.test(markdown)) {
+    const next = markdown.replace(rewriteRe, '$1工伤保险（按建设项目参保）及意外伤害保险');
+    return { markdown: next, fixedCount: 1, details: ['工伤保险表述改写：“意外伤害保险”→“工伤保险（按建设项目参保）及意外伤害保险”'] };
+  }
+  // 插入兜底：无可改写句时在「工伤保险」标题小节后补合规短句（纯追加，句面经链尾各检测器词面排查）
+  const headingRe = /^(#{2,6}[^\n]*工伤保险[^\n]*)$/mu;
+  if (!headingRe.test(markdown)) return noop;
+  const sentence = '项目部按规定为全体作业人员办理工伤保险（按建设项目参保），保险费用由企业承担。';
+  const next = markdown.replace(headingRe, `$1\n\n${sentence}`);
+  return { markdown: next, fixedCount: 1, details: ['工伤保险表述补写：在「工伤保险」小节插入参保表述'] };
+}
+
 /**
  * 工序顺序表达检测：施工流程/施工方法的工序顺序表达形式不限——箭头链、编号步骤、
  * 有序/无序列表、顺序词引导、连接线链任一即可，不再强制“→”箭头。
@@ -30,8 +53,15 @@ export function hasProcessSequenceExpression(text: string): boolean {
   if (!text) return false;
   // 箭头链（→、->、=>）
   if (/→|->|=>/u.test(text)) return true;
-  // 顺序词引导（按…顺序 / 依次 / 先后 / 先…后…）
-  if (/按.{0,12}顺序|依次|先后|先.{0,12}(?:后|再|然后|最后)|顺序施工|流水顺序/u.test(text)) return true;
+  // 顺序词引导（按…顺序 / 依次 / 先后 / 先…后…）：4.44 窗口放宽（40~60 字）——自然成文工序叙述的
+  // 顺序词间隔实测 20~60 字（「施工按先采用小型破碎机械进行拆除，再配合人工清理碎块，随后装车外运，
+  // 最后平整场地的顺序组织」），旧 {0,12} 窗口漏判 2 个分项块弱链（#41 误报根因）；「随后」同义补入
+  if (/按.{0,60}?顺序|依次|先后|先.{0,40}?(?:后|再|随后|然后|最后)|顺序施工|流水顺序/u.test(text)) return true;
+  // 同词前后结构（r16c 丰乐镇 B3 归因）：「苗木栽植前完成种植土翻整与基肥施入，栽植后及时浇透
+  // 定根水并进入养护周期」是自然成文的工序先后表达——同一工序词以「前/后」成对出现即具备顺序
+  // 语义（「栽植前…栽植后」「浇筑前…浇筑后」），旧词表只认「先…后」序列词漏判该形态致 1.2.3
+  // 绿化工程块误报缺工序顺序
+  if (/([\u4e00-\u9fa5]{2,6})前[^。；;!?\n]{0,80}?\1后/u.test(text)) return true;
   // 编号步骤序列：行首 1. / 1、 / （1） / ① 式编号，至少 2 步
   if ((text.match(/(?:^|\n)\s*(?:\d+[.、]|[（(]\d+[）)]|[一二三四五六七八九十]+[、.]|第[一二三四五六七八九十]+步)/gmu) || []).length >= 2) return true;
   // 列表序列：行首 - / * / • 列表符，至少 2 行
@@ -57,9 +87,19 @@ export function workPackageContentElementFlags(block: string): { scope: boolean;
   // 是工程量表达，「路床碾压检验」「每日检查、整改、复查、销项」「养护」是方法与验收证据；
   // 词表须覆盖真实写作形态（呈现形式不限口径与 hasProcessSequenceExpression 同向）。
   // 检查(?!井)：排除名词「检查井」误命中，保留动词「检查」；三处验收器共用本函数，单点同源防漂移
-  const scope = /(?:施工)?(?:概况|范围)[:：]\s*\S|工程量|作业对象|部位|总量|共\s*\d/u.test(block);
+  // 4.44 增补「数值+工程量单位」形态：清单量在正文的自然形态（「塑料管铺设8205.53m」「塑料检查井555座」）
+  // 不带「工程量」标签词——旧词表漏判 12/14 个分项块（#39/#40 根因）；「300mm」被右断言排除（管径非工程量）
+  // r11 增补管理方法证据族（丰乐镇门禁 #10 归因）：土方平衡块方法证据是「台账/核对/复核/计量」管理闭环
+  //（「每日统计当日土方平衡情况」「每周核对一次土方平衡台账」）——旧词表漏判致整块方法要素误报缺失
+  const scope = /(?:施工)?(?:概况|范围)[:：]\s*\S|工程量|作业对象|部位|总量|共\s*\d|\d+(?:\.\d+)?\s*(?:km|㎡|m²|m2|m3|m³|座|套|处|盏|株|棵|延米|吨)(?![\dA-Za-z])|\d+(?:\.\d+)?\s*m(?![\dA-Za-z])/u.test(block);
   const process = /工艺流程|施工流程/u.test(block) || /(?:施工)?(?:流程|工序|顺序)[:：]\s*\S/u.test(block) || hasProcessSequenceExpression(block);
-  const method = /(?:施工)?方法[:：]\s*\S|工艺参数|验收标准|检测|试验|记录|检查(?!井)|巡查|检验|整改|复查|销项|养护/u.test(block);
+  // r15 丰乐镇 B4 归因：自然行文「施工方法采用/为/按/以/包括…」（无冒号标签形态）此前漏判致
+  // 「景观工程」块方法要素误报缺失——方法声明结构补齐无冒号变体（呈现形式不限口径与三要素检查同向）
+  // r16 丰乐镇 B8 归因：「MU10砌块砌筑」「连接路采用10cm厚C30混凝土」「编入施工工序卡与操作规程」
+  // 形态（材料牌号/强度等级、材料性能、工艺管理闭环）均未命中词表致「景观工程」块方法维度误报缺失——
+  // 补材料牌号强度等级（MU10/C30/HPB300…）、材料性能（抗压/抗折强度、强度等级、配合比、坍落度）
+  // 与工艺管理闭环（工序卡/操作规程/作业指导书/技术交底）证据族（呈现形式不限口径与三要素检查同向）
+  const method = /(?:施工)?方法(?:[:：]\s*\S|(?:采用|为|按|以|包括|如下))|工艺参数|验收标准|检测|试验|记录|检查(?!井)|巡查|检验|整改|复查|销项|养护|台账|核对|复核|计量|MU\s*\d+|C\d+|抗压强度|抗折强度|强度等级|配合比|坍落度|工序卡|操作规程|作业指导书|技术交底/u.test(block);
   return { scope, process, method };
 }
 
@@ -101,6 +141,88 @@ export function workPackageThemeLabel(workPackageName: string): string {
  * finalize 标题对齐归一，远小于误杀代价） */
 export function looseTitleFamilyMatch(left: string, right: string): boolean {
   return left.replace(/工程/gu, '') === right.replace(/工程/gu, '');
+}
+
+/** 标题近似差异敏感字表（nearSubsectionTitleMatch 的误容防线）：差异字命中数字或季节/气象字时
+ * 一律不容忍——“冬期/雨期/雨季”类差异是工序措施的实义区分字，容忍会把「冬期施工保证措施」
+ * 当成「雨期施工保证措施」（货不对板）；「季候→气候」式同义微调的差异字（季/气）不在表内，正常容忍。 */
+const HEADING_DIFF_SENSITIVE_RE = /[0-9０-９冬夏春秋汛台寒冻暑热旱涝雨雪]/u;
+
+/** 带预算的编辑距离判定（两行滚动 DP；行最小值超预算即剪枝——行 min 单调非减，剪枝安全） */
+function editDistanceWithin(left: string, right: string, budget: number): boolean {
+  if (left === right) return true;
+  if (Math.abs(left.length - right.length) > budget) return false;
+  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let row = 1; row <= left.length; row += 1) {
+    const current: number[] = [row];
+    let rowMin = row;
+    for (let column = 1; column <= right.length; column += 1) {
+      const substitution = previous[column - 1] + (left[row - 1] === right[column - 1] ? 0 : 1);
+      const value = Math.min(previous[column] + 1, current[column - 1] + 1, substitution);
+      current.push(value);
+      if (value < rowMin) rowMin = value;
+    }
+    if (rowMin > budget) return false;
+    previous = current;
+  }
+  return previous[right.length] <= budget;
+}
+
+/** 标题单字/双字级近似判定（供 alignSimilarHeadingsToPlan 使用）：在归一化标题（剥编号/括号/
+ * 标点/工程尾缀）之上按编辑距离阈值容忍模型对生僻规划标题的同义微调——≥12 字容忍 2 处差异、
+ * ≥8 字容忍 1 处，更短标题不容忍；差异字符命中敏感字表（数字/季节气象字）直接拒绝。
+ * 根因实测（r7 工期章阻断）:规划层产出书面词标题「季候条件影响与工期应对」，写层模型 4 次都
+ * 改写为「气候条件影响与工期应对」（单字差异），行级精确包含匹配 4 连败 → 块重试 + 隔离重写
+ * 全部耗尽 → 整章阻断；该差异语义完全同指，判缺失属误杀。 */
+export function nearSubsectionTitleMatch(left: string, right: string): boolean {
+  const maxLen = Math.max(left.length, right.length);
+  const diffBudget = maxLen >= 12 ? 2 : maxLen >= 8 ? 1 : 0;
+  if (diffBudget === 0) return false;
+  const leftChars = new Set(left.split(''));
+  const rightChars = new Set(right.split(''));
+  for (const ch of leftChars) {
+    if (!rightChars.has(ch) && HEADING_DIFF_SENSITIVE_RE.test(ch)) return false;
+  }
+  for (const ch of rightChars) {
+    if (!leftChars.has(ch) && HEADING_DIFF_SENSITIVE_RE.test(ch)) return false;
+  }
+  return editDistanceWithin(left, right, diffBudget);
+}
+
+/** 块成稿 H4 标题近似对齐（写层质检前的确定性清洗，零内容改写）：把与规划要点标题“近义微调”
+ * 的 H4 标题行就地改写回规划标题原文——模型对生僻/书面化规划标题做同义微调是稳定行为（r7 实测：
+ * 「季候条件影响与工期应对」4 次被改写为「气候条件影响与工期应对」），精确包含匹配判缺失后
+ * 重试与隔离重写全部空转 → 章阻断；本对齐先于缺失判定执行，修正后标题与规划同源（缺失判定
+ * 「完全一致」口径不放松）。保护：仅处理正文中尚未被任一规划标题精确覆盖的 H4 行（精确命中的
+ * 行归属明确，不得再被近似改写占用）；同一规划标题只认领一行；无法近似匹配的保持原样交缺失判定。 */
+export function alignSimilarHeadingsToPlan(markdown: string, plannedTitles: string[]): { markdown: string; aligned: string[] } {
+  const candidates = [...new Set(plannedTitles.filter(Boolean))]
+    .map(title => ({ title, normalized: normalizeSubsectionTitleForDedup(title) }))
+    .filter(item => item.normalized);
+  if (candidates.length === 0) return { markdown, aligned: [] };
+  const normalizedLines = markdown.split('\n').map(line => normalizeSubsectionTitleForDedup(line)).filter(Boolean);
+  // 已被正文精确覆盖（归一化包含，与缺失判定同口径）的规划标题：无需对齐，不得被近似行占用
+  const coveredTitles = new Set(candidates
+    .filter(item => normalizedLines.some(line => line.includes(item.normalized)))
+    .map(item => item.title));
+  const usedTitles = new Set<string>();
+  const aligned: string[] = [];
+  const result = markdown.split('\n').map(line => {
+    const heading = /^(\s*####\s+)(.+)$/u.exec(line);
+    if (!heading) return line;
+    const currentTitle = heading[2].trim();
+    const normalizedCurrent = normalizeSubsectionTitleForDedup(currentTitle);
+    if (!normalizedCurrent) return line;
+    // 本行已精确覆盖某个规划标题（含其扩展形态）时原样保留——近似对齐只处理“谁都对不上”的行
+    if (candidates.some(item => normalizedCurrent.includes(item.normalized))) return line;
+    const match = candidates.find(item =>
+      !coveredTitles.has(item.title) && !usedTitles.has(item.title) && nearSubsectionTitleMatch(normalizedCurrent, item.normalized));
+    if (!match) return line;
+    usedTitles.add(match.title);
+    aligned.push(`${currentTitle}→${match.title}`);
+    return `${heading[1]}${match.title}`;
+  }).join('\n');
+  return { markdown: result, aligned };
 }
 
 /** 同一 H3 小节范围内出现 ≥2 次的归一化 H4 标题（返回原样标题文本）：
@@ -358,7 +480,7 @@ function extractSectionExact(content: string, title: string, headingStartRe: Reg
   return lines.slice(start, end).join('\n');
 }
 
-function sectionHeadingTitleText(line: string) {
+export function sectionHeadingTitleText(line: string) {
   return line
     .replace(/^\s*#{2,4}\s*/u, '')
     .replace(/^\s*(?:\d+(?:\.\d+)*|[一二三四五六七八九十]+)(?:[、.．]|\s+)\s*/u, '')
@@ -404,12 +526,13 @@ export function comparableSectionHeadingMatches(headingTitle: string, sectionTit
  * 同一规划标题只对齐一处（后续近似标题保持原样，避免多节共用同名标题），无法匹配的保持原样交由检测器报缺。
  * headingLevel（C2 全路径扩展）：3 只对齐 H3、4 只对齐 H4——主题块管线 H3 块标题与 H4 要点标题
  * 混排对齐会跨级误配（如「施工部署」块标题把「施工部署与流水组织」H4 改写掉），分层对齐规避 */
-export function alignSectionHeadingsToPlan(markdown: string, plannedSections: string[], headingLevel?: 3 | 4): string {
+export function alignSectionHeadingsToPlan(markdown: string, plannedSections: string[], headingLevel?: 3 | 4, options?: { nearMatch?: boolean }): string {
   const uniqueTitles = [...new Set(plannedSections.filter(Boolean))];
   if (uniqueTitles.length === 0) return markdown;
   const levelRe = headingLevel === 3 ? /^\s*###\s+/u : headingLevel === 4 ? /^\s*####\s+/u : /^\s*#{3,4}\s+/u;
   const usedTitles = new Set<string>();
-  return markdown.split('\n').map(line => {
+  const lines = markdown.split('\n');
+  const aligned = lines.map(line => {
     if (!levelRe.test(line)) return line;
     const currentTitle = sectionHeadingTitleText(line);
     if (!currentTitle) return line;
@@ -419,7 +542,39 @@ export function alignSectionHeadingsToPlan(markdown: string, plannedSections: st
     if (!headingPrefix) return line;
     usedTitles.add(matched);
     return `${headingPrefix}${matched}`;
-  }).join('\n');
+  });
+  if (!options?.nearMatch) return aligned.join('\n');
+  // r11 近名兜底轮（丰乐镇门禁 #1 归因）：可比匹配是包含口径，模型对规划标题的单字改写
+  //（「分区落位→分区落实」实测）无法命中——错字标题未被对齐回规划名，缺节判定成立触发补写，
+  // 补写版与错字版并存成 3 个 H3 直坠 section-count-overflow/heading-duplicate；
+  // 本轮回退到单字级编辑距离近似（nearSubsectionTitleMatch 单源，与 H4 侧
+  // alignSimilarHeadingsToPlan 同口径），仅当该规划标题尚未被任何标题行覆盖时认领唯一近似行，
+  // 已覆盖的规划标题不得被近似行抢占（防误配）；对齐后标题与规划同源，缺失判定「完全一致」口径不放松。
+  const candidates = uniqueTitles
+    .map(title => ({ title, normalized: normalizeSubsectionTitleForDedup(title) }))
+    .filter(item => item.normalized);
+  if (candidates.length === 0) return aligned.join('\n');
+  const headingTexts = aligned
+    .filter(line => levelRe.test(line))
+    .map(line => normalizeSubsectionTitleForDedup(sectionHeadingTitleText(line)))
+    .filter(Boolean);
+  const coveredTitles = new Set(candidates.filter(item => headingTexts.some(text => text.includes(item.normalized))).map(item => item.title));
+  const usedNear = new Set<string>();
+  const result = aligned.map(line => {
+    if (!levelRe.test(line)) return line;
+    const currentTitle = sectionHeadingTitleText(line);
+    const normalizedCurrent = normalizeSubsectionTitleForDedup(currentTitle);
+    if (!normalizedCurrent) return line;
+    // 本行已精确/可比覆盖某个规划标题时原样保留——近似对齐只处理“谁都对不上”的行
+    if (candidates.some(item => normalizedCurrent.includes(item.normalized))) return line;
+    const match = candidates.find(item => !coveredTitles.has(item.title) && !usedNear.has(item.title) && nearSubsectionTitleMatch(normalizedCurrent, item.normalized));
+    if (!match) return line;
+    const headingPrefix = /^(\s*#{3,4}\s+)/u.exec(line)?.[1];
+    if (!headingPrefix) return line;
+    usedNear.add(match.title);
+    return `${headingPrefix}${match.title}`;
+  });
+  return result.join('\n');
 }
 
 function extractSectionFuzzy(content: string, sectionTitle: string) {

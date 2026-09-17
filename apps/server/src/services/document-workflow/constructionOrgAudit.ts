@@ -316,6 +316,10 @@ export function processParameterDensityIssues(chapters: DocumentDraftChapter[]):
     for (const block of blocks) {
       const isWorkPackageSection = WORK_PACKAGE_SECTION_PATTERNS.some(pattern => pattern.test(block.heading) || pattern.test(chapter.title));
       if (!isWorkPackageSection) continue;
+      // 管理程序型小节豁免（r17 丰乐镇归因）：「专项施工方案管理」类程序小节（编制/审批/交底/修订
+      // 流程，载体是管理动作与检查闭环）被「施工方案」泛类模式误纳——按工作包要求 mm/MPa 工艺参数
+      // 属语义错位；真作业方案小节（如「沟槽开挖专项施工方案」）不含程序词不受影响。
+      if (/(?:方案管理|管理程序|管理流程|管理制度|审批流程)/u.test(block.heading)) continue;
       const processParams = new Set(block.body.match(PROCESS_PARAMETER_RE) || []);
       const basicFacts = new Set(block.body.match(BASIC_FACT_RE) || []);
       const deviceSpecs = new Set(block.body.match(DEVICE_SPEC_RE) || []);

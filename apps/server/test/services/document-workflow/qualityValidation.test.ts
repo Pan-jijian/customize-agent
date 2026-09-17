@@ -1,11 +1,11 @@
 /**
- * qualityValidation 单测：截断词表扩展 + 占位式表达。
+ * qualityValidation 单测：截断词表扩展 + 占位式表达 + 跨章设备台数一致性（r15 B3 配套比豁免）。
  * 均为 L2 确定性结构检测，无需语义通道。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { applyDeterministicConsistencyFixesToMarkdown, basisRegulationsCoverageIssues, boqPlacementIssues, resourceBreakdownConsistencyIssues, collectSectionContentGaps, evaluationCriteriaCoreKeywords, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, processSpecConflictIssues, punctuationArtifactIssues } from '@/services/document-workflow/qualityValidation';
+import { applyDeterministicConsistencyFixesToMarkdown, basisRegulationsCoverageIssues, boqPlacementIssues, resourceBreakdownConsistencyIssues, collectSectionContentGaps, crossChapterConsistencyIssues, criticalPreciseTokens, evaluationCriteriaCoreKeywords, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, missingCriticalPreciseTokens, preciseFactUsageIssues, processSpecConflictIssues, punctuationArtifactIssues } from '@/services/document-workflow/qualityValidation';
 import type { BlueprintData } from '@/services/document-workflow/integratedBlueprint';
-import type { DocumentFactsModel } from '@/services/document-workflow/types';
+import type { DocumentDraftChapter, DocumentFactsModel } from '@/services/document-workflow/types';
 
 // 语义兜底 stub：测试环境不加载本地嵌入模型（@huggingface/transformers 缺席），
 // 返回 0 相似度使 boqPlacementIssues 的语义路径退化为「无命中」确定性行为
@@ -283,6 +283,20 @@ describe('basisRegulationsCoverageIssues 编制依据法规/规范完整性兑�
     const issues = basisRegulationsCoverageIssues(markdown, blueprint('', ['《合肥市公共资源交易管理条例》']));
     expect(issues).toEqual([]);
   });
+
+  it('r16 丰乐镇 B3-B7 复合标题抢占修复：「编制说明与工程概况」在前、「编制依据」在后 → 检查到依据小节', () => {
+    // 修复前：单轮包含匹配命中首个「编制说明与工程概况」小节（无书名号）→ 5 项法规全报缺；
+    // 修复后：两轮扫描先精确「编制依据」候选 → 真实依据小节被检查 → 零输出
+    const markdown = '## 第一章 工程概况\n#### 1.1.1 编制说明与工程概况\n本工程为丰乐镇美丽宜居自然村建设项目，覆盖道路、污水、绿化三个板块。\n#### 1.1.2 编制依据\n依据《中华人民共和国建筑法》、《建设工程质量管理条例》、《给水排水管道工程施工及验收规范》（GB 50268-2008）编制。';
+    expect(basisRegulationsCoverageIssues(markdown)).toEqual([]);
+  });
+
+  it('r16 B3-B7 反例：仅「编制说明」小节无书名号 → 仍按依据小节检查报缺（不静默漏检）', () => {
+    // 无「编制依据」候选时退回「编制说明/编制原则/编制目的」候选，类别话术照报缺失
+    const markdown = '## 第一章 工程概况\n#### 1.1.1 编制说明与工程概况\n本工程按国家现行法律、行政法规、地方性法规组织施工。';
+    const issues = basisRegulationsCoverageIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('国家法律法规'))).toBe(true);
+  });
 });
 
 /** 资源章数值拆分一致性兑底：工种构成/机械台数/同名多规格材料拆分与蓝图权威漂移即 error（十度实测缺陷） */
@@ -410,5 +424,113 @@ describe('punctuationArtifactIssues（十度：断句/残句/拼接错误确定�
   it('表格行与标题行的标点形态不参与叠用检测（口径豁免）', () => {
     const markdown = '## 第1章 工程概况\n| 序号 | 内容 |\n| --- | --- |\n| 1 | 建设规模：道路硬化及亮化提升。； |\n';
     expect(punctuationArtifactIssues(markdown)).toEqual([]);
+  });
+});
+
+// ── #44 关键参数抽查池类目轮转（4.44 根治：丰乐镇 4.43 实测「关键参数抽查 0/10（缺失如 103㎡、106㎡、1072㎡）」） ──
+
+describe('criticalPreciseTokens 抽查池类目轮转（#44 根治）', () => {
+  // 4.43 实测结构：面积小值（103/106/1072）、面积大值（28570.36/4646）、
+  // 管径（DN1000/400/200）、规范编号（GB50647/GB13693）、强度（15.50kPa）、工期（90天）
+  const poolInput = ['103㎡', '106㎡', '1072㎡', '28570.36㎡', '4646㎡', '15.50kPa', '90天', 'DN1000', 'DN200', 'DN400', 'GB50647-2011', 'GB13693-2005'];
+
+  it('小面积值不再霸榜：类内数值降序使大值核心参数优先入选', () => {
+    const pool = criticalPreciseTokens(poolInput);
+    expect(pool).not.toContain('103㎡');
+    expect(pool).not.toContain('106㎡');
+    expect(pool).not.toContain('1072㎡');
+    expect(pool).toContain('28570.36㎡');
+    expect(pool).toContain('4646㎡');
+  });
+
+  it('跨类轮转：各类目代表均进入抽查池（规范编号/管径/强度/工期/面积）', () => {
+    const pool = criticalPreciseTokens(poolInput);
+    expect(pool).toEqual(['GB50647-2011', 'DN1000', '15.50kPa', '90天', '28570.36㎡', 'GB13693-2005', 'DN400', '4646㎡']);
+  });
+
+  it('确定性：同一集合不同输入顺序重跑池与顺序完全一致（消除提取顺序随机性）', () => {
+    const shuffled = [...poolInput].reverse();
+    expect(criticalPreciseTokens(shuffled)).toEqual(criticalPreciseTokens(poolInput));
+  });
+
+  it('边界：无 critical token 时回退常规 token 字典序前 2（0.01mm/0.5cm 回归）', () => {
+    expect(criticalPreciseTokens(['0.5cm', '0.01mm'])).toEqual(['0.01mm', '0.5cm']);
+  });
+});
+
+describe('preciseFactUsageIssues 端到端（#44 根治：缺失示例从字面序小值改为大值核心参数）', () => {
+  const precisionFactsModel = (values: string[]): DocumentFactsModel => ({
+    project: [], schedule: [], quality: [], safety: [], resources: [], tables: [],
+    drawings: [], rules: [], bills: [], schemaFacts: {}, factIndex: {},
+    missing: [], conflicts: [], specifications: [], canonical: { byKey: {} },
+    preciseFacts: values.map(value => ({ key: '工程参数', fieldName: '', value, sourceFile: '清单.xlsx', roleId: 'precise_fact', confidence: 90 })),
+  } as unknown as DocumentFactsModel);
+
+  const poolValues = ['103㎡', '106㎡', '1072㎡', '28570.36㎡', '4646㎡', '15.50kPa', '90天', 'DN1000', 'DN200', 'DN400', 'GB50647-2011', 'GB13693-2005'];
+
+  it('4.43 场景复现：命中 2/8 时缺失示例为大值面积/编号（小值 103㎡ 不再出现）', async () => {
+    const message = (await preciseFactUsageIssues('管径DN1000，混凝土强度15.50kPa。', precisionFactsModel(poolValues)))
+      .find(issue => issue.message.includes('关键参数抽查'))?.message ?? '';
+    expect(message).toContain('关键参数抽查 2/8');
+    expect(message).toContain('28570.36㎡');
+    expect(message).not.toContain('103㎡');
+  });
+
+  it('对照：核心参数全部写入正文时命中率达标 → 不报关键参数 error', async () => {
+    const markdown = '本项目总建筑面积28570.36㎡，道路铺装面积4646㎡，混凝土强度15.50kPa，设计管径DN1000、DN400、DN200，总工期90天，执行GB50647-2011与GB13693-2005。';
+    const issues = await preciseFactUsageIssues(markdown, precisionFactsModel(poolValues));
+    expect(issues.some(issue => issue.message.includes('关键参数抽查'))).toBe(false);
+  });
+});
+
+// ── 4.49 r9 #12 根治：关键参数池清洗（裸单位碎片）+ 归一化匹配（形态假缺口） ──
+
+describe('precise 抽查池清洗与归一匹配（4.49 r9 #12 根治）', () => {
+  // 资料证据窗口（剔噪后 ≥20 token 池；含 2.4t/cm3 的裸单位碎片 cm3，改造前因含 m3 子串挤占体积类目抽查名额）
+  const EVIDENCE_CONTENT = '素混凝土密度约2.4t/cm3，管径DN1000，混凝土强度15.50kPa，总建筑面积28570.36㎡，设计工期90天，道路铺装面积4646㎡，水稳层厚度200mm，压实度98%，沥青摊铺温度160℃，排水管DN400，检查井直径1250mm，沟槽深度3m，回填分层300mm，闭水试验压力0.1MPa，路灯间距30m，缆线规格YJV-4x25，人行道宽2m，标线宽150mm，路面厚度4cm，管线埋深1.2m，执行GB51192-2016与GB13693-2005等现行规范。';
+
+  const evidenceChapter = (): DocumentDraftChapter => ({
+    id: 'ev-1', title: '工程概况', content: '', missingFacts: [], sections: [],
+    evidence: [{ chapterId: 'ev-1', filePath: '资料.pdf', score: 1, roleId: 'spec', content: EVIDENCE_CONTENT }],
+  });
+
+  const factsModel = { preciseFacts: [] } as unknown as DocumentFactsModel;
+
+  it('裸单位碎片剔除：2.4t/cm3 的 cm3 不进抽查池（r9 实机「缺失如 cm3」归因）', () => {
+    const missing = missingCriticalPreciseTokens('与参数无关的正文。', factsModel, [evidenceChapter()]);
+    expect(missing.length).toBeGreaterThan(0);
+    expect(missing).not.toContain('cm3');
+  });
+
+  it('归一化命中：平方米/日历天/破折号变体不再算缺失（形态假缺口消除）', () => {
+    const markdown = '总建筑面积28570.36平方米，设计工期90日历天，执行GB51192—2016等现行国家规范。';
+    const missing = missingCriticalPreciseTokens(markdown, factsModel, [evidenceChapter()]);
+    expect(missing).not.toContain('28570.36㎡');
+    expect(missing).not.toContain('90天');
+    expect(missing).not.toContain('GB51192-2016');
+  });
+});
+
+// ── r15 丰乐镇 B3：跨章设备台数配套比豁免（配套结构「每台挖掘机配1台自卸汽车」不采为口径值） ──
+
+describe('crossChapterConsistencyIssues 设备台数配套比豁免（r15 丰乐镇 B3 根治）', () => {
+  const emptyFacts = {
+    project: [], schedule: [], quality: [], safety: [], resources: [], tables: [],
+    drawings: [], rules: [], bills: [], preciseFacts: [], schemaFacts: {}, factIndex: {},
+    missing: [], conflicts: [], specifications: [], canonical: { byKey: {} },
+  } as unknown as DocumentFactsModel;
+
+  it('配套比结构「每台挖掘机配1台自卸汽车」不采为台数口径（5 vs 1 假冲突收口，实况复刻）', async () => {
+    // r15 实机阻断：全项目口径「挖掘机5台」与配套比「每台挖掘机配1台自卸汽车」的 1台 被正则
+    // 同采为「挖掘机」口径 → [5,1] 互斥误报；isUnitPairRatioMatch 豁免后配套数不入互斥池
+    const markdown = '主要机械台数执行全项目统一口径：挖掘机5台、自卸车5台、压路机5台。沟槽开挖采用挖掘机分组作业，每台挖掘机配1台自卸汽车循环装运。';
+    const issues = await crossChapterConsistencyIssues(markdown, emptyFacts, undefined, undefined, embedDocuments);
+    expect(issues.some(issue => /配置台数/u.test(issue.message))).toBe(false);
+  });
+
+  it('反例：无配套比语境的同设备多值仍报冲突（豁免不误放行）', async () => {
+    const markdown = '主要机械台数执行全项目统一口径：挖掘机5台。沟槽开挖投入挖掘机1台。';
+    const issues = await crossChapterConsistencyIssues(markdown, emptyFacts, undefined, undefined, embedDocuments);
+    expect(issues.some(issue => /配置台数/u.test(issue.message))).toBe(true);
   });
 });

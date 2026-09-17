@@ -209,20 +209,24 @@ export function renderBlueprintBlockSlice(chapter: BlueprintChapter, data: Bluep
     body.push(...sectionBlocks);
   }
   const authorityCard = renderBlueprintChapterAuthorityCard(chapter, data);
-  // 行级封顶：保留头部/三源规则/must_cite 与前部内容，超限截断加提示
+  // 行级封顶只作用于工作包展开段（body）：恒定段（头部三源规则 + 章域数值锚点卡/编制依据清单）
+  // 是本章数值与编制依据的唯一可引口径，被截断即写手不可见——4.43 实测：工程概况章锚点卡
+  // 10320 字符（工程量域 130 条全量渲染）超封顶 6000，编制依据 14 条法规清单随卡末尾被整体
+  // 截掉，编制依据小节只剩类别话术（5 项 blocker 根因）；数值自编类缺陷同源。
+  // body 超限仍按行截断加提示（保留前部内容）。
   const cap = options.sliceCharsCap ?? 6000;
-  let text = [...head, ...body, authorityCard].filter(Boolean).join('\n\n');
-  if (text.length > cap) {
+  let bodyText = body.join('\n\n');
+  if (bodyText.length > cap) {
     const kept: string[] = [];
     let total = 0;
-    for (const line of text.split('\n')) {
+    for (const line of bodyText.split('\n')) {
       if (total + line.length + 1 > cap) break;
       kept.push(line);
       total += line.length + 1;
     }
-    text = `${kept.join('\n')}\n（本节蓝图切片过长已截断，未展开工作包见本章其他小节与绑定材料）`;
+    bodyText = `${kept.join('\n')}\n（本节蓝图切片过长已截断，未展开工作包见本章其他小节与绑定材料）`;
   }
-  return text;
+  return [...head, bodyText, authorityCard].filter(Boolean).join('\n\n');
 }
 
 /** 正则元字符转义（蓝图引用对齐锚定词安全） */

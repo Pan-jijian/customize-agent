@@ -3,39 +3,32 @@
  * 由 finalizeGeneration 代码块机械搬迁而来，业务语义逐字一致（行为保持）。
  * decisionLockEntries 计算由语义矛盾检测轮迁入本阶段末尾（依赖事实池局部变量，提前计算行为等价）。
  */
-import { assertEvidenceInProjectScope, filterEvidenceByProjectScope, filterFactsByProjectScope } from '../projectMaterialScope';
 import { selectEvidenceByBudget } from '../evidence';
 import { extractFacts, extractFactsWithLlm, extractLocalFactPool, buildFactsModel, shouldRunLlmFactExtraction } from '../factsModel';
 import { applyScopeConflictResolutions, buildCanonicalFactModel, detectNumericScopeConflicts, extractDrawingAnnotationFacts } from '../factGovernance';
 import { extractScheduleAuthority, extractAssemblyRateAuthority, extractProjectScaleSummary, extractSupportSystemAuthority } from '../documentIntegrityChecks';
 import { extractDecisionLockEntries } from '../integratedBlueprint';
-import { factsWithEvidenceSource } from '../documentGeneratorHelpers';
 import { stringifyFactValue, throwIfAborted } from '../utils';
 import { upsertProgressStage } from '../progress';
 import type { DocumentFact, DocumentExecutionStage } from '../types';
 import type { FinalizeSession } from './finalizeSession';
 
 export async function stageRebuildFacts(session: FinalizeSession): Promise<void> {
-  const generatedChapterEvidence = filterEvidenceByProjectScope(session.chapterDrafts.flatMap(chapter => chapter.evidence || []), session.projectMaterialScope);
-  assertEvidenceInProjectScope(generatedChapterEvidence, session.projectMaterialScope, 'finalize:chapter-evidence');
+  const generatedChapterEvidence = session.chapterDrafts.flatMap(chapter => chapter.evidence || []);
   if (generatedChapterEvidence.length > 0) {
     session.allEvidence.push(...generatedChapterEvidence);
     // 证据全量保留（无预算截断）：章节证据收集后不再压缩，数据零丢失
     session.allEvidence.splice(0, session.allEvidence.length, ...selectEvidenceByBudget(session.allEvidence, { preservePinned: true }));
   }
-  const scopedAllEvidence = filterEvidenceByProjectScope(session.allEvidence, session.projectMaterialScope);
-  session.allEvidence.splice(0, session.allEvidence.length, ...scopedAllEvidence);
-  assertEvidenceInProjectScope(session.allEvidence, session.projectMaterialScope, 'finalize:all-evidence');
 
   throwIfAborted(session.signal);
   const compactPostFileEvidence = selectEvidenceByBudget(session.allEvidence, { preservePinned: true });
-  session.allEvidence.splice(0, session.allEvidence.length, ...filterEvidenceByProjectScope(compactPostFileEvidence, session.projectMaterialScope));
-  assertEvidenceInProjectScope(session.allEvidence, session.projectMaterialScope, 'finalize:post-file-understanding');
+  session.allEvidence.splice(0, session.allEvidence.length, ...compactPostFileEvidence);
 
   session.facts = extractFacts(session.template, session.allEvidence, session.documentSpec);
   // 本地事实池统一入口（与生成准备抽取点同源，见 factsModel.extractLocalFactPool）；
   // structuredTables 经工作簿解析缓存复用生成准备阶段对同批表文件的解析结果，零重复磁盘 IO
-  const { localFacts, projectBasicFacts, preciseFacts, structuredTables } = extractLocalFactPool({ evidence: session.allEvidence, template: session.template, spec: session.documentSpec, profile: session.domainProfile, scope: session.projectMaterialScope, diagnostics: session.generationDiagnostics });
+  const { localFacts, projectBasicFacts, preciseFacts, structuredTables } = extractLocalFactPool({ evidence: session.allEvidence, template: session.template, spec: session.documentSpec, profile: session.domainProfile, diagnostics: session.generationDiagnostics });
   const preLlmFacts = [...localFacts, ...projectBasicFacts, ...preciseFacts];
   let llmExtraction: { facts: DocumentFact[]; stages: DocumentExecutionStage[] } = { facts: [], stages: [{ type: 'fact_extraction', roleId: 'llm-json', status: 'skipped', message: '已有本地/资料事实覆盖主要必需字段，跳过 LLM 全量事实抽取' }] };
   if (shouldRunLlmFactExtraction(preLlmFacts, session.template, session.documentSpec)) {
@@ -52,7 +45,8 @@ export async function stageRebuildFacts(session: FinalizeSession): Promise<void>
   // 只喂了 Writer 输入；finalize 重建事实主表未接入 → 危大/支护形式检查器输入槽位全空（真实回归实测：
   // 正文深度/支护形式留白、canonical 空）。与 documentGenerator L299 同口径确定性补抽并入主表链。
   const drawingAnnotationFacts = extractDrawingAnnotationFacts(session.allEvidence);
-  session.structuredFacts = filterFactsByProjectScope(factsWithEvidenceSource([...localFacts, ...projectBasicFacts, ...preciseFacts, ...llmExtraction.facts, ...drawingAnnotationFacts], session.allEvidence), session.projectMaterialScope);
+  // 事实来源完整性由各抽取器源头保证（LLM 事实来源经编号映射回填证据路径）；范围过滤已随资料包 ID 体系退役
+  session.structuredFacts = [...localFacts, ...projectBasicFacts, ...preciseFacts, ...llmExtraction.facts, ...drawingAnnotationFacts];
   // 源级同口径冲突裁决回写：裁决值统一进入事实主表与确定性校验基准，避免正文被主表败选值误导（如 4645㎡ 与 4646㎡ 并存）
   session.governedStructuredFacts = applyScopeConflictResolutions(session.structuredFacts, session.scopeConflicts ?? detectNumericScopeConflicts(session.structuredFacts));
   for (const fact of session.governedStructuredFacts) session.facts[fact.key] = `${stringifyFactValue(fact.value)}（来源：${fact.sourceFile}，角色：${fact.roleId}）`;

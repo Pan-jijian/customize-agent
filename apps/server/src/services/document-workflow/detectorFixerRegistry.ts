@@ -86,6 +86,12 @@ export interface FixerEntry {
   kind: 'deterministic' | 'llm-patch';
   /** 锚定检测器 id（检测定位=修复定位强制声明） */
   anchoredTo: string;
+  /**
+   * 多锚定检测器集合（可选，r8 修复）：单轮统一消费多类检测器 blocker 时登记其余锚定目标。
+   * 每一扩展锚定与 anchoredTo 同口径校验（存在性 + 权威集合一致），防「多消费轮只登记一个
+   * 锚定、其余检测器锚定缺失无人校验」的哑火逃逸（content-depth-repair 六检测器统一收口场景）。
+   */
+  alsoAnchoredTo?: string[];
   /** 修复依赖的权威口径（必须与锚定检测器集合相等） */
   authorities?: AuthorityId[];
   /** llm-patch 必填：patch 应用前预检的检测器集（全部 deterministicSafe） */
@@ -295,11 +301,17 @@ export const DETERMINISTIC_FIXER_ANCHORS: readonly FixerEntry[] = [
   { id: 'finish-thickness', kind: 'deterministic', anchoredTo: 'finish-thickness', giveUpOnFailure: true },
   // 4.31 埋深/覆土槽位数值错位删除（丰乐镇 v6 #3）：与检测器 fact-reconciliation D4.3 同源（blueprint 权威）
   { id: 'slot-depth-value', kind: 'deterministic', anchoredTo: 'fact-reconciliation', authorities: ['blueprint'], giveUpOnFailure: true },
+  // r17 丰乐镇归因 #B1：规格-数值绑定错位（「DN110 UPVC排水管15m」无源值撞无关条目）——与检测器
+  // fact-reconciliation D4.2 同源单扫描（scanSpecBindingHits），原位替换为规格组和值（组和豁免口径）
+  { id: 'spec-quantity-binding', kind: 'deterministic', anchoredTo: 'fact-reconciliation', authorities: ['blueprint'], giveUpOnFailure: true },
   { id: 'labor-peak', kind: 'deterministic', anchoredTo: 'resource-consistency', authorities: ['laborPeak'], giveUpOnFailure: true },
   // V5 P4b-2 阶段劳动力确定性回写（与检测器 phase-labor-mixing 同源双通道扫描；蓝图权威）
   { id: 'phase-labor-values', kind: 'deterministic', anchoredTo: 'phase-labor-mixing', authorities: ['blueprint'], giveUpOnFailure: true },
   // A3 资源章数值拆分确定性统一（4.27.0）：与检测器 resource-breakdown-consistency 同源（blueprint 权威）
   { id: 'resource-breakdown', kind: 'deterministic', anchoredTo: 'resource-breakdown-consistency', authorities: ['blueprint'], giveUpOnFailure: true },
+  // r17 丰乐镇归因 #B2/B3：机械设备分批台数矛盾（首批＋剩余之和不等于蓝图汇总）——与检测器
+  // equipment-batch-conflict 同源单扫描（scanEquipmentBatchConflicts），删除 later 批「N 台」数字
+  { id: 'equipment-batch-values', kind: 'deterministic', anchoredTo: 'equipment-batch-conflict', authorities: ['blueprint'], giveUpOnFailure: true },
   { id: 'internal-table-row-dup', kind: 'deterministic', anchoredTo: 'table-spam', giveUpOnFailure: true },
   // 4.31 基础信息表重复合并（丰乐镇 v6 #70）：与检测器 table-quality（markdownTableQualityIssues）同源
   { id: 'duplicate-basic-info-tables', kind: 'deterministic', anchoredTo: 'table-quality', giveUpOnFailure: true },
@@ -358,6 +370,16 @@ export const NUMERIC_ARBITER_FIXERS: readonly FixerEntry[] = [
 ];
 
 /**
+ * 章草稿级独立确定性修复器声明（r11 丰乐镇门禁 #1 兜底）：不进 SURFACE_FIX_STEPS——
+ * 修复对象是 finalChapterDrafts（章草稿结构与规划小节守恒），非 markdown 字符串，
+ * 无法纳入同步 markdown 修复链；执行点：postReviewSurface 缺节补写之前（与 planned-section-repair 同域）。
+ * anchoredTo 与检测端同源：section-count-overflow（成稿 H3 超规划小节数，同步读 drafts）。
+ */
+export const CHAPTER_DETERMINISTIC_FIXERS: readonly FixerEntry[] = [
+  { id: 'near-duplicate-section-merge', kind: 'deterministic', anchoredTo: 'section-count-overflow', giveUpOnFailure: true },
+];
+
+/**
  * LLM patch 修复轮 patchGuard 预检集（P11 扩展，与 patchGuard.deterministicDefectPrecheck 十类同源）：
  * 全部为零误伤确定性检测器（deterministicSafe），词表/正则引用检测层同源常量或直接复用同源检测函数；
  * 渐进策略：先全链 observe 采集 patchGuardStats 按轮次分布，零误伤类别再切 enforce。
@@ -389,6 +411,19 @@ export const LLM_PATCH_REPAIR_ROUNDS: readonly FixerEntry[] = [
   { id: 'workpackage-skeleton-repair', kind: 'llm-patch', anchoredTo: 'workpackage-skeleton', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
   { id: 'planned-section-repair', kind: 'llm-patch', anchoredTo: 'planned-section-completeness', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
   { id: 'global-consistency-repair', kind: 'llm-patch', anchoredTo: 'global-consistency-review', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
+  // r4 实机归因：引文成对性残缺（编制依据段法规列举句自吞噬拼接丢失）此前只有终检 punctuation-artifact
+  // 报出、无修复轮消费——链尾 LLM 定向补全残缺拼接句（章级定位 + 成对性复检 + 变差回滚）
+  { id: 'quotation-balance-repair', kind: 'llm-patch', anchoredTo: 'punctuation-artifact', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
+  // r8 实机终门禁 18 项阻断归因（第二类系统性缺陷：修复链覆盖检测器集合 < 终检检测器集合）：
+  // critical/emergency-section-depth、construction-org-major-content/division-section、precise-fact-usage、
+  // overview-recap 六类「内容欠产」blocker 此前无任何修复轮消费，裸奔直坠终门禁——本轮统一收口：
+  // 按 provenance + chapterId 章级分组，定向补写（每章 2 轮 + 外层 2 周期收敛 + 变差回滚）。
+  { id: 'content-depth-repair', kind: 'llm-patch', anchoredTo: 'critical-section-depth', alsoAnchoredTo: ['emergency-section-depth', 'construction-org-major-content', 'construction-org-division-section', 'precise-fact-usage', 'overview-recap'], patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
+  // 丰乐镇实机终门禁归因 #8（编制依据法规漏列）：编制依据小节此前漏写具体法规/规范条目（法律法规/
+  // 地方性法规齐全但零施工验收规范编号）只有终检 basis-regulations-coverage 报出、无修复轮消费——
+  // 链尾 LLM 定向补列缺失类目（照抄招标文件引用法规 + 按本工程分部分项选列现行施工验收规范名称
+  // 及编号），复检缺失类目数 + 变差回滚。authorities 与锚定检测器同声明（消费蓝图法规清单权威）
+  { id: 'basis-regulations-repair', kind: 'llm-patch', anchoredTo: 'basis-regulations-coverage', authorities: ['blueprint'], patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
 ];
 
 /**
@@ -405,12 +440,35 @@ export const FINALIZE_REPAIR_ROUNDS = [
   'commercial-strip',            // 商务条款数据交付前兜底清洗（stripCommercialDataBodyLines）
   'table-deterministic-repair',  // 表格空单元格交付前确定性修复（repairTableBlocksInMarkdownDeterministically）
   'numeric-verification',        // C2 正文数值 vs 资料原文确定性核对轮（stageNumericVerification）
+  // r3 实机门禁归因：章级验收 requirements-coverage blocker 此前无任何修复轮消费（40+ 项要求未响应直坠门禁）——
+  // 本轮消费该 blocker 按主责章定向补写；位置早于 post-review-surface（复读剥离覆盖本轮补写引入的重复句）
+  'requirement-response-repair', // 招标要求响应定向补写轮（stageRequirementResponseRepair）
   'requirement-verification',    // C3 生成后用户要求执行核验闭环（stageRequirementVerification）
+  // r8 实机终门禁归因（第二类系统性缺陷：修复链覆盖检测器集合 < 终检检测器集合）：内容深度类
+  // blocker（critical/emergency-section-depth、construction-org-major-content/division-section、
+  // precise-fact-usage、overview-recap）此前无修复轮消费裸奔到终门禁——本轮统一消费定向补写；
+  // 位置必须早于 post-review-surface（其复读剥离/格式清洗覆盖本轮补写引入的残留）
+  'content-depth-repair',        // 内容深度补写轮（stageContentDepthRepair）
   // 顺序调整理由（丰乐镇 doc-1788954795698 实测）：requirement-verification 的 LLM 补写会引入句级复读，
   // post-review-surface 若在其之前执行，补写引入的复读（17 处）无人清理 → 后置到补写轮之后兜底
   'post-review-surface',         // 评审轮后表面修复兜底（SURFACE_FIX_STEPS round-2 链，含句级复读剥离）
   'terminology-strip',           // 内部术语句子确定性删除兜底（stripInternalTerminologySentences）
+  // 4.44 法规文号残缺链尾收口：stage5 全文数值链之后的 LLM patch 轮（数值/要求定向修复、缺节补写）
+  // 重写可再引入「（国务院令第279订）」类自吞噬残缺，链尾此前无确定性收口点，两轮实机成稿同形态残留
+  'regulation-number-typo',      // 法规文号残缺确定性收口（fixRegulationNumberTypos，仅「第N订」紧邻右括号形态）
+  // r4 实机归因：同一自吞噬族系的引文成对性残缺（「2017实施条例》」「第279安全生产管理条例》」拼接
+  // 丢失）此前只有终检报出、无修复轮消费——链尾 LLM 定向补全残缺拼接句（章级定位 + 成对性复检），
+  // 与 regulation-number-typo 并列链尾收口点（确定性可覆盖的形态在前，需语义补全的形态在后）
+  'quotation-balance-repair',    // 引文成对性残缺链尾修复（stageQuotationBalanceRepair）
+  // 丰乐镇实机终门禁归因 #8（编制依据法规漏列）：编制依据小节漏写具体法规/规范条目此前无修复轮消费
+  //（法律法规/地方性法规齐全但零施工验收规范编号直坠终门禁）——链尾 LLM 定向补列缺失类目（照抄
+  // 招标文件引用法规 + 按本工程分部分项选列现行规范名称及编号），复检缺失类目数 + 变差回滚
+  'basis-regulations-repair',    // 编制依据法规漏列链尾修复（stageBasisRegulationsRepair）
   'toc-consistency',             // 目录与正文一致性兜底（fixTocFromBody）
+  // R12 方案针对性分布归因（丰乐镇实测 distribution≈0.09）：高价值事实值仅在单一章节落位——链尾确定性
+  // 扩散轮（stageFactDistribution），在语义相关章正文块尾追加自然引用句；必须在全部 LLM 补写轮之后
+  // （前置轮改写正文会稀释/回退已生效的分布），stageFinalGate 之前收口（评分与门禁按扩散后正文判定）
+  'fact-distribution-round',     // 关键事实跨章扩散轮（stageFactDistribution）
 ] as const;
 
 export type FinalizeRepairRound = (typeof FINALIZE_REPAIR_ROUNDS)[number];
@@ -486,7 +544,7 @@ function authoritySetsEqual(left?: AuthorityId[], right?: AuthorityId[]): boolea
  */
 export function assertRegistryConsistency(): void {
   const errors: string[] = [];
-  const fixers: FixerEntry[] = [...DETERMINISTIC_FIXER_ANCHORS, ...NUMERIC_ARBITER_FIXERS, ...LLM_PATCH_REPAIR_ROUNDS];
+  const fixers: FixerEntry[] = [...DETERMINISTIC_FIXER_ANCHORS, ...NUMERIC_ARBITER_FIXERS, ...CHAPTER_DETERMINISTIC_FIXERS, ...LLM_PATCH_REPAIR_ROUNDS];
   for (const fixer of fixers) {
     const anchored = detectorEntry(fixer.anchoredTo);
     // 1. 锚定检测器必须存在（防修复无检测哑火）
@@ -497,6 +555,15 @@ export function assertRegistryConsistency(): void {
     // 2. 权威集合必须相等（防「修复用蓝图、检测用表峰值」类口径拉扯）
     if (!authoritySetsEqual(fixer.authorities, anchored.authorities)) {
       errors.push(`修复器 ${fixer.id}（authorities=${JSON.stringify(fixer.authorities ?? [])}）与锚定检测器 ${fixer.anchoredTo}（authorities=${JSON.stringify(anchored.authorities ?? [])}）权威口径不一致`);
+    }
+    // 2b. 扩展锚定（alsoAnchoredTo）同口径校验：存在性 + 权威一致（多消费轮每一锚定目标均须可判定）
+    for (const extraAnchorId of fixer.alsoAnchoredTo ?? []) {
+      const extraAnchor = detectorEntry(extraAnchorId);
+      if (!extraAnchor) {
+        errors.push(`修复器 ${fixer.id} 扩展锚定检测器 ${extraAnchorId} 未在注册表声明（检测定位=修复定位强制同源）`);
+      } else if (!authoritySetsEqual(fixer.authorities, extraAnchor.authorities)) {
+        errors.push(`修复器 ${fixer.id}（authorities=${JSON.stringify(fixer.authorities ?? [])}）与扩展锚定检测器 ${extraAnchorId}（authorities=${JSON.stringify(extraAnchor.authorities ?? [])}）权威口径不一致`);
+      }
     }
     // 3. llm-patch 必带 patchGuard
     if (fixer.kind === 'llm-patch' && !fixer.patchGuard) {
@@ -534,6 +601,12 @@ export function assertRegistryConsistency(): void {
   for (const [anchorIndex, anchor] of NUMERIC_ARBITER_FIXERS.entries()) {
     if (NUMERIC_ARBITER_FIXERS.slice(0, anchorIndex).some(entry => entry.id === anchor.id)) {
       errors.push(`数值裁决器修复器声明重复：${anchor.id}`);
+    }
+  }
+  // 6b. 章草稿级独立修复器声明重复检查（同口径；与 numeric-arbiter 同模式不进 SURFACE_FIX_STEPS 键比对）
+  for (const [anchorIndex, anchor] of CHAPTER_DETERMINISTIC_FIXERS.entries()) {
+    if (CHAPTER_DETERMINISTIC_FIXERS.slice(0, anchorIndex).some(entry => entry.id === anchor.id)) {
+      errors.push(`章草稿级修复器声明重复：${anchor.id}`);
     }
   }
   // 7. category 强制校验（V2 批3 门禁升级 L3）：门禁硬阻断按 category 判定，缺卡/错卡会使检测器

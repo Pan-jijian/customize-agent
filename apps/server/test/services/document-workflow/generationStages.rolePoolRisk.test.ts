@@ -57,6 +57,7 @@ describe('stageUnderstanding 写回 rolePoolRisk（4.22.0 治本防线）', () =
     Object.assign(session.prepare, {
       projectRoot: '/fake/root',
       projectId: 'p-risk',
+      materialScope: { selectedRoots: [], selectedMaterialRoots: [], selectedFiles: ['招标文件.pdf'], totalAvailableFiles: 1, ambiguous: false, locked: true, reason: 'test', rejectedRoots: [], scopeHash: 'scope-test' },
       materialFilePaths: ['招标文件.pdf'],
       kindByPath: new Map<string, string>([['招标文件.pdf', 'tender']]),
       processingByPath: new Map<string, string>(),

@@ -262,6 +262,22 @@ export async function buildTenderBidTemplatingReport(
   };
 }
 
+/** 评分块切分（R13 精度修正实测）：旧口径「空行分块 + ≥30 字」下，小节标题（如
+ * 「#### 7.1.4 生产安全事故应急预案与应急演练」）或独立成短块被阈值丢弃、或与其后正文
+ * 单换行并入跨小节大块——R13 实测 5.15 万字仅 59 块、块均 870 字，超 bge 512 token 有效
+ * 窗口后标题在块中部被截断，评审查询与正文小节标题的近词面对齐被系统性稀释：
+ * 19 项（6 强制模块 + 13 合规项）仅命中 7 项。修正为「标题行为边界 + 空行分块 + ≥12 字」：
+ * 每个小节「标题+首段」构成独立判定单元（与评审人按小节查阅的判定粒度一致），
+ * 含术语原词的短标题块保留参与嵌入（纯编号标题 <12 字仍过滤）。R13 实测命中 7 → 14 项。
+ * 导出供单测验证切分粒度（行为不变，仅可见性）。 */
+export function splitScoringBlocks(markdown: string): string[] {
+  return markdown
+    .split(/(?=^#{1,6}\s)/mu)
+    .flatMap(section => section.split(/\n{2,}/u))
+    .map(block => block.trim())
+    .filter(block => block.length >= 12);
+}
+
 export async function buildTenderBidScores(input: {
   markdown: string;
   chapters: DocumentDraftChapter[];
@@ -271,8 +287,8 @@ export async function buildTenderBidScores(input: {
   /** 单测注入的嵌入实现（替代本地模型），生产环境不传 */
   embedDocuments?: (texts: string[]) => Promise<number[][]>;
 }): Promise<TenderBidScores> {
-  // 强制模块与合规项共享同一批块嵌入（≥30 字段落块），块级任一命中即判定该项存在
-  const blocks = input.markdown.split(/\n{2,}/u).filter(block => block.trim().length >= 30);
+  // 强制模块与合规项共享同一批块嵌入，块级任一命中即判定该项存在
+  const blocks = splitScoringBlocks(input.markdown);
   const querySimilarity = await buildSemanticSimilarity(
     blocks,
     [...MANDATORY_MODULE_QUERIES, ...COMPLIANCE_ITEM_QUERIES],

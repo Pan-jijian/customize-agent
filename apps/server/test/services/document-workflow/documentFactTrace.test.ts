@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { boqDivisionCoverageIssues, boqRowTraceIssues, buildBoqRowTraces, buildDocumentFactTraces, cleanFactValue, factTraceIssues, isActionableFactValue, isActionableTraceFact } from '@/services/document-workflow/documentFactTrace';
+import { boqDivisionCoverageIssues, boqRowTraceIssues, buildBoqRowTraces, buildDocumentFactTraces, cleanFactValue, enforceBoqDivisionCoverageInMethodChapters, extractBoqDivisionCoverage, factTraceIssues, formatBoqDivisionCoverage, isActionableFactValue, isActionableTraceFact } from '@/services/document-workflow/documentFactTrace';
 import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel } from '@/services/document-workflow/types';
 
 function factsModel(project: DocumentFact[] = [], preciseFacts: DocumentFact[] = [], tables: DocumentFactsModel['tables'] = []): DocumentFactsModel {
@@ -203,6 +203,19 @@ describe('isActionableTraceFact（可执行落位义务判定）', () => {
   it('实质事实保留', () => {
     expect(isActionableTraceFact({ label: '计划工期', value: '540日历天', status: 'unplaced', confidence: 1 })).toBe(true);
   });
+  it('项目名称标签下的清单分部名噪声排除，真实项目名（含地名/建设词）保留（R14 丰乐镇）', () => {
+    expect(isActionableTraceFact({ label: '项目名称', value: '其他装饰工程', status: 'used', confidence: 1 })).toBe(false);
+    expect(isActionableTraceFact({ label: '项目名称', value: '墙、柱面装饰与隔断、幕墙工程', status: 'unplaced', confidence: 1 })).toBe(false);
+    expect(isActionableTraceFact({ label: '项目名称', value: '2026年度丰乐镇20个美丽宜居自然村建设项目', status: 'used', confidence: 1 })).toBe(true);
+  });
+  it('风险描述条件句（未编制专项施工方案…）不构成落位义务', () => {
+    expect(isActionableTraceFact({
+      label: '风险控制要求',
+      value: '危险性较大分部分项工程（包括脚手架、高支模、起重吊装及安装拆卸工程等）未编制专项施工方案、未组织论证的不得施工',
+      status: 'unplaced',
+      confidence: 1,
+    })).toBe(false);
+  });
 });
 
 describe('boqDivisionCoverageIssues（P2/P4 清单分项覆盖义务）', () => {
@@ -353,5 +366,113 @@ describe('boqDivisionCoverageIssues（P2/P4 清单分项覆盖义务）', () => 
       '小菜园按场地平整→种植土回填→菜畦修筑工序施工。',
     ].join('\n');
     expect(boqDivisionCoverageIssues(markdown, chapters(markdown), model)).toEqual([]);
+  });
+});
+
+describe('extractBoqDivisionCoverage（r14 E16 清单分部全景：规划/写作注入素材）', () => {
+  it('分部行提取（编号+无数量格）+ 条目摘要聚合 + 村名过滤 + 泛词保持父级（公厕/建筑子分部）', () => {
+    const model = factsModel([], [], [{
+      tableType: '清单',
+      headers: [],
+      rows: [
+        ['', '1.1', '', '新建混凝土道路', ''],
+        ['1', '040101001001', '', '挖一般土方', '1．土壤类别：综合', 'm3', '', '359.100'],
+        ['', '1.4', '', '青砖步道', ''],
+        ['2', '040204002001', '', '人行道板安砌', '1．本地青砖', 'm2', '', '150.000'],
+        ['工程名称：马老郢（丁小郢、马小郢、李小郢）、马圩', '', '', '', '', '', '', ''],
+        ['', '2.1', '', '马老郢', ''],
+        ['', '2.3', '', '公厕', ''],
+        ['', '2.3.1', '', '建筑', ''],
+        ['3', '010101001001', '', '平整场地', '1．土壤类别：综合', 'm2', '', '24.700'],
+      ],
+      sourceFile: '清单.xls',
+    }]);
+    const entries = extractBoqDivisionCoverage(model);
+    const names = entries.map(entry => entry.name);
+    expect(names).toContain('新建混凝土道路');
+    expect(names).toContain('青砖步道');
+    expect(names).toContain('公厕');
+    // 村级地名与泛词不入全景（泛词「建筑」子分部条目归入父级「公厕」）
+    expect(names).not.toContain('马老郢');
+    expect(names).not.toContain('建筑');
+    expect(entries.find(entry => entry.name === '新建混凝土道路')?.items).toEqual(['挖一般土方 359.1m3']);
+    expect(entries.find(entry => entry.name === '青砖步道')?.items).toEqual(['人行道板安砌 150m2']);
+    expect(entries.find(entry => entry.name === '公厕')?.items).toEqual(['平整场地 24.7m2']);
+  });
+
+  it('跨表分页聚合（同名分部跨表合并 + 无实体词分部靠直属条目保留）', () => {
+    const page = (rows: string[][]): DocumentFactsModel['tables'][number] => ({ tableType: '清单', headers: [], rows, sourceFile: '清单.xls' });
+    const model = factsModel([], [], [
+      page([['', '1.2', '', '入户路', ''], ['1', '040101001002', '', '挖一般土方', 'x', 'm3', '', '100.440']]),
+      page([['', '1.2', '', '入户路', ''], ['2', '040202001002', '', '路床(槽)碾压检验', 'x', 'm2', '', '558.000']]),
+    ]);
+    const entries = extractBoqDivisionCoverage(model);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.name).toBe('入户路');
+    expect(entries[0]?.items).toEqual(['挖一般土方 100.44m3', '路床(槽)碾压检验 558m2']);
+  });
+
+  it('空 factsModel → 空数组；formatBoqDivisionCoverage 格式化', () => {
+    expect(extractBoqDivisionCoverage(factsModel([], [], []))).toEqual([]);
+    expect(formatBoqDivisionCoverage([{ name: '过路涵', items: ['挖沟槽土方 30.7m3'] }, { name: '公厕', items: [] }])).toBe('- 过路涵（挖沟槽土方 30.7m3）\n- 公厕');
+    expect(formatBoqDivisionCoverage([])).toBe('');
+  });
+});
+
+describe('enforceBoqDivisionCoverageInMethodChapters（r14 E16 链尾确定性兜底）', () => {
+  const coverageModel = factsModel([], [], [{
+    tableType: '清单',
+    headers: ['序号', '项目编码', '项目名称', '工程量', '单位'],
+    rows: [
+      ['1', '040202009001', '级配碎石', '1436.4', 'm2'],
+      ['2', '040204003001', '青砖步道', '150', 'm2'],
+      ['3', '040205004001', '过路涵', '50', 'm'],
+    ],
+    sourceFile: '清单.xlsx',
+  }]);
+  const markdown = [
+    '## 第二章 主要施工方法',
+    '### 2.1 道路工程',
+    '道路工程按测量放线、路基整平、面层铺筑工序施工。',
+    '',
+    '## 第三章 物资计划',
+    '物资按计划进场。',
+  ].join('\n');
+  const drafts = (): DocumentDraftChapter[] => [
+    { id: 'ch2', title: '主要施工方法', content: '### 2.1 道路工程\n道路工程按测量放线、路基整平、面层铺筑工序施工。', evidence: [], missingFacts: [] },
+    { id: 'ch3', title: '物资计划', content: '物资按计划进场。', evidence: [], missingFacts: [] },
+  ];
+
+  it('方法章缺专有分项 → 章末补段 + drafts 同步 + 检测清零 + 幂等', () => {
+    const chapterDrafts = drafts();
+    const fix = enforceBoqDivisionCoverageInMethodChapters({ markdown, chapters: chapterDrafts, factsModel: coverageModel });
+    expect(fix).toBeTruthy();
+    expect(fix!.appended).toEqual(expect.arrayContaining(['青砖步道', '过路涵']));
+    expect(fix!.markdown).toContain('青砖步道分项');
+    expect(fix!.markdown).toContain('过路涵分项');
+    // 补段位于方法章段落内（下一 H2 之前），且无新标题（H2/H3 计数不变）
+    const lines = fix!.markdown.split('\n');
+    const paraIdx = lines.findIndex(line => line.includes('本工程工程量清单分项施工方法补充如下'));
+    const ch3Idx = lines.findIndex(line => /^##\s.*物资计划/u.test(line));
+    expect(paraIdx).toBeGreaterThan(0);
+    expect(paraIdx).toBeLessThan(ch3Idx);
+    expect((fix!.markdown.match(/^#{1,3}\s/gmu) || []).length).toBe((markdown.match(/^#{1,3}\s/gmu) || []).length);
+    // drafts 同步（防 rebuildFinalMarkdown 重拼回退）
+    expect(chapterDrafts[0]!.content).toContain('本工程工程量清单分项施工方法补充如下');
+    // 检测清零 + 幂等
+    expect(boqDivisionCoverageIssues(fix!.markdown, chapterDrafts, coverageModel)).toEqual([]);
+    expect(enforceBoqDivisionCoverageInMethodChapters({ markdown: fix!.markdown, chapters: chapterDrafts, factsModel: coverageModel })).toBeNull();
+  });
+
+  it('无缺口 / 无方法章 / 空模型 → null（零成本静默）', () => {
+    // 覆盖判定以章 drafts 内容为准（methodText 源）：drafts 与 markdown 同步提及全部分项 → 零缺口
+    const coveredDrafts = (): DocumentDraftChapter[] => [
+      { id: 'ch2', title: '主要施工方法', content: '### 2.1 道路工程\n道路工程按测量放线施工；青砖步道分项按设计标高铺砌；过路涵分项按设计断面施工。', evidence: [], missingFacts: [] },
+      { id: 'ch3', title: '物资计划', content: '物资按计划进场。', evidence: [], missingFacts: [] },
+    ];
+    const covered = ['## 第二章 主要施工方法', '### 2.1 道路工程', '道路工程按测量放线施工；青砖步道分项按设计标高铺砌；过路涵分项按设计断面施工。'].join('\n');
+    expect(enforceBoqDivisionCoverageInMethodChapters({ markdown: covered, chapters: coveredDrafts(), factsModel: coverageModel })).toBeNull();
+    expect(enforceBoqDivisionCoverageInMethodChapters({ markdown, chapters: [{ id: 'c1', title: '工程概况', content: '概况。', evidence: [], missingFacts: [] }], factsModel: coverageModel })).toBeNull();
+    expect(enforceBoqDivisionCoverageInMethodChapters({ markdown, chapters: drafts(), factsModel: factsModel([], [], []) })).toBeNull();
   });
 });

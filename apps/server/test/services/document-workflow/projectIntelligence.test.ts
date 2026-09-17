@@ -6,7 +6,7 @@ import { computeProjectId } from '@customize-agent/knowledge';
 import { buildBaseProjectGraph } from '@/services/document-workflow/agentWorkflow';
 import type { ConstructionOrganizationGraph, ProjectIntelligenceIntentEntry } from '@/services/document-workflow/projectIntelligence';
 
-vi.mock('@/services/knowledge/kbOperationLog', () => ({ upsertKbOperation: vi.fn() }));
+vi.mock('@/services/knowledge/kbOperationLog', () => ({ upsertKbOperation: vi.fn(), deleteKbOperation: vi.fn(), listKbOperationsByIdPrefix: vi.fn(() => []) }));
 // 守卫测试用真实 startProjectIntelligenceBuild：仅 mock 外部依赖 getMultiProjectManager/listKnowledgeFiles 控制构建时序
 // （partial self-mock 替换 buildProjectIntelligence 无效——同模块内部互调是词法引用，不经导出命名空间）
 vi.mock('@/services/knowledge/kbService', async importOriginal => {
@@ -16,10 +16,10 @@ vi.mock('@/services/knowledge/kbService', async importOriginal => {
 // LLM 图谱构建为外部模块：降级落盘测试用 reject 模拟 LLM 失败
 vi.mock('@/services/document-workflow/projectGraph', () => ({ buildProjectGraph: vi.fn() }));
 
-import { buildProjectIntelligence, buildProjectIntelligenceSync, chapterIntentTags, constructionOrganizationPrompt, evidenceFromIntentIndex, extractContentFacts, extractSpreadsheetFacts, intentRelevance, isIrrelevantProjectGap, mergeProjectGraphs, readProjectIntelligence, sampledSignals, startProjectIntelligenceBuild } from '@/services/document-workflow/projectIntelligence';
+import { buildProjectIntelligence, buildProjectIntelligenceSync, chapterIntentTags, constructionOrganizationPrompt, evidenceFromIntentIndex, extractContentFacts, extractSpreadsheetFacts, intentRelevance, isIrrelevantProjectGap, mergeProjectGraphs, readProjectIntelligence, sampledSignals, startProjectIntelligenceBuild, startProjectIntelligenceBuildForLibrary } from '@/services/document-workflow/projectIntelligence';
 import { buildProjectGraph } from '@/services/document-workflow/projectGraph';
 import { getMultiProjectManager, getStorageRoot, listKnowledgeFiles } from '@/services/knowledge/kbService';
-import { upsertKbOperation } from '@/services/knowledge/kbOperationLog';
+import { deleteKbOperation, listKbOperationsByIdPrefix, upsertKbOperation } from '@/services/knowledge/kbOperationLog';
 
 function graphOf(): ConstructionOrganizationGraph {
   return {
@@ -49,7 +49,7 @@ function graphOf(): ConstructionOrganizationGraph {
   };
 }
 
-// 每个测试独立的临时存储根：缓存/scope 快照落盘不污染真实知识库目录
+// 每个测试独立的临时存储根：缓存落盘不污染真实知识库目录
 beforeEach(() => {
   vi.mocked(getStorageRoot).mockReturnValue(path.join(os.tmpdir(), `intel-test-${Date.now()}-${Math.random()}`));
 });
@@ -87,7 +87,7 @@ describe('constructionOrganizationPrompt', () => {
 describe('readProjectIntelligence', () => {
   it('缓存文件不存在返回 undefined', () => {
     const missingRoot = path.join(os.tmpdir(), `project-intelligence-missing-${Date.now()}-${Math.random()}`);
-    expect(readProjectIntelligence(missingRoot)).toBeUndefined();
+    expect(readProjectIntelligence(missingRoot, '资料包')).toBeUndefined();
   });
 });
 
@@ -384,9 +384,9 @@ describe('startProjectIntelligenceBuild 并发守卫', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       vi.mocked(getMultiProjectManager).mockReturnValue({ getProject: vi.fn(() => Promise.reject(new Error('项目不存在'))) } as never);
-      startProjectIntelligenceBuild('/proj-guard-once');
+      startProjectIntelligenceBuild('/proj-guard-once', '资料包');
       expect(startCount()).toBe(1);
-      expect(upsertKbOperation).toHaveBeenCalledWith('/proj-guard-once', expect.objectContaining({ id: expect.any(String), type: 'reindex', title: '项目理解缓存', stage: 'generating', status: 'processing', percent: 5 }));
+      expect(upsertKbOperation).toHaveBeenCalledWith('/proj-guard-once', expect.objectContaining({ id: expect.stringContaining(`project-intelligence-${encodeURIComponent('资料包')}-`), type: 'reindex', title: '项目理解缓存', stage: 'generating', status: 'processing', percent: 5 }));
       await vi.waitFor(() => expect(upsertKbOperation).toHaveBeenCalledWith('/proj-guard-once', expect.objectContaining({ stage: 'error', status: 'error', error: '项目不存在' })));
       expect(startCount()).toBe(1);
     } finally {
@@ -409,9 +409,9 @@ describe('startProjectIntelligenceBuild 并发守卫', () => {
         }),
       } as never);
       // 首次触发启动构建；随后两次触发仅标记待重跑，不启动新构建
-      startProjectIntelligenceBuild('/proj-guard');
-      startProjectIntelligenceBuild('/proj-guard');
-      startProjectIntelligenceBuild('/proj-guard');
+      startProjectIntelligenceBuild('/proj-guard', '资料包');
+      startProjectIntelligenceBuild('/proj-guard', '资料包');
+      startProjectIntelligenceBuild('/proj-guard', '资料包');
       expect(startCount()).toBe(1);
       // 进行中的构建失败结束：期间多次触发合并为一次串行重跑
       rejectFirst(new Error('项目不存在'));
@@ -428,12 +428,63 @@ describe('startProjectIntelligenceBuild 并发守卫', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       vi.mocked(getMultiProjectManager).mockReturnValue({ getProject: vi.fn(() => Promise.reject(new Error('LLM 前置失败'))) } as never);
-      startProjectIntelligenceBuild('/proj-guard-fail');
-      startProjectIntelligenceBuild('/proj-guard-fail');
+      startProjectIntelligenceBuild('/proj-guard-fail', '资料包');
+      startProjectIntelligenceBuild('/proj-guard-fail', '资料包');
       expect(startCount()).toBe(1);
       await vi.waitFor(() => expect(startCount()).toBe(2));
       await vi.waitFor(() => expect(upsertKbOperation).toHaveBeenCalledWith('/proj-guard-fail', expect.objectContaining({ stage: 'error', status: 'error', error: 'LLM 前置失败' })));
       expect(startCount()).toBe(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('库级触发：仅对失效包启动构建，已新鲜包零重建开销', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const kbFile = { relativePath: '资料包/招标文件.pdf', contentHash: 'h1', chunkCount: 3, status: 'ok', indexedAt: 123, category: 'document', format: 'pdf', mtime: 0 };
+      vi.mocked(listKnowledgeFiles).mockReturnValue([kbFile] as never);
+      const getProject = vi.fn(() => Promise.reject(new Error('库级触发构建失败（预期）')));
+      vi.mocked(getMultiProjectManager).mockReturnValue({ getProject } as never);
+      // 无缓存：库级触发对包启动构建（版本/包 ID/指纹三重比对判定失效）
+      startProjectIntelligenceBuildForLibrary('/proj-library-trigger');
+      expect(startCount()).toBe(1);
+      await vi.waitFor(() => expect(getProject).toHaveBeenCalled());
+      // 新鲜缓存：包被跳过（不重建、不调用 getProject）
+      const freshRoot = '/proj-library-fresh';
+      const cacheDir = path.join(getStorageRoot(), 'projects', computeProjectId(freshRoot), 'project-intelligence', 'packs');
+      fs.mkdirSync(cacheDir, { recursive: true });
+      fs.writeFileSync(path.join(cacheDir, `${encodeURIComponent('资料包')}.json`), JSON.stringify({
+        version: 'project-intelligence-v13', projectRoot: freshRoot, packRoot: '资料包', projectId: computeProjectId(freshRoot), createdAt: 0, sourceHash: 'x', fileCount: 1,
+        files: [{ relativePath: kbFile.relativePath, contentHash: 'h1', chunkCount: 3, status: 'ok' }], facts: [], chapterIntentIndex: [], projectGraph: { works: [] },
+      }));
+      const startsBefore = startCount();
+      startProjectIntelligenceBuildForLibrary(freshRoot);
+      expect(startCount()).toBe(startsBefore);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+  it('库级触发清理已不存在资料包的混放告警（拆分/改名后残留）', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const root = '/proj-library-orphan-alert';
+      vi.mocked(listKnowledgeFiles).mockReturnValue([
+        { relativePath: '新包/招标文件.pdf', contentHash: 'h1', chunkCount: 3, status: 'ok', indexedAt: 123, category: 'document', format: 'pdf', mtime: 0 },
+      ] as never);
+      // 历史告警指向「旧包」（按告警拆分后旧包已消失），当前仅存在「新包」
+      vi.mocked(listKbOperationsByIdPrefix).mockReturnValue([
+        { id: `intelligence-mixed-${encodeURIComponent('旧包')}`, type: 'reindex', stage: 'done', status: 'warning', title: '资料包混放告警', message: '旧包混放', percent: 100, createdAt: 1, updatedAt: 1 },
+        { id: `intelligence-mixed-${encodeURIComponent('新包')}`, type: 'reindex', stage: 'done', status: 'warning', title: '资料包混放告警', message: '新包混放', percent: 100, createdAt: 1, updatedAt: 1 },
+      ] as never);
+      const getProject = vi.fn(() => Promise.reject(new Error('库级触发构建失败（预期）')));
+      vi.mocked(getMultiProjectManager).mockReturnValue({ getProject } as never);
+      startProjectIntelligenceBuildForLibrary(root);
+      // 旧包告警被清除；仍存在的「新包」告警保留（由该包后续构建解除）
+      expect(vi.mocked(deleteKbOperation)).toHaveBeenCalledWith(root, `intelligence-mixed-${encodeURIComponent('旧包')}`);
+      expect(vi.mocked(deleteKbOperation)).not.toHaveBeenCalledWith(root, `intelligence-mixed-${encodeURIComponent('新包')}`);
+      await vi.waitFor(() => expect(upsertKbOperation).toHaveBeenCalledWith(root, expect.objectContaining({ stage: 'error' })));
+      vi.mocked(listKbOperationsByIdPrefix).mockReturnValue([]);
     } finally {
       warn.mockRestore();
     }
@@ -496,24 +547,86 @@ describe('buildProjectIntelligence LLM 失败降级落盘', () => {
       } as never);
       vi.mocked(buildProjectGraph).mockRejectedValue(new Error('LLM 服务不可用'));
       const root = `/proj-degrade-${Date.now()}`;
-      const cache = await buildProjectIntelligence(root);
+      const cache = await buildProjectIntelligence(root, '资料');
       expect(cache.graphDegraded).toBe(true);
       expect(cache.projectGraphMessage).toContain('降级');
       expect(cache.projectGraphMessage).toContain('LLM 增强失败');
       // 确定性图谱仍含事实驱动的工期节点
       expect(cache.projectGraph.schedule.some(item => String(item.duration).includes('540'))).toBe(true);
       // 缓存已落盘（原子写），且可被 readProjectIntelligence 读取
-      const onDisk = JSON.parse(fs.readFileSync(path.join(getStorageRoot(), 'projects', computeProjectId(root), 'project-intelligence', 'project-intelligence.json'), 'utf8'));
+      const onDisk = JSON.parse(fs.readFileSync(path.join(getStorageRoot(), 'projects', computeProjectId(root), 'project-intelligence', 'packs', `${encodeURIComponent('资料')}.json`), 'utf8'));
       expect(onDisk.graphDegraded).toBe(true);
-      expect(readProjectIntelligence(root)).toBeDefined();
+      expect(readProjectIntelligence(root, '资料')).toBeDefined();
     } finally {
       warn.mockRestore();
     }
   });
 });
 
+describe('buildProjectIntelligence 混放检测入库化告警（D1）', () => {
+  const emptyGraphResult = { graph: { works: [], methods: [], resources: [], schedule: [], standards: [], risks: [], requirements: [], siteConditions: [], addendumChanges: [], gaps: [], generatedAt: 0 }, stage: { roleId: 'x', status: 'success' } };
+
+  beforeEach(() => {
+    vi.mocked(getMultiProjectManager).mockReset();
+    vi.mocked(listKnowledgeFiles).mockReset();
+    vi.mocked(buildProjectGraph).mockReset();
+    vi.mocked(upsertKbOperation).mockReset();
+    vi.mocked(deleteKbOperation).mockReset();
+  });
+
+  it('包内 ≥2 个不同项目编号：缓存记录 mixedProjectNos 并写入 warning 操作日志', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      vi.mocked(listKnowledgeFiles).mockReturnValue([
+        { relativePath: '资料/2026ANNGZ500482招标文件.pdf', contentHash: 'h1', chunkCount: 3, status: 'ok', indexedAt: 123, category: 'document', format: 'pdf', mtime: 0 },
+        { relativePath: '资料/2026ANNGZ50112工程量清单.xls', contentHash: 'h2', chunkCount: 2, status: 'ok', indexedAt: 123, category: 'document', format: 'xls', mtime: 0 },
+      ] as never);
+      vi.mocked(getMultiProjectManager).mockReturnValue({ getProject: vi.fn(async () => ({ listChunksSampled: () => [] })) } as never);
+      vi.mocked(buildProjectGraph).mockResolvedValue(emptyGraphResult as never);
+      const root = `/proj-mixed-${Date.now()}`;
+      const cache = await buildProjectIntelligence(root, '资料');
+      expect(cache.mixedProjectNos).toEqual(['2026ANNGZ500482', '2026ANNGZ50112']);
+      expect(upsertKbOperation).toHaveBeenCalledWith(root, expect.objectContaining({
+        title: '资料包混放告警', status: 'warning', percent: 100, message: expect.stringContaining('疑似多份项目资料混放'),
+      }));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('单项目包（同编号跨文件重复）：不记录 mixedProjectNos，并清除历史混放告警', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      vi.mocked(listKnowledgeFiles).mockReturnValue([
+        { relativePath: '资料/2026ANNGZ500482招标文件.pdf', contentHash: 'h1', chunkCount: 3, status: 'ok', indexedAt: 123, category: 'document', format: 'pdf', mtime: 0 },
+        { relativePath: '资料/2026ANNGZ500482补疑.pdf', contentHash: 'h2', chunkCount: 2, status: 'ok', indexedAt: 123, category: 'document', format: 'pdf', mtime: 0 },
+      ] as never);
+      vi.mocked(getMultiProjectManager).mockReturnValue({ getProject: vi.fn(async () => ({ listChunksSampled: () => [] })) } as never);
+      vi.mocked(buildProjectGraph).mockResolvedValue(emptyGraphResult as never);
+      const root = `/proj-single-${Date.now()}`;
+      const cache = await buildProjectIntelligence(root, '资料');
+      expect(cache.mixedProjectNos).toBeUndefined();
+      const warningCalls = vi.mocked(upsertKbOperation).mock.calls.filter(call => (call[1] as { status?: string }).status === 'warning');
+      expect(warningCalls).toHaveLength(0);
+      expect(vi.mocked(deleteKbOperation)).toHaveBeenCalledWith(root, `intelligence-mixed-${encodeURIComponent('资料')}`);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('包内无可用文件（清空/拆分后）：抛错前清除历史混放告警', async () => {
+    vi.mocked(listKnowledgeFiles).mockReturnValue([
+      { relativePath: '资料/招标文件.pdf', contentHash: 'h1', chunkCount: 0, status: 'disk', indexedAt: 0, category: 'document', format: 'pdf', mtime: 0 },
+    ] as never);
+    vi.mocked(getMultiProjectManager).mockReturnValue({ getProject: vi.fn(async () => ({ listChunksSampled: () => [] })) } as never);
+    const root = `/proj-empty-pack-${Date.now()}`;
+    await expect(buildProjectIntelligence(root, '资料')).rejects.toThrow('无可用入库文件');
+    expect(vi.mocked(deleteKbOperation)).toHaveBeenCalledWith(root, `intelligence-mixed-${encodeURIComponent('资料')}`);
+  });
+});
+
 describe('readProjectIntelligence 惰性自愈重建', () => {
-  const cacheFile = (projectRoot: string) => path.join(getStorageRoot(), 'projects', computeProjectId(projectRoot), 'project-intelligence', 'project-intelligence.json');
+  const cacheFile = (projectRoot: string, packRoot: string) => path.join(getStorageRoot(), 'projects', computeProjectId(projectRoot), 'project-intelligence', 'packs', `${encodeURIComponent(packRoot)}.json`);
 
   it('缓存存在但文件集不匹配：拒绝使用并触发后台重建', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -521,19 +634,19 @@ describe('readProjectIntelligence 惰性自愈重建', () => {
       const getProject = vi.fn(() => Promise.reject(new Error('自愈构建失败（预期）')));
       vi.mocked(getMultiProjectManager).mockReturnValue({ getProject } as never);
       const root = `/proj-selfheal-${Date.now()}`;
-      fs.mkdirSync(path.dirname(cacheFile(root)), { recursive: true });
-      fs.writeFileSync(cacheFile(root), JSON.stringify({
+      fs.mkdirSync(path.dirname(cacheFile(root, '资料')), { recursive: true });
+      fs.writeFileSync(cacheFile(root, '资料'), JSON.stringify({
         version: 'project-intelligence-v12',
         projectGraph: { works: [] },
         files: [{ relativePath: 'ghost.txt', contentHash: 'x', chunkCount: 1, status: 'ok' }],
         facts: [], chapterIntentIndex: [],
       }));
-      expect(readProjectIntelligence(root)).toBeUndefined();
+      expect(readProjectIntelligence(root, '资料')).toBeUndefined();
       // 自愈已触发：后台构建启动（getProject 被调用）
       await vi.waitFor(() => expect(getProject).toHaveBeenCalled());
       // 节流：1 分钟内再次读取不重复触发（第二次 read 不新增构建调用）
       const callsBefore = getProject.mock.calls.length;
-      expect(readProjectIntelligence(root)).toBeUndefined();
+      expect(readProjectIntelligence(root, '资料')).toBeUndefined();
       expect(getProject.mock.calls.length).toBe(callsBefore);
     } finally {
       warn.mockRestore();
@@ -547,16 +660,17 @@ describe('readProjectIntelligence 惰性自愈重建', () => {
       vi.mocked(listKnowledgeFiles).mockReturnValue([kbFile] as never);
       vi.mocked(getMultiProjectManager).mockReturnValue({ getProject: vi.fn(() => Promise.reject(new Error('重试失败（预期）'))) } as never);
       const root = `/proj-degraded-heal-${Date.now()}`;
-      fs.mkdirSync(path.dirname(cacheFile(root)), { recursive: true });
-      fs.writeFileSync(cacheFile(root), JSON.stringify({
-        version: 'project-intelligence-v12',
+      fs.mkdirSync(path.dirname(cacheFile(root, '资料')), { recursive: true });
+      fs.writeFileSync(cacheFile(root, '资料'), JSON.stringify({
+        version: 'project-intelligence-v13',
+        packRoot: '资料',
         projectGraph: { works: [] },
         graphDegraded: true,
         files: [{ relativePath: '资料/招标文件.pdf', contentHash: 'h1', chunkCount: 3, status: 'ok' }],
         facts: [], chapterIntentIndex: [],
         constructionOrganizationGraph: { workPackages: [], controlMatrix: [], qualityControls: [], safetyControls: [], resourcePlans: [], acceptanceRecords: [], evidenceRankingHints: [] },
       }));
-      const cache = readProjectIntelligence(root);
+      const cache = readProjectIntelligence(root, '资料');
       expect(cache).toBeDefined();
       expect(cache?.graphDegraded).toBe(true);
       // 后台重试已触发（getProject 被调用），且不阻塞缓存读取
@@ -588,13 +702,15 @@ describe('buildProjectIntelligenceSync 同步构建并发守卫', () => {
         }),
       } as never);
       const root = `/proj-sync-guard-${Date.now()}`;
-      startProjectIntelligenceBuild(root);
-      const syncPromise = buildProjectIntelligenceSync(root);
+      vi.mocked(listKnowledgeFiles).mockReturnValue([{ relativePath: '资料/招标文件.pdf', contentHash: 'h1', chunkCount: 3, status: 'ok', indexedAt: 123, category: 'document', format: 'pdf', mtime: 0 }] as never);
+      vi.mocked(buildProjectGraph).mockResolvedValue({ graph: { works: [], methods: [], resources: [], schedule: [], standards: [], risks: [], requirements: [], siteConditions: [], addendumChanges: [], gaps: [], generatedAt: 0 }, stage: { roleId: 'x', status: 'success' } } as never);
+      startProjectIntelligenceBuild(root, '资料');
+      const syncPromise = buildProjectIntelligenceSync(root, '资料');
       expect(calls).toBe(1);
       // 释放挂起：两种触发路径共享同一构建，完成后同步等待方拿到结果
       releaseGet({ listChunksSampled: () => [] } as never);
       const cache = await syncPromise;
-      expect(cache.fileCount).toBe(0);
+      expect(cache.fileCount).toBe(1);
       expect(calls).toBe(1);
     } finally {
       warn.mockRestore();
@@ -616,7 +732,8 @@ describe('buildProjectIntelligence 进度回调', () => {
     vi.mocked(getMultiProjectManager).mockReturnValue({ getProject: vi.fn(async () => ({ listChunksSampled: () => [] })) } as never);
     vi.mocked(buildProjectGraph).mockResolvedValue({ graph: { works: [], methods: [], resources: [], schedule: [], standards: [], risks: [], requirements: [], siteConditions: [], addendumChanges: [], gaps: [], generatedAt: 0 }, stage: { roleId: 'x', status: 'success' } } as never);
     const root = `/proj-progress-${Date.now()}`;
-    await buildProjectIntelligence(root, (stage) => { stages.push(stage); });
+    vi.mocked(listKnowledgeFiles).mockReturnValue([{ relativePath: '资料/招标文件.pdf', contentHash: 'h1', chunkCount: 3, status: 'ok', indexedAt: 123, category: 'document', format: 'pdf', mtime: 0 }] as never);
+    await buildProjectIntelligence(root, '资料', (stage) => { stages.push(stage); });
     expect(stages).toEqual(['files', 'facts', 'graph', 'assembly']);
   });
 });
