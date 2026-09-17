@@ -47,19 +47,19 @@ export interface ReviewModuleSectionChange {
 export function injectReviewModuleSections(chapters: DocumentTemplateChapter[]): { chapters: DocumentTemplateChapter[]; changes: ReviewModuleSectionChange[] } {
   const next = chapters.map(chapter => ({ ...chapter, sections: [...(chapter.sections || [])] }));
   const changes: ReviewModuleSectionChange[] = [];
-  for (const module of REVIEW_MODULE_SECTIONS) {
-    const chapter = next.find(item => module.chapterPattern.test(displayChapterTitle(item.title)));
+  for (const sectionModule of REVIEW_MODULE_SECTIONS) {
+    const chapter = next.find(item => sectionModule.chapterPattern.test(displayChapterTitle(item.title)));
     if (!chapter) continue;
     const sections = chapter.sections || (chapter.sections = []);
-    if (sections.some(section => sectionTitleEquivalent(section, module.section))) continue;
-    const weakIndex = sections.findIndex(section => module.coreWords.test(section));
+    if (sections.some(section => sectionTitleEquivalent(section, sectionModule.section))) continue;
+    const weakIndex = sections.findIndex(section => sectionModule.coreWords.test(section));
     const record = changes.find(item => item.chapterTitle === chapter.title) || (changes.push({ chapterTitle: chapter.title, added: [], renamed: [] }), changes[changes.length - 1]!);
     if (weakIndex >= 0) {
-      record.renamed.push({ from: sections[weakIndex]!, to: module.section });
-      sections[weakIndex] = module.section;
+      record.renamed.push({ from: sections[weakIndex]!, to: sectionModule.section });
+      sections[weakIndex] = sectionModule.section;
     } else {
-      sections.push(module.section);
-      record.added.push(module.section);
+      sections.push(sectionModule.section);
+      record.added.push(sectionModule.section);
     }
   }
   return { chapters: next, changes: changes.filter(item => item.added.length > 0 || item.renamed.length > 0) };

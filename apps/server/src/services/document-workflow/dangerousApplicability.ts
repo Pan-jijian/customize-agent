@@ -20,6 +20,7 @@ const extractNumberNear = (body: string, pattern: RegExp): number | undefined =>
  * 等常规吊运描述会与排除声明并存，判出清单遗漏。硬设备名（塔吊/汽车吊/履带吊/卷扬机等非常规起重
  * 设备）不受本豁免约束——设备在册即真实适用前提，与 hazard-exclusion-contradiction 检测器互补。 */
 function declaresNoDangerousWork(body: string): boolean {
+  // eslint-disable-next-line no-control-regex -- [^\u000A] 与原始 [^\n] 语义等价（编辑工具会破坏字面换行转义，改用 unicode 转义）
   return /(?:不涉及|不存在|不属于|未涉及)[^。；\u000A]{0,16}危大|(?:不涉及|不存在|不属于|未涉及)[^。；\u000A]{0,16}危险性较大|(?:参数|高度|深度)[^。；\u000A]{0,12}未达[^。；\u000A]{0,60}危大/u.test(body);
 }
 
