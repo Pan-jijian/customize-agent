@@ -7,8 +7,8 @@
  *    （基线 H 段只测 79/80/120/121 四边界与批豁免）；
  *  - BB4 ambiguousEitherOrIssues：形态B 悬置词七谱系/截断/全角括号/形态C 左组非贪婪与右组吞并/三形态聚合
  *    （基线 S1 已测窗口边界与词族谱系，本组测未覆盖形态）；
- *  - BB5 localAdaptationKeywordIssues：label 七谱系/城市 16 谱系/语义逐 query 门控/绿色门与劳务门词谱系
- *    （基线 D4 只测建设地点 label 与合肥）；
+ *  - BB5 localAdaptationKeywordIssues：label 七谱系/属地值谱系（产品通用不限省份）/语义逐 query 门控/绿色门与劳务门词谱系
+ *    （基线 D4 只测建设地点 label 与属地项目）；
  *  - BB6 stripCommercialDataSentences：商务词 9 谱系/税率 12 字窗口边界/！不分句连带删除/句后标题表格行保留
  *    （基线 E 段只测部分词与常规形态）。
  * 全部为确定性正则提取与词面判定，BB5 语义判定用恒值/门控模拟器锁定。
@@ -209,6 +209,17 @@ describe('BB4 ambiguousEitherOr 形态C 非贪婪与窗口锁定', () => {
   });
 });
 
+describe('BB4 ambiguousEitherOr 形态C 临时设施语境豁免', () => {
+  it('BB4 临建/周转设施（可拆卸轻钢或集装箱式）→ 不报', () => {
+    // r22 P3a 实测误报：临时设施做法选型（堆场/加工点/工具房类）非永久工程基础/支护决策——
+    // 临建形态词（集装箱/活动房/板房等）＋临时属性词（临时/可拆卸/可周转/撤场）组合豁免
+    expect(ambiguousEitherOrIssues('临时设施包括材料堆场、加工点、工具房和移动式厕所，均采用可拆卸、可周转的轻钢结构或集装箱式设施，撤场后恢复原状。')).toEqual([]);
+  });
+  it('BB4 反例：无临时属性的集装箱式模块决策仍报（豁免不过宽）', () => {
+    expect(ambiguousEitherOrIssues('主体结构采用钢框架结构或集装箱式模块化建筑，按图纸确定。').length).toBe(1);
+  });
+});
+
 describe('BB4 ambiguousEitherOr 形态A 两侧与数值豁免', () => {
   it('BB4 右侧词族不必命中（采用放坡/甲甲）→ 报', () => {
     expect(ambiguousEitherOrIssues('采用放坡/甲甲。').length).toBe(1);
@@ -241,35 +252,40 @@ describe('BB5 localAdaptation label 七谱系与 key 拼接', () => {
     vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.1));
   });
   const labels = ['建设地点', '工程地点', '项目地点', '实施地点', '服务地点', '交付地点', '建设地址'];
-  it.each(labels)('BB5 label「%s」值含合肥 → 判安徽报创优', async (label) => {
+  it.each(labels)('BB5 label「%s」有值 → 触发属地创优检测', async (label) => {
     const facts = factsOf({ project: [factOf({ fieldName: label, value: '合肥市' })] });
     const issues = await localAdaptationKeywordIssues('建立劳务用工管理制度。', facts);
     expect(issues.map(issue => issue.message).join('')).toContain('属地创优目标缺失');
   });
-  it('BB5 key 参与拼接（fieldName 空、key=建设地点）→ 判安徽', async () => {
+  it('BB5 key 参与拼接（fieldName 空、key=建设地点）→ 触发属地增强', async () => {
     const facts = factsOf({ project: [factOf({ key: '建设地点', value: '芜湖市' })] });
     const issues = await localAdaptationKeywordIssues('建立劳务用工管理制度。', facts);
     expect(issues.map(issue => issue.message).join('')).toContain('属地创优目标缺失');
   });
-  it('BB5 值含省名「安徽」直接判属地', async () => {
+  it('BB5 省级全称值 → 触发属地增强', async () => {
     const facts = factsOf({ project: [factOf({ fieldName: '建设地点', value: '安徽省' })] });
     const issues = await localAdaptationKeywordIssues('建立劳务用工管理制度。', facts);
     expect(issues.map(issue => issue.message).join('')).toContain('属地创优目标缺失');
   });
 });
 
-describe('BB5 localAdaptation 省内城市 16 谱系', () => {
+describe('BB5 localAdaptation 属地字段谱系（产品通用：不限省份）', () => {
   beforeEach(() => {
     vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.1));
   });
-  const cities = ['安徽', '芜湖', '蚌埠', '淮南', '马鞍山', '淮北', '铜陵', '安庆', '黄山', '滁州', '阜阳', '宿州', '六安', '亳州', '池州', '宣城'];
-  it.each(cities)('BB5 城市「%s」判安徽 → 报创优', async (city) => {
-    const value = city === '安徽' ? '安徽省' : `${city}市`;
+  const locations = ['安徽省合肥市', '江苏省南京市', '新疆维吾尔自治区乌鲁木齐市'];
+  it.each(locations)('BB5 属地值「%s」→ 报创优', async (value) => {
     const facts = factsOf({ project: [factOf({ fieldName: '建设地点', value })] });
     const issues = await localAdaptationKeywordIssues('建立劳务用工管理制度。', facts);
     expect(issues.map(issue => issue.message).join('')).toContain('属地创优目标缺失');
   });
-  it('BB5 无 project facts → 非安徽（仅工伤 query）', async () => {
+  it('BB5 地点字段空值 → 不触发属地增强（仅工伤 query）', async () => {
+    const facts = factsOf({ project: [factOf({ fieldName: '建设地点', value: '' })] });
+    const issues = await localAdaptationKeywordIssues('建立劳务用工管理制度。', facts);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('工伤保险表述缺失');
+  });
+  it('BB5 无 project facts → 非属地（仅工伤 query）', async () => {
     const issues = await localAdaptationKeywordIssues('建立劳务用工管理制度。', factsOf({}));
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('工伤保险表述缺失');
@@ -303,14 +319,13 @@ describe('BB5 localAdaptation 绿色门与劳务门词谱系', () => {
     expect(issues.map(issue => issue.message).join('')).toContain('四节一环保量化指标缺失');
   });
   const laborWords = ['劳务人员备案管理规范。', '农民工工资按月发放。', '工资支付保障措施落实。'];
-  it.each(laborWords)('BB5 劳务门句「%s」→ 报工伤（非安徽）', async (sentence) => {
+  it.each(laborWords)('BB5 劳务门句「%s」→ 报工伤', async (sentence) => {
     const facts = factsOf({ project: [factOf({ fieldName: '建设地点', value: '江苏省南京市' })] });
     const issues = await localAdaptationKeywordIssues(sentence, facts);
-    expect(issues).toHaveLength(1);
-    expect(issues[0].message).toContain('工伤保险表述缺失');
+    expect(issues.map(issue => issue.message).join('')).toContain('工伤保险表述缺失');
   });
-  it('BB5 绿色词在但非安徽 → 不报四节一环保', async () => {
-    const facts = factsOf({ project: [factOf({ fieldName: '建设地点', value: '江苏省南京市' })] });
+  it('BB5 绿色词在但无属地字段 → 不报四节一环保', async () => {
+    const facts = factsOf({ project: [factOf({ fieldName: '建设单位', value: '某建设投资有限公司' })] });
     const issues = await localAdaptationKeywordIssues('落实绿色施工要求。', facts);
     expect(issues.map(issue => issue.message).join('')).not.toContain('四节一环保');
   });

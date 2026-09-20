@@ -9,6 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { loadBoqChunksFromKb, mergeBillOfQuantitiesResults, parseBillOfQuantities, pickBillOfQuantityFiles } from '../billOfQuantitiesParser';
 import type { BillOfQuantitiesResult, BoqEntry } from '../billOfQuantitiesParser';
+import { extractSpecTokens } from '../billFactLock';
 import type { CanonicalFactModel } from '../types';
 import type { BlueprintQuantity, BlueprintRedLineFact } from './types';
 
@@ -49,7 +50,10 @@ export function resolveBillOfQuantities(input: { projectRoot: string; boundFileP
 
 /** L1a：清单条目聚合为 quantities（按名称聚合，保留首条来源）。
  * V5 P1：分组明细（villageGroup/section）随聚合保留——value 仍为合计（现有消费方零影响），
- * groups 供权威索引做分村合法性判定与跨工程同值复制检测 */
+ * groups 供权威索引做分村合法性判定与跨工程同值复制检测。
+ * R20：规格-数量拆分（specBreakdown）随聚合保留——同名条目跨规格（如「一般路灯」100W/120W）时
+ * 按特征描述规格 token 分组小计（值=名称合计的共享规格组过滤、≥2 组才保留），供写作逐项照抄与
+ * 规格-数量绑定断言（P0 根因：按名称聚合丢失规格维度 → 「100W 共118套」全部 token 命中漏网）。 */
 export function deriveQuantitiesFromBoq(boq: BillOfQuantitiesResult): Record<string, BlueprintQuantity> {
   interface NamedQuantityAgg {
     value: number;
@@ -58,26 +62,45 @@ export function deriveQuantitiesFromBoq(boq: BillOfQuantitiesResult): Record<str
     seq: number;
     total: number;
     groupTotals: Map<string, number>;
+    specTotals: Map<string, number>;
   }
   const byName = new Map<string, NamedQuantityAgg>();
   for (const entry of boq.entries) {
     if (!entry.name) continue;
     const group = (entry.villageGroup || entry.section || '').trim();
+    const specTokens = extractSpecTokens(entry.description || '');
     const existing = byName.get(entry.name);
     if (existing) {
       existing.total += entry.quantity;
       if (group) existing.groupTotals.set(group, (existing.groupTotals.get(group) ?? 0) + entry.quantity);
+      for (const spec of specTokens) existing.specTotals.set(spec, (existing.specTotals.get(spec) ?? 0) + entry.quantity);
     } else {
       const groupTotals = new Map<string, number>();
       if (group) groupTotals.set(group, entry.quantity);
-      byName.set(entry.name, { value: entry.quantity, unit: entry.unit, sourceFile: entry.sourceFile, seq: entry.seq, total: entry.quantity, groupTotals });
+      const specTotals = new Map<string, number>();
+      for (const spec of specTokens) specTotals.set(spec, (specTotals.get(spec) ?? 0) + entry.quantity);
+      byName.set(entry.name, { value: entry.quantity, unit: entry.unit, sourceFile: entry.sourceFile, seq: entry.seq, total: entry.quantity, groupTotals, specTotals });
     }
   }
   const result: Record<string, BlueprintQuantity> = {};
   for (const [name, item] of byName) {
     const round3 = (value: number) => Math.round(value * 1000) / 1000;
     const groups = [...item.groupTotals.entries()].map(([group, value]) => ({ group, value: round3(value) }));
-    result[name] = { value: round3(item.total), unit: item.unit, sourceFile: item.sourceFile, seq: item.seq, groups: groups.length > 0 ? groups : undefined };
+    const total = round3(item.total);
+    // 规格拆分：剔除值=名称合计的共享规格组（如全组同为「高4.5m」无拆分信息量，保留会误判合计句）；
+    // 浮点容差比较——round3 后与合计仍可能有 1e-9 级差
+    const specBreakdown = [...item.specTotals.entries()]
+      .map(([spec, value]) => ({ spec, value: round3(value) }))
+      .filter(split => Math.abs(split.value - total) > 1e-6)
+      .sort((left, right) => right.value - left.value);
+    result[name] = {
+      value: total,
+      unit: item.unit,
+      sourceFile: item.sourceFile,
+      seq: item.seq,
+      groups: groups.length > 0 ? groups : undefined,
+      specBreakdown: specBreakdown.length >= 2 ? specBreakdown : undefined,
+    };
   }
   return result;
 }
@@ -169,9 +192,10 @@ export function extractRedLineFacts(boq: BillOfQuantitiesResult): BlueprintRedLi
 }
 
 export function extractVillageCount(projectName: string, basicFacts: string): number {
-  const projectMatch = /(\d+)\s*个(?:美丽宜居)?自然村/u.exec(projectName);
+  // 村名前缀修饰通用化（任意 ≤8 字修饰词，如「美丽宜居」「和美」）——不绑定具体项目名形态
+  const projectMatch = /(\d+)\s*个[^，。；、\s\n]{0,8}?自然村/u.exec(projectName);
   if (projectMatch) return Number(projectMatch[1]);
-  const factsMatch = /(\d+)\s*个(?:美丽宜居)?自然村/u.exec(basicFacts);
+  const factsMatch = /(\d+)\s*个[^，。；、\s\n]{0,8}?自然村/u.exec(basicFacts);
   return factsMatch ? Number(factsMatch[1]) : 0;
 }
 
@@ -200,7 +224,8 @@ export function extractContractFromFacts(basicFacts: string, boq: BillOfQuantiti
   const totalDays = totalDaysMatch ? Number(totalDaysMatch[1]) : 0;
   const qualityMatch = /质量(?:标准|要求)[^。；;\n]{0,20}?[：:]\s*([^。；;\n]{1,20})/u.exec(basicFacts) || /合格/u.exec(basicFacts);
   const qualityStandard = qualityMatch ? (qualityMatch[1] || '合格').trim() : '';
-  const pricingMatch = /(合造价〔\d{4}〕\d+号)/u.exec(basicFacts);
+  // 造价文号形态通用化：{机构简称}价〔YYYY〕N号（如「合造价」「皖价」「皖建价」）——不绑定单一城市文号前缀
+  const pricingMatch = /([\u4e00-\u9fa5]{1,6}?价〔\d{4}〕\d+号)/u.exec(basicFacts);
   const pricingFile = pricingMatch ? pricingMatch[1] : '';
   // 合同估算价（万元）：金额禁区提取（渲染仅限基本信息表例外，参数桶不渲染）
   const amountMatch = /(?:合同估算价|招标控制价|最高投标限价|项目总投资|投资估算|工程概算)[^。；;\n]{0,20}?([\d,]+(?:\.\d+)?)\s*万/u.exec(basicFacts);

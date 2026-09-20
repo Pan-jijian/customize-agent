@@ -14,8 +14,52 @@
  */
 import { extractAppendixTables } from './promptRuleExtraction';
 
-/** 勾选标记字符集（PDF 提取常见：「☑暗标」「√暗标」「■暗标」等） */
-const CHECK_MARK = '[☑√✔✓■●◼☒⊠]';
+/** 勾选标记字符集（PDF 提取常见：「☑暗标」「√暗标」「■暗标」等；含填充方块变体 ▣） */
+const CHECK_MARK = '[☑√✔✓■●◼☒⊠▣]';
+
+/**
+ * 标记与文字间的可选中缀（PDF 提取对勾选框的常见变形，标记识别零容忍丢失）：
+ * 空格与换行、「☑️」emoji 变体选择符（U+FE0E/FE0F）、括号包裹（「☑（暗标）」「（☑）暗标」「√【暗标】」）。
+ */
+const MARK_GAP = '[\\uFE0E\\uFE0F\\s（）()【】\\[\\]〔〕]*';
+
+/** 勾选标记双形态：标记在词前（「☑暗标」）与词后（「暗标（√）」——两种排版写法均存在） */
+function markPatterns(word: string): RegExp[] {
+  const chars = [...word];
+  const inner = `${chars[0]}\\s*${chars[1]}`;
+  return [
+    new RegExp(`${CHECK_MARK}${MARK_GAP}${inner}`, 'u'),
+    new RegExp(`${inner}${MARK_GAP}${CHECK_MARK}`, 'u'),
+  ];
+}
+const BLIND_MARK_PATTERNS = markPatterns('暗标');
+const OPEN_MARK_PATTERNS = markPatterns('明标');
+
+/**
+ * 语义判定通道（勾选标记不可见或未被提取时的兜底）：暗标/明标编制与评审规则的文本结构证据。
+ * 词面为通用表述（「按暗标」「采用暗标评审」等），不含章节名/编号等位置假设；否定语境（「不按暗标」）不命中。
+ */
+const BLIND_SEMANTIC_SIGNALS = [
+  /暗标(?:评审项目)?的?编制要求/u,
+  /(?<!不)按暗标/u,
+  /(?<!不)(?:采用|执行|实行)暗标(?:评审|方式|编制|形式)/u,
+  /暗标(?:评审|编制)(?:方式|办法|程序)/u,
+];
+const OPEN_SEMANTIC_SIGNALS = [
+  /明标(?:评审项目)?的?编制要求/u,
+  /(?<!不)按明标/u,
+  /(?<!不)(?:采用|执行|实行)明标(?:评审|方式|编制|形式)/u,
+  /明标(?:评审|编制)(?:方式|办法|程序)/u,
+];
+
+/** 依序取首个命中（返回匹配原文，供证据链显性展示） */
+function firstPatternHit(scope: string, patterns: RegExp[]): string | undefined {
+  for (const pattern of patterns) {
+    const match = pattern.exec(scope);
+    if (match) return (match[0] || '').trim();
+  }
+  return undefined;
+}
 
 export interface BidAppendixEntry {
   /** 附表编号（一/二/三/…） */
@@ -111,22 +155,27 @@ export function extractBidCompositionSpec(input: {
     .replace(/\r/gu, '');
   const evidence: string[] = [];
 
-  // ── 1) 标书类型：勾选标记（最高证据）→ 结构证据（暗标编制要求章节）→ unknown（显性展示不猜测） ──
+  // ── 1) 标书类型（F-T1 双通道加固）：勾选标记（最高证据，含字符/间距/括号/词后变体）→
+  //      语义结构证据（「按暗标」「采用暗标评审」等条款兜底）→ unknown（显性展示不猜测） ──
   const windows = adoptionWindows(normalized);
   const adoptScope = windows.length > 0 ? windows.join('\n') : normalized;
-  const blindMarked = new RegExp(`${CHECK_MARK}\\s*暗\\s*标`, 'u').test(adoptScope);
-  const openMarked = new RegExp(`${CHECK_MARK}\\s*明\\s*标`, 'u').test(adoptScope);
-  const blindStructure = /暗标(?:评审项目)?的?编制要求/u.test(normalized);
+  const blindMarked = firstPatternHit(adoptScope, BLIND_MARK_PATTERNS);
+  const openMarked = firstPatternHit(adoptScope, OPEN_MARK_PATTERNS);
+  const blindSemantic = firstPatternHit(normalized, BLIND_SEMANTIC_SIGNALS);
+  const openSemantic = firstPatternHit(normalized, OPEN_SEMANTIC_SIGNALS);
   let bidType: BidCompositionSpec['bidType'] = 'unknown';
   if (blindMarked) {
     bidType = 'blind';
-    evidence.push(`标书类型勾选证据：${firstMatch(adoptScope, new RegExp(`${CHECK_MARK}\\s*暗\\s*标`, 'u')) || '☑暗标'}`);
+    evidence.push(`标书类型勾选证据：${blindMarked}`);
   } else if (openMarked) {
     bidType = 'open';
-    evidence.push(`标书类型勾选证据：${firstMatch(adoptScope, new RegExp(`${CHECK_MARK}\\s*明\\s*标`, 'u')) || '☑明标'}`);
-  } else if (blindStructure) {
+    evidence.push(`标书类型勾选证据：${openMarked}`);
+  } else if (blindSemantic) {
     bidType = 'blind';
-    evidence.push('结构证据：识别到「暗标评审项目的编制要求」章节（招标文件为该标段设定暗标编制条款）');
+    evidence.push(`结构证据：识别到「${blindSemantic}」条款（语义判定通道——勾选标记不可见或未被提取时的兜底，招标文件为该标段设定暗标编制条款）`);
+  } else if (openSemantic) {
+    bidType = 'open';
+    evidence.push(`结构证据：识别到「${openSemantic}」条款（语义判定通道——按明标口径编制）`);
   }
 
   // 正文口径：暗标双证据——「正文内不允许出现非文字需要的其他任何符号和标志」+「除文字表述外可附下列图表」
@@ -217,6 +266,11 @@ export function isBodyTableForbidden(spec: BidCompositionSpec | undefined) {
   return spec?.bodyTablePolicy === 'forbidden';
 }
 
+/** 正文禁图（暗标纯文字口径，与禁表并列） */
+export function isBodyFigureForbidden(spec: BidCompositionSpec | undefined) {
+  return spec?.bodyFigurePolicy === 'forbidden';
+}
+
 /**
  * 写作约束文本（暗标口径注入写作/修复提示词；明标返回空串不注入）。
  * 含：禁表格/禁图片/禁无关标记/身份禁语 + 数据以文字表述（数值引用蓝图锚点）。
@@ -258,6 +312,7 @@ export function bidCompositionSummary(spec: BidCompositionSpec): { status: 'succ
   ].filter(Boolean);
   const details = [
     ...spec.evidence.map(item => `证据：${item}`),
+    ...(spec.bidType === 'unknown' ? ['核查指引：检索招标文件「施工组织设计采用」勾选项（标记字符变体 ☑/√/■/▣ 与「按暗标/采用暗标评审」语义条款均已覆盖）或「暗标编制要求」条款，确认标书类型后重跑以切换编制口径'] : []),
     ...spec.appendixPlan.map(item => `附表${item.no}：${item.title}（${item.kind === 'figure' ? '图类·编制人补图' : `数据源 ${item.dataSource}`}）`),
     spec.formatRules.gutter ? `格式：装订线 ${spec.formatRules.gutter}${spec.formatRules.lineHeight ? `、行距${spec.formatRules.lineHeight}` : ''}` : '',
     spec.formatRules.bodyFont ? `格式：正文 ${[spec.formatRules.bodySize, spec.formatRules.bodyFont].filter(Boolean).join(' ')}${spec.formatRules.headingSize ? `、大标题 ${spec.formatRules.headingSize}` : ''}` : '',
@@ -269,7 +324,7 @@ export function bidCompositionSummary(spec: BidCompositionSpec): { status: 'succ
   return {
     status: spec.bidType === 'unknown' ? 'skipped' : 'success',
     message: spec.bidType === 'unknown'
-      ? '标书编制规格：未识别到「本项目施工组织设计采用：□明标/☑暗标」标记，按常规口径生成（如为暗标请在招标文件中确认后重跑）'
+      ? '⚠ 标书类型未判定（告警）：未识别到「本项目施工组织设计采用：□明标/☑暗标」勾选标记与暗标编制要求语义证据，本次按常规（明标）口径生成——若本项目实为暗标，正文将错用明标口径（表格/图片本应禁止）导致施工组织设计部分不得分，请核对招标文件后重跑'
       : `标书编制规格：${parts.join('；')}`,
     details,
   };

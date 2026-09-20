@@ -12,14 +12,15 @@ import { buildDocumentBudget, stripExplicitLengthLines } from '../budget';
 import { chapterCriteriaText, prioritizeOverviewSections, validateBidStructureBeforeGeneration } from '../constructionBidStructure';
 import { buildSemanticSimilarity } from '../semanticSimilarity';
 import { filterOffTopicSectionsForChapters } from '../evidenceContentSafety';
-import { hasTenderRequirements, normalizeChapterTitleLine, tenderRequirementCheckItems, tenderRequirementSemanticQuery, tenderRequirementsSummary, tenderRequirementsWritingRules } from '../tenderRequirements';
+import { assignStructureRequirementsToChapters, hasTenderRequirements, normalizeChapterTitleLine, structureRequirementSemanticQuery, tenderRequirementCheckItems, tenderRequirementSemanticQuery, tenderRequirementsSummary, tenderRequirementsWritingRules } from '../tenderRequirements';
 import { applyRequirementSectionAdditions, calibrateOutlineSectionsToRequirements } from '../requirementCalibration';
-import { injectReviewModuleSections } from '../reviewModuleSections';
+import { injectReviewModuleSections, injectStructureOrgSections } from '../reviewModuleSections';
 import { buildFactTokenScopeClassifier } from '../factTokenClassifier';
 import { buildChapterIntentClassifier } from '../chapterIntentClassifier';
 import { buildProfessionalDepthClassifier } from '../professionalDepthClassifier';
 import { buildWritingTaskBrief } from '../documentWritingTaskBrief';
-import { buildPlannedTablePlans } from '../constructionOrgTablePlan';
+import { buildPlannedTablePlans, attachDiagramArtifacts, extractDiagramArtifacts, mergeStructureDiagramArtifacts } from '../constructionOrgTablePlan';
+import { auditPlannedTableScope, type PlannedTableScopeEntry } from '../tableScopeAudit';
 import { isBodyTableForbidden } from '../bidComposition';
 import { runWithAdaptiveConcurrency } from '../utils';
 import { displayStage, upsertProgressStage } from '../progress';
@@ -201,22 +202,95 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
     upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'review-module-sections', status: 'success', message: `评审模块承接：补入 ${addedCount} 个评审模块小节、规范化 ${renamedCount} 个承接标题`, details: reviewModuleResult.changes.map(item => `${displayChapterTitle(item.chapterTitle)}：${[...item.added.map(section => `补入「${section}」`), ...item.renamed.map(entry => `「${entry.from}」→「${entry.to}」`)].join('；')}`) }, { subtitle: '评审模块承接', order: session.global.progressStages.length }));
     session.global.emitProgress();
   }
+  // B-T2 组织机构承接小节：招标结构要求含组织机构类（org_chart 或机构要素）时，规划层显性承接
+  // 「项目管理机构与岗位职责」——写作链按小节展开，规划无承接则组织机构内容无承载位置。
+  // 目标章与写作注入同路由口径（同一路由函数、同一章标题归一化；章节标题集与蓝图分配一致，
+  // 防「小节在此章、指令挂彼章」错位）；低置信不挂章不注入，防错挂。
+  let plannedWithStructureSections = plannedWithReviewModules;
+  {
+    const structureRequirements = session.planning.tenderRequirements?.structureRequirements || [];
+    if (structureRequirements.length > 0) {
+      const structureSimilarity = await buildSemanticSimilarity(
+        structureRequirements.map(structureRequirementSemanticQuery),
+        plannedWithReviewModules.map(chapter => normalizeChapterTitleLine(chapter.title)),
+      );
+      const structureRoute = assignStructureRequirementsToChapters(structureRequirements, plannedWithReviewModules, structureSimilarity);
+      const structureSectionResult = injectStructureOrgSections(plannedWithReviewModules, structureRoute.assignments);
+      plannedWithStructureSections = structureSectionResult.chapters;
+      if (structureSectionResult.changes.length > 0) {
+        const addedCount = structureSectionResult.changes.reduce((sum, item) => sum + item.added.length, 0);
+        const renamedCount = structureSectionResult.changes.reduce((sum, item) => sum + item.renamed.length, 0);
+        upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'structure-org-sections', status: 'success', message: `组织机构承接：${addedCount > 0 ? `补入 ${addedCount} 个「项目管理机构与岗位职责」小节` : ''}${addedCount > 0 && renamedCount > 0 ? '、' : ''}${renamedCount > 0 ? `规范化 ${renamedCount} 个承接标题` : ''}`, details: structureSectionResult.changes.map(item => `${displayChapterTitle(item.chapterTitle)}：${[...item.added.map(section => `补入「${section}」`), ...item.renamed.map(entry => `「${entry.from}」→「${entry.to}」`)].join('；')}`) }, { subtitle: '组织机构承接', order: session.global.progressStages.length }));
+        session.global.emitProgress();
+      }
+    }
+  }
   // 大纲编辑单点统计（C2）：补挂回路（validateBidStructureBeforeGeneration）已在补挂生成点
   // 过同一硬剔闸（isHardBannedSectionTitle），不再有「补挂后二次过滤」补丁；本道统计即最终剔除数
   // 规划后章节文本已变化，重建语义相似度缓存（同一闭包缓存 key 不可跨阶段复用）
   const finalCriteriaSimilarity = await buildSemanticSimilarity(
     session.understanding.evaluationItems.map(item => item.title),
-    plannedWithReviewModules.map(chapterCriteriaText),
+    plannedWithStructureSections.map(chapterCriteriaText),
   );
-  session.planning.finalBidStructureAudit = validateBidStructureBeforeGeneration({ template: session.prepare.template, chapters: plannedWithReviewModules, requirement: session.global.input.requirement, evaluationItems: session.understanding.evaluationItems, semanticSimilarity: finalCriteriaSimilarity });
+  session.planning.finalBidStructureAudit = validateBidStructureBeforeGeneration({ template: session.prepare.template, chapters: plannedWithStructureSections, requirement: session.global.input.requirement, evaluationItems: session.understanding.evaluationItems, semanticSimilarity: finalCriteriaSimilarity });
+  // R20 C4 规划污染过滤（明标）：LLM 小节规划可能把资料中非本标段范围的内容（其他专业工程领域实体，
+  // 如图纸通用说明条款）规划成表格——单次 LLM 范围核对（判据 = 招标要求摘要 + 清单分部全景），
+  // 超范围表从规划中剔除（防虚假缺失对账扣分 + 防补表轮写入超范围内容）；剔除超 1/3 或调用失败
+  // 保留原规划不阻断。暗标（正文禁表）下规划表为空自动跳过；无清单知识库时判据退化为招标摘要仍可用。
+  let filteredPlannedTables = plannedTablesByChapter;
+  if (!isBodyTableForbidden(session.understanding.bidComposition) && plannedTablesByChapter.size > 0) {
+    const chapterTitleOf = (chapterId: string) => displayChapterTitle(session.planning.finalBidStructureAudit.enrichedChapters.find(chapter => chapter.id === chapterId)?.title || chapterId);
+    const scopeEntries: PlannedTableScopeEntry[] = [...plannedTablesByChapter.entries()].flatMap(([chapterId, chapterTables]) => chapterTables.map(table => ({ chapterTitle: chapterTitleOf(chapterId), title: table.title, fields: table.fields })));
+    if (scopeEntries.length > 0) {
+      const scopeAudit = await auditPlannedTableScope({
+        tables: scopeEntries,
+        requirementSummary: tenderRequirementsSummary(session.planning.tenderRequirements),
+        boqCoverageSummary: formatBoqDivisionCoverage(extractBoqDivisionCoverage(session.understanding.preliminaryFactsModel)),
+        templateName: session.prepare.template.name,
+        signal: session.global.input.signal,
+      });
+      if (scopeAudit.removed.length > 0) {
+        const removedKeys = new Set(scopeAudit.removed.map(item => `${item.chapterTitle}\n${item.title}`));
+        filteredPlannedTables = new Map([...plannedTablesByChapter.entries()].map(([chapterId, chapterTables]) => [chapterId, chapterTables.filter(table => !removedKeys.has(`${chapterTitleOf(chapterId)}\n${table.title}`))]));
+        upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'table-scope-audit', status: 'success', message: `表格范围核对：剔除 ${scopeAudit.removed.length} 项超范围规划表（非本标段工程实体）`, details: scopeAudit.removed.map(item => `${item.chapterTitle}：${item.title}（${item.reason}）`) }, { subtitle: '表格范围核对', order: session.global.progressStages.length }));
+        session.global.emitProgress();
+      } else if (scopeAudit.skipped) {
+        upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'table-scope-audit', status: 'skipped', message: `表格范围核对跳过：${scopeAudit.skipped}`, details: [] }, { subtitle: '表格范围核对', order: session.global.progressStages.length }));
+        session.global.emitProgress();
+      }
+    }
+  }
   // 规划表格计划构建（组件 9）：表格来源 = 提示词声明的必需表格（用户声明层，必写）+ LLM 章节规划的
   // 表格需求（规划产物，应写）；无静态目录匹配、无系统创作——规划没有的表不出现。必需表格逐表全章
   // 评分归属；无归属的显性提示，交由文档合成终验的必需表格兜底链（insertRequiredTable）插入。
   // 标书编制规格为 forbidden（暗标正文禁表）时短路：正文不生成任何表格计划（含提示词必需表格——
   // 已由阶段 1 编制规格逐一裁决：能对应招标附表的收敛入终稿附表区，其余取消表格形式转文字表述）
   // 防御：判定缺失（非常规 session）时 bodyTablePolicy 为空，buildPlannedTablePlans 按常规口径放开
-  const plannedTableBuild = buildPlannedTablePlans({ chapters: session.planning.finalBidStructureAudit.enrichedChapters, plannedTables: plannedTablesByChapter, requiredTables: session.prepare.runtimePromptRules.requiredTables, bodyTablePolicy: session.understanding.bidComposition?.bodyTablePolicy });
-  session.planning.effectiveChapters = plannedTableBuild.chapters;
+  const plannedTableBuild = buildPlannedTablePlans({ chapters: session.planning.finalBidStructureAudit.enrichedChapters, plannedTables: filteredPlannedTables, requiredTables: session.prepare.runtimePromptRules.requiredTables, bodyTablePolicy: session.understanding.bidComposition?.bodyTablePolicy });
+  // R20 C1 图类呈现元件（明标）：招标要求条目识别出的图类元件（横道图/网络图/布置图等）语义归属后注入
+  // 章级文字框图/时间轴承载指令（diagramRequirements）；相似度低于阈值不注入（防错挂），未归属显性展示。
+  // 暗标正文禁图表（招标编制要求）：图类由终稿附表区（appendixPlan）承载，正文不注入
+  let chaptersWithDiagramPlans = plannedTableBuild.chapters;
+  if (!isBodyTableForbidden(session.understanding.bidComposition) && hasTenderRequirements(session.planning.tenderRequirements)) {
+    // B-T1：图类元件数据源 = 要求池 entries（R20 C1）∪ A-T1 结构/呈现要求（含被排除条款的图类信号，不随排除丢失），
+    // 按图名核心词去重——图类承载指令与终稿图位链消费同一图类集合
+    const diagramArtifacts = mergeStructureDiagramArtifacts(
+      extractDiagramArtifacts(session.planning.tenderRequirements?.entries || []),
+      session.planning.tenderRequirements?.structureRequirements || [],
+    );
+    if (diagramArtifacts.length > 0) {
+      const diagramSimilarity = await buildSemanticSimilarity(diagramArtifacts.map(artifact => artifact.source), chaptersWithDiagramPlans.map(chapter => chapter.title));
+      const diagramAttach = attachDiagramArtifacts(chaptersWithDiagramPlans, diagramArtifacts, diagramSimilarity);
+      chaptersWithDiagramPlans = diagramAttach.chapters;
+      const attachedEntries: string[] = [];
+      for (const chapter of chaptersWithDiagramPlans) {
+        for (const item of chapter.diagramRequirements || []) attachedEntries.push(`${displayChapterTitle(chapter.title)}：${item.split('（招标要求原文')[0]}`);
+      }
+      upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'diagram-artifacts', status: 'success', message: `图类呈现计划：识别 ${diagramArtifacts.length} 项图类要求（${diagramArtifacts.map(artifact => artifact.name).join('、')}），注入 ${attachedEntries.length} 项${diagramAttach.unattached.length > 0 ? `，未归属 ${diagramAttach.unattached.length} 项（相似度不足不注入，防错挂）` : ''}`, details: attachedEntries }, { subtitle: '图表呈现计划', order: session.global.progressStages.length }));
+      session.global.emitProgress();
+    }
+  }
+  session.planning.effectiveChapters = chaptersWithDiagramPlans;
   if (isBodyTableForbidden(session.understanding.bidComposition)) {
     const composition = session.understanding.bidComposition;
     upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'bid-composition-table-policy', status: 'success', message: `暗标编制规格消费：正文禁用表格与框图——小节规划 ${plannedTableRequestCount} 项表格需求与提示词必需表格 ${session.prepare.runtimePromptRules.requiredTables.length} 张均不进入正文，图表由终稿附表区 ${composition.appendixPlan.length} 项附表承接`, details: [...composition.conflicts.map(conflict => `${conflict.rule} → ${conflict.resolution}`), ...composition.appendixPlan.map(entry => `附表${entry.no}：${entry.title}${entry.kind === 'figure' ? '（图类，编制人补图）' : `（数据源：${entry.dataSource}）`}`)] }, { subtitle: '表格计划' }));
@@ -235,9 +309,14 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
   }
   session.prepare.template = { ...session.prepare.template, chapters: session.planning.effectiveChapters };
   // 评分项要求↔章节标题语义相似度（零响应检测第二道：变体表述兜底；语义模型恒可用，空输入返回恒零函数）
-  // 章节标题与零响应检测侧同口径归一化（normalizeChapterTitleLine），避免闭包缓存 key 不一致静默返回 0
+  // 章节标题与零响应检测侧同口径归一化（normalizeChapterTitleLine），避免闭包缓存 key 不一致静默返回 0；
+  // 池必须覆盖结构要求查询文本（structureRequirementSemanticQuery 单源）——闭包对未预嵌入文本静默返回 0，
+  // 缺失将使结构要求路由（写作注入）与终稿图位规格全量判定 0 分而空转
   session.planning.requirementsSimilarity = await buildSemanticSimilarity(
-    tenderRequirementCheckItems(session.planning.tenderRequirements).map(({ item }) => tenderRequirementSemanticQuery(item)),
+    [
+      ...tenderRequirementCheckItems(session.planning.tenderRequirements).map(({ item }) => tenderRequirementSemanticQuery(item)),
+      ...(session.planning.tenderRequirements?.structureRequirements || []).map(structureRequirementSemanticQuery),
+    ],
     session.planning.effectiveChapters.map(chapter => normalizeChapterTitleLine(chapter.title)),
   );
   // 评分项要求分配下沉阶段 3 蓝图构建（assignTenderRequirementsToChapters 随蓝图落盘：唯一权威分配 + 分配对账）

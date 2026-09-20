@@ -218,6 +218,21 @@ describe('processParameterDensityIssues（工艺参数密度）', () => {
     expect(processParameterDensityIssues([workPackageChapter('管道工程', body)])).toHaveLength(0);
   });
 
+  it('r28 扩围：绿化苗木类形态（地径D10/养护期为二年）计入工艺参数 → 不报（r27b 实况复刻）', () => {
+    // r27b 实机阻断：2.2 绿化工程块只有苗木形态描述（红枫B地径D10、养护期为二年），旧词表无
+    // 绿化/苗木形态分支 → 工艺参数 0 命中误报 blocker；绿化工程无 mm/MPa 级参数不等于无工艺参数
+    const seed = '苗木品种以红枫B、腊梅及林下栀子花为主，其中红枫B地径D10，冠丛高、蓬径按设计规格控制。全部苗木按二级养护标准执行，养护期为二年。';
+    const body = seed.repeat(7);
+    expect(processParameterDensityIssues([workPackageChapter('绿化工程', body)])).toHaveLength(0);
+  });
+
+  it('r28 反例：绿化块纯描述（无苗木形态参数）→ 仍报无工艺参数 blocker', () => {
+    const body = '绿化苗木按设计规格选型，进场后及时栽植并浇足定根水，养护管理到位确保景观效果。'.repeat(12);
+    const issues = processParameterDensityIssues([workPackageChapter('绿化工程', body)]);
+    expect(issues.length).toBe(1);
+    expect(issues[0].severity).toBe('blocker');
+  });
+
   it('非工作包小节不检查', () => {
     const body = '概况。'.repeat(100);
     expect(processParameterDensityIssues([chapter('工程概况', `### 工程概况\n${body}`)])).toHaveLength(0);

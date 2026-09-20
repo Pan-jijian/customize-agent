@@ -10,21 +10,25 @@ import type { FactTokenScopeClassifier } from '../factTokenClassifier';
 import type { ProfessionalDepthClassifier } from '../professionalDepthClassifier';
 import type { BlueprintData } from '../integratedBlueprint';
 import type { BillFactLock } from '../billFactLock';
+import { buildParameterUsageAudit } from '../chapterParameterFacts';
+import { buildKeyFactPlacementAudit } from '../keyFactPlacement';
+import type { DrawingFactLock } from '../drawingFactLock';
 import { validateDraftWithAutoSpec } from '../../document-validation/documentValidationService';
 import { validateProjectContamination } from '../../document-validation/documentContaminationService';
 import { validateFactConsistency } from '../../document-validation/factConsistencyService';
 import { chapterReadinessIssues, evaluateChapterReadiness } from '../../document-validation/chapterReadinessService';
 import { cleanFormalSourcePhrases, composeDocumentMarkdown, finalizeDocumentMarkdown, normalizeTertiaryHeadings, plannedStructureIssues, sanitizeFormalMarkdown } from '../markdownComposer';
-import { isBodyTableForbidden, type BidCompositionSpec } from '../bidComposition';
+import { isBodyFigureForbidden, isBodyTableForbidden, type BidCompositionSpec } from '../bidComposition';
 import { appendTenderAppendixSections } from '../composeAppendices';
 import { documentBudgetIssues, documentTextLength, pageTargetIssues } from '../budget';
 import { applySpecGateRules, buildExportGate, headingUncoveredEngineeringItems } from '../qualityValidation';
 import { fixTocFromBody } from '../documentIntegrityChecks';
 import { internalTerminologyAnchorIssues } from '../internalTerminologyAnchors';
-import { auditAuthorityCoverage, authorityAuditDetails, authorityAuditSummary } from '../authorityAudit';
+import { auditAuthorityCoverage, authorityAuditDetails, authorityAuditIssues, authorityAuditSummary, type AuthorityAuditReport } from '../authorityAudit';
+import { buildNumericAuthority } from './repairRounds/numericVerification';
 import { buildStandardFinalValidationIssues } from '../documentFinalValidation';
 import { buildKnowledgeCoverageReport, knowledgeCoverageIssues } from '../documentKnowledgeCoverage';
-import { buildDocumentFactTraces, factTraceIssues } from '../documentFactTrace';
+import { buildBoqRowTraces, buildDocumentFactTraces, factTraceIssues } from '../documentFactTrace';
 import { buildChapterCoverageReports, chapterCoverageIssues } from '../documentChapterCoverage';
 import { buildDocumentQualityReport, qualityReportIssues } from '../documentQualityReport';
 import { buildRepairStrategies, repairStrategyIssues } from '../documentRepairStrategies';
@@ -37,7 +41,9 @@ import { formalTextGateIssues } from '../agentWorkflow';
 import { displayStage, upsertProgressStage } from '../progress';
 import { buildValidationIssues } from '../chapterGeneration';
 import { chapterSectionFactUsageIssues } from '../chapterReview';
-import { factCoverageIssues, finalizeChapterContentQuality, finalizeFinalMarkdownStructure, normalizeProjectBasicInfoTable, partialChapterStatus, criticalSectionBlockerLine, projectBasicPlaceholderIssues, validateDraft, vectorStatusLabel } from '../documentGeneratorHelpers';
+import { factCoverageIssues, finalizeChapterContentQuality, finalizeFinalMarkdownStructure, removeDuplicateProjectBasicInfoBlocks, normalizeProjectBasicInfoTable, partialChapterStatus, criticalSectionBlockerLine, projectBasicPlaceholderIssues, validateDraft, vectorStatusLabel } from '../documentGeneratorHelpers';
+import { collectFigurePlaceholderSpecs, ensureFigurePlaceholders, injectTableCaptions, normalizeFigureNumbering, normalizeTableNumbering } from '../constructionOrgTablePlan';
+import { assignStructureRequirementsToChapters } from '../tenderRequirements';
 import { constructionOrgProfessionalAuditIssues } from '../constructionOrgAudit';
 // 方案 2.2 密度/结构执行器终检同源复核（写作侧 block-fact-density/block-structure-contract 的 finalize 复核函数）
 import { BLOCK_FACT_DENSITY_PER1000, factDensityVerdict } from '../blockQualityExecutors';
@@ -169,7 +175,9 @@ export function criticalSectionDeficitTotal(chapters: DocumentDraftChapter[]): n
 
 export function rebuildFinalMarkdown(input: { template: DocumentTemplate; requirement?: string; projectRoot: string; projectId: string; facts: Record<string, string>; structuredFacts: DocumentFact[]; factsModel: any; chapters: DocumentDraftChapter[]; sources: { filePath: string; count: number }[]; missingItems: string[]; validation: any; validationIssues: any[]; executionStages: DocumentExecutionStage[]; assets: DocumentAsset[]; promptDocumentRules: any; bodyTableForbidden?: boolean; coverForbidden?: boolean; bidComposition?: BidCompositionSpec; blueprintData?: BlueprintData }) {
   // 最终组装不再逐章跑 finalizeChapterContentQuality：补跑重复 H4 去重 + 空壳小节删除兼底（与成稿阶段同口径）
-  const markdown = finalizeFinalMarkdownStructure(finalizeDocumentMarkdown(composeDocumentMarkdown({ templateId: input.template.id, templateName: input.template.name, title: input.template.outputTitle, requirement: input.requirement || '', projectRoot: input.projectRoot, projectId: input.projectId, exportSettings: input.template.exportSettings, generationSettings: input.template.generationSettings, facts: input.facts, structuredFacts: input.structuredFacts, factsModel: input.factsModel, chapters: input.chapters, sources: input.sources, missingItems: [...new Set(input.missingItems)], validation: input.validation, validationIssues: input.validationIssues, executionStages: input.executionStages, exportGate: { passed: false, blockingIssues: [], checklist: [] }, assets: input.assets, partialChapters: [], checkpointChapters: input.chapters, generatedAt: Date.now() }, { forbidDrawingImages: false, promptRules: input.promptDocumentRules, bodyTableForbidden: input.bodyTableForbidden, coverForbidden: input.coverForbidden }), input.chapters, { forbidDrawingImages: false, promptRules: input.promptDocumentRules, bodyTableForbidden: input.bodyTableForbidden, coverForbidden: input.coverForbidden }).markdown);
+  // F-T3：正文禁图口径（暗标纯文字）——input 已携带 bidComposition，函数内同源判定并驱动两处确定性剥离
+  const bodyFigureForbidden = isBodyFigureForbidden(input.bidComposition);
+  const markdown = finalizeFinalMarkdownStructure(finalizeDocumentMarkdown(composeDocumentMarkdown({ templateId: input.template.id, templateName: input.template.name, title: input.template.outputTitle, requirement: input.requirement || '', projectRoot: input.projectRoot, projectId: input.projectId, exportSettings: input.template.exportSettings, generationSettings: input.template.generationSettings, facts: input.facts, structuredFacts: input.structuredFacts, factsModel: input.factsModel, chapters: input.chapters, sources: input.sources, missingItems: [...new Set(input.missingItems)], validation: input.validation, validationIssues: input.validationIssues, executionStages: input.executionStages, exportGate: { passed: false, blockingIssues: [], checklist: [] }, assets: input.assets, partialChapters: [], checkpointChapters: input.chapters, generatedAt: Date.now() }, { forbidDrawingImages: bodyFigureForbidden, promptRules: input.promptDocumentRules, bodyTableForbidden: input.bodyTableForbidden, coverForbidden: input.coverForbidden }), input.chapters, { forbidDrawingImages: bodyFigureForbidden, promptRules: input.promptDocumentRules, bodyTableForbidden: input.bodyTableForbidden, coverForbidden: input.coverForbidden }).markdown);
   // 文末附表区：按招标附表清单（appendixPlan）从一体化蓝图直出（无清单时不追加，正文不以表格承载附表数据）
   return appendTenderAppendixSections(markdown, { plan: input.bidComposition?.appendixPlan || [], blueprintData: input.blueprintData });
 }
@@ -193,12 +201,18 @@ export async function buildFullValidationIssues(input: {
   blueprintData?: BlueprintData;
   /** B1 清单事实锁（4.27.0 A1）：参数口径冲突误报裁决（多值分别命中不同清单条目 → 降级 info） */
   billFactLock?: BillFactLock;
+  /** B-T3 图纸事实锁：终稿图纸事实引用率验收（drawing-reference）的判定源 */
+  drawingFactLock?: DrawingFactLock;
   /** 标书编制规格（暗标禁表）：缺表类门禁豁免 + planned-structure 缺表检测跳过 */
   bodyTableForbidden?: boolean;
+  /** 标书编制规格（暗标禁图）：终检正文图片/图件占位反向阻断依据（F-T3） */
+  bodyFigureForbidden?: boolean;
+  /** 标书编制规格（暗标身份禁语）：终检业绩/获奖/证书编号标记反向阻断依据（F-T3） */
+  identityMarksForbidden?: boolean;
   /** 标书编制规格（暗标无封面）：封面必需检查跳过（终稿移除封面块） */
   coverForbidden?: boolean;
 }): Promise<ValidationIssue[]> {
-  const { documentSpec, validationIssues, factsModel, finalChapterDrafts, finalMarkdown, template, promptBindings, promptDocumentRules, projectMaterialSummary, domainProfile, structuredFacts, documentBudget, scopeConflicts, evaluationCriteriaItems, effectiveChapters, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier, blueprintData, billFactLock, bodyTableForbidden, coverForbidden } = input;
+  const { documentSpec, validationIssues, factsModel, finalChapterDrafts, finalMarkdown, template, promptBindings, promptDocumentRules, projectMaterialSummary, domainProfile, structuredFacts, documentBudget, scopeConflicts, evaluationCriteriaItems, effectiveChapters, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier, blueprintData, billFactLock, drawingFactLock, bodyTableForbidden, bodyFigureForbidden, identityMarksForbidden, coverForbidden } = input;
   // P7：检测器注册表化（detectorFixerRegistry）——各组检测器经 det() 登记引用，元数据（权威依赖/确定性/scope/category）
   // 单源于声明表；调用顺序与行为保持现状（分组顺序变更必须同步声明表并附理由）
   return collectValidationIssueGroups(
@@ -207,7 +221,7 @@ export async function buildFullValidationIssues(input: {
     det('fact-consistency', () => validateFactConsistency({ markdown: finalMarkdown, facts: structuredFacts, summary: projectMaterialSummary, profile: domainProfile })),
     det('project-contamination', () => validateProjectContamination(finalMarkdown, projectMaterialSummary)),
     det('project-basic-placeholder', () => projectBasicPlaceholderIssues(finalMarkdown, structuredFacts)),
-    await detSafe('standard-final', () => buildStandardFinalValidationIssues({ markdown: finalMarkdown, chapters: finalChapterDrafts, factsModel, template, promptBindings, promptDocumentRules, scopeConflicts, evaluationCriteriaItems, effectiveChapters, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier, blueprintData, billFactLock, bodyTableForbidden, coverForbidden })),
+    await detSafe('standard-final', () => buildStandardFinalValidationIssues({ markdown: finalMarkdown, chapters: finalChapterDrafts, factsModel, template, promptBindings, promptDocumentRules, scopeConflicts, evaluationCriteriaItems, effectiveChapters, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier, blueprintData, billFactLock, drawingFactLock, bodyTableForbidden, bodyFigureForbidden, identityMarksForbidden, coverForbidden })),
     det('fact-coverage', () => factCoverageIssues(finalMarkdown, [...structuredFacts, ...factsModel.preciseFacts], { maxIssues: 30 }).map(issue => ({ ...issue, level: 'warning' as const, severity: 'warning' as const, suggestion: '建议后续优化事实自然落位；导出阶段不因未落位的引用型或可优化事实阻断。' }))),
     det('page-target', () => pageTargetIssues(template.generationSettings || template.exportSettings, finalMarkdown).filter(issue => !(documentBudget.minPages && /低于目标页数/u.test(issue.message)))),
     det('document-budget', () => documentBudgetIssues(documentBudget, finalMarkdown)),
@@ -233,8 +247,18 @@ const FLOW_DIAGNOSTIC_ISSUE_RE = /章节级证据覆盖较弱|章节事实覆盖
 export async function buildQualityReportBundle(input: {
   finalChapterDrafts: DocumentDraftChapter[]; effectiveChapters: DocumentTemplateChapter[]; factsModel: any; allEvidence: DocumentEvidence[];
   finalMarkdown: string; validationIssues: ValidationIssue[]; retrievalCoverageReports: RetrievalCoverageReport[]; includeRetrievalCoverage: boolean; template: DocumentTemplate;
+  /** v2 评分输入：要求模型与编制规格（模式感知），缺失时质量报告对应构成分量显式降级 */
+  tenderRequirements?: TenderRequirementModel; bidComposition?: BidCompositionSpec;
+  /** B-T3 图纸事实锁：数据锚定分量（图纸事实落位率）判定源，缺失时分量降级不计不扣 */
+  drawingFactLock?: DrawingFactLock;
+  /** C-T7 关键事实落位审计源：结构化事实池（与 det('fact-coverage') 同池）；缺失时仅以 factsModel.preciseFacts 构成审计池 */
+  structuredFacts?: DocumentFact[];
+  /** F-T4 无主数值审计报告：数据锚定「数字溯源」分量判定源（先审计后评分，与审计 blocker 同版收敛） */
+  authorityAuditReport?: AuthorityAuditReport;
+  /** 专业深度语义分类器：章级 12 分制达标率（对齐口径 E）判定源 */
+  professionalDepthClassifier?: ProfessionalDepthClassifier;
 }) {
-  const { finalChapterDrafts, effectiveChapters, factsModel, allEvidence, finalMarkdown, validationIssues, retrievalCoverageReports, includeRetrievalCoverage, template } = input;
+  const { finalChapterDrafts, effectiveChapters, factsModel, allEvidence, finalMarkdown, validationIssues, retrievalCoverageReports, includeRetrievalCoverage, template, tenderRequirements, bidComposition, drawingFactLock, structuredFacts, authorityAuditReport, professionalDepthClassifier } = input;
   const knowledgeCoverage = buildKnowledgeCoverageReport({ chapters: finalChapterDrafts, templateChapters: effectiveChapters, factsModel, evidence: allEvidence });
   const factTraces = buildDocumentFactTraces(finalMarkdown, factsModel);
   const chapterCoverage = buildChapterCoverageReports({ chapters: finalChapterDrafts, templateChapters: effectiveChapters, factsModel });
@@ -250,7 +274,7 @@ export async function buildQualityReportBundle(input: {
   issues = issues.map(issue => FLOW_DIAGNOSTIC_ISSUE_RE.test(issue.message) && issue.level === 'warning' ? { ...issue, level: 'info' as const } : issue);
   // 可落地性目标基准（4.26.0 起固化字数口径）：每 1500 字 1 块完整五要素块。
   // 参考库锚点已随模板参考库移除下线，单一逻辑：target = max(6, ceil(字数/1500))
-  const qualityReport = await buildDocumentQualityReport({ markdown: finalMarkdown, chapters: finalChapterDrafts, issues, knowledgeCoverage, factTraces, template });
+  const qualityReport = await buildDocumentQualityReport({ markdown: finalMarkdown, chapters: finalChapterDrafts, issues, knowledgeCoverage, factTraces, template, tenderRequirements, bidComposition, effectiveChapters, drawingFactLock, boqRowTraces: buildBoqRowTraces(finalMarkdown, factsModel), parameterUsageAudit: buildParameterUsageAudit({ markdown: finalMarkdown, factsModel, chapters: finalChapterDrafts }), keyFactPlacementAudit: buildKeyFactPlacementAudit(finalMarkdown, [...(structuredFacts || []), ...((factsModel && factsModel.preciseFacts) || [])]), authorityAuditReport, professionalDepthClassifier });
   const repairStrategies = buildRepairStrategies({ issues, qualityReport, knowledgeCoverage, factTraces, chapterCoverage });
   issues = collectValidationIssueGroups(issues, qualityReportIssues(qualityReport), repairStrategyIssues(repairStrategies));
   const finalExportGate = buildExportGate(issues, factsModel, finalChapterDrafts);
@@ -335,10 +359,22 @@ export async function stageValidationPack(session: FinalizeSession): Promise<voi
 
 }
 
+/** B-T1 图位规格快照（终稿注入数据源）：结构/呈现要求现场路由（与蓝图分配同函数同口径，低置信不挂章）+
+ * 章级图类承载指令合并去重（collectFigurePlaceholderSpecs 内部同章同图核心词判重）；
+ * stageComposeFinal 与 rebuildFinalMarkdown 闭包共用口径。 */
+function figurePlaceholderSpecs(session: FinalizeSession) {
+  const structureRoute = assignStructureRequirementsToChapters(session.tenderRequirements?.structureRequirements || [], session.effectiveChapters, session.requirementsSimilarity);
+  return collectFigurePlaceholderSpecs({
+    structureItems: structureRoute.assignments.map(assignment => ({ chapterTitle: assignment.chapterTitle, form: assignment.requirement.form, element: assignment.requirement.element })),
+    chapters: session.effectiveChapters,
+  });
+}
+
 /** stageComposeFinal：全文组装 + 标准化管道（P2 拆分，方案 5.2） */
 export function stageComposeFinal(session: FinalizeSession): void {
-  // 标书编制规格（阶段 1 判定）：暗标正文禁表 + 无封面口径——组装管道与门禁同源
+  // 标书编制规格（阶段 1 判定）：暗标正文禁表/禁图 + 无封面口径——组装管道与门禁同源
   const bodyTableForbidden = isBodyTableForbidden(session.bidComposition);
+  const bodyFigureForbidden = isBodyFigureForbidden(session.bidComposition);
   const coverForbidden = session.bidComposition?.formatRules.cover === 'forbidden';
   const finalizedDocument = finalizeDocumentMarkdown(composeDocumentMarkdown({
     templateId: session.template.id,
@@ -363,29 +399,55 @@ export function stageComposeFinal(session: FinalizeSession): void {
     partialChapters: session.chapterDrafts.map(chapter => ({ id: chapter.id, title: chapter.title, chars: documentTextLength(chapter.content), status: partialChapterStatus(chapter, session.documentBudget.chapterTargets.get(chapter.id)), updatedAt: Date.now() })),
     checkpointChapters: session.chapterDrafts,
     generatedAt: Date.now(),
-  }, { forbidDrawingImages: false, promptRules: session.promptDocumentRules, bodyTableForbidden, coverForbidden }), session.chapterDrafts, { forbidDrawingImages: false, promptRules: session.promptDocumentRules, bodyTableForbidden, coverForbidden });
+  }, { forbidDrawingImages: bodyFigureForbidden, promptRules: session.promptDocumentRules, bodyTableForbidden, coverForbidden }), session.chapterDrafts, { forbidDrawingImages: bodyFigureForbidden, promptRules: session.promptDocumentRules, bodyTableForbidden, coverForbidden });
   session.finalChapterDrafts = finalizedDocument.chapters.map(chapter => {
     const templateChapter = session.effectiveChapters.find(item => item.id === chapter.id) || chapter;
     return { ...chapter, sections: chapter.sections || [], content: finalizeChapterContentQuality(chapter.content, templateChapter) };
   });
-  session.finalMarkdown = finalizeDocumentMarkdown(composeDocumentMarkdown({ templateId: session.template.id, templateName: session.template.name, title: session.template.outputTitle, requirement: session.requirement || '', projectRoot: session.projectRoot, projectId: session.projectId, exportSettings: session.template.exportSettings, generationSettings: session.template.generationSettings, facts: session.facts, structuredFacts: session.structuredFacts, factsModel: session.factsModel, chapters: session.finalChapterDrafts, sources: session.sources, missingItems: [...new Set(session.missingItems)], validation: session.validation, validationIssues: session.validationIssues, executionStages: session.executionStages, exportGate: { passed: false, blockingIssues: [], checklist: [] }, assets: session.assets, partialChapters: [], checkpointChapters: session.finalChapterDrafts, generatedAt: Date.now() }, { forbidDrawingImages: false, promptRules: session.promptDocumentRules, bodyTableForbidden, coverForbidden }), session.finalChapterDrafts, { forbidDrawingImages: false, promptRules: session.promptDocumentRules, bodyTableForbidden, coverForbidden }).markdown;
-  session.finalMarkdown = fixTocFromBody(finalizeFinalMarkdownStructure(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(session.finalMarkdown, session.structuredFacts, { bodyTableForbidden }), session.projectMaterialSummary)))))).markdown;
+  session.finalMarkdown = finalizeDocumentMarkdown(composeDocumentMarkdown({ templateId: session.template.id, templateName: session.template.name, title: session.template.outputTitle, requirement: session.requirement || '', projectRoot: session.projectRoot, projectId: session.projectId, exportSettings: session.template.exportSettings, generationSettings: session.template.generationSettings, facts: session.facts, structuredFacts: session.structuredFacts, factsModel: session.factsModel, chapters: session.finalChapterDrafts, sources: session.sources, missingItems: [...new Set(session.missingItems)], validation: session.validation, validationIssues: session.validationIssues, executionStages: session.executionStages, exportGate: { passed: false, blockingIssues: [], checklist: [] }, assets: session.assets, partialChapters: [], checkpointChapters: session.finalChapterDrafts, generatedAt: Date.now() }, { forbidDrawingImages: bodyFigureForbidden, promptRules: session.promptDocumentRules, bodyTableForbidden, coverForbidden }), session.finalChapterDrafts, { forbidDrawingImages: bodyFigureForbidden, promptRules: session.promptDocumentRules, bodyTableForbidden, coverForbidden }).markdown;
+  // r26 B4：sanitize 链（表格块间距规范化/空行归一）会把「孤立表格残行 + 空行 + 分隔行」粘连成
+  // 「污染表头怪表」形态；normalizeProjectBasicInfoTable 内部的去重运行在其之前（空行未归一，
+  // 粘连怪块不被识别，怪表直坠终检）——链尾补跑去重保证「清理所检 = 终检所检」（幂等：正常形态零变化）
+  session.finalMarkdown = fixTocFromBody(finalizeFinalMarkdownStructure(normalizeTertiaryHeadings(removeDuplicateProjectBasicInfoBlocks(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(session.finalMarkdown, session.structuredFacts, { bodyTableForbidden }), session.projectMaterialSummary))))))).markdown;
+  // r24 B8 链尾题注注入（r23 实机归因）：finalizeDocumentMarkdown 内部的注入器运行在
+  // normalizeProjectBasicInfoTable 之前，而后者每次重建「项目基本信息表」表块（终链最后阶段），
+  // 重建表块从未被注入器看到 → 终检 table-caption 报出（r23 实测「#### 项目基本信息表」下表格
+  // 无题注）。注入器幂等（已带题注前缀的表跳过），此处对最新成稿重跑同口径注入，保证
+  // 「注入所检 = 终检所检」；暗标正文禁表由调用侧跳过（同 finalizeDocumentMarkdown 口径）
+  // r25 B1：注入后接编号唯一化（拆粘连 + 重复编号章内重排 + 引用同步）——与 composeFinal 同口径
+  // B-T1 图位链（与题注链同为链尾确定性注入）：图类要求规格补位（幂等）→ 图题编号归一化（章序-图序连续 + 引用同步）
+  if (!bodyTableForbidden) {
+    session.finalMarkdown = normalizeTableNumbering(injectTableCaptions(session.finalMarkdown));
+    session.finalMarkdown = normalizeFigureNumbering(ensureFigurePlaceholders(session.finalMarkdown, figurePlaceholderSpecs(session)).markdown);
+  }
   // 文末附表区：全部标准化管道完成后追加（不再经 normalize 管道，避免附表 H2 被当章标题处理）；
   // 数据源为一体化蓝图（appendixPlan 逐项绑定），无附表清单时不追加
   session.finalMarkdown = appendTenderAppendixSections(session.finalMarkdown, { plan: session.bidComposition?.appendixPlan || [], blueprintData: session.blueprintData });
 }
 
-/** V5 P5 M6 · 无主数值审计记录（确定性、零 LLM）：扫描 finalMarkdown 全部数值与 AuthorityIndex 匹配，
+/** 审计失败 issue 消息锚（recordAuthorityAudit 幂等替换旧审计 issue；不得与「生成后事实反查失败」
+ * 豁免规则混同——后者不硬阻断，本锚走 fact_consistency 直通硬阻断） */
+const AUTHORITY_AUDIT_ISSUE_ANCHOR = '无主数值审计失败';
+
+/** V5 P5 M6 · 无主数值审计记录（确定性、零 LLM）：扫描 finalMarkdown 全部数值与 AuthorityIndex
+ * 权威核 + 全源数值 token（buildNumericAuthority，与 numeric-verification 修复轮单源）匹配，
  * 三分类（一致 / 登记豁免 / 无主→推导缺口·工艺缺口·未登记），报告随执行阶段与 reviewMetadata 交付；
- * 修复轮每次重算校验组后重跑（upsert 幂等），报告始终基于最新 finalMarkdown——
- * 未登记数应随修复收敛至 0（验收口径「无主数值审计报告=0 未登记项」）。 */
+ * 修复轮每次重算校验组后重跑（upsert 幂等），报告始终基于最新 finalMarkdown。
+ * F-T4：三桶任一非零即审计失败——authorityAuditIssues 产出 blocker 并入校验组（硬门禁，审计失败
+ * 不可进交付）；旧审计 issue 按消息锚去除后重加（幂等）；缺口由修复轮/链尾 demote 收敛后自动静默。 */
 function recordAuthorityAudit(session: FinalizeSession): void {
-  const report = auditAuthorityCoverage(session.finalMarkdown, session.blueprintData);
+  const report = auditAuthorityCoverage(session.finalMarkdown, session.blueprintData, buildNumericAuthority(session));
   session.authorityAuditReport = report;
+  const auditIssues = det('authority-audit-gap', () => authorityAuditIssues(report));
+  session.validationIssues = [
+    ...session.validationIssues.filter(issue => !issue.message.startsWith(AUTHORITY_AUDIT_ISSUE_ANCHOR)),
+    ...auditIssues,
+  ];
+  const auditFailed = report.unregisteredCount > 0 || report.derivationGaps.length > 0 || report.processGaps.length > 0;
   upsertProgressStage(session.executionStages, displayStage({
     type: 'validation',
     roleId: 'authority-audit',
-    status: report.unregisteredCount > 0 ? 'failed' : 'success',
+    status: auditFailed ? 'failed' : 'success',
     message: authorityAuditSummary(report),
     details: authorityAuditDetails(report),
   }, { subtitle: '权威覆盖审计' }));
@@ -396,18 +458,31 @@ export async function stageRebuildAndRecompute(session: FinalizeSession): Promis
   // round-19：全文重建函数（章草稿 → finalMarkdown 标准化管道）单一定义：
   // 确定性修复后重建/Final Gate 补写后重建/事实落位后重建/表格修复后重建/post-gate 重建共用同一口径，
   // 消除 5 处 300+ 字符重复表达式（历史遗留：rebuild 定义在修复循环后才出现，前面的重建只能内联复制）
-  session.rebuildFinalMarkdown = () => fixTocFromBody(finalizeFinalMarkdownStructure(normalizeTertiaryHeadings(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(rebuildFinalMarkdown({ template: session.template, requirement: session.requirement, projectRoot: session.projectRoot, projectId: session.projectId, facts: session.facts, structuredFacts: session.structuredFacts, factsModel: session.factsModel, chapters: session.finalChapterDrafts, sources: session.sources, missingItems: session.missingItems, validation: session.validation, validationIssues: session.validationIssues, executionStages: session.executionStages, assets: session.assets, promptDocumentRules: session.promptDocumentRules, bodyTableForbidden: isBodyTableForbidden(session.bidComposition), coverForbidden: session.bidComposition?.formatRules.cover === 'forbidden', bidComposition: session.bidComposition, blueprintData: session.blueprintData }), session.structuredFacts, { bodyTableForbidden: isBodyTableForbidden(session.bidComposition) }), session.projectMaterialSummary)))))).markdown;
+  // B-T1 图位规格快照：闭包内每次重建均需重跑补位链（章草稿重建不携带链尾注入的图题），
+  // 规格在闭包外取一次（章列表/结构要求在 finalize 期恒定）
+  const figureSpecs = figurePlaceholderSpecs(session);
+  session.rebuildFinalMarkdown = () => {
+    const rebuilt = fixTocFromBody(finalizeFinalMarkdownStructure(normalizeTertiaryHeadings(removeDuplicateProjectBasicInfoBlocks(sanitizeFormalMarkdown(cleanFormalSourcePhrases(sanitizeContaminationCandidates(normalizeProjectBasicInfoTable(rebuildFinalMarkdown({ template: session.template, requirement: session.requirement, projectRoot: session.projectRoot, projectId: session.projectId, facts: session.facts, structuredFacts: session.structuredFacts, factsModel: session.factsModel, chapters: session.finalChapterDrafts, sources: session.sources, missingItems: session.missingItems, validation: session.validation, validationIssues: session.validationIssues, executionStages: session.executionStages, assets: session.assets, promptDocumentRules: session.promptDocumentRules, bodyTableForbidden: isBodyTableForbidden(session.bidComposition), coverForbidden: session.bidComposition?.formatRules.cover === 'forbidden', bidComposition: session.bidComposition, blueprintData: session.blueprintData }), session.structuredFacts, { bodyTableForbidden: isBodyTableForbidden(session.bidComposition) }), session.projectMaterialSummary))))))).markdown;
+    // r24 B8 链尾题注注入（与 stageComposeFinal 同口径）：normalizeProjectBasicInfoTable 在本闭包内
+    // 重建基本信息表块，处于 finalizeDocumentMarkdown 内部注入器之后——不补注入则每次 rebuild 后
+    // 该表重新无题注直坠终检；注入器幂等可重放，暗标禁表跳过
+    // B-T1 图位链（同口径）：规格补位 + 编号归一化，暗标禁表跳过
+    if (isBodyTableForbidden(session.bidComposition)) return rebuilt;
+    return normalizeFigureNumbering(ensureFigurePlaceholders(normalizeTableNumbering(injectTableCaptions(rebuilt)), figureSpecs).markdown);
+  };
 
   const canonicalFacts = buildCanonicalFacts({ facts: session.structuredFacts, markdown: session.finalMarkdown });
   if (canonicalFacts.size > 0) session.executionStages.push({ type: 'fact_extraction', roleId: 'canonical-facts', status: 'success', message: `已决策可信基础事实 ${canonicalFacts.size} 项`, details: [...canonicalFacts.values()].map(fact => `${fact.label}=${fact.value}（${fact.source}，confidence=${fact.confidence}）`).slice(0, 12) });
 
   // 修复后重算问题组会重新计算，修复基线只保留基础累计问题，避免重复累加
   session.baseValidationIssues = session.validationIssues;
-  session.validationIssues = await buildFullValidationIssues({ documentSpec: session.documentSpec, validationIssues: session.validationIssues, factsModel: session.factsModel, finalChapterDrafts: session.finalChapterDrafts, finalMarkdown: session.finalMarkdown, template: session.template, promptBindings: session.promptBindings, promptDocumentRules: session.promptDocumentRules, projectMaterialSummary: session.projectMaterialSummary, domainProfile: session.domainProfile, structuredFacts: session.structuredFacts, documentBudget: session.documentBudget, scopeConflicts: session.scopeConflicts, evaluationCriteriaItems: session.evaluationCriteriaItems, effectiveChapters: session.effectiveChapters, tenderRequirements: session.tenderRequirements, requirementsSimilarity: session.requirementsSimilarity, factTokenScopeClassifier: session.factTokenScopeClassifier, professionalDepthClassifier: session.professionalDepthClassifier, blueprintData: session.blueprintData, billFactLock: session.billFactLock, bodyTableForbidden: isBodyTableForbidden(session.bidComposition), coverForbidden: session.bidComposition?.formatRules.cover === 'forbidden' });
+  session.validationIssues = await buildFullValidationIssues({ documentSpec: session.documentSpec, validationIssues: session.validationIssues, factsModel: session.factsModel, finalChapterDrafts: session.finalChapterDrafts, finalMarkdown: session.finalMarkdown, template: session.template, promptBindings: session.promptBindings, promptDocumentRules: session.promptDocumentRules, projectMaterialSummary: session.projectMaterialSummary, domainProfile: session.domainProfile, structuredFacts: session.structuredFacts, documentBudget: session.documentBudget, scopeConflicts: session.scopeConflicts, evaluationCriteriaItems: session.evaluationCriteriaItems, effectiveChapters: session.effectiveChapters, tenderRequirements: session.tenderRequirements, requirementsSimilarity: session.requirementsSimilarity, factTokenScopeClassifier: session.factTokenScopeClassifier, professionalDepthClassifier: session.professionalDepthClassifier, blueprintData: session.blueprintData, billFactLock: session.billFactLock, drawingFactLock: session.drawingFactLock, bodyTableForbidden: isBodyTableForbidden(session.bidComposition), bodyFigureForbidden: isBodyFigureForbidden(session.bidComposition), identityMarksForbidden: Boolean(session.bidComposition?.identityMarksForbidden), coverForbidden: session.bidComposition?.formatRules.cover === 'forbidden' });
 
-  session.qualityBundle = await buildQualityReportBundle({ finalChapterDrafts: session.finalChapterDrafts, effectiveChapters: session.effectiveChapters, factsModel: session.factsModel, allEvidence: session.allEvidence, finalMarkdown: session.finalMarkdown, validationIssues: session.validationIssues, retrievalCoverageReports: session.retrievalCoverageReports, includeRetrievalCoverage: true, template: session.template });
-  session.validationIssues = session.qualityBundle.validationIssues;
+  // P5 M6/F-T4：先审计后评分——评分读本次最新审计报告（数据锚定「数字溯源」分量），审计 blocker
+  // 随输入 validationIssues 进入 blockingIssues 计数（消除「评分读上一版审计、审计 blocker 不计分」脱节）
   recordAuthorityAudit(session);
+  session.qualityBundle = await buildQualityReportBundle({ finalChapterDrafts: session.finalChapterDrafts, effectiveChapters: session.effectiveChapters, factsModel: session.factsModel, allEvidence: session.allEvidence, finalMarkdown: session.finalMarkdown, validationIssues: session.validationIssues, retrievalCoverageReports: session.retrievalCoverageReports, includeRetrievalCoverage: true, template: session.template, tenderRequirements: session.tenderRequirements, bidComposition: session.bidComposition, drawingFactLock: session.drawingFactLock, structuredFacts: session.structuredFacts, authorityAuditReport: session.authorityAuditReport, professionalDepthClassifier: session.professionalDepthClassifier });
+  session.validationIssues = session.qualityBundle.validationIssues;
   session.finalGateRepairStages = [];
   // 修复后重算校验组（事实落位轮/表格修复轮后共用）：过滤旧快照 issue，
   // 用最新 finalMarkdown 重算全部校验组与导出门禁
@@ -421,10 +496,11 @@ export async function stageRebuildAndRecompute(session: FinalizeSession): Promis
     // 历史缺陷佐证：事实落位轮后已落位事实仍带修复前警告进入交付（如基本信息表招标人）；
     // 正文已删「本项目为…」但门禁仍报概况复述（B5）；终稿塑料管两口径仍报单一蓝图冲突（B8）。
     const repairedValidationBase = stripSnapshotIssues(session.baseValidationIssues);
-    session.validationIssues = await buildFullValidationIssues({ documentSpec: session.documentSpec, validationIssues: repairedValidationBase, factsModel: session.factsModel, finalChapterDrafts: session.finalChapterDrafts, finalMarkdown: session.finalMarkdown, template: session.template, promptBindings: session.promptBindings, promptDocumentRules: session.promptDocumentRules, projectMaterialSummary: session.projectMaterialSummary, domainProfile: session.domainProfile, structuredFacts: session.structuredFacts, documentBudget: session.documentBudget, scopeConflicts: session.scopeConflicts, evaluationCriteriaItems: session.evaluationCriteriaItems, effectiveChapters: session.effectiveChapters, tenderRequirements: session.tenderRequirements, requirementsSimilarity: session.requirementsSimilarity, factTokenScopeClassifier: session.factTokenScopeClassifier, professionalDepthClassifier: session.professionalDepthClassifier, blueprintData: session.blueprintData, billFactLock: session.billFactLock, bodyTableForbidden: isBodyTableForbidden(session.bidComposition), coverForbidden: session.bidComposition?.formatRules.cover === 'forbidden' });
-    session.qualityBundle = await buildQualityReportBundle({ finalChapterDrafts: session.finalChapterDrafts, effectiveChapters: session.effectiveChapters, factsModel: session.factsModel, allEvidence: session.allEvidence, finalMarkdown: session.finalMarkdown, validationIssues: session.validationIssues, retrievalCoverageReports: session.retrievalCoverageReports, includeRetrievalCoverage: false, template: session.template });
-    session.validationIssues = session.qualityBundle.validationIssues;
-    // P5 M6：修复轮重算后刷新无主数值审计（报告始终反映最新 finalMarkdown）
+    session.validationIssues = await buildFullValidationIssues({ documentSpec: session.documentSpec, validationIssues: repairedValidationBase, factsModel: session.factsModel, finalChapterDrafts: session.finalChapterDrafts, finalMarkdown: session.finalMarkdown, template: session.template, promptBindings: session.promptBindings, promptDocumentRules: session.promptDocumentRules, projectMaterialSummary: session.projectMaterialSummary, domainProfile: session.domainProfile, structuredFacts: session.structuredFacts, documentBudget: session.documentBudget, scopeConflicts: session.scopeConflicts, evaluationCriteriaItems: session.evaluationCriteriaItems, effectiveChapters: session.effectiveChapters, tenderRequirements: session.tenderRequirements, requirementsSimilarity: session.requirementsSimilarity, factTokenScopeClassifier: session.factTokenScopeClassifier, professionalDepthClassifier: session.professionalDepthClassifier, blueprintData: session.blueprintData, billFactLock: session.billFactLock, drawingFactLock: session.drawingFactLock, bodyTableForbidden: isBodyTableForbidden(session.bidComposition), bodyFigureForbidden: isBodyFigureForbidden(session.bidComposition), identityMarksForbidden: Boolean(session.bidComposition?.identityMarksForbidden), coverForbidden: session.bidComposition?.formatRules.cover === 'forbidden' });
+    // P5 M6/F-T4：重算后先刷新无主数值审计（报告始终反映最新 finalMarkdown）再评分——
+    // 评分读本版审计；审计 blocker 随输入 validationIssues 进入 blockingIssues 计数（双数同版收敛）
     recordAuthorityAudit(session);
+    session.qualityBundle = await buildQualityReportBundle({ finalChapterDrafts: session.finalChapterDrafts, effectiveChapters: session.effectiveChapters, factsModel: session.factsModel, allEvidence: session.allEvidence, finalMarkdown: session.finalMarkdown, validationIssues: session.validationIssues, retrievalCoverageReports: session.retrievalCoverageReports, includeRetrievalCoverage: false, template: session.template, tenderRequirements: session.tenderRequirements, bidComposition: session.bidComposition, drawingFactLock: session.drawingFactLock, structuredFacts: session.structuredFacts, authorityAuditReport: session.authorityAuditReport, professionalDepthClassifier: session.professionalDepthClassifier });
+    session.validationIssues = session.qualityBundle.validationIssues;
   };
 }

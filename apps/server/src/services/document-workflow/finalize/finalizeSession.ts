@@ -39,6 +39,7 @@ import type { DocumentGenerationReadiness } from '../../document-validation/docu
 import type { BlueprintData, extractDecisionLockEntries } from '../integratedBlueprint';
 import type { SurfaceFixerContext } from '../deterministicFixChains';
 import type { BillFactLock } from '../billFactLock';
+import type { DrawingFactLock } from '../drawingFactLock';
 import type { RequirementSemanticPlan } from '../requirementSemantics';
 import type { BidCompositionSpec } from '../bidComposition';
 import type { buildFactsModel } from '../factsModel';
@@ -114,6 +115,8 @@ export interface FinalizeGenerationInput {
   bidComposition?: BidCompositionSpec;
   /** B1 清单事实锁（蓝图阶段确定性解析）：正文数值 vs 资料原文核对轮（numeric-verification）的清单行权威源 */
   billFactLock?: BillFactLock;
+  /** B-T3 图纸事实锁（蓝图阶段确定性提取）：终稿图纸事实引用率验收（drawing-reference）的判定源 */
+  drawingFactLock?: DrawingFactLock;
   /** A2 用户提示词语义解析计划：生成后用户要求执行核验闭环（requirement-verification）的核验依据 */
   requirementSemantics?: RequirementSemanticPlan;
 }
@@ -161,6 +164,8 @@ export interface FinalizeSession {
   bidComposition?: BidCompositionSpec;
   /** B1 清单事实锁快照（numeric-verification 轮消费） */
   billFactLock?: BillFactLock;
+  /** B-T3 图纸事实锁快照（drawing-reference 引用率验收消费） */
+  drawingFactLock?: DrawingFactLock;
   /** A2 用户提示词语义解析计划快照（requirement-verification 轮消费） */
   requirementSemantics?: RequirementSemanticPlan;
   generationDiagnostics: DocumentGenerationDiagnostics;
@@ -254,6 +259,7 @@ export function createFinalizeSession(input: FinalizeGenerationInput): FinalizeS
     blueprintData: input.blueprintData,
     bidComposition: input.bidComposition,
     billFactLock: input.billFactLock,
+    drawingFactLock: input.drawingFactLock,
     requirementSemantics: input.requirementSemantics,
     generationDiagnostics: input.generationDiagnostics,
     repairPromptTexts: input.repairPromptTexts,

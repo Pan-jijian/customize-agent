@@ -1,7 +1,9 @@
 /**
  * buildPlannedChapterContent（块写作合同）单测：
- * 字数双向硬合同（4.40）：达标区 [0.85,1.15] 直通；欠产侧接受区 [0.7,0.85) 记录放行、<0.7 仅
- * 首轮阻断（二轮放行）；超产侧 >1.15 任何轮次阻断（二轮仍超产 → 块失败，零降级）——旧 4.35
+ * 字数双向硬合同（4.40/4.51）：达标区 [0.85,1.15] 直通；欠产侧接受区 [0.7,0.85) 记录放行、<0.7 仅
+ * 首轮阻断（二轮放行）；超产侧前轮 >1.15 一律阻断（携压缩指令），4.51 末轮容差线 1.2× 内微超产
+ * 接受（r28 实机：末轮 1.19× / 仅超合同线 1 字仍判块失败 → 单块章整章阻断、文档缺章，损失远大于
+ * 微超产本身）；末轮仍 >1.2× → 块失败（严重超产零降级）——旧 4.35
  * 「接受区 [0.7,1.4] 放行 / 二轮一律放行」是超产进入成稿的最后失守环节（舒城 14 万目标产出 22 万字）。
  * 结构硬门保留零降级（缺失/重复 H4、清单外标题）→ 标题层缺陷确定性修复通道（修复后仍超产不得
  * 放行）→ 两轮不达标返回失败块隔离清单（不整章降级）。
@@ -161,6 +163,41 @@ describe('buildPlannedChapterContent（块字数分层验收 + 结构硬门 + �
     expect(result?.allSucceeded).toBe(true);
     expect(llmMock).toHaveBeenCalledTimes(2);
     expect(llmMock.mock.calls[1][1]).toContain('【上一轮篇幅超限】');
+  });
+
+  it('4.51 末轮容差：首轮超产 → 二轮微超合同线（1.15~1.2×）→ 容差放行成稿（r28 实证：末轮微超不判块失败）', async () => {
+    // 块目标 500：合同超产线 575 / 末轮容差线 600。首轮 861 字（1.72×）阻断；二轮 581 字
+    //（1.16× 微超合同线）——r28 实机形态（2141 字=1.19×、1496 字仅超 1 字）由末轮容差吸收
+    llmMock
+      .mockResolvedValueOnce(passingContent([H4A, H4B, H4C, H4D], 200))
+      .mockResolvedValueOnce(passingContent([H4A, H4B, H4C, H4D], 130));
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure());
+    expect(result?.allSucceeded).toBe(true);
+    expect(result?.failedBlocks).toEqual([]);
+    expect(llmMock).toHaveBeenCalledTimes(2);
+    // 首轮仍走压缩阻断路径（容差不提前到首轮）
+    expect(llmMock.mock.calls[1][1]).toContain('【上一轮篇幅超限】');
+  });
+
+  it('4.51 容差不提前：首轮即微超合同线（1.15~1.2×）→ 仍压缩阻断重写，二轮容差放行', async () => {
+    // 581 字（1.16×）两轮不变：首轮不因末轮容差而放行（仍携压缩指令重写）；二轮同一产出落在
+    // 容差线内 → 接受成稿（不判块失败、不进隔离重写）
+    llmMock.mockResolvedValue(passingContent([H4A, H4B, H4C, H4D], 130));
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure());
+    expect(result?.allSucceeded).toBe(true);
+    expect(llmMock).toHaveBeenCalledTimes(2);
+    expect(llmMock.mock.calls[1][1]).toContain('【上一轮篇幅超限】');
+  });
+
+  it('4.51 容差不越界：末轮仍越容差线（>1.2×）→ 块失败（严重超产零降级不变）', async () => {
+    // 605 字（1.21×）两轮不变：> 容差线 600 → 块失败、隔离清单返回；容差只吸收微超产，
+    // 不改变「严重超产零降级」的硬合同
+    llmMock.mockResolvedValue(passingContent([H4A, H4B, H4C, H4D], 136));
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure());
+    expect(result?.allSucceeded).toBe(false);
+    expect(result?.failedBlocks).toHaveLength(1);
+    expect(result?.sections[0]).toBeUndefined();
+    expect(llmMock).toHaveBeenCalledTimes(2);
   });
 
   it('清单外 H4 修复后仍超产（>1.15×）→ 修复通道不放行，二轮重写达标成稿', async () => {

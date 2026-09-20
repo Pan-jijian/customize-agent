@@ -356,7 +356,9 @@ const PROCEDURAL_LEXICAL_HINTS_RE = /签章|盖章|联系人|联系电话|电话
 const PROCEDURAL_VALUE_THRESHOLD = 0.6;
 
 function conflictComparableFactValue(value: unknown, profile: DocumentDomainProfile, isProcedural?: (raw: string) => boolean) {
-  const raw = stringifyFactValue(value).trim();
+  // C-T7 #4 兜底：名称+编号连读值以拆分后形态参与多源对账（净化门未覆盖的通道脏值在此归一，
+  // 防「名称 vs 名称+编号」被误报为多值冲突）
+  const raw = stripTrailingNameCodeBinding(stringifyFactValue(value).trim());
   if (isDiagnosticFactValue(profile, raw) || isForbiddenFactValue(profile, raw)) return '';
   if (hasCorruptTextMarkers(raw)) return '';
   // 纯结构过滤（表格行分隔/标题标记/引用跳转/内部摘要标记）保留正则：属结构判定而非语义判断
@@ -370,6 +372,18 @@ function conflictComparableFactValue(value: unknown, profile: DocumentDomainProf
   // 程序性词面命中 → bge 语义复核：与程序性原型余弦 ≥0.6 才过滤，实质条款句放行
   if (PROCEDURAL_LEXICAL_HINTS_RE.test(raw) && isProcedural?.(raw)) return '';
   return normalized;
+}
+
+/** 时间值形态分桶（D-T4 ④ 槽位对齐，r28f #3 归因）：「计划工期=90日历天」与「开工日期=2026年9月24日」
+ * 在周期要求域（schedule_requirement，aliases 含开工/竣工日期）归并后互比，时长与日期是不同槽位。
+ * 判定口径：仅当组内值全部可判形态且时长、日期并存时分桶各自比对（同形态多值照报，跨形态不报）；
+ * 含未判形态值或单一形态时维持全量互比口径，防真冲突被静默。 */
+const TEMPORAL_DURATION_VALUE_RE = /^\d+\s*个?\s*(?:日历天|天|个月|月|周|年)$/u;
+const TEMPORAL_DATE_VALUE_RE = /^20\d{2}\s*(?:年\s*\d{1,2}\s*月|[.\-/]\d{1,2}(?:[.\-/]|$))/u;
+function temporalValueKind(value: string): 'duration' | 'date' | 'plain' {
+  if (TEMPORAL_DURATION_VALUE_RE.test(value)) return 'duration';
+  if (TEMPORAL_DATE_VALUE_RE.test(value)) return 'date';
+  return 'plain';
 }
 
 function conflictComparableField(key: string, profile: DocumentDomainProfile) {
@@ -395,8 +409,17 @@ export async function detectFactConflicts(facts: DocumentFact[], spec?: AutoDocu
       if (!normalized) continue;
       values.set(normalized, [...(values.get(normalized) || []), item]);
     }
-    if (values.size > 1) {
-      const detail = [...values.values()].slice(0, 4).map(group => `${stringifyFactValue(group[0]!.value).slice(0, 120)}（${[...new Set(group.map(item => item.sourceFile))].slice(0, 3).join('、')}）`).join(' vs ');
+    if (values.size <= 1) continue;
+    // D-T4 ④ 槽位对齐（r28f #3 归因）：时长（90日历天）与日期（2026年9月24日）分属不同槽位，
+    // 跨形态不互比——组内值全部可判形态且两种形态并存时按形态分桶各自比对（同形态多值照报），
+    // 其余情形维持全量互比口径，防真冲突被静默
+    const kinds = new Set([...values.keys()].map(temporalValueKind));
+    const groups = kinds.size === 2 && !kinds.has('plain')
+      ? (['duration', 'date'] as const).map(kind => new Map([...values].filter(entry => temporalValueKind(entry[0]) === kind)))
+      : [values];
+    for (const group of groups) {
+      if (group.size <= 1) continue;
+      const detail = [...group.values()].slice(0, 4).map(groupItems => `${stringifyFactValue(groupItems[0]!.value).slice(0, 120)}（${[...new Set(groupItems.map(item => item.sourceFile))].slice(0, 3).join('、')}）`).join(' vs ');
       conflicts.push(`事实冲突：${key} 存在多个来源值：${detail}`);
     }
   }
@@ -431,6 +454,22 @@ export function normalizeOcrFactText(text: string) {
     .replace(/招标\s*控\s*制\s*价/gu, '招标控制价')
     .replace(/[：:]\s*/gu, '：')
     .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+/** 标签前缀剥离（C-T7：自 helpers/factCoverage 迁移单源）：「招标人：肥西县丰乐镇人民政府」类值
+ *  前缀剥离后与纯值同口径——基本信息表行、占位修复取值与事实落位检测三处共用。 */
+export function stripFactLabelPrefix(value: string) {
+  return value.replace(/^(?:招标人|招标单位|建设单位|发包人|项目名称|工程名称|项目编号|招标项目编号|标段名称|建设地点|建设规模|招标范围|计划工期|合同工期|质量标准|质量目标)[：:]\s*/u, '');
+}
+
+/** 名称+编号连读拆分（C-T7 #4 口径单源）：「项目名称」类值尾部粘连「2.2招标项目编号：2026AEEGZ50048」
+ *  形态（PDF 标题行/行内连读——r28f 实测 #4「名称 vs 名称+编号」多值冲突根因）——剥离「章节编号+
+ *  编号标签+编号码」尾段只保留名称前缀；编号事实由编号标签通道独立抽取（名称与编号各成独立事实再对账）。
+ *  编号字段值与无编号标签形态的普通值不受影响。 */
+export function stripTrailingNameCodeBinding(value: string) {
+  return value
+    .replace(/[（(【[]?\s*(?:\d{1,2}(?:[.．]\d{1,2}){0,3}\s*)?(?:招标项目编号|招标编号|项目编号|工程编号|标段编号|采购编号|项目代码)\s*[：:为是]?\s*[A-Za-z0-9][A-Za-z0-9\-_.（）()]{3,79}\s*[）)】\]]?\s*$/u, '')
     .trim();
 }
 
@@ -470,7 +509,9 @@ export function isValidProjectBasicFactValue(fieldId: string | undefined, rawVal
   // 质量标准只允许短词（合格/优良/一次验收合格）：逗号拼接创优残句（「合格，确保创优目标与奖」）拒收，
   // 创优目标由创优事实行承载，不进质量标准行
   if (fieldId === 'quality_standard') return value.length <= 40 && /合格|优良|一次性验收|国家.*验收|达到/u.test(value) && !/工期|投标|技术标准|\d[.．、]/u.test(value);
-  if (fieldId === 'owner') return value.length >= 4 && value.length <= 80 && /公司|局|委员会|中心|处|院|所|校|集团|有限|股份|责任|管理/u.test(value) && !/将报|监督管理部门|投标人|中标|负责解释|见招标|详见|空白|填写/u.test(value);
+  // C-T7（#50 归因）：机构后缀补「政府」族——「XX镇人民政府」不含原词表任一字被拒收，招标人事实
+  // 进不了基本信息表、正文零落位（r28f #50）；口径与 factGovernance.valueTypeScore.organization 对齐
+  if (fieldId === 'owner') return value.length >= 4 && value.length <= 80 && /公司|局|委员会|中心|处|院|所|校|集团|有限|股份|责任|管理|政府|管委会|办事处|指挥部/u.test(value) && !/将报|监督管理部门|投标人|中标|负责解释|见招标|详见|空白|填写/u.test(value);
   if (fieldId === 'project_location') return value.length <= 120 && !/见招标公告|详见|投标/u.test(value);
   if (fieldId === 'project_scope') return value.length <= 220 && !/^[（(]\s*\d+[)）]/u.test(value) && !/具备.{0,24}(?:证书|考核合格|安全生产考核)/u.test(value) && !/^见(?:招标|投标人|前附)/u.test(value);
   // 项目编号拒收「2026AEEGZ500482.3」形态（编号+PDF 序号粘连）与过短/过长值
@@ -618,6 +659,9 @@ export function sanitizeExtractedFacts(facts: DocumentFact[], evidence: Document
     const pollution = FACT_VALUE_POLLUTION_RE.exec(raw);
     let value = raw;
     if (pollution) value = raw.slice(0, pollution.index).replace(/[\s：:，,、;；\-—|]+$/u, '').trim();
+    // C-T7 #4：名称+编号连读拆分（「…建设项目2.2招标项目编号：E…」→「…建设项目」）——拆出的编号由
+    // 编号标签通道独立抽取为编号事实；编号字段自身不走此清洗（防误伤编号值）
+    if (!isSanitizeCodeField(fact)) value = stripTrailingNameCodeBinding(value);
     const truncated = value !== raw;
     if (value.length < 2) {
       stats.dropped += 1;
@@ -698,7 +742,8 @@ function isProjectBasicCommercialFact(text: string) {
   return /合同估算价|合同估算价格|投资估算|估算价格|工程估算价|项目估算价|最高投标限价|招标控制价/u.test(text);
 }
 
-function isGenerationExcludedFact(fact: DocumentFact) {
+/** 商务域事实排除（生成侧零写入红线单源；导出供 chapterParameterFacts C-T6 消费侧二次兜底） */
+export function isGenerationExcludedFact(fact: DocumentFact) {
   const text = factText(fact);
   if (isProjectBasicCommercialFact(text)) return false;
   return /投标保证金|发票类型|开标时间|公共资源交易监督管理|不良行为记录|投诉举报|资质投诉|投标承诺|违约金|中标服务费|交易平台|保证金账户|投标有效期|报价明细|投标报价|单价|合价|税率|增值税|利润|结算/u.test(text);

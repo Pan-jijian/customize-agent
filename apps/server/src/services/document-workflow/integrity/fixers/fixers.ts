@@ -140,6 +140,10 @@ export function fixTruncatedSentenceArtifacts(markdown: string): { markdown: str
     [/，、/gu, '，'],
     [/；、/gu, '；'],
     [/。{2,}/gu, '……'],
+    // r28h 扩围（r28h2 实测「宽度按3m、、、、等设计路幅控制」）：顿号叠用是并列条目/数值
+    // 删除后的残留形态，检测端 punctuationArtifactIssues 的 `[！？；：，、]{2,}` 已覆盖、
+    // 修复端此前缺口（修不掉即直坠终门禁）；收敛为单个顿号（与「。。」步骤同族，幂等）
+    [/、{2,}/gu, '、'],
   ];
   let result = markdown;
   let fixedCount = 0;
@@ -172,6 +176,32 @@ export function fixTruncatedSentenceArtifacts(markdown: string): { markdown: str
   }
   if (result === markdown) return { markdown, fixedCount: 0, details: [] };
   return { markdown: result, fixedCount, details: [`截断句残留清洗 ${fixedCount} 处`] };
+}
+
+/**
+ * r28h 扩围（s28h2 实机归因）：正文行内嵌标题拆行——LLM 输出把「## 第N章 …」「### N.M …」
+ * 标题并进正文行（「……有缺损。## 第九章 确保文明施工的技术组织措施」）：行首锚定的结构解析
+ * 全部失效——「正文缺少章节标题」（planned-structure）与 9.x 小节错挂第 8 章、目录缺节、
+ * 「正文出现未允许章节」连锁 blockers，且粘连行被判句尾截断。确定性拆行（仅插换行、零字词
+ * 改删、幂等零误伤：正文行内「# 群 + 空白」不是合法 Markdown 形态；行首标题行/表格行跳过）。
+ */
+export function fixEmbeddedHeadingLines(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+  const lines = markdown.split('\n');
+  const out: string[] = [];
+  let fixedCount = 0;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || /^#{1,6}\s+/u.test(trimmed) || /^\s*\|/u.test(line)) {
+      out.push(line);
+      continue;
+    }
+    out.push(line.replace(/([^\n])(#{2,6}\s+\S)/gu, (_match, prev: string, heading: string) => {
+      fixedCount += 1;
+      return `${prev}\n${heading}`;
+    }));
+  }
+  if (fixedCount === 0) return { markdown, fixedCount: 0, details: [] };
+  return { markdown: out.join('\n'), fixedCount, details: [`行内嵌标题拆行 ${fixedCount} 处`] };
 }
 
 // ── 9. 闭环句式密度上限（模板化）：闭环四词过度密集削弱语言精练度 ──
@@ -1800,7 +1830,9 @@ interface AmbiguousDecisionFix {
 }
 
 const AMBIGUOUS_DECISION_FIXES: AmbiguousDecisionFix[] = [
-  { from: /钢板桩或型钢支撑支护/gu, sides: [{ text: '钢板桩支护', keyword: /钢板桩/ }, { text: '型钢支撑支护', keyword: /型钢/ }], detail: '钢板桩型钢两可归一为钢板桩' },
+  // r26 实测补齐裸形态：「…无法放坡的段落采用钢板桩或型钢支撑，支撑安装…」无尾部「支护」
+  // （历史句式要求「支护」后缀，裸形态漏网至终检 blocker）——后缀可选化，两侧短语形态同归一
+  { from: /钢板桩或型钢支撑(?:支护)?/gu, sides: [{ text: '钢板桩支护', keyword: /钢板桩/ }, { text: '型钢支撑支护', keyword: /型钢/ }], detail: '钢板桩型钢两可归一为钢板桩' },
   // 4.32.0 扩围（丰乐镇复测 #78）：「沟槽开挖深度超过1.5m的区段采用钢板桩或木挡板支护」——
   // 沟槽支护形态两可（与「放坡或挡板支护」先例同源，按正文主流侧/权威supportForm 归一）
   { from: /钢板桩或木挡板支护/gu, sides: [{ text: '钢板桩支护', keyword: /钢板桩/ }, { text: '木挡板支护', keyword: /木挡板|挡板/ }], detail: '沟槽支护两可归一为钢板桩支护' },
@@ -1881,6 +1913,12 @@ const FORBIDDEN_CONFIG_FIXES: Array<{ from: RegExp; to: string; detail: string }
   // forbiddenTexts blocker——同口径并入正文级清洗（合法交叉引用后缀豁免与 containsForbiddenText 一致）
   { from: /按图纸(?!目录|清单|索引|汇总)/gu, to: '按施工图设计文件', detail: '正文「按图纸」留白改写' },
   { from: /见图纸(?!目录|清单|索引|汇总)/gu, to: '见施工图设计文件', detail: '正文「（详）见图纸」留白改写' },
+  // D-T4 ③ 选材纪律（r28f #20 归因）：招标资格承诺句与项目经理变更/开工令签发程序句被逐字转述
+  // 进技术标正文（实测出现在实名制管理节）——资格承诺与变更/签发程序属商务册职责；检测端 r28g
+  // 已按管控语言豁免自伤召回（非自伤），本通道按选材纪律做内容侧确定性清洗（B3/#20 类污染），
+  // 与「检测器豁免↔确定性通道不动」的 A6 自伤链契约不冲突（本通道不由自伤检测触发）
+  { from: /我方拟派项目经理目前无在岗项目[^。；;\n]{0,90}?能够从其他项目变更至本(?:招标)?项目并全面履约。?/gu, to: '项目经理按投标承诺及时到岗，全面负责本工程现场管理，在岗期间不兼任其他在建项目职务。', detail: '项目经理资格承诺转述改写为到岗履职表述' },
+  { from: /项目经理到岗后由公司人力资源部门办理原项目任职解除或变更手续，并在合同签订前将变更证明文件报建设单位核验[；;]项目经理未完成变更前，项目部不办理开工令签发，确保项目经理在本(?:招标)?项目全面履约。?/gu, to: '', detail: '项目经理变更/开工令签发程序转述删除' },
 ];
 
 /** 表格数据行留白改写规则（舒城第二轮实测：数据行照抄清单特征「建筑物檐口高度、层数：详见图纸」
@@ -2113,6 +2151,20 @@ export function fixInvertedDateRanges(markdown: string): { markdown: string; fix
     next = next.slice(0, hit.start) + next.slice(hit.start + dayMatch[0].length);
     details.push(source);
   }
+  return { markdown: next, fixedCount: details.length, details };
+}
+
+// ── 同日零长区间确定性修复（r28i/s28i 实机归因「预留开工后第360日至第360日」）──
+// 起止日相同的区间属笔误拼接（检测器 qualityValidation「同日起止区间校验」只报不修、owner=llm
+// 交修复轮但 LLM 未清）——删除重复端点保留单一时间点表述（「第360日至第360日」→「第360日」），
+// 句义完整零丢失。与检测器同源字符类 [~～—至到]；replace 全局替换引擎自管理游标，同句多处可收敛。
+
+export function fixZeroLengthDayRanges(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+  const details: string[] = [];
+  const next = markdown.replace(/第(\d{1,3})\s*日\s*[~～—至到]\s*第\1\s*日/gu, (match: string, day: string) => {
+    if (details.length < 12) details.push(`同日零长区间收敛：“${match.replace(/\s+/gu, '')}”→“第${day}日”`);
+    return `第${day}日`;
+  });
   return { markdown: next, fixedCount: details.length, details };
 }
 

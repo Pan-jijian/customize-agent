@@ -19,6 +19,11 @@
  * 确定性 + 语义同源；precise-fact-usage 用字面 token 口径；overview-recap 用复述判定）。
  * 收敛修复（蓝本同构）：每章最多 2 轮，残留数下降才继续下一轮；外层最多 2 周期（补写后 recompute
  * 语义重算新滑移出的残留再消费一轮）；修复落地后 rebuildFinalMarkdown + recomputeFinalValidationBundle。
+ *
+ * D-T1 扩展（第七类消费：专业评分不足强制补写链）：professional-score 报出线统一 8/12 后，
+ * <8/12 的章（warning 级）按 provenance 精确过滤同轮消费——chapterId 直连定位 + 六维分数实时
+ * 重算（professionalDepthTotal 单源口径）复检，薄弱维度随任务卡要求注入补写指令；补写预算单列
+ *（每章轮上限 + 单周期章数上限，防超预算），独立于六类 blocker 的每章 2 轮收敛框架。
  */
 import { displayStage, upsertProgressStage } from '../../progress';
 import { repairChapterByQuality, repairPatchGuard } from '../../rolePipeline';
@@ -26,7 +31,9 @@ import { withPatchRollback } from '../../patchRollback';
 import { divisionSectionDeficitCount, majorContentDeficitCount } from '../../constructionOrgQualityRules';
 import { normalizeEngineeringTextForFactMatch } from '../../engineeringUnits';
 import { emergencySectionDepthIssues } from '../../emergencySectionDepth';
-import { missingCriticalPreciseTokens } from '../../qualityValidation';
+import { missingCriticalPreciseTokens, professionalDepthTotal, professionalScoreTargetLine, professionalWeakDimensions, PROFESSIONAL_SCORE_LINE } from '../../qualityValidation';
+import type { DepthDimension } from '../../professionalDepthClassifier';
+import { assignMissingParameterChapters } from '../../chapterParameterFacts';
 import { overviewRecapCandidates, overviewRecapHit } from '../../integrity/detectors/detectors';
 import { criticalSectionDeficitTotal } from '../rebuildAndRecompute';
 import type { DocumentDraftChapter, ValidationIssue } from '../../types';
@@ -48,6 +55,11 @@ const MAX_CONTENT_DEPTH_REPAIR_ROUNDS = 2;
 /** 外层收敛周期上限（补写改写后 recompute 语义重算新报的残留需要再消费；首周期处理初检 blocker） */
 const MAX_CONTENT_DEPTH_REPAIR_CYCLES = 2;
 
+/** D-T1 专业评分补写预算（单列，防超预算——独立于六类内容深度补写的每章 2 轮收敛框架）：
+ * 单周期最多补写章数（按实时评分升序取最薄弱章优先）与每章专业补写轮上限 */
+const MAX_PROFESSIONAL_SCORE_REPAIR_CHAPTERS = 4;
+const MAX_PROFESSIONAL_SCORE_REPAIR_ROUNDS = 1;
+
 /** 章级待办项：一条深度类 blocker 的修复素材（按检测器类别承载不同定位载荷） */
 interface ChapterTodo {
   detectorId: string;
@@ -56,7 +68,20 @@ interface ChapterTodo {
   pendingTokens?: string[];
   /** overview-recap：本章须删除/改写的复述句 */
   pendingSentences?: string[];
+  /** professional-score：本章须定向补写的六维薄弱维度（D-T1，任务卡要求随指令注入） */
+  weakDimensions?: DepthDimension[];
 }
+
+/** D-T1 六维薄弱维度 → 任务卡驱动补写要求（与 professionalDepthClassifier 六维锚点语义同族；
+ * 方案任务卡要素：资料依据/实施流程/专业控制点/检查整改闭环/资源进场调配/项目特异性） */
+const DEPTH_DIMENSION_REQUIREMENTS: Record<DepthDimension, string> = {
+  factuality: '资料依据：引用绑定资料、清单与图纸中的具体数值和工程事实，数据口径与绑定资料一致',
+  structure: '实施流程：按施工准备、工艺流程、施工方法、验收标准的顺序组织，写出工序步骤与衔接关系',
+  depth: '专业控制点：写出关键工序控制点、工艺参数、隐蔽工程验收与检验批划分',
+  executable: '可执行性：明确责任主体、检查频次、记录台账与资源进场调配安排',
+  specificity: '项目特异性：结合本项目建设地点、工程规模与计划工期展开，引用本项目工程量数据',
+  consistency: '跨章一致性：工期、质量、安全数据口径与总进度计划和质量目标相互呼应',
+};
 
 /** 参数 token → 目标章匹配表（factLanding 同族口径：类别关键词映射章标题关键词） */
 const PRECISE_TOKEN_CHAPTER_MATCHERS: Array<[RegExp, RegExp]> = [
@@ -92,6 +117,33 @@ const normalizedFor = (text: string) => text.replace(/\s+/gu, '');
 /** blocker 过滤单源（周期循环每轮以最新 validationIssues 为准） */
 function contentDepthBlockers(session: FinalizeSession): ValidationIssue[] {
   return session.validationIssues.filter(issue => issue.severity === 'blocker' && issue.provenance && CONTENT_DEPTH_DETECTOR_IDS.has(issue.provenance.detectorId));
+}
+
+/**
+ * D-T1 专业评分不足（<8/12）目标章收集：provenance 精确过滤（warning 级，非 blocker）→ 逐章
+ * analyze 实时重算六维分数（与检测端单源口径）→ 快照过期已达线章剔除 → 分数升序取最薄弱章 →
+ * 预算截断（单周期章数上限）。返回 issue + 章 id + 薄弱维度（任务卡指令载荷）。
+ */
+async function professionalScoreTargets(session: FinalizeSession): Promise<Array<{ issue: ValidationIssue; chapterId: string; weakDimensions: DepthDimension[] }>> {
+  const warnings = session.validationIssues.filter(issue => issue.provenance?.detectorId === 'professional-score' && issue.chapterId);
+  if (warnings.length === 0) return [];
+  const scored: Array<{ issue: ValidationIssue; chapterId: string; total: number; weakDimensions: DepthDimension[] }> = [];
+  const seen = new Set<string>();
+  for (const issue of warnings) {
+    const chapterId = issue.chapterId;
+    if (!chapterId || seen.has(chapterId)) continue;
+    seen.add(chapterId);
+    const draft = session.finalChapterDrafts.find(chapter => chapter.id === chapterId);
+    if (!draft) continue;
+    const analysis = await session.professionalDepthClassifier.analyze(draft.content);
+    if (!analysis) continue;
+    const total = professionalDepthTotal(analysis.dimensions);
+    // 靶线按章判定（资源类章 ≥10/12，其余 ≥8/12；与检测端 professionalScoreTargetLine 单源）
+    if (total >= professionalScoreTargetLine(draft.title)) continue;
+    scored.push({ issue, chapterId, total, weakDimensions: professionalWeakDimensions(analysis.dimensions) });
+  }
+  scored.sort((left, right) => left.total - right.total);
+  return scored.slice(0, MAX_PROFESSIONAL_SCORE_REPAIR_CHAPTERS);
 }
 
 const blockerCount = (issues: ValidationIssue[]) => issues.filter(issue => issue.severity === 'blocker').length;
@@ -161,6 +213,14 @@ async function chapterClassResidual(session: FinalizeSession, chapterIndex: numb
     }
     case 'overview-recap':
       return countRecapSentences(content, overview);
+    case 'professional-score': {
+      // D-T1 复检：重算六维语义评分（professionalDepthTotal 单源口径），残差=章级靶线缺口
+      //（分数上升即残差下降，与其余类同一收敛框架；无内容可分析=零残差跳过）
+      const analysis = await session.professionalDepthClassifier.analyze(content);
+      if (!analysis) return 0;
+      const line = professionalScoreTargetLine(session.finalChapterDrafts[chapterIndex].title);
+      return Math.max(0, line - professionalDepthTotal(analysis.dimensions));
+    }
     default:
       return 0;
   }
@@ -180,10 +240,10 @@ async function chapterResidual(session: FinalizeSession, chapterIndex: number, t
 }
 
 /** 定向补写指令：逐条缺陷原文 + 类别定制补写要求 + 局部修改约束（反条幅、禁编造） */
-function instructionFor(draftChapter: DocumentDraftChapter, todos: ChapterTodo[], round: number): string {
+function instructionFor(draftChapter: DocumentDraftChapter, todos: ChapterTodo[], round: number, roundCap: number): string {
   const lines: string[] = [
     '【内容深度定向补写修复】',
-    ...(round > 1 ? [`本轮为第 ${round} 轮（最多 ${MAX_CONTENT_DEPTH_REPAIR_ROUNDS} 轮）：上一轮补写后复检仍有残留，请针对下列缺口严格补足。`] : []),
+    ...(round > 1 ? [`本轮为第 ${round} 轮（最多 ${roundCap} 轮）：上一轮补写后复检仍有残留，请针对下列缺口严格补足。`] : []),
     `下列内容深度类验收缺陷是《${draftChapter.title}》导出前的阻断项，请逐条定向修复：`,
     '1. 补写内容必须落到绑定资料/清单/图纸中的具体数值与工程事实，保持原始数值与单位，不得编造参数、不得空泛套话；',
     '2. 只做局部修改：优先在对应小节内扩写补实，或在最合适的位置并入补写段落；不得新增、删除或合并小节，不得改动无关内容；',
@@ -193,6 +253,9 @@ function instructionFor(draftChapter: DocumentDraftChapter, todos: ChapterTodo[]
     const head = `- [${todo.detectorId}] ${todo.issue.message}`;
     const advice = todo.issue.suggestion ? `（补充要求：${todo.issue.suggestion}）` : '';
     lines.push(`${head}${advice}`);
+    if (todo.weakDimensions && todo.weakDimensions.length > 0) {
+      lines.push(`  本章专业深度评分薄弱维度定向补写（按序落实）：${todo.weakDimensions.map(dimension => DEPTH_DIMENSION_REQUIREMENTS[dimension]).join('；')}。`);
+    }
     if (todo.pendingTokens && todo.pendingTokens.length > 0) {
       lines.push(`  本章负责补齐的关键工程参数：${todo.pendingTokens.join('、')}。请自然写入本章对应位置，必须逐字保留原文形态（数字、单位、编号中的连字符与年份不得改写、拆写或省略）；规范编号无法确认规范名称时只写编号并表述为现行国家（行业）标准，不得编造规范名称。`);
     }
@@ -204,16 +267,19 @@ function instructionFor(draftChapter: DocumentDraftChapter, todos: ChapterTodo[]
 }
 
 /**
- * 章级分组：blocker → ChapterTodo（按定位通道分配目标章）。
+ * 章级分组：blocker + 专业评分不足（D-T1，warning 级）→ ChapterTodo（按定位通道分配目标章）。
  * 返回 [章索引, todos] 映射与未定位计数（未定位项由终门禁照常复核）。
  */
-function groupBlockersByChapter(session: FinalizeSession, blockers: ValidationIssue[]): { byChapter: Map<number, ChapterTodo[]>; unlocated: number } {
+function groupBlockersByChapter(session: FinalizeSession, blockers: ValidationIssue[], scoreWeakDimensions: Map<string, DepthDimension[]>): { byChapter: Map<number, ChapterTodo[]>; unlocated: number } {
   const byChapter = new Map<number, ChapterTodo[]>();
   let unlocated = 0;
   const chapters = session.finalChapterDrafts;
   // precise-fact-usage 缺失池重算一次（惰性：仅当确有该类 blocker 时）
   const hasPreciseUsage = blockers.some(issue => issue.provenance?.detectorId === 'precise-fact-usage');
   const missingTokens = hasPreciseUsage ? missingCriticalPreciseTokens(session.finalMarkdown, session.factsModel, chapters) : [];
+  // C-T6 可靠参数义务补写：相关而遗漏的可靠参数（有责任章但正文未使用）按最相关章分配目标章，
+  // 与关键参数缺失池同轮消费（参数池已在构建时排除商务金额/单价/税率/预留金类事实）
+  const missingParameterTasks = hasPreciseUsage ? assignMissingParameterChapters(session.finalMarkdown, session.factsModel, chapters) : new Map<number, string[]>();
   // overview-recap 复述句重算一次（惰性：定位通道依赖现行文本的复述命中）
   const hasRecap = blockers.some(issue => issue.provenance?.detectorId === 'overview-recap');
   const recapSentences = hasRecap ? overviewRecapCandidates(session.finalMarkdown).sentences : [];
@@ -231,11 +297,12 @@ function groupBlockersByChapter(session: FinalizeSession, blockers: ValidationIs
       unlocated += 1;
       continue;
     }
-    // 通道 1：chapterId 直连（critical-section-depth / construction-org-*）
+    // 通道 1：chapterId 直连（critical-section-depth / construction-org-* / professional-score）
     if (issue.chapterId) {
       const index = chapters.findIndex(chapter => chapter.id === issue.chapterId);
       if (index >= 0) {
-        push(index, { detectorId, issue });
+        // D-T1：专业评分不足的章随 todo 注入薄弱维度（任务卡定向补写要求），其余类缺省
+        push(index, { detectorId, issue, weakDimensions: scoreWeakDimensions.get(issue.chapterId) });
         continue;
       }
     }
@@ -250,20 +317,29 @@ function groupBlockersByChapter(session: FinalizeSession, blockers: ValidationIs
     // 通道 3：precise-fact-usage 参数类别映射（缺失池首次命中时分配；与关键参数抽查同源重算）
     if (detectorId === 'precise-fact-usage' && !tokensAssigned) {
       tokensAssigned = true;
-      if (missingTokens.length > 0) {
-        let assignedAny = false;
-        for (const token of missingTokens) {
-          const matcher = PRECISE_TOKEN_CHAPTER_MATCHERS.find(([tokenRe]) => tokenRe.test(token));
-          const matchedIndex = matcher ? chapters.findIndex(chapter => matcher[1].test(chapter.title)) : -1;
-          // 无匹配章回退默认承载章（r9 #12 根治）：此前 index<0 直接 continue 丢弃，
-          // 规范编号类 token（章集无「依据/规范/标准」标题）零归属、修复轮零消费
-          const index = matchedIndex >= 0 ? matchedIndex : promptChapterFallbackIndex(chapters);
-          if (index < 0) continue;
-          push(index, { detectorId, issue, pendingTokens: [token] });
+      let assignedAny = false;
+      const assignedTokenText = new Set<string>();
+      for (const token of missingTokens) {
+        const matcher = PRECISE_TOKEN_CHAPTER_MATCHERS.find(([tokenRe]) => tokenRe.test(token));
+        const matchedIndex = matcher ? chapters.findIndex(chapter => matcher[1].test(chapter.title)) : -1;
+        // 无匹配章回退默认承载章（r9 #12 根治）：此前 index<0 直接 continue 丢弃，
+        // 规范编号类 token（章集无「依据/规范/标准」标题）零归属、修复轮零消费
+        const index = matchedIndex >= 0 ? matchedIndex : promptChapterFallbackIndex(chapters);
+        if (index < 0) continue;
+        push(index, { detectorId, issue, pendingTokens: [token] });
+        assignedTokenText.add(token);
+        assignedAny = true;
+      }
+      // C-T6 相关而遗漏的可靠参数：按章相关性直接定位目标章（与关键参数缺失池去重后同轮消费）
+      for (const [index, values] of missingParameterTasks) {
+        for (const value of values) {
+          if (assignedTokenText.has(value)) continue;
+          push(index, { detectorId, issue, pendingTokens: [value] });
+          assignedTokenText.add(value);
           assignedAny = true;
         }
-        if (assignedAny) continue;
       }
+      if (assignedAny) continue;
       // 关键参数池不可用（bills/drawings 类 error 或池过小）：按正文承载章关键词分配
       const fallbackRe = /正文未体现结构化数据资料/u.test(issue.message) ? /主要施工|分部分项|施工方法/u : /依据|概况|施工方案|主要施工/u;
       const index = chapters.findIndex(chapter => fallbackRe.test(chapter.title));
@@ -302,6 +378,7 @@ function groupBlockersByChapter(session: FinalizeSession, blockers: ValidationIs
 
 export async function stageContentDepthRepair(session: FinalizeSession): Promise<void> {
   let firstCycleBlockerCount = 0;
+  let firstCycleScoreCount = 0;
   let unlocatedTotal = 0;
   let repairedChaptersTotal = 0;
   let resolvedTotal = 0;
@@ -309,9 +386,11 @@ export async function stageContentDepthRepair(session: FinalizeSession): Promise
   for (let cycle = 1; cycle <= MAX_CONTENT_DEPTH_REPAIR_CYCLES; cycle += 1) {
     // 输入=检测链最新 blocker（六类内容深度 detectorId 精确过滤，不依赖 message 文案）
     const blockerIssues = contentDepthBlockers(session);
-    if (blockerIssues.length === 0) {
+    // D-T1：专业评分不足（<8/12，warning 级）目标章同轮消费（预算单列，与 blocker 合并章级定位）
+    const scoreTargetList = await professionalScoreTargets(session);
+    if (blockerIssues.length === 0 && scoreTargetList.length === 0) {
       if (cycle === 1) {
-        const passStage = displayStage({ type: 'validation', roleId: 'content-depth-repair', status: 'success', message: '内容深度验收通过：六类内容深度检测器均未报阻断' }, { subtitle: '内容深度补写核验' });
+        const passStage = displayStage({ type: 'validation', roleId: 'content-depth-repair', status: 'success', message: '内容深度验收通过：内容深度检测器与专业评分均未报阻断' }, { subtitle: '内容深度补写核验' });
         upsertProgressStage(session.progressStages, passStage);
         upsertProgressStage(session.finalGateRepairStages, passStage);
         session.emitProgress(session.finalChapterDrafts, session.progressStages);
@@ -320,13 +399,17 @@ export async function stageContentDepthRepair(session: FinalizeSession): Promise
       // 收敛周期后清零：终态无残留，循环收口
       break;
     }
-    if (cycle === 1) firstCycleBlockerCount = blockerIssues.length;
+    if (cycle === 1) {
+      firstCycleBlockerCount = blockerIssues.length;
+      firstCycleScoreCount = scoreTargetList.length;
+    }
     const cycleLabel = cycle > 1 ? `（收敛周期 ${cycle}/${MAX_CONTENT_DEPTH_REPAIR_CYCLES}：处理上轮补写后重算新报残留）` : '';
-    const { byChapter, unlocated } = groupBlockersByChapter(session, blockerIssues);
+    const scoreWeakDimensions = new Map(scoreTargetList.map(target => [target.chapterId, target.weakDimensions]));
+    const { byChapter, unlocated } = groupBlockersByChapter(session, [...blockerIssues, ...scoreTargetList.map(target => target.issue)], scoreWeakDimensions);
     unlocatedTotal += unlocated;
     if (byChapter.size === 0) {
       if (cycle === 1) {
-        const failedStage = displayStage({ type: 'validation', roleId: 'content-depth-repair', status: 'failed', message: `内容深度补写无法定位目标章：${blockerIssues.length} 条阻断均未匹配到章节锚点（由终门禁照常复核）` }, { subtitle: '内容深度补写核验' });
+        const failedStage = displayStage({ type: 'validation', roleId: 'content-depth-repair', status: 'failed', message: `内容深度补写无法定位目标章：${blockerIssues.length + scoreTargetList.length} 条缺口均未匹配到章节锚点（由终门禁照常复核）` }, { subtitle: '内容深度补写核验' });
         upsertProgressStage(session.progressStages, failedStage);
         upsertProgressStage(session.finalGateRepairStages, failedStage);
         session.emitProgress(session.finalChapterDrafts, session.progressStages);
@@ -345,13 +428,18 @@ export async function stageContentDepthRepair(session: FinalizeSession): Promise
       let rounds = 0;
       let chapterRepaired = false;
       let anyRollback = false;
+      // D-T1 专业评分补写预算单列：仅专业 todo 的章每章 1 轮；含 blocker 类时仍 2 轮（专业类第 1 轮后退出）
+      const hasBlockerTodos = todos.some(todo => todo.detectorId !== 'professional-score');
+      const roundCap = hasBlockerTodos ? MAX_CONTENT_DEPTH_REPAIR_ROUNDS : MAX_PROFESSIONAL_SCORE_REPAIR_ROUNDS;
       const residualTrajectory = [beforeResidual];
       const roleId = `agent-content-depth-repair-${draftChapter.id}`;
-      while (rounds < MAX_CONTENT_DEPTH_REPAIR_ROUNDS) {
+      while (rounds < roundCap) {
         rounds += 1;
         // 活动待办刷新：逐类以实时残差过滤（已清零的类不再注入修复指令；参数类同步收缩待补列表）
         const activeTodos: ChapterTodo[] = [];
         for (const todo of todos) {
+          // D-T1 专业评分补写预算单列：超过每章轮上限后不再注入（其余类不受影响）
+          if (todo.detectorId === 'professional-score' && rounds > MAX_PROFESSIONAL_SCORE_REPAIR_ROUNDS) continue;
           if (todo.detectorId === 'precise-fact-usage') {
             const still = (todo.pendingTokens ?? []).filter(token => tokenMissingFrom(chapterContent, token));
             if (still.length > 0) activeTodos.push({ ...todo, pendingTokens: still });
@@ -361,7 +449,7 @@ export async function stageContentDepthRepair(session: FinalizeSession): Promise
           if (residual > 0) activeTodos.push(todo);
         }
         if (activeTodos.length === 0) break;
-        const runningStage = displayStage({ type: 'llm_review', roleId, status: 'running', message: `内容深度补写中${cycleLabel}（第 ${rounds}/${MAX_CONTENT_DEPTH_REPAIR_ROUNDS} 轮）：${draftChapter.title}（${activeTodos.length} 类缺口）`, details: activeTodos.map(todo => `缺口：${todo.issue.message.slice(0, 80)}`), }, { subtitle: '内容深度补写核验' });
+        const runningStage = displayStage({ type: 'llm_review', roleId, status: 'running', message: `内容深度补写中${cycleLabel}（第 ${rounds}/${roundCap} 轮）：${draftChapter.title}（${activeTodos.length} 类缺口）`, details: activeTodos.map(todo => `缺口：${todo.issue.message.slice(0, 80)}`), }, { subtitle: '内容深度补写核验' });
         upsertProgressStage(session.progressStages, runningStage);
         upsertProgressStage(session.finalGateRepairStages, runningStage);
         session.emitProgress(session.finalChapterDrafts, session.progressStages);
@@ -375,7 +463,7 @@ export async function stageContentDepthRepair(session: FinalizeSession): Promise
               template: session.template,
               chapter: { id: draftChapter.id, title: draftChapter.title, content: chapterContent, evidence: draftChapter.evidence, missingFacts: draftChapter.missingFacts, sections: draftChapter.sections },
               issues: activeTodos.map(todo => `${todo.issue.message}｜${todo.issue.suggestion || ''}`),
-              promptTexts: instructionFor(draftChapter, activeTodos, rounds),
+              promptTexts: instructionFor(draftChapter, activeTodos, rounds, roundCap),
               requirement: session.requirement,
               forbidDrawingImages: false,
               // 标书编制规格（暗标禁表）：修复链 system 口径同步
@@ -396,7 +484,7 @@ export async function stageContentDepthRepair(session: FinalizeSession): Promise
         const afterResidual = outcome.afterMetrics[0] ?? await chapterResidual(session, chapterIndex, todos, chapterContent, overview);
         residualTrajectory.push(afterResidual);
         // 收敛判定：清零即通过；未下降（含回滚/空修复）即停止；下降且未达上限 → 再修一轮
-        if (afterResidual === 0 || afterResidual >= beforeResidual || rounds >= MAX_CONTENT_DEPTH_REPAIR_ROUNDS) break;
+        if (afterResidual === 0 || afterResidual >= beforeResidual || rounds >= roundCap) break;
         beforeResidual = afterResidual;
       }
       if (chapterRepaired) repairedChapters += 1;
@@ -422,13 +510,15 @@ export async function stageContentDepthRepair(session: FinalizeSession): Promise
       // 本周期无修复落地（全部回滚/未生效/防御跳过）：同样内容再补写无意义，停止外层循环
       break;
     }
-    // 外层收敛判定：recompute 后的最新残留（含语义通道复验）；清零或未下降即停止，下降则再跑一个收敛周期
+    // 外层收敛判定：recompute 后的最新残留（含语义通道复验）与专业评分缺口（预算截断后）
+    // 合计清零或未下降即停止，下降则再跑一个收敛周期
     const residualIssues = contentDepthBlockers(session);
-    if (residualIssues.length === 0 || residualIssues.length >= blockerIssues.length) break;
+    const residualScoreCount = (await professionalScoreTargets(session)).length;
+    if (residualIssues.length + residualScoreCount === 0 || residualIssues.length + residualScoreCount >= blockerIssues.length + scoreTargetList.length) break;
   }
   // 终态残留=重算后检测链最新 blocker 数（含语义通道复验，口径比确定性复检更宽松）
   const residualBlockers = contentDepthBlockers(session);
-  if (repairedInAnyCycle || firstCycleBlockerCount > 0) {
-    session.generationDiagnostics.llm.lastInfo = `内容深度定向补写：初检 ${firstCycleBlockerCount} 项深度类阻断（定位 ${firstCycleBlockerCount - Math.min(unlocatedTotal, firstCycleBlockerCount)} 项${unlocatedTotal > 0 ? `，未定位 ${unlocatedTotal} 项` : ''}），章级定向补写（每章最多 ${MAX_CONTENT_DEPTH_REPAIR_ROUNDS} 轮收敛修复，收敛周期上限 ${MAX_CONTENT_DEPTH_REPAIR_CYCLES}），${repairedChaptersTotal} 章次落地，本次消解 ${resolvedTotal} 项缺口，终态残留 ${residualBlockers.length} 项（由终门禁照常复核）`;
+  if (repairedInAnyCycle || firstCycleBlockerCount > 0 || firstCycleScoreCount > 0) {
+    session.generationDiagnostics.llm.lastInfo = `内容深度定向补写：初检 ${firstCycleBlockerCount} 项深度类阻断${firstCycleScoreCount > 0 ? `、${firstCycleScoreCount} 章专业评分不足（补写线 ${PROFESSIONAL_SCORE_LINE}/12，资源类章 10/12）` : ''}（定位 ${firstCycleBlockerCount - Math.min(unlocatedTotal, firstCycleBlockerCount)} 项${unlocatedTotal > 0 ? `，未定位 ${unlocatedTotal} 项` : ''}），章级定向补写（六类每章最多 ${MAX_CONTENT_DEPTH_REPAIR_ROUNDS} 轮 + 专业评分每章最多 ${MAX_PROFESSIONAL_SCORE_REPAIR_ROUNDS} 轮/单周期最多 ${MAX_PROFESSIONAL_SCORE_REPAIR_CHAPTERS} 章，收敛周期上限 ${MAX_CONTENT_DEPTH_REPAIR_CYCLES}），${repairedChaptersTotal} 章次落地，本次消解 ${resolvedTotal} 项缺口，终态残留 ${residualBlockers.length} 项（由终门禁照常复核）`;
   }
 }

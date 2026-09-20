@@ -11,22 +11,23 @@ import { arbitrateNumericConflicts } from './numericConflictArbiter';
 import type { BillFactLock } from './billFactLock';
 import { blueprintCitationVerdict, rebaseCitationAnchorsForChapters, type BlueprintCitationAdjudicationSummary, type BlueprintData, type QuantityConflictAnchor } from './integratedBlueprint';
 import { blueprintEquipmentAuthorities, blueprintLaborPeakAuthority, blueprintPhaseLaborAuthorities, blueprintQuantityGroupAuthorities, buildAuthorityIndex } from './authorityIndex';
-import { applyDeterministicConsistencyFixes, collectSectionContentGaps, crossChapterConsistencyIssues, processSpecConflictIssues } from './qualityValidation';
+import { applyDeterministicConsistencyFixes, classifyThematicSectionKey, collectSectionContentGaps, crossChapterConsistencyIssues, emptyUnplannedSectionSpans, normalizeSectionTitleForGap, processSpecConflictIssues } from './qualityValidation';
 import { professionalSectionTaskCard } from './promptRuleExtraction';
 import { reviewGlobalConsistency } from './chapterReview';
 import { dataConsistencyConflictIssue, reviewDataConsistency } from './dataConsistencyReview';
 import { tablePlanExecutionGaps } from './constructionOrgTablePlan';
 import { measureGenerationStep, repairChapterByQuality, repairPatchGuard } from './rolePipeline';
 import { withPatchRollback } from './patchRollback';
-import { fillerSentenceTargets, stripZeroInfoSloganSentences } from './constructionOrgAudit';
-import { difficultyCountermeasureReport, fillerDensityReport } from './tenderBidChecks';
+import { fillerSentenceTargets, stripZeroInfoSloganSentences, templatePrefixTargets } from './constructionOrgAudit';
+import { difficultyCountermeasureReport, fillerDensityReport, scanTemplatePrefixSentences } from './tenderBidChecks';
 import { missingWorkPackageSkeletonTitles, stripEmptyWorkPackageHeadings, stripTablesInSection, workPackageSkeletonTitles } from './chapterPostProcessing';
 import { DIVISION_SECTION_RE } from './writingSpec';
 import { majorContentGovernanceIssues, perPackageContentElementIssues } from './constructionOrgQualityRules';
 import { flowFormRepairTargets, isStructuralLabelTitle, skeletonFingerprintRepairTargets, titleRepairTargets } from './templatingGovernance';
 import { bodyTableDismantleIssue, isBodyTableForbidden, type BidCompositionSpec } from './bidComposition';
-import { countMarkdownTables, extractMarkdownTableTextBlocks } from './markdownComposer';
-import { nearSubsectionTitleMatch, normalizeSubsectionTitleForDedup, sectionHeadingTitleText } from './utils';
+import { countMarkdownTables, extractGeneratedSections, extractMarkdownTableTextBlocks } from './markdownComposer';
+import { nearSubsectionTitleMatch, normalizeSubsectionTitleForDedup, sectionHeadingTitleText, WORK_PACKAGE_SECTION_RE } from './utils';
+import { renumberSectionHeadings } from './structureIntegrityRules';
 
 export type EmitProgressFn = (checkpointChapters?: DocumentDraftChapter[], stages?: DocumentExecutionStage[]) => void;
 export type WithProgressHeartbeatFn = <T>(work: () => Promise<T>) => Promise<T>;
@@ -287,7 +288,7 @@ export async function repairTableExecutionGaps(input: {
           })
           : draft.evidence;
         const baseChapter = { id: draft.id, title: draft.title, content: draft.content, evidence: scopedEvidence.length ? scopedEvidence : draft.evidence, missingFacts: draft.missingFacts || [], sections: draft.sections };
-        const baseIssue = `计划表格缺失（计划 ${gap.planned} 张，实际仅 ${gap.actual} 张）：${gap.plans.map(plan => `${plan.title}（表头：${plan.fields.map(field => field.name).join('、')}）`).join('；')}。必须按表头字段补齐这些 markdown 表格并紧跟相关小节输出，不得删除已有正文；每个表格前须有 1～2 句引导叙述说明表格作用与关键结论，表格不能替代小节正文；表格内项目特有数字、日期、工程量、规格必须来自项目资料或项目图谱，不得编造；人数、台班、进度时间等计划类数值必须原样引用蓝图权威锚点（劳动力峰值、工种构成、分阶段投入、机械台数、总工期节点），不得基于工程量或定额自行推算另设，不得留空、不得写“按需配置”等空话。`;
+        const baseIssue = `计划表格缺失（本章计划 ${gap.planned} 张，正文实际检出 ${gap.actual} 张）：${gap.plans.map(plan => `${plan.title}（表头：${plan.fields.map(field => field.name).join('、')}）`).join('；')}。必须按表头字段补齐这些 markdown 表格并紧跟相关小节输出，不得删除已有正文；每个表格前须有 1～2 句引导叙述说明表格作用与关键结论，表格不能替代小节正文；表格内项目特有数字、日期、工程量、规格必须来自项目资料或项目图谱，不得编造；人数、台班、进度时间等计划类数值必须原样引用蓝图权威锚点（劳动力峰值、工种构成、分阶段投入、机械台数、总工期节点），不得基于工程量或定额自行推算另设，不得留空、不得写“按需配置”等空话。`;
         // 并行修复共享 diagnostics.llm.lastError，重试提示中的失败原因存在轻微串章竞争（仅影响诊断文案，不影响修复正确性）
         // P12 回滚保护：补表修复后同源复检该章计划表格缺口数（tablePlanExecutionGaps 章级隔离），
         // 缺口不降反升（LLM 乱删既有表格）即回滚保留修复前正文
@@ -295,7 +296,7 @@ export async function repairTableExecutionGaps(input: {
           originalContent: draft.content,
           repairRound: 'table-execution-repair',
           diagnostics: generationDiagnostics,
-          beforeMetrics: [Math.max(0, gap.planned - gap.actual)],
+          beforeMetrics: [gap.plans.length],
           apply: async () => {
             const repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `table-execution-repair:${draft.id}`, () => repairChapterByQuality({
               template,
@@ -317,7 +318,7 @@ export async function repairTableExecutionGaps(input: {
             // 章级隔离复检：以修复后章内容替换该章草稿重算计划表格缺口（同源检测，跨章缺口不受并发修复影响）
             const replacedDrafts = chapterDraftsFinal.map(item => item.id === draft.id ? { title: item.title, content, sections: item.sections } : item);
             const nextGaps = tablePlanExecutionGaps(effectiveChapters, replacedDrafts).filter(item => item.chapterTitle === draft.title || item.chapterTitle === gap.chapterTitle || draft.title.includes(item.chapterTitle) || item.chapterTitle.includes(draft.title));
-            return [nextGaps.reduce((sum, item) => sum + Math.max(0, item.planned - item.actual), 0)];
+            return [nextGaps.reduce((sum, item) => sum + item.plans.length, 0)];
           },
         });
         // 4.17.8 补表失败重试删除：每章单次尝试（失败即放弃）——重试轮是修复 token 主力军的组成部分
@@ -410,20 +411,26 @@ export async function repairTemplatingIssues(input: {
     const skeletonTargets = skeletonFingerprintRepairTargets(fullMarkdown);
     const flowTargets = flowFormRepairTargets(fullMarkdown);
     const titleTargets = titleRepairTargets(fullMarkdown);
+    // D-T7 ①：模板化前缀句（「本节/本章将…」元话语导语）修复目标——检测端 formalStyleIssues
+    // 同源判定（scanTemplatePrefixSentences 句池 + isTemplatePrefixSentence 词首词表）
+    const prefixTargets = templatePrefixTargets(chapterDraftsFinal);
     const needsSkeletonFix = skeletonTargets.length > 0;
     const needsFlowFix = flowTargets.length > 0;
     const needsTitleFix = titleTargets.length > 0;
-    if (!needsFillerFix && !needsDifficultyFix && !needsSkeletonFix && !needsFlowFix && !needsTitleFix) break;
+    const needsPrefixFix = prefixTargets.length > 0;
+    if (!needsFillerFix && !needsDifficultyFix && !needsSkeletonFix && !needsFlowFix && !needsTitleFix && !needsPrefixFix) break;
     // C2 句级定点治理：零信息纯口号句（semantic 通道 + 零信息硬闸）先走确定性删除——
     // 删除是无损净化（不承载可核查信息）且无 LLM 随机性；删除后正文与快照为本轮回滚基线，
     // LLM 修复变差回滚时保留删除成果（删除不参与回滚，F2 判定语义逐字保持）；
     // 剩余命中句（vague 通道 / 含信息或合规承诺句）交 LLM 锚点具体化重写
     const sentenceTargets = needsFillerFix ? await fillerSentenceTargets(chapterDraftsFinal) : [];
-    const stripped = needsFillerFix
+    // D-T7 ①：前缀句并入同一删除池——零信息前缀句即删，含信息句进 remaining 交 LLM 去前缀改写
+    if (needsPrefixFix) sentenceTargets.push(...prefixTargets);
+    const stripped = sentenceTargets.length > 0
       ? stripZeroInfoSloganSentences(chapterDraftsFinal, sentenceTargets)
       : { deletedCount: 0, deletedSentences: [] as string[], remaining: sentenceTargets };
     if (stripped.deletedCount > 0) {
-      console.error(`[gen][templating] 零信息口号句确定性删除 ${stripped.deletedCount} 处：${stripped.deletedSentences.slice(0, 3).join(' / ')}${stripped.deletedSentences.length > 3 ? ' 等' : ''}`);
+      console.error(`[gen][templating] 零信息句（口号/前缀）确定性删除 ${stripped.deletedCount} 处：${stripped.deletedSentences.slice(0, 3).join(' / ')}${stripped.deletedSentences.length > 3 ? ' 等' : ''}`);
     }
     // F2 回滚保护（P12 泛化）：修复前正文快照 + 同源复检 + 变差即回滚统一收敛到 withPatchRollback——
     // 历史缺陷（丰乐镇第五轮）：修复后套话句占比 27.5%→32.0% 不降反升（LLM 重写产出的新句仍命中语义原型），
@@ -440,26 +447,29 @@ export async function repairTemplatingIssues(input: {
       return chapter ? [{ chapter, text: entry.text, missingAttribution: !entry.attributed, missingTarget: !entry.quantified }] : [];
     });
     const targets = chapterDraftsFinal.flatMap(chapter => {
-      const sentences = stripped.remaining.filter(target => (target.chapterId || target.chapterTitle) === (chapter.id || chapter.title)).map(target => target.sentence);
+      const kept = stripped.remaining.filter(target => (target.chapterId || target.chapterTitle) === (chapter.id || chapter.title));
+      const sentences = kept.filter(target => target.channel !== 'prefix').map(target => target.sentence);
+      const prefixSentences = kept.filter(target => target.channel === 'prefix').map(target => target.sentence);
       const difficulty = difficultyByChapter.filter(item => item.chapter.id === chapter.id).map(item => ({ text: item.text, missingAttribution: item.missingAttribution, missingTarget: item.missingTarget }));
       const frames = skeletonTargets.filter(target => chapterOwnsTarget(chapter, target.chapterTitle));
       const flows = flowTargets.filter(target => chapterOwnsTarget(chapter, target.chapterTitle));
       const titles = titleTargets.filter(target => chapterOwnsTarget(chapter, target.chapterTitle));
-      return sentences.length > 0 || difficulty.length > 0 || frames.length > 0 || flows.length > 0 || titles.length > 0
-        ? [{ chapter, sentences, difficulty, frames, flows, titles }]
+      return sentences.length > 0 || prefixSentences.length > 0 || difficulty.length > 0 || frames.length > 0 || flows.length > 0 || titles.length > 0
+        ? [{ chapter, sentences, prefixSentences, difficulty, frames, flows, titles }]
         : [];
     });
     if (targets.length === 0) {
       // C2：零信息口号句已确定性删净且无剩余 LLM 目标 → 删除单独生效并收口（不发起空修复调用）
       if (stripped.deletedCount > 0) {
         templatingFixApplied = true;
-        upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'templating-repair', status: 'success', message: `模板化修复第 ${round + 1} 轮：确定性删除零信息口号句 ${stripped.deletedCount} 处（无剩余重写目标）` }, { subtitle: '模板化修复' }));
+        upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'templating-repair', status: 'success', message: `模板化修复第 ${round + 1} 轮：确定性删除零信息句（口号/前缀）${stripped.deletedCount} 处（无剩余重写目标）` }, { subtitle: '模板化修复' }));
         emitProgress(chapterDraftsFinal);
       }
       break;
     }
     const repairDimension = [
-      needsFillerFix ? `套话句占比 ${(filler.ratio * 100).toFixed(1)}%${stripped.deletedCount > 0 ? `（已确定性删除零信息口号 ${stripped.deletedCount} 处）` : ''}` : '',
+      needsFillerFix ? `套话句占比 ${(filler.ratio * 100).toFixed(1)}%${stripped.deletedCount > 0 ? `（已确定性删除零信息句 ${stripped.deletedCount} 处）` : ''}` : '',
+      needsPrefixFix ? `模板化前缀句 ${prefixTargets.length} 处` : '',
       needsDifficultyFix ? `重难点双达标 ${(difficulty.ratio * 100).toFixed(0)}%` : '',
       needsSkeletonFix ? `骨架指纹 ${skeletonTargets.length} 组` : '',
       needsFlowFix ? `工序形式 ${flowTargets.length} 处` : '',
@@ -474,6 +484,10 @@ export async function repairTemplatingIssues(input: {
         parts.push(`第 1～${target.sentences.length} 条目标原文是本章已检出的空话套话句（零信息纯口号句已由系统确定性删除，此处为含信息或合规承诺类命中句）：逐条原地改写为“责任岗位 + 执行动作 + 量化标准 + 检查频次 + 整改时限”式可核查措施，且每条改写句必须嵌入不少于 2 个项目实体（村名/工程量/规格，取自本章证据摘要）；禁止以同义空话替换、禁止改写清单外内容、不得凭空编造数值；属必须保留的合规承诺句须具体化到可核查。`);
       }
       let anchorIndex = target.sentences.length + 1;
+      if (target.prefixSentences.length > 0) {
+        const indices = target.prefixSentences.map(() => { const current = anchorIndex; anchorIndex += 1; return current; });
+        parts.push(`第 ${indices.join('、')} 条目标原文是模板化前缀导语句（句首为“本节/本章将/以下从”式元话语）：删除前缀后直接从作业对象、执行动作、量化措施切入改写，句内工程信息（数值/规格/岗位/频次）必须全部保留；禁止以同义导语替换。`);
+      }
       for (const item of target.difficulty) {
         const missingParts = [item.missingAttribution ? '归因句（该难点的成因/风险来源）' : '', item.missingTarget ? '量化控制目标（数值+单位，来自本章证据摘要或行业规范，不得编造）' : ''].filter(Boolean).join('与');
         parts.push(`第 ${anchorIndex} 条目标原文是重难点分析条目，缺少${item.missingAttribution && item.missingTarget ? '成因归因与量化控制目标' : missingParts}：保留条目原有事实与数值，在其内补充${missingParts}。`);
@@ -504,7 +518,7 @@ export async function repairTemplatingIssues(input: {
         diagnostics: generationDiagnostics,
         signal,
         patchGuard: repairPatchGuard('templating-repair', generationDiagnostics),
-        anchorTexts: [...target.sentences, ...target.difficulty.map(item => item.text), ...target.frames.flatMap(frame => frame.sentences), ...target.flows.map(flow => flow.blockTitle), ...target.titles.map(title => title.title)],
+        anchorTexts: [...target.sentences, ...target.prefixSentences, ...target.difficulty.map(item => item.text), ...target.frames.flatMap(frame => frame.sentences), ...target.flows.map(flow => flow.blockTitle), ...target.titles.map(title => title.title)],
         maxTokens: 6000,
         // F2 套话重写需要项目事实支撑：证据预算专用放大（默认 1500 字符最小集不足以支撑
         // 60 条套话句具体化重写，重写后仍是套话的根源之一）
@@ -517,8 +531,9 @@ export async function repairTemplatingIssues(input: {
       repairRound: 'templating-repair',
       diagnostics: generationDiagnostics,
       // 修复前指标 = 循环开头对同一正文的检测值（避免重复同源复检；与 recheck 计算口径同源）；
-      // 确定性删除是纯收益不计入回滚判定（占比已先降），LLM 修复把指标推回高于轮初值才判变差
-      beforeMetrics: [filler.ratio, difficulty.ratio, skeletonTargets.length, flowTargets.length, titleTargets.length],
+      // 确定性删除是纯收益不计入回滚判定（占比已先降），LLM 修复把指标推回高于轮初值才判变差；
+      // 第 6 位为模板化前缀句全文计数（scanTemplatePrefixSentences，与 recheck 同口径）
+      beforeMetrics: [filler.ratio, difficulty.ratio, skeletonTargets.length, flowTargets.length, titleTargets.length, scanTemplatePrefixSentences(fullMarkdown).length],
       apply: async () => {
         const results = await Promise.allSettled(targets.map(target => repairOne(target)));
         results.forEach((result, index) => {
@@ -537,16 +552,16 @@ export async function repairTemplatingIssues(input: {
         emitProgress(chapterDraftsFinal);
         return chapterDraftsFinal.map(chapter => chapter.content).join('\n\n');
       },
-      // 同源复检：修复后全文重算套话句占比 + 重难点双达标率
+      // 同源复检：修复后全文重算套话句占比 + 重难点双达标率 + 模板化前缀句计数
       recheck: async (content) => {
         const recheckFiller = await fillerDensityReport(content);
         const recheckDifficulty = await difficultyCountermeasureReport(content);
-        return [recheckFiller.ratio, recheckDifficulty.ratio, skeletonFingerprintRepairTargets(content).length, flowFormRepairTargets(content).length, titleRepairTargets(content).length];
+        return [recheckFiller.ratio, recheckDifficulty.ratio, skeletonFingerprintRepairTargets(content).length, flowFormRepairTargets(content).length, titleRepairTargets(content).length, scanTemplatePrefixSentences(content).length];
       },
       // F2 双指标抵偿 + 治理指标不回退：套话占比上升 >1% 且重难点双达标未提升 >1% → 回滚；
-      // 骨架指纹/工序形式/标题缺陷目标总数上升 → 回滚（改写引入新模板化残留不可接受，前后同口径计数）
+      // 骨架指纹/工序形式/标题缺陷/模板化前缀计数总数上升 → 回滚（改写引入新模板化残留不可接受，前后同口径计数）
       shouldRollback: (before, after) => (after[0] > before[0] + 0.01 && !(after[1] > before[1] + 0.01))
-        || (after[2] + after[3] + after[4]) > (before[2] + before[3] + before[4]),
+        || after.slice(2).reduce((sum, value) => sum + value, 0) > before.slice(2).reduce((sum, value) => sum + value, 0),
     });
     if (appliedCount === 0 && stripped.deletedCount === 0) {
       upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'templating-repair', status: 'failed', message: `模板化修复第 ${round + 1} 轮：修复 patch 未落地（${targets.length} 章锚点失配或 LLM 未产出）`, details: [`未收敛维度：${repairDimension}`] }, { subtitle: '模板化修复' }));
@@ -557,7 +572,7 @@ export async function repairTemplatingIssues(input: {
         const snapshot = roundSnapshot.get(chapter.id);
         if (snapshot !== undefined) chapter.content = snapshot;
       }
-      upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'templating-repair', status: 'failed', message: `模板化修复第 ${round + 1} 轮：修复后指标变差已回滚本轮修改（套话 ${(rollbackOutcome.beforeMetrics[0] * 100).toFixed(1)}%→${(rollbackOutcome.afterMetrics[0] * 100).toFixed(1)}%，治理缺陷目标 ${rollbackOutcome.beforeMetrics[2] + rollbackOutcome.beforeMetrics[3] + rollbackOutcome.beforeMetrics[4]}→${rollbackOutcome.afterMetrics[2] + rollbackOutcome.afterMetrics[3] + rollbackOutcome.afterMetrics[4]}）`, details: ['LLM 重写未收敛，回滚保留修复前正文'] }, { subtitle: '模板化修复' }));
+      upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'templating-repair', status: 'failed', message: `模板化修复第 ${round + 1} 轮：修复后指标变差已回滚本轮修改（套话 ${(rollbackOutcome.beforeMetrics[0] * 100).toFixed(1)}%→${(rollbackOutcome.afterMetrics[0] * 100).toFixed(1)}%，治理缺陷目标 ${rollbackOutcome.beforeMetrics.slice(2).reduce((sum, value) => sum + value, 0)}→${rollbackOutcome.afterMetrics.slice(2).reduce((sum, value) => sum + value, 0)}）`, details: ['LLM 重写未收敛，回滚保留修复前正文'] }, { subtitle: '模板化修复' }));
       emitProgress(chapterDraftsFinal);
       break;
     }
@@ -572,11 +587,13 @@ export async function repairTemplatingIssues(input: {
     const finalSkeletons = skeletonFingerprintRepairTargets(finalMarkdown);
     const finalFlows = flowFormRepairTargets(finalMarkdown);
     const finalTitles = titleRepairTargets(finalMarkdown);
-    const converged = finalFiller.ratio < 0.1 && (!finalDifficulty.heavyTemplated || finalDifficulty.countermeasures === 0) && finalSkeletons.length === 0 && finalFlows.length === 0 && finalTitles.length === 0;
+    const finalPrefixes = scanTemplatePrefixSentences(finalMarkdown);
+    const converged = finalFiller.ratio < 0.1 && (!finalDifficulty.heavyTemplated || finalDifficulty.countermeasures === 0) && finalSkeletons.length === 0 && finalFlows.length === 0 && finalTitles.length === 0 && finalPrefixes.length === 0;
     const templateResidue = [
       finalSkeletons.length > 0 ? `骨架指纹 ${[...new Set(finalSkeletons.map(item => `${item.fingerprintLabel}×${item.totalCount}`))].join('、')}` : '',
       finalFlows.length > 0 ? `工序形式相邻重复 ${finalFlows.length} 处` : '',
       finalTitles.length > 0 ? `标题缺陷 ${finalTitles.length} 处` : '',
+      finalPrefixes.length > 0 ? `模板化前缀句 ${finalPrefixes.length} 处` : '',
     ].filter(Boolean).join('；');
     upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'templating-repair', status: converged ? 'success' : 'failed', message: `模板化修复完成：套话句占比 ${(finalFiller.ratio * 100).toFixed(1)}%（达标线 ≤10%），重难点归因+量化双达标 ${(finalDifficulty.ratio * 100).toFixed(0)}%（达标线 ≥50%）${templateResidue ? `，模板化残留：${templateResidue}` : ''}`, details: converged ? [] : ['未完全收敛：残留项先由确定性修复链（终检前）收敛；复核未清零的残留经终检检测器判定，仍不达标即列入终检复核清单（不阻断导出，宁缺毋假）'] }, { subtitle: '模板化修复' }));
     emitProgress(chapterDraftsFinal);
@@ -797,22 +814,24 @@ export async function enforceWorkPackageSkeletons(input: {
  * 小节对）或双无归属且标题为结构标签（泛化无主题，标签治理另有专门修复器）时跳过。
  * 调用点：postReviewSurface 缺节补写（plannedSectionFixFinal）之前——先合并再判定缺节，补写轮不重复补。
  */
+/** 标题块边界：自 from 行向下第一个 H2/H3 行（含）或文末（mergeNearDuplicateSectionHeadings 与
+ * mergeDuplicateThematicSections 共用） */
+function headingBlockEnd(lines: string[], from: number) {
+  for (let index = from + 1; index < lines.length; index += 1) {
+    if (/^#{2,3}\s/u.test(lines[index].trim())) return index;
+  }
+  return lines.length;
+}
+/** 保留原「### 编号 」前缀形态，仅替换标题文本（同上两函数共用） */
+function headingPrefixOf(line: string) {
+  const base = /^(\s*###\s+)/u.exec(line)?.[1] ?? '### ';
+  const numbered = /^((?:\d+(?:\.\d+)*|[一二三四五六七八九十]+)(?:[、.．]|\s+)\s*)/u.exec(line.slice(base.length));
+  return numbered ? `${base}${numbered[1]}` : base;
+}
+
 export function mergeNearDuplicateSectionHeadings(chapterDraftsFinal: DocumentDraftChapter[]): { mergedCount: number; details: string[] } {
   let mergedCount = 0;
   const details: string[] = [];
-  /** 标题块边界：自 from 行向下第一个 H2/H3 行（含）或文末 */
-  const headingBlockEnd = (lines: string[], from: number) => {
-    for (let index = from + 1; index < lines.length; index += 1) {
-      if (/^#{2,3}\s/u.test(lines[index].trim())) return index;
-    }
-    return lines.length;
-  };
-  /** 保留原「### 编号 」前缀形态，仅替换标题文本 */
-  const headingPrefixOf = (line: string) => {
-    const base = /^(\s*###\s+)/u.exec(line)?.[1] ?? '### ';
-    const numbered = /^((?:\d+(?:\.\d+)*|[一二三四五六七八九十]+)(?:[、.．]|\s+)\s*)/u.exec(line.slice(base.length));
-    return numbered ? `${base}${numbered[1]}` : base;
-  };
   for (const chapter of chapterDraftsFinal) {
     if (!chapter.content?.trim()) continue;
     const planned = (chapter.sections || [])
@@ -828,7 +847,6 @@ export function mergeNearDuplicateSectionHeadings(chapterDraftsFinal: DocumentDr
         const normalized = title ? normalizeSubsectionTitleForDedup(title) : '';
         if (normalized) h3s.push({ line: index, title, normalized });
       });
-      if (h3s.length <= 1) break;
       let pair: { keep: (typeof h3s)[number]; drop: (typeof h3s)[number]; plannedTitle?: string } | undefined;
       for (let i = 0; i < h3s.length && !pair; i += 1) {
         for (let j = i + 1; j < h3s.length && !pair; j += 1) {
@@ -847,7 +865,35 @@ export function mergeNearDuplicateSectionHeadings(chapterDraftsFinal: DocumentDr
           break;
         }
       }
-      if (!pair) break;
+      if (!pair) {
+        // D-T6 ② 单行漂移改名（r28f 门禁 #2 归因）：近名变体（「安全责任体系与目标落位→…目标落实」
+        // 单字漂移）无配对对象时上方 pair 逻辑零命中（漂移行与规划名精确行从未并存，补写轮因
+        // sameSectionTitle 近名容忍也不补）——成稿小节名与规划主题块不一致（目录=正文=主题块
+        // 100% 对应的结构对齐判据），且后续 LLM 重写可再引入变体。此处把「未精确覆盖任何规划
+        // 小节、且唯一近似某未覆盖规划小节」的漂移行就地改名回规划名（保前缀编号；结构标签与
+        // 歧义形态保守跳过），与写作期 alignSectionHeadingsToPlan 近名轮同口径。
+        const covered = new Set<string>();
+        for (const heading of h3s) {
+          for (const item of planned) {
+            if (heading.normalized.includes(item.normalized)) covered.add(item.normalized);
+          }
+        }
+        const drifts = h3s.flatMap(heading => {
+          if (planned.some(item => heading.normalized.includes(item.normalized))) return [];
+          if (isStructuralLabelTitle(heading.title)) return [];
+          return planned
+            .filter(item => !covered.has(item.normalized) && nearSubsectionTitleMatch(heading.normalized, item.normalized))
+            .map(item => ({ heading, plannedTitle: item.title }));
+        });
+        const drift = drifts.length === 1 ? drifts[0] : undefined;
+        if (!drift) break;
+        chapter.content = lines
+          .map((line, index) => (index === drift.heading.line ? `${headingPrefixOf(line)}${drift.plannedTitle}` : line))
+          .join('\n');
+        mergedCount += 1;
+        details.push(`「${drift.heading.title}」对齐规划名「${drift.plannedTitle}」（第 ${chapterDraftsFinal.indexOf(chapter) + 1} 章）`);
+        continue;
+      }
       const { keep, drop, plannedTitle } = pair;
       const keepEnd = headingBlockEnd(lines, keep.line);
       const dropEnd = headingBlockEnd(lines, drop.line);
@@ -870,6 +916,188 @@ export function mergeNearDuplicateSectionHeadings(chapterDraftsFinal: DocumentDr
     }
   }
   return { mergedCount, details };
+}
+
+/**
+ * D-T7 ② 重复主题小节确定性合并（minChapterSectionIssues 检测消费，duplicate-theme-merge 轮）：
+ * r28f 实证（第三章「物资分类与采购权限」+「主要材料投入量」、第四章「道路作业机械配置与调度」+
+ * 「苗木吊运与栽植机具」同桶）此前检测恒报、修复链零消费——同桶（classifyThematicSectionKey 单源，
+ * 与检测端同口径）规划小节 ≥2 项且正文均有 H3 落位时，逐对合并：行序靠前项为保留位（标题漂移
+ * 变体改名回规划名，保前缀编号），其后项标题行摘除、正文并入保留块末（零内容生成：只删标题行
+ * 不删任何正文与表格），规划数组同步删除已合并项（正文=规划=目录三源一致，缺节/超节判定不因
+ * 合并产生新缺口）；章内编号空档由 renumberSectionHeadings 原子重放。正文缺行（未落位）或
+ * 定位撞同一行的规划对保守跳过——宁缺毋假，交终检报告。
+ */
+export function mergeDuplicateThematicSections(chapterDraftsFinal: DocumentDraftChapter[]): { mergedCount: number; details: string[] } {
+  let mergedCount = 0;
+  const details: string[] = [];
+  chapterDraftsFinal.forEach((chapter, chapterIndex) => {
+    if (!chapter.content?.trim()) return;
+    let changedInChapter = 0;
+    // guard 循环：同桶多对逐轮收敛（每轮全章重扫一次分桶与 H3 定位，上限 6 轮）
+    for (let guard = 0; guard < 6; guard += 1) {
+      const rawSections = chapter.sections || [];
+      const indexed = rawSections
+        .map((section, index) => ({ section: String(section || '').trim(), index }))
+        .filter(item => item.section);
+      const themed = new Map<string, Array<{ section: string; index: number }>>();
+      for (const item of indexed) {
+        const key = classifyThematicSectionKey(item.section);
+        if (key) themed.set(key, [...(themed.get(key) || []), item]);
+      }
+      const bucket = [...themed.values()].find(items => items.length >= 2);
+      if (!bucket) break;
+      const lines = chapter.content.split('\n');
+      const h3s: Array<{ line: number; title: string; normalized: string }> = [];
+      lines.forEach((line, index) => {
+        if (!/^\s*###\s+\S/u.test(line)) return;
+        const title = sectionHeadingTitleText(line);
+        const normalized = title ? normalizeSectionTitleForGap(title) : '';
+        if (normalized) h3s.push({ line: index, title, normalized });
+      });
+      const findHeading = (section: string) => {
+        const key = normalizeSectionTitleForGap(section);
+        return h3s.find(item => item.normalized === key) || h3s.find(item => nearSubsectionTitleMatch(item.normalized, key));
+      };
+      const located = bucket.flatMap(item => {
+        const heading = findHeading(item.section);
+        return heading ? [{ section: item.section, index: item.index, heading }] : [];
+      });
+      const unique = located.filter((item, index) => located.findIndex(other => other.heading.line === item.heading.line) === index);
+      if (unique.length < 2) break;
+      unique.sort((a, b) => a.heading.line - b.heading.line);
+      const keep = unique[0];
+      const drop = unique[1];
+      const keepEnd = headingBlockEnd(lines, keep.heading.line);
+      const dropEnd = headingBlockEnd(lines, drop.heading.line);
+      const keepBody = lines.slice(keep.heading.line + 1, keepEnd);
+      while (keepBody.length > 0 && keepBody[keepBody.length - 1].trim() === '') keepBody.pop();
+      const dropBody = lines.slice(drop.heading.line + 1, dropEnd);
+      while (dropBody.length > 0 && dropBody[dropBody.length - 1].trim() === '') dropBody.pop();
+      while (dropBody.length > 0 && dropBody[0].trim() === '') dropBody.shift();
+      const mergedBody = dropBody.length > 0 ? [...keepBody, '', ...dropBody, ''] : [...keepBody, ''];
+      const keepLine = keep.heading.normalized === normalizeSectionTitleForGap(keep.section)
+        ? lines[keep.heading.line]
+        : `${headingPrefixOf(lines[keep.heading.line])}${keep.section}`;
+      chapter.content = [
+        ...lines.slice(0, keep.heading.line),
+        keepLine,
+        ...mergedBody,
+        ...lines.slice(keepEnd, drop.heading.line),
+        ...lines.slice(dropEnd),
+      ].join('\n').replace(/\n{3,}/gu, '\n\n');
+      // 规划数组同步删除已合并项（按原索引删除，保持数组顺序）
+      chapter.sections = rawSections.filter((_, index) => index !== drop.index);
+      mergedCount += 1;
+      changedInChapter += 1;
+      details.push(`「${drop.section}」并入「${keep.section}」（第 ${chapterIndex + 1} 章）`);
+    }
+    if (changedInChapter > 0) {
+      // 合并不消耗编号：章内 H3 编号空档原子重放（章序=装配层「第N章」=终检口径，三源同值）
+      const renumbered = renumberSectionHeadings(chapter.content, { chapterNumber: chapterIndex + 1 });
+      chapter.content = renumbered.markdown;
+    }
+  });
+  return { mergedCount, details };
+}
+
+/**
+ * D-T6 ② 规划外小节确定性收口（section-count-overflow 门禁修复消费，r28f 实测「第 7 章成稿
+ * 5 节 vs 规划 4 节」归因）：近名漂移由 mergeNearDuplicateSectionHeadings 改名/合并、无规划
+ * 归属空壳由 stripEmptyUnplannedSectionHeadings 清扫，本函数收口第三形态——非近名非空壳的
+ * 规划外 H3（LLM 擅加分节穿透到链尾）。判定与 sectionCountOverflowIssues 同源（豁免口径/
+ * normalizeSectionTitleForGap 键/overflow 触发条件），处理策略与检测器 suggestion 同口径
+ * 「有归属则并入并降 H4」：上方存在规划小节 H3（相邻主题块）时整行降为 H4（剥除 H3 编号，
+ * 内容零改动——结构上并入上方主题块）；近名形态（属 merge 辖区，降级会造成缺节 blocker）、
+ * 防撞名后缀形态（属 fixCollisionNumberedHeadings 辖区，「（1）」后缀泄漏为 H4 违规）与
+ * 章首规划外（无上方规划 H3，无归属可并入）保守跳过。降级后章内编号空档由
+ * renumberSectionHeadings 章片段模式原子重放（同 stage5/空节清扫口径）。
+ * 调用点：stageSectionAlignmentSweep——位于 merge 之后（近名先行改名/合并，本函数只处理残余）。
+ */
+export function reconcileUnplannedSectionHeadings(chapterDraftsFinal: DocumentDraftChapter[]): { demotedCount: number; details: string[] } {
+  let demotedCount = 0;
+  const details: string[] = [];
+  chapterDraftsFinal.forEach((chapter, chapterIndex) => {
+    if (!chapter.content?.trim()) return;
+    const exempt = (section: string) => {
+      const trimmed = String(section || '').trim();
+      return !trimmed || isStructuralLabelTitle(trimmed) || /^附录/u.test(trimmed)
+        || (DIVISION_SECTION_RE.test(chapter.title) && WORK_PACKAGE_SECTION_RE.test(trimmed));
+    };
+    const plannedSections = (chapter.sections || []).filter(section => !exempt(section));
+    if (plannedSections.length === 0) return;
+    // 与检测器同域触发：成稿 H3 数未超规划数时没有需要收口的多节（缺节方向由补写轮覆盖）
+    const actualSections = extractGeneratedSections(chapter.content).filter(section => !exempt(section));
+    if (actualSections.length <= plannedSections.length) return;
+    const plannedNormTitles = plannedSections.map(section => normalizeSectionTitleForGap(section));
+    const plannedKeys = new Set(plannedNormTitles);
+    const lines = chapter.content.split('\n');
+    const h3s: { line: number; title: string; normalized: string }[] = [];
+    lines.forEach((line, index) => {
+      if (!/^\s*###\s+\S/u.test(line)) return;
+      const title = sectionHeadingTitleText(line);
+      const normalized = title ? normalizeSectionTitleForGap(title) : '';
+      if (normalized) h3s.push({ line: index, title, normalized });
+    });
+    let lastPlannedLine = -1;
+    let demotedInChapter = 0;
+    for (const item of h3s) {
+      if (plannedKeys.has(item.normalized)) {
+        lastPlannedLine = item.line;
+        continue;
+      }
+      if (exempt(item.title)) continue;
+      // 近名形态属 merge 辖区（降级后规划名仍缺失会造成 missing_planned_section blocker）
+      if (plannedNormTitles.some(normalized => nearSubsectionTitleMatch(item.normalized, normalized))) continue;
+      // 防撞名后缀形态属 fixCollisionNumberedHeadings 辖区（重命名/合并而非降级）
+      if (/(?:（(?:\d+|[一二三四五六七八九十]+)）)+$/u.test(item.title)) continue;
+      // 章首规划外（上方无规划 H3）：无归属可并入，保守跳过（交终检报告）
+      if (lastPlannedLine < 0) continue;
+      lines[item.line] = `#### ${item.title}`;
+      demotedInChapter += 1;
+      details.push(`第 ${chapterIndex + 1} 章「${item.title}」降为 H4（并入上方规划小节主题块）`);
+    }
+    if (demotedInChapter === 0) return;
+    demotedCount += demotedInChapter;
+    // 降级不消耗编号：章内 H3 编号空档原子重放（章序=装配层「第N章」=终检口径，三源同值）
+    const renumbered = renumberSectionHeadings(lines.join('\n'), { chapterNumber: chapterIndex + 1 });
+    chapter.content = renumbered.markdown;
+  });
+  return { demotedCount, details };
+}
+
+/**
+ * D-T3 空节清扫（链尾确定性收口，与 emptyUnplannedSectionSpans 同源定位）：无规划归属的严格空壳
+ * H3/H4 标题行整节移除 + 章内编号原子重放。r28f 实证形态：补写轮把原 H4（「特殊技术标准和要求」）
+ * 的正文搬往规划名小节后空壳标题行自有残留 → 终检「空小节」blocker 直坠交付（有规划归属的空壳
+ * 属补写辖区，由 enforcePlannedSectionCompleteness 覆盖；本清扫器只管无依据空壳——「无依据则移除」）。
+ * guard 循环收敛「空壳 H3 内嵌空壳 H4」（删 H4 后 H3 才空，逐轮删至无空壳，上限 4 轮）；删除后
+ * 章内编号空档由 renumberSectionHeadings 章片段模式原子重放（与 stage5/装配层同口径，幂等）。
+ * 零内容生成：只删标题行不删任何正文与表格。返回删除数与重编号章数供阶段消息。
+ */
+export function stripEmptyUnplannedSectionHeadings(chapterDraftsFinal: DocumentDraftChapter[]): { removedCount: number; renumberedChapters: number; details: string[] } {
+  let removedCount = 0;
+  let renumberedChapters = 0;
+  const details: string[] = [];
+  chapterDraftsFinal.forEach((chapter, index) => {
+    if (!chapter.content?.trim()) return;
+    let removedInChapter = 0;
+    for (let guard = 0; guard < 4; guard += 1) {
+      const spans = emptyUnplannedSectionSpans(chapter);
+      if (spans.length === 0) break;
+      const removeLines = new Set(spans.map(span => span.line));
+      chapter.content = chapter.content.split('\n').filter((_, lineIndex) => !removeLines.has(lineIndex)).join('\n').replace(/\n{3,}/gu, '\n\n');
+      removedInChapter += spans.length;
+      for (const span of spans) details.push(`第 ${index + 1} 章移除空壳标题「${span.rawTitle}」`);
+    }
+    if (removedInChapter === 0) return;
+    removedCount += removedInChapter;
+    // 删除 H3 行后「编号被分配又被删除」产生空档：章片段模式原子重放（章序=装配层「第N章」=终检口径，三源同值）
+    const renumbered = renumberSectionHeadings(chapter.content, { chapterNumber: index + 1 });
+    chapter.content = renumbered.markdown;
+    if (renumbered.fixedCount > 0) renumberedChapters += 1;
+  });
+  return { removedCount, renumberedChapters, details };
 }
 
 /**
@@ -905,7 +1133,8 @@ export async function enforcePlannedSectionCompleteness(input: {
     const chapterGaps = gaps.filter(gap => gap.chapterTitle === chapter.title);
     if (chapterGaps.length === 0) return [];
     const sectionTitles = chapterGaps.map(gap => ({ title: gap.sectionTitle, emptyOnly: gap.reason === 'empty' }));
-    // 章末标题行作为补写定位锚点（append 模式：新小节插入该锚点之后）
+    // 章末标题行作为补写锚点（章末追加模式：锚点仅作存在性校验，补写小节落章末——锚点行后
+    // 仍有其正文时在位插入会把标题行切成空壳触发回滚，r28j B8 实测 s28i 第五章）
     const lastHeadingLine = chapter.content.split('\n').map(line => line.trim()).filter(line => /^#{2,4}\s/u.test(line)).pop();
     if (!lastHeadingLine) return [];
     return [{ chapter, sectionTitles, lastHeadingLine }];
@@ -917,21 +1146,42 @@ export async function enforcePlannedSectionCompleteness(input: {
   if (finalGateRepairStages) upsertProgressStage(finalGateRepairStages, plannedSectionRunningStage);
   emitProgress(chapterDraftsFinal);
   const chapterIndexByTitle = new Map(chapterDraftsFinal.map((chapter, index) => [chapter.title, index]));
+  /** 空标题行计数（补写回滚守卫）：H2-H4 标题行后（跳过空行）无任何正文或直接接另一标题行即计一个
+   * ——r28g B8 归因（r28f 实测）：补写 LLM 把锚点 H4（如「特殊技术标准和要求」）与其正文切开，
+   * H4 变空壳直坠终检「空小节」blocker；复检指标不降反升即回滚整个补写 patch。 */
+  const emptyHeadingCount = (content: string): number => {
+    const lines = content.split('\n');
+    let count = 0;
+    for (let index = 0; index < lines.length; index += 1) {
+      if (!/^#{2,4}\s+\S/u.test(lines[index].trim())) continue;
+      let next = index + 1;
+      while (next < lines.length && lines[next].trim() === '') next += 1;
+      if (next >= lines.length || /^#{1,6}\s+\S/u.test(lines[next].trim())) count += 1;
+    }
+    return count;
+  };
   const repairOne = async (target: (typeof targets)[number]) => {
     const chapterIndex = chapterIndexByTitle.get(target.chapter.title) ?? chapterDraftsFinal.indexOf(target.chapter);
     const parts = target.sectionTitles.map(({ title: sectionTitle, emptyOnly }) => {
-      const sectionOrdinal = ((target.chapter.sections || []).findIndex(section => section === sectionTitle) + 1) || ((target.chapter.sections || []).length + 1);
+      // r28g B1/B2 归因（r28f 实测）：补写编号原取规划序位——规划首节在成稿单字漂移（落位/落实）
+      // 被判缺失后章末补写编号复用 7.1，与既有同号小节并存（编号重复 + 目录口径对不上）。章末
+      // 追加语义下编号取章内现有 H3 最大小节号 +1，无现有 H3 时退回规划序位。
+      const existingOrdinals = [...target.chapter.content.matchAll(/^###\s+\d+\.(\d+)\s/gmu)].map(match => Number(match[1]));
+      const sectionOrdinal = existingOrdinals.length > 0
+        ? Math.max(...existingOrdinals) + 1
+        : (((target.chapter.sections || []).findIndex(section => section === sectionTitle) + 1) || ((target.chapter.sections || []).length + 1));
       const heading = `### ${chapterIndex + 1}.${sectionOrdinal} ${sectionTitle}`;
       if (emptyOnly) return `本章小节「${sectionTitle}」只有标题或表格无正式正文：必须在既有小节标题下补写正式正文段落（正文写在表格前后均可），不得新增同名小节标题、不得删除或改动已有表格与数值。\n${professionalSectionTaskCard(target.chapter.title, sectionTitle)}`;
       return `本章正文缺少规划小节「${sectionTitle}」：必须在章末新增小节标题「${heading}」（标题一字不差）并写入正式正文。\n${professionalSectionTaskCard(target.chapter.title, sectionTitle)}`;
     });
-    // P12 回滚保护：补写后同源复检该章缺规划小节数（collectSectionContentGaps 同口径），
-    // 缺失不降反升（LLM 乱删已有小节）即回滚保留修复前正文
+    // P12 回滚保护：补写后同源复检该章缺规划小节数（collectSectionContentGaps 同口径）与空标题
+    // 行数（emptyHeadingCount 同源），任一指标不降反升（LLM 乱删已有小节/切开锚点标题）即回滚
+    // 保留修复前正文
     return withPatchRollback({
       originalContent: target.chapter.content,
       repairRound: 'planned-section-repair',
       diagnostics: generationDiagnostics,
-      beforeMetrics: [target.sectionTitles.length],
+      beforeMetrics: [target.sectionTitles.length, emptyHeadingCount(target.chapter.content)],
       apply: async () => {
         const repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `planned-section-repair:${target.chapter.id}`, () => repairChapterByQuality({
           template,
@@ -944,15 +1194,16 @@ export async function enforcePlannedSectionCompleteness(input: {
           diagnostics: generationDiagnostics,
           signal,
           patchGuard: repairPatchGuard('planned-section-repair', generationDiagnostics),
-          // 补写定位锚点 = 章末标题行：replacement 必须逐字保留锚点后在章末追加补写小节
-          anchorTexts: [{ text: target.lastHeadingLine, append: true }],
+          // 章末追加锚点 = 章末标题行：锚点仅作存在性校验，replacement 追加到章末，锚点原文原位不动
+          // （历史缺陷 r28j B8：锚点行后仍有其正文，原位插入切出空壳标题 → emptyHeadingCount 上升 → P12 回滚误杀）
+          anchorTexts: [{ text: target.lastHeadingLine, append: true, appendAt: 'chapter-end' }],
           maxTokens: 6000,
         })));
         return repaired.content && repaired.content !== target.chapter.content ? repaired.content : target.chapter.content;
       },
       recheck: (content) => {
         const chapterGaps = collectSectionContentGaps('', [{ title: target.chapter.title, content, sections: target.chapter.sections }]).filter(gap => gap.chapterTitle === target.chapter.title && (gap.reason === 'missing_planned_section' || (gap.reason === 'empty' && gap.planned)));
-        return [chapterGaps.length];
+        return [chapterGaps.length, emptyHeadingCount(content)];
       },
     });
   };
@@ -976,8 +1227,13 @@ export async function enforcePlannedSectionCompleteness(input: {
       appliedCount += 1;
     }
   });
+  // r28g B2 时序兜底（r28f 实测）：近名合并（postReviewSurface 链首）跑在缺节补写之前——补写按
+  // 规划名写入后不再复核近名对，成稿写歪节（落实）与补写规划名节（落位）并存直坠
+  // section-count-overflow。补写落地后立即跑一次同源近名合并（零内容生成：仅摘重复标题行 +
+  // 内容并入首现块），保持章内 H3 与规划小节一一对应。
+  const postRepairMerge = appliedCount > 0 ? mergeNearDuplicateSectionHeadings(chapterDraftsFinal) : { mergedCount: 0, details: [] as string[] };
   emitProgress(chapterDraftsFinal);
-  const plannedSectionCompletedStage = displayStage({ type: 'llm_review', roleId: 'planned-section-repair', status: appliedCount > 0 ? 'success' : 'failed', message: appliedCount > 0 ? `缺规划小节补写完成：补写 ${appliedCount} 章` : '缺规划小节补写：修复 patch 未落地（锚点失配或 LLM 未产出）' }, { subtitle: '缺节补写收口' });
+  const plannedSectionCompletedStage = displayStage({ type: 'llm_review', roleId: 'planned-section-repair', status: appliedCount > 0 ? 'success' : 'failed', message: appliedCount > 0 ? `缺规划小节补写完成：补写 ${appliedCount} 章${postRepairMerge.mergedCount > 0 ? `（近名合并 ${postRepairMerge.mergedCount} 处）` : ''}` : '缺规划小节补写：修复 patch 未落地（锚点失配或 LLM 未产出）' }, { subtitle: '缺节补写收口' });
   upsertProgressStage(progressStages, plannedSectionCompletedStage);
   if (finalGateRepairStages) upsertProgressStage(finalGateRepairStages, plannedSectionCompletedStage);
   return { plannedSectionFixApplied: appliedCount > 0 };

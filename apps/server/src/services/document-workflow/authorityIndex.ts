@@ -53,6 +53,8 @@ export interface AuthorityEntry {
   trace?: string;
   /** 数量分村/分工程明细（清单聚合条目：合计数与分工程明细并存；分村多值合法性判定依据） */
   groups?: Array<{ group: string; value: number }>;
+  /** 规格-数量拆分（R20 同名跨规格条目：各规格小计；写作逐项照抄 + 绑定断言权威） */
+  specBreakdown?: Array<{ spec: string; value: number }>;
   /** 金额禁区（禁入正文；合同估算价/金额类红线事实） */
   amountRestricted?: boolean;
   /** 该条目覆盖的 BlueprintData 数值叶子路径（覆盖契约双向断言用） */
@@ -221,9 +223,11 @@ const quantityTransform: AuthorityTransform = data => {
     value: quantity.value, unit: quantity.unit,
     source: quantity.sourceFile || '工程量清单',
     groups: quantity.groups?.length ? quantity.groups : undefined,
+    specBreakdown: quantity.specBreakdown?.length ? quantity.specBreakdown : undefined,
     paths: [
       `quantities.${name}.value`,
       ...(quantity.groups ?? []).map((_, index) => `quantities.${name}.groups[${index}].value`),
+      ...(quantity.specBreakdown ?? []).map((_, index) => `quantities.${name}.specBreakdown[${index}].value`),
     ],
   }));
 };
@@ -425,11 +429,19 @@ const DOMAIN_RENDERERS: Record<AuthorityDomain, (entries: AuthorityEntry[]) => s
   },
   quantity: entries => {
     if (entries.length === 0) return [];
-    return [`- 工程量清单（合计口径；分村/分工程明细为合法多值）：${entries.map(entry => {
+    const rows = [`- 工程量清单（合计口径；分组明细为合法多值）：${entries.map(entry => {
       const base = `${entry.label} ${entry.value}${entry.unit}`;
-      const detail = entry.groups?.length ? `（分工程：${entry.groups.map(group => `${group.group} ${group.value}`).join('、')}）` : '';
+      const detail = entry.groups?.length ? `（分组：${entry.groups.map(group => `${group.group} ${group.value}`).join('、')}）` : '';
       return base + detail;
     }).join('、')}`];
+    // R20 同名跨规格拆分逐项列（路灯「100W 109套 + 120W 9套」）：写作层逐项照抄，不得把规格小计
+    // 写为名称合计、也不得把合计挂给单一规格（生成后规格-数量绑定断言与该行同源）
+    for (const entry of entries) {
+      if ((entry.specBreakdown?.length ?? 0) < 2) continue;
+      const total = typeof entry.value === 'number' ? entry.value : 0;
+      rows.push(`- ${entry.label}规格-数量拆分（逐项照抄，不得自行分配/改动）：${entry.specBreakdown!.map(item => `${item.spec} ${item.value}${entry.unit}`).join(' + ')}（合计 ${total}${entry.unit}）`);
+    }
+    return rows;
   },
   spec: entries => {
     if (entries.length === 0) return [];

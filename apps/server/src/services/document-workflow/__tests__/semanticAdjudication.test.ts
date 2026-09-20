@@ -7,6 +7,7 @@ import {
   adjudicateCitationCandidates,
   buildCitationSentenceContext,
   CITATION_ADJUDICATION_BATCH_SIZE,
+  rationaleNegatesConflict,
   resetCitationAdjudicationCache,
 } from '../semanticAdjudication';
 import type { CitationAdjudicationCandidate } from '../semanticAdjudication';
@@ -153,5 +154,53 @@ describe('buildCitationSentenceContext：判定上下文切片', () => {
     const context = buildCitationSentenceContext(markdown, at, '18949.52'.length);
     expect(context).toContain('主要工程量为级配碎石18949.52m²');
     expect(context).not.toContain('前段文字');
+  });
+});
+
+describe('rationaleNegatesConflict：结论-依据自否校正（r22 实测归因）', () => {
+  it('依据明确否定冲突（机动工期实况复刻）→ conflict 降级 consistent', async () => {
+    const invokeJson = vi.fn(async (_system: string, prompt: string) => ({
+      judgments: idsFromPrompt(prompt).map(id => ({
+        id,
+        conclusion: 'conflict',
+        rationale: '该句以项目总工期口径陈述90日历天，与权威值一致，但机动工期1天为工期管理阈值，非总工期数值，故不冲突。',
+      })),
+    }));
+    const outcome = await adjudicateCitationCandidates([candidate('a')], { invokeJson });
+    expect(outcome.records.get('a')?.conclusion).toBe('consistent');
+    expect(outcome.records.get('a')?.rationale).toContain('不冲突');
+  });
+
+  it('真冲突依据（含肯定不一致表述）不降级', async () => {
+    const invokeJson = judgeAll('conflict', '以项目级口径陈述且与权威不一致');
+    const outcome = await adjudicateCitationCandidates([candidate('a')], { invokeJson });
+    expect(outcome.records.get('a')?.conclusion).toBe('conflict');
+  });
+
+  it('否定与肯定并存的自相矛盾依据 → 保守不降级', async () => {
+    const invokeJson = judgeAll('conflict', '非项目级口径陈述，但与权威值不一致');
+    const outcome = await adjudicateCitationCandidates([candidate('a')], { invokeJson });
+    expect(outcome.records.get('a')?.conclusion).toBe('conflict');
+  });
+
+  it('函数边界：无否定短语不降级，纯自否短语降级', () => {
+    expect(rationaleNegatesConflict('以项目级口径陈述且与权威不一致')).toBe(false);
+    expect(rationaleNegatesConflict('机动工期为管理阈值，故不冲突')).toBe(true);
+    expect(rationaleNegatesConflict('非项目级数值，不予冲突表述')).toBe(true);
+  });
+
+  it('r24 B6 动宾否定族：「未构成…冲突」实测复刻 → conflict 降级 consistent', async () => {
+    const invokeJson = judgeAll('conflict', '句中明确以项目级口径陈述20个自然村，与权威值一致；但2个自然村与20个自然村两套口径的表述未构成对权威值的冲突。');
+    const outcome = await adjudicateCitationCandidates([candidate('a')], { invokeJson });
+    expect(outcome.records.get('a')?.conclusion).toBe('consistent');
+  });
+
+  it('r24 B6 函数边界：动宾否定族降级，真冲突/并存/非判定动词保守不降级', () => {
+    expect(rationaleNegatesConflict('两套口径的表述未构成对权威值的冲突')).toBe(true);
+    expect(rationaleNegatesConflict('未发现与权威值不一致的表述')).toBe(true);
+    expect(rationaleNegatesConflict('未识别到冲突')).toBe(true);
+    expect(rationaleNegatesConflict('以项目级口径陈述且与权威不一致')).toBe(false);
+    expect(rationaleNegatesConflict('未构成冲突，但两处数值不一致')).toBe(false);
+    expect(rationaleNegatesConflict('未达到冲突判定阈值')).toBe(false);
   });
 });

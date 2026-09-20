@@ -6,6 +6,8 @@ import type { ValidationIssue } from './types';
  * 判定分层：L1 正则提取前提参数（确定性）→ L2 阈值比较（依据建办质〔2018〕31号常见门槛）→
  * L1 别名词面覆盖判定（辨识区 = 含"危大"关键词行前后 6 行的清单区段）。
  * 语义模型不参与判定（危大项名称是确定性封闭集，词面判定即零误伤）。
+ * r28j：gaps 结构与 uncoveredDangerousItems 导出供修复轮 stageDangerousApplicabilityRepair 同源复用
+ *（检测定位=修复定位；s28i 连续两轮「拆除工程」漏列直坠门禁为修复轮落位归因）。
  */
 
 const extractNumberNear = (body: string, pattern: RegExp): number | undefined => {
@@ -24,7 +26,8 @@ function declaresNoDangerousWork(body: string): boolean {
   return /(?:不涉及|不存在|不属于|未涉及)[^。；\u000A]{0,16}危大|(?:不涉及|不存在|不属于|未涉及)[^。；\u000A]{0,16}危险性较大|(?:参数|高度|深度)[^。；\u000A]{0,12}未达[^。；\u000A]{0,60}危大/u.test(body);
 }
 
-/** 危大工程封闭集项：适用前提判定 + 辨识别名（检测器 dangerousApplicabilityIssues 消费；4.41 起确定性补写器已删除） */
+/** 危大工程封闭集项：适用前提判定 + 辨识别名（检测器 dangerousApplicabilityIssues 与修复轮
+ * stageDangerousApplicabilityRepair 同源消费；4.41 确定性补写器删除后由 LLM 修复轮定向补列） */
 export const DANGEROUS_APPLICABLE_ITEMS = [
   {
     name: '基坑支护与降水工程',
@@ -60,9 +63,12 @@ export const DANGEROUS_APPLICABLE_ITEMS = [
     // r11 豁免分层（丰乐镇门禁 #7 归因）：作业形态词（起重伤害/垂直运输/吊装）是普通工序描述的常用词——
     // 「化粪池吊装就位」「管材吊装打击」「人工配合机械下管」等常规吊运不构成非常规起重设备适用前提；
     // 正文明确宣称「不涉及危大工程/参数未达判定标准」时弱词不再判适用（硬设备名保留——见 declaresNoDangerousWork）
+    // r24 B7 收窄（实机归因）：「垂直运输/吊装」仍为普通工序高频词（实测 4 处均为化粪池/灯杆常规吊运，
+    // 零硬设备词）误触发适用前提——词表删去裸「垂直运输/吊装」，改为「起重伤害 | 非常规起重 | 起吊重量 |
+    // 吊装重量 | 吊装荷载」有向前提：伤害形态名与非常规起重量纲词才是真实适用证据，普通吊运静默
     applicable: (body: string) => {
       if (/塔吊|塔式起重机|汽车吊|履带吊|吊车|起重机械|起重设备|起重机|卷扬机|物料提升机|提升机|电动葫芦/u.test(body)) return true;
-      return /起重伤害|垂直运输|吊装/u.test(body) && !declaresNoDangerousWork(body);
+      return /起重伤害|非常规起重|起吊重量|吊装重量|吊装荷载/u.test(body) && !declaresNoDangerousWork(body);
     },
   },
   {
@@ -89,32 +95,60 @@ export function extractDangerZone(markdown: string): string {
   return zone.join('\n');
 }
 
+/** 危大适用性缺口（r28j 检测器与修复轮同源单源）：applicableNames=全文适用前提命中项名；
+ * zonePresent=全文是否存在危大辨识区（含「危大」行）；missingNames=辨识区未覆盖别名的项名。
+ * 修复轮 stageDangerousApplicabilityRepair 消费本结构与 uncoveredDangerousItems（检测定位=修复定位）。 */
+export interface DangerousApplicabilityGaps {
+  applicableNames: string[];
+  zonePresent: boolean;
+  missingNames: string[];
+}
+
+export function dangerousApplicabilityGaps(markdown: string): DangerousApplicabilityGaps {
+  const applicable = DANGEROUS_APPLICABLE_ITEMS.filter(item => item.applicable(markdown));
+  const dangerZone = extractDangerZone(markdown);
+  return {
+    applicableNames: applicable.map(item => item.name),
+    zonePresent: dangerZone !== '',
+    missingNames: dangerZone === ''
+      ? applicable.map(item => item.name)
+      : applicable.filter(item => !item.aliases.some(alias => dangerZone.includes(alias))).map(item => item.name),
+  };
+}
+
+/** 指定项名集合在文本危大辨识区中未覆盖的项（修复轮复检单源：补列条目必须落回 extractDangerZone 覆盖范围） */
+export function uncoveredDangerousItems(markdown: string, names: readonly string[]): string[] {
+  const dangerZone = extractDangerZone(markdown);
+  return names.filter(name => {
+    const item = DANGEROUS_APPLICABLE_ITEMS.find(entry => entry.name === name);
+    return !!item && !item.aliases.some(alias => dangerZone.includes(alias));
+  });
+}
+
 export function dangerousApplicabilityIssues(markdown: string): ValidationIssue[] {
   // 适用性前提判定（确定性）：正文关键参数/设备词 → 危大项适用；无适用前提时静默跳过（不制造义务）
-  const applicable = DANGEROUS_APPLICABLE_ITEMS.filter(item => item.applicable(markdown));
-  if (applicable.length === 0) return [];
+  const gaps = dangerousApplicabilityGaps(markdown);
+  if (gaps.applicableNames.length === 0) return [];
   // 辨识覆盖判定：危大辨识区内别名词面命中；正文从未出现"危大"字样 = 全部适用项漏辨识
-  const dangerZone = extractDangerZone(markdown);
-  if (!dangerZone) {
+  if (!gaps.zonePresent) {
     return [{
       level: 'error',
       severity: 'blocker',
       category: 'fact_consistency',
       owner: 'llm',
       repairability: 'llm_repairable',
-      message: `正文出现危大工程适用前提（${applicable.map(item => item.name).join('、')}）但全文未编制危大工程辨识清单`,
+      message: `正文出现危大工程适用前提（${gaps.applicableNames.join('、')}）但全文未编制危大工程辨识清单`,
       suggestion: '必须编制危大工程辨识清单：按建办质〔2018〕31号逐项辨识并标注分级，超过一定规模的专项施工方案需专家论证。',
     }];
   }
-  const missing = applicable.filter(item => !item.aliases.some(alias => dangerZone.includes(alias)));
-  if (missing.length === 0) return [];
+  if (gaps.missingNames.length === 0) return [];
   return [{
     level: 'error',
     severity: 'blocker',
     category: 'fact_consistency',
     owner: 'llm',
     repairability: 'llm_repairable',
-    message: `危大工程辨识清单遗漏适用项：${missing.map(item => item.name).join('、')}（正文已出现适用前提但辨识清单未列入）`,
+    message: `危大工程辨识清单遗漏适用项：${gaps.missingNames.join('、')}（正文已出现适用前提但辨识清单未列入）`,
     suggestion: '按建办质〔2018〕31号逐项辨识：将遗漏项补入危大工程辨识清单并标注分级，超过一定规模的专项施工方案需专家论证。',
   }];
 }

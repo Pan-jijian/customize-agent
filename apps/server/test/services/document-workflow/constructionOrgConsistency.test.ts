@@ -105,6 +105,37 @@ describe('constructionOrgConsistencyIssues', () => {
   });
 });
 
+describe('constructionOrgConsistencyIssues 机械数量型号 C-T4（资料事实对账）', () => {
+  it('资料事实无机械条目（管理规则类）时正文机械台数静默（r28f 死告警根因）', () => {
+    const facts = makeFactsModel({
+      resources: [makeFact('machine-rule-1', '机械设备实行专人管理并定期维保。', 'resources'), makeFact('machine-rule-2', '大型机械进场前须报审验收。', 'resources')],
+    });
+    const markdown = '施工组织设计。现场配置提升泵 2 台、自卸汽车 3 辆、压路机 2 台、蛙式打夯机 1 台。';
+    expect(constructionOrgConsistencyIssues(markdown, facts).filter(item => item.message.includes('机械数量型号'))).toEqual([]);
+  });
+
+  it('资料事实有机械台数且与正文不一致 → 报对账冲突（正文/资料两口径并列）', () => {
+    const facts = makeFactsModel({ resources: [makeFact('machine', '挖掘机 3 台', 'resources')] });
+    const markdown = '施工组织设计。土方开挖配置挖掘机 5 台。';
+    const issue = constructionOrgConsistencyIssues(markdown, facts).find(item => item.message.includes('机械数量型号'));
+    expect(issue).toBeTruthy();
+    expect(issue?.message).toContain('正文 5 台');
+    expect(issue?.message).toContain('资料 3 台');
+  });
+
+  it('名称归一与去噪：现场配置/每台配套结构不产生垃圾名且同名台数一致不报', () => {
+    const facts = makeFactsModel({ resources: [makeFact('machine', '洒水车 2 台', 'resources')] });
+    const markdown = '施工组织设计。现场配置洒水车 2 台，每台洒水车配 1 台喷雾机。';
+    expect(constructionOrgConsistencyIssues(markdown, facts)).toEqual([]);
+  });
+
+  it('否定分句（不使用/无需）不参与对账，正常配置保留', () => {
+    const facts = makeFactsModel({ resources: [makeFact('machine', '发电机 2 台', 'resources')] });
+    const markdown = '施工组织设计。本项目不使用发电机，无需另配发电机 1 台，现场配置发电机 2 台。';
+    expect(constructionOrgConsistencyIssues(markdown, facts)).toEqual([]);
+  });
+});
+
 describe('constructionOrgChapterDataCoverageIssues', () => {
   it('项目事实为空时不检查', () => {
     const chapters: DocumentDraftChapter[] = [{ id: 'c1', title: '工程概况', content: '模板化内容。', evidence: [], missingFacts: [] }];

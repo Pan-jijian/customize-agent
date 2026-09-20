@@ -319,6 +319,10 @@ describe('AA4 specLocationMismatchIssues 豁免与模式谱系增量', () => {
     const map = specMap({ 混凝土强度等级: [['垫层', 'C15'], ['主体', 'C35']] });
     expect(specLocationMismatchIssues('垫层按分层厚度300mm浇筑C30。', map)).toEqual([]);
   });
+  it('AA4 间距参数豁免（栏板固定件间距）', () => {
+    const map = specMap({ 板材厚度: [['栏板', '150mm'], ['屋面', '80mm']] });
+    expect(specLocationMismatchIssues('栏板固定件间距不大于500mm。', map)).toEqual([]);
+  });
   it('AA4 8 条截断', () => {
     const map = specMap({ 混凝土强度等级: [['垫层', 'C15'], ['主体', 'C35']] });
     const md = Array.from({ length: 12 }, () => '垫层采用C20混凝土。').join('\n');

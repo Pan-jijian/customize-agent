@@ -7,6 +7,8 @@ import type { WritingTaskBrief } from './core';
 import type { TenderBidTemplatingReport } from '../tenderBidScoring';
 import type { AuthorityAuditReport } from '../authorityAudit';
 import type { SuspensionChecklist } from '../suspensionChecklist';
+import type { ParameterUsageAudit } from '../chapterParameterFacts';
+import type { KeyFactPlacementAudit } from '../keyFactPlacement';
 
 export interface ChapterCoverageReport {
   chapterId: string;
@@ -48,6 +50,22 @@ export interface DocumentProfileReport {
   requiredEvidencePolicy: string;
 }
 
+/** 评分 v3 维度构成明细（对齐口径 E：诚实口径、外部对齐、防通胀；维度/权重/得分/口径说明） */
+export interface DocumentQualityDimension {
+  key: 'requirement' | 'structure' | 'dataAnchor' | 'professionalDepth' | 'compliance' | 'factIntegrity';
+  label: string;
+  score: number;
+  weight: number;
+  detail?: string;
+}
+
+/** 要件对照表条目（要求模型 → 逐条响应状态；要求模型不可用时为 undefined） */
+export interface DocumentRequirementChecklistItem {
+  text: string;
+  category: string;
+  responded: boolean;
+}
+
 export interface DocumentQualityReport {
   overall: number;
   deliveryProbability: number;
@@ -66,7 +84,37 @@ export interface DocumentQualityReport {
     normalization: number;
     /** 低雷同性 */
     uniqueness: number;
+    /** 强制模块语义覆盖率（0..1，v2 要件完整性构成分量，单源判定透传；旧报告可能缺省） */
+    moduleCoverageRate?: number;
   };
+  /** 评分口径模式（v2）：blind=暗标（媒介按附表区承载核验）/ open=明标 / unknown=未判定（按明标口径） */
+  mode?: 'blind' | 'open' | 'unknown';
+  /** 维度构成明细（v2；权重为产品级通用常量，缺失输入的构成分量已显式降级） */
+  dimensions?: DocumentQualityDimension[];
+  /** 要件对照表（v2：要求模型可用时输出，含条款类别与响应状态） */
+  requirementChecklist?: DocumentRequirementChecklistItem[];
+  /** C-T5 清单落位审计（有清单行追踪时输出）：有效行（豁免口径行后）落位情况与豁免行清单，
+   * 供交付审计核验「BOQ 有效行落位 ≥90%」的口径完整性（豁免/显性说明均有据可查） */
+  billPlacementAudit?: {
+    /** 有效行数（豁免口径行后） */
+    effectiveRows: number;
+    /** 落位行数（名称/编码字面命中） */
+    placedRows: number;
+    /** 已落位行中以利旧/甲供/不涉及等说明式处置的行数（按条目名去重；审计区分说明式处置与施工内容落位） */
+    explicitRows: number;
+    /** 有效行落位率（落位/有效行；无有效行时为 null） */
+    rate: number | null;
+    /** 豁免行清单（口径行等非落位必要行的明细登记，截取前 50 行） */
+    exemptRows: string[];
+  };
+  /** C-T6 可靠参数使用审计（有参数池时输出）：义务集=与任一章标题/小节词面相关的可靠参数
+   * （参数池构建已排除商务金额/单价/税率/预留金类事实）；义务满足率=已使用/(已使用+相关而遗漏)，
+   * 相关而遗漏明细供修复链补写与「≥80%」验收核验 */
+  parameterUsageAudit?: ParameterUsageAudit;
+  /** C-T7 关键事实落位审计（有值的关键事实字段存在时输出）：须落位清单=8 项基础信息字段中有值的
+   * 字段，落位=任一候选值经 factValueAppears 命中正文（与 fact-coverage 落位判定同口径单源）；
+   * C-T7 验收判据：关键事实落位率 100%（rate===1），未落位明细供落位复核定位 */
+  keyFactPlacementAudit?: KeyFactPlacementAudit;
   summary: string;
   actions: string[];
   /** 模板化套用专项检测报告（docx 第十类核心降档判定，重难点重度模板化→直接降档） */

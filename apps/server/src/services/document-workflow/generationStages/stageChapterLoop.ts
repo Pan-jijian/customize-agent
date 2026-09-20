@@ -13,7 +13,7 @@ import { sectionContentIntegrityIssues } from '../qualityValidation';
 import { chapterCriteriaText } from '../constructionBidStructure';
 import { buildSemanticSimilarity } from '../semanticSimilarity';
 import { evidenceSafetyKey } from '../evidenceContentSafety';
-import { normalizeChapterTitleLine, renderChapterRequirementSlice } from '../tenderRequirements';
+import { normalizeChapterTitleLine, renderChapterRequirementSlice, renderChapterStructureSlice } from '../tenderRequirements';
 import { buildChapterFactNeeds, factNeedsCoveragePrompt, factsForChapterNeeds, resolveChapterFactNeeds } from '../factsModel';
 import { QUANTIFIED_FACT_RE } from '../parameterPatterns';
 import { chapterSectionFactUsageIssues } from '../chapterReview';
@@ -28,7 +28,9 @@ import { alignSectionHeadingsToPlan, runWithAdaptiveConcurrency, stableHash, thr
 import { displayStage, elapsedMessage, upsertProgressStage } from '../progress';
 import { measureGenerationStep } from '../rolePipeline';
 import { buildRetrievalCoverageReport, resolveRolePoolRisk, retrieveDeepChapterEvidence, shouldTriggerDeepRetrieval } from '../documentEvidenceRetrieval';
-import { chapterRelevanceTokens, renderBillFactLockText } from '../billFactLock';
+import { buildBillFactLockQueries, buildBillResponsibilityMap, renderBillChapterTaskLines, renderBillFactLockText } from '../billFactLock';
+import { renderDrawingFactLockText } from '../drawingFactLock';
+import { renderChapterParameterLines } from '../chapterParameterFacts';
 import { extractBoqDivisionCoverage, formatBoqDivisionCoverage } from '../documentFactTrace';
 import { retrievePlannedMaterialEvidence, sampleProjectMaterialEvidence } from '../projectMaterialProfile';
 import { buildChapterFactCoverageContext, buildPlannedChapterContent, capFactCoverageContext, evidenceForSection } from '../chapterGeneration';
@@ -47,6 +49,9 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
   // 4.2 阶段瀑布：规划期收口 → 成稿期起点（成稿主循环含章级审查修复流水线重叠，合并记 phase:draft）
   session.planning.generationDiagnostics.metrics.push({ name: 'phase:plan', startedAt: session.planning.planPhaseStartedAt, endedAt: Date.now(), durationMs: Date.now() - session.planning.planPhaseStartedAt });
   session.chapterLoop.draftPhaseStartedAt = Date.now();
+  // C-T5 行级任务清单（每行→责任章→写作证据位）：清单锁按章分配责任行，写作注入与未落位修复定位同源；
+  // 全章循环只构建一次（条目×章打分一次完成，避免每章重复计算）
+  const billResponsibility = buildBillResponsibilityMap(session.blueprint.billFactLock, session.planning.effectiveChapters);
   for (let chapterOffset = 0; chapterOffset < session.planning.effectiveChapters.length; chapterOffset += session.blueprint.chapterConcurrency) {
     const chapterBatch = session.planning.effectiveChapters.slice(chapterOffset, chapterOffset + session.blueprint.chapterConcurrency);
     const batchTasks = await Promise.all(chapterBatch.map(async (chapter, batchIndex): Promise<(() => Promise<void>) | undefined> => {
@@ -123,16 +128,12 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     // P1-5：基础事实查询已跨章预执行缓存（basicFactSearchResults），不再并入本章查询集重复检索
     // P17 语义化：概况类章判定迁移 chapterIntentClassifier（语义优先、正则兑底）
     const usesCachedBasicFacts = session.planning.chapterIntentClassifier.needsBasicFacts(chapter.title);
-    // D2 清单专用查询构造：清单事实锁中与本章相关的条目名/特征构造精确查询——数值型清单行在向量空间弱势，
-    // 词面精确查询兑底（历史缺陷：清单条目证据竞争不过高语义匹配的招标文件切片，条目行从不被召回）
+    // D2 清单专用查询构造：清单事实锁按分部轮询均衡选取代表条目构造精确查询——数值型清单行在向量空间弱势，
+    // 词面精确查询兑底（历史缺陷：清单条目证据竞争不过高语义匹配的招标文件切片，条目行从不被召回）；
+    // 分部均衡保证章节标题与条目分部名无词面交集时条目类仍不被丢弃（旧实现硬过滤+顺序截断，
+    // 亮化设计说明含太阳能参数从未被定向召回）
     const billItemQueries = session.blueprint.billFactLock
-      ? (() => {
-        const billTokens = chapterRelevanceTokens(chapter.title, chapter.sections || []);
-        return session.blueprint.billFactLock.entries
-          .filter(entry => entry.name && billTokens.some(token => entry.name.includes(token) || entry.description.includes(token) || entry.section.includes(token)))
-          .slice(0, 6)
-          .map(entry => `${entry.name} ${entry.description} ${entry.quantity}${entry.unit}`.trim().slice(0, 80));
-      })()
+      ? buildBillFactLockQueries(session.blueprint.billFactLock, chapter.title, chapter.sections || [])
       : [];
     const queries = compactChapterQueries(chapter, [...baseQueries, ...planQueries, ...billItemQueries], []);
     const searchStartedAt = Date.now();
@@ -303,6 +304,14 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       const entries = session.blueprint.requirementAssignments.filter(assignment => assignment.chapterTitle === chapterTitle).map(assignment => assignment.entry);
       return renderChapterRequirementSlice(entries);
     })();
+    // A-T1 结构/呈现要求写作注入（章级）：招标明文的呈现形态（框图/图/表格/结合图表）必须在正文落实；
+    // 暗标口径下正文不得出图表实体，以完整文字承载并指向文末附表区（形态由附表区兑现）
+    const chapterStructureContext = (() => {
+      if (session.blueprint.structureAssignments.length === 0) return '';
+      const chapterTitle = normalizeChapterTitleLine(chapter.title);
+      const items = session.blueprint.structureAssignments.filter(assignment => assignment.chapterTitle === chapterTitle).map(assignment => assignment.requirement);
+      return renderChapterStructureSlice(items, { blind: forbidDrawingImages });
+    })();
     // 4.17.8 六个百分百写作侧前置注入：扬尘治理六项是国家规范固定封闭集，历史缺陷只在检测/修复侧
     // 逐项补写（后期修复模式），写作 LLM 凭记忆编写必漏项（4.17.7 实测缺 2 项）；写作时即注入六项
     // 原文要求逐项落实，缺项从源头消失——修复是辅助，写作是主力
@@ -327,6 +336,15 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     // B2 清单行直读通道：清单事实锁按章节相关性渲染权威清单行，不经检索召回/注入截断直接进入写作提示词
     //（清单条目级数据零丢失：检索硬顶/向量弱势/重排惩罚都影响不到直读行）
     const billLockText = session.blueprint.billFactLock ? renderBillFactLockText(session.blueprint.billFactLock, chapter.title, { sections: chapter.sections || [] }) : '';
+    // C-T5 行级任务清单（本章责任行）：责任章分配到本章的清单条目逐条列出（含建议落位小节），
+    // 写作时即按任务清单驱动落位（从源头提升落位率，检测/修复只作安全网）
+    const billTaskLines = session.blueprint.billFactLock ? renderBillChapterTaskLines(session.blueprint.billFactLock, billResponsibility, chapter.title) : [];
+    // B-T3 图纸行直读通道：图纸事实锁按章节相关性渲染设计说明/构造做法/材料规格/设备参数事实行，
+    // 不经检索召回/注入截断直接进入写作提示词（每份可用图纸保底行进入本节，支撑引用率验收 ≥1 处/份）
+    const drawingLockText = session.blueprint.drawingFactLock ? renderDrawingFactLockText(session.blueprint.drawingFactLock, chapter.title, { sections: chapter.sections || [] }) : '';
+    // C-T6 可靠参数按章直读通道：资料事实链参数索引（规格/参数/数量/时间/比例/标准编号）按章节相关性渲染，
+    // 不经检索召回直接进入写作提示词——可靠参数使用率的写作侧主力（商务金额类已在参数池构建时排除）
+    const parameterLines = renderChapterParameterLines(session.understanding.preliminaryFactsModel, chapter.title, { sections: chapter.sections || [] });
     // 组件 6 跨章写作职责分工：职责载体 = 本章标题+规划小节 / 其余各章标题+各自小节（同一份规划产物），
     // 写作端源头确保无跨章重复（写时即不复制其他章主题），不再依赖事后按分数删重复
     const dutyDeclaration = buildCrossChapterDutyDeclaration(chapter, session.planning.effectiveChapters);
@@ -339,7 +357,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
           return summary ? `【本章必须覆盖的清单分部分项全景（下列专有分项逐项写入正文施工方法，不得只写道路/铺装/绿化等大类而遗漏清单独有分项）】\n${summary}` : '';
         })()
       : '';
-    const roleContext = [graphRoleHint, chapterRequirementContext, forcedSectionContext, dutyDeclaration, sixHundredPercentContext, scopeOverrideAnchors.length ? `【数据口径强制约束】${scopeOverrideAnchors.join('；')}` : '', ...WRITING_INTEGRITY_CONSTRAINTS, plan?.writingGoal, plan?.mustCover?.length ? `本章必须覆盖：${plan.mustCover.join('、')}` : '', plan?.mustUseMaterialKinds?.length ? `本章优先使用资料类型：${plan.mustUseMaterialKinds.join('、')}` : '', boqCoverageContext, billLockText].filter(Boolean).join('\n');
+    const roleContext = [graphRoleHint, chapterRequirementContext, chapterStructureContext, forcedSectionContext, dutyDeclaration, sixHundredPercentContext, scopeOverrideAnchors.length ? `【数据口径强制约束】${scopeOverrideAnchors.join('；')}` : '', ...WRITING_INTEGRITY_CONSTRAINTS, plan?.writingGoal, plan?.mustCover?.length ? `本章必须覆盖：${plan.mustCover.join('、')}` : '', plan?.mustUseMaterialKinds?.length ? `本章优先使用资料类型：${plan.mustUseMaterialKinds.join('、')}` : '', boqCoverageContext, ...parameterLines, ...billTaskLines, billLockText, drawingLockText].filter(Boolean).join('\n');
     const chapterPromptExecution = resolveChapterPromptExecution(session.prepare.promptPlan, chapter);
     if (session.prepare.promptPlan.writerPrompts.length > 0 && !chapterPromptExecution.primaryWriter) throw new Error(`${displayChapterTitle(chapter.title)} 写作主控提示词未进入章节生成阶段`);
     const chapterPromptTexts = [chapterPromptExecution.promptTexts, session.prepare.generationControlPrompt].filter(Boolean).join('\n\n');

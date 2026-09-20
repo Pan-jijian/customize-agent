@@ -30,6 +30,33 @@ describe('PRECISE_TOKEN_RE', () => {
     expect(matches(PRECISE_TOKEN_RE, '尺寸50×10方管')).toContain('50×10');
     expect(matches(PRECISE_TOKEN_RE, '300x300x10预埋板')).toContain('300x300x10');
   });
+
+  it('M24d D1 面积单位三形态可提（r28k/s28l 实机盲区根治）', () => {
+    expect(matches(PRECISE_TOKEN_RE, '建筑面积1436.400m2，')).toContain('1436.400m2');
+    expect(matches(PRECISE_TOKEN_RE, '建筑面积961.42平方米。')).toContain('961.42平方米');
+    expect(matches(PRECISE_TOKEN_RE, '建筑面积937.72㎡；')).toContain('937.72㎡');
+    expect(matches(PRECISE_TOKEN_RE, '占地1436.4m²，')).toContain('1436.4m²');
+  });
+
+  it('M24d D1 m² 不截断为 m（原被 m 分支截断为「1436.4m」）', () => {
+    expect(matches(PRECISE_TOKEN_RE, '占地1436.4m²，')).not.toContain('1436.4m');
+    expect(matches(PRECISE_TOKEN_RE, '占地1436.4m²，')).toContain('1436.4m²');
+  });
+
+  it('M24d D1 非词形单位后接标点可提（原 \\b 边界不成立而漏提）', () => {
+    expect(matches(PRECISE_TOKEN_RE, '压实度93%，合格')).toContain('93%');
+    expect(matches(PRECISE_TOKEN_RE, '温度25℃，正常')).toContain('25℃');
+  });
+
+  it('M24d D1 既有形态零回归', () => {
+    expect(matches(PRECISE_TOKEN_RE, '长度20mm；')).toContain('20mm');
+    expect(matches(PRECISE_TOKEN_RE, '合计100.5m3。')).toContain('100.5m3');
+    expect(matches(PRECISE_TOKEN_RE, '长约500m，')).toContain('500m');
+    expect(matches(PRECISE_TOKEN_RE, 'C30混凝土')).toContain('C30');
+    expect(matches(PRECISE_TOKEN_RE, '管径DN50')).toContain('DN50');
+    // 裸小数非工程数字不提取
+    expect(matches(PRECISE_TOKEN_RE, '坡度i=0.3、')).toEqual([]);
+  });
 });
 
 describe('QUANTIFIED_FACT_RE / HAS_QUANTIFIED_VALUE_RE', () => {
@@ -67,6 +94,17 @@ describe('PROCESS_PARAMETER_RE', () => {
   it('多字符单位优先于单字符（m³/m² 不截断成 m）', () => {
     expect(matches(PROCESS_PARAMETER_RE, '混凝土30m³')).toEqual(['30m³']);
     expect(matches(PROCESS_PARAMETER_RE, '模板500m²')).toEqual(['500m²']);
+  });
+
+  it('r28 扩围：绿化/苗木类形态（地径D10/胸径Φ12/养护期为二年/成活率≥95%）→ 命中', () => {
+    expect(matches(PROCESS_PARAMETER_RE, '其中红枫B地径D10')).not.toHaveLength(0);
+    expect(matches(PROCESS_PARAMETER_RE, '腊梅胸径Φ12')).not.toHaveLength(0);
+    expect(matches(PROCESS_PARAMETER_RE, '养护期为二年')).not.toHaveLength(0);
+    expect(matches(PROCESS_PARAMETER_RE, '移栽成活率≥95%')).not.toHaveLength(0);
+  });
+
+  it('r28 反例：绿化描述句无参数形态 → 0 命中（防词表过宽）', () => {
+    expect(matches(PROCESS_PARAMETER_RE, '绿化苗木按设计规格选型并及时栽植，养护管理到位。')).toHaveLength(0);
   });
 });
 

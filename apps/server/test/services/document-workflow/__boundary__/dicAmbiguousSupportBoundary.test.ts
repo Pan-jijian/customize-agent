@@ -5,7 +5,11 @@
  *  - S1 两可表述：决策词窗口 12/20 字符精确边界、词族谱系逐词单侧命中、1 字豁免、
  *    括号悬置 48 字符上限、管线豁免词谱系、归一化去空白、多命中聚合去重；
  *  - S2 支护形式：资料形式词 10 词谱系、编造体系词 8 词谱系、否定词 13 词谱系、
- *    否定 12 字符前窗精确边界、资料源四谱系、formTexts 过滤、部分落地豁免、表格行形态。
+ *    否定 12 字符前窗精确边界、资料源四谱系、formTexts 过滤、部分落地豁免、表格行形态；
+ *  - S3 质量缺陷处置豁免（r27）：前窗决策词同构上下文下缺陷枚举+处置闭环豁免、
+ *    40 字窗无处置动作保持召回、真两可护栏；
+ *  - S4 时序状语收尾豁免（r28）：「X或Y前/后」作业时点列举豁免（含右组吞尾形态）、
+ *    句中「前」不豁免与真两可护栏。
  * 全部为确定性正则提取与词面判定，无语义依赖。
  */
 import { describe, expect, it } from 'vitest';
@@ -170,5 +174,43 @@ describe('S2 supportFormFact 反向完整性与过滤', () => {
   });
   it('S2-14 无资料形式事实 → 0 条', () => {
     expect(supportFormFactConsistencyIssues('基坑支护小节：采用灌注桩。', factsOf({}))).toEqual([]);
+  });
+});
+
+// ── S3. ambiguousEitherOrIssues：质量缺陷处置闭环豁免（r27 扩围） ──
+
+describe('S3 ambiguousEitherOr 质量缺陷处置句豁免与条件边界', () => {
+  /** 缺陷枚举前窗含决策词（「按…检查1次」），与前文窗口召回上下文同构 */
+  const inspectionContext = '施工员对围栏立柱基础混凝土强度按每批次检查1次，';
+  it('S3-1 缺陷枚举（强度不足/固定不牢）+ 返工复验销项闭环 → 豁免不报', () => {
+    const md = `${inspectionContext}发现基础强度不足或固定不牢的构件由施工员组织返工，质检员复验合格后销项，方可进行上部安装。`;
+    expect(ambiguousEitherOrIssues(md)).toEqual([]);
+  });
+  it('S3-2 同前文缺陷枚举但 40 字窗内无处置动作 → 保持召回', () => {
+    const md = `${inspectionContext}发现基础强度不足或固定不牢的构件应立即停工封闭现场并等候上级指示。`;
+    expect(ambiguousEitherOrIssues(md).length).toBe(1);
+  });
+  it('S3-3 真两可护栏：设计决策并列（桩基或独立基础）仍报', () => {
+    expect(ambiguousEitherOrIssues('基础形式为桩基或独立基础，按设计图纸实施。').length).toBe(1);
+  });
+});
+
+// ── S4. ambiguousEitherOrIssues：时序状语收尾豁免（r28 扩围） ──
+
+describe('S4 ambiguousEitherOr 时序状语（或…前/后）豁免与真两可护栏', () => {
+  it('S4-1 出行便道「道路面层浇筑或沟槽开挖前」作业时点列举 → 豁免不报（r27b 实况复刻）', () => {
+    // r27b 实机误报：右侧贪婪组把紧邻的「前」吞入匹配尾（match[2]=「沟槽开挖前」），后窗判定
+    // 落空——「X或Y前，先…」是先通后封、分段流水的时序安排（两个作业时点的先后），非设计决策两可
+    const md = '出行便道按“先通后封”时序组织。道路面层浇筑或沟槽开挖前，施工员先沿施工带外侧整平临时便道，宽度不小于1.2m。';
+    expect(ambiguousEitherOrIssues(md)).toEqual([]);
+  });
+
+  it('S4-2 真两可护栏：无时序标记的设计决策并列（钢板桩或排桩支护）仍报', () => {
+    expect(ambiguousEitherOrIssues('基坑支护采用钢板桩或排桩支护。').length).toBe(1);
+  });
+
+  it('S4-3 「前」在句中不在匹配尾（采用放坡或支护桩前应…）→ 不豁免仍报', () => {
+    // 时序标记仅收束于匹配尾或后窗首时才豁免；句中「前」连接的是论证条件句，选型两可仍属决策悬置
+    expect(ambiguousEitherOrIssues('采用放坡或支护桩前应组织专家论证。').length).toBe(1);
   });
 });

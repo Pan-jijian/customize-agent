@@ -1,5 +1,7 @@
 import type { BoqRowTrace, DocumentDraftChapter, DocumentFact, DocumentFactTrace, DocumentFactsModel, StructuredTableFact, ValidationIssue } from './types';
 import { stringifyFactValue } from './utils';
+import { normalizeEngineeringTextForFactMatch } from './engineeringUnits';
+import { classifyBillPlacementExemption } from './billFactLock';
 
 function normalize(value: string) {
   return value.replace(/[\s,，.。:：;；|｜（）()《》<>【】"“”'‘’]/gu, '').toLowerCase();
@@ -109,7 +111,9 @@ export function isActionableFactValue(value: string) {
 export function isActionableTraceFact(trace: DocumentFactTrace) {
   const value = String(trace.value || '').trim();
   const labelValue = `${trace.label}${value}`;
-  if (!/项目|工程|编号|地点|规模|范围|工期|质量|安全|资源|材料|设备|验收|\d/u.test(labelValue)) return false;
+  // C-T7（#50）：招标人/建设单位/发包人/业主是一级关键事实标签（基本信息表核心行），其值（机构名）
+  // 不含工程关键词——原先仅按工程词面白名单过滤会被整类误滤，致跨章扩散与落位评分池缺失
+  if (!/项目|工程|编号|地点|规模|范围|工期|质量|安全|资源|材料|设备|验收|招标人|建设单位|发包人|业主|\d/u.test(labelValue)) return false;
   if (!isActionableFactValue(value)) return false;
   // “技术参数/精确参数”是正文可写参数池（清单编码、孤立尺寸等），用于提示词注入而非逐条落位义务，不参与落位评分
   if (/^(?:技术参数|精确参数)$/u.test(trace.label)) return false;
@@ -120,6 +124,19 @@ export function isActionableTraceFact(trace: DocumentFactTrace) {
   if (/^(?:项目名称|工程名称|项目名)$/u.test(trace.label)
     && !/(?:建设|新建|改建|扩建|改造|整治|提升|治理)/u.test(value)
     && !/[\u4e00-\u9fa5]{1,8}(?:镇|乡|县|区|村|街道|社区|片区)/u.test(value)) return false;
+  // r27 扩围（r26d 归因：5 项招标文件要求条款类知识入池恒不落位，永久稀释方案针对性
+  // usedRate）：①义务主体开头的目标/要求条款（「承包人应实现安全生产无事故目标。」）；
+  // ②纯法规名连排/单列（去除书名号引用后无实质内容）；③「本招标项目…须/应/必须…」
+  // 式编制要求条款；④圆括号中文/数字序号开头的条款枚举碎片（「（二）污水管网…」）。
+  // 此类条款正文应以管理措施响应而非字面落位原句，入池即永久 unplaced（r26d 实测 5 项
+  // 全为要求条款）；含数值/期限等具体数据的义务句不在排除列（「承包人应在开工前7日内
+  // 完成…准备」类具体安排可被正文直接引用扩散，R14 实机验证）——通用形态判据，零项目语义
+  const legalOnly = value.replace(/《[^》]{2,60}》/gu, '').replace(/[、，,；;．.／/\s（）()]/gu, '');
+  if (!legalOnly && /《[^》]{2,60}》/u.test(value)) return false;
+  const hasConcreteData = /\d/u.test(value);
+  if (!hasConcreteData && /^(?:承包人|发包人|招标人|投标人|我方|施工单位|建设单位|总承包单位|分包人|中标人)(?:应|须|必须|应当)/u.test(value)) return false;
+  if (!hasConcreteData && /^本(?:招标|采购)项目[^。；]{0,80}?(?:须|应|必须)/u.test(value)) return false;
+  if (/^[（(]\s*[一二三四五六七八九十\d]{1,3}\s*[)）]/u.test(value)) return false;
   return true;
 }
 
@@ -155,6 +172,14 @@ export function factTraceIssues(traces: DocumentFactTrace[], options: { maxIssue
     }));
 }
 
+/** 2 字首段泛词保护名单（r28h M9 实机复核）：s28h2「材料」「人工」「软件」等费用子行/占位行与
+ * r28h2「其他」类汇总行——泛词在正文必然出现，但不构成清单项的落位证据（2 字工程实义词如
+ * 「圈梁」「垫层」「压膜」不在表内，照常判定） */
+const BOQ_PRIMARY_NAME_STOPWORDS = new Set([
+  '其他', '材料', '人工', '软件', '硬件', '机械', '设备', '建筑', '安装', '拆除',
+  '服务', '费用', '项目', '工程', '施工', '内容', '其中', '以上', '以下', '临时', '措施', '合计', '小计',
+]);
+
 /** 构建 BOQ 行级落位追踪 */
 export function buildBoqRowTraces(markdown: string, factsModel: DocumentFactsModel): BoqRowTrace[] {
   const tables = factsModel.tables || [];
@@ -187,7 +212,14 @@ export function buildBoqRowTraces(markdown: string, factsModel: DocumentFactsMod
 
       const normalizedName = normalize(itemName);
       const normalizedCode = normalize(itemCode);
-      const placed = (normalizedName.length >= 3 && normalizedMarkdown.includes(normalizedName.slice(0, 12)))
+      // r28h M9 落位判定扩围（实机归因）：名称首段实体主名——括号/顿号/枚举形态（「矩形柱（含梯柱）」
+      // 「天沟、挑檐板」）与 2 字短名（「圈梁」「垫层」）原先因长度门槛与整串前缀失配而永不落位
+      // （s28h2 实测 411 行短名死区）；2 字主名须过泛词保护名单；原整名前缀通道保留（无分隔符形态同源，
+      // 「给、排水附（配）件」类首段过短的枚举名走整名通道）
+      const primaryName = normalize(itemName.split(/[\s（(、，,;；:：]/u)[0] || '');
+      const primaryOk = primaryName.length >= 3 || (primaryName.length === 2 && !BOQ_PRIMARY_NAME_STOPWORDS.has(primaryName));
+      const placed = (primaryOk && normalizedMarkdown.includes(primaryName.slice(0, 12)))
+        || (normalizedName.length >= 3 && normalizedMarkdown.includes(normalizedName.slice(0, 12)))
         || (normalizedCode.length >= 3 && normalizedMarkdown.includes(normalizedCode.slice(0, 8)));
 
       traces.push({
@@ -197,6 +229,8 @@ export function buildBoqRowTraces(markdown: string, factsModel: DocumentFactsMod
         unit: unit.slice(0, 20),
         sourceFile: table.sourceFile || '',
         placed,
+        // C-T5 豁免口径单源：汇总/噪声/费用/分部标题行标记豁免（不计入落位率分母，行保留在追踪中供审计登记）
+        exempt: classifyBillPlacementExemption(itemName, { code: itemCode, quantity }) !== undefined,
       });
     }
   }
@@ -205,24 +239,30 @@ export function buildBoqRowTraces(markdown: string, factsModel: DocumentFactsMod
   return traces.sort((a, b) => (a.placed === b.placed ? 0 : a.placed ? 1 : -1));
 }
 
-/** BOQ 行级落位问题（从 trace 生成） */
+/** BOQ 行级落位问题（从 trace 生成）；C-T5：口径行豁免（汇总/噪声/费用/分部标题，与 boqPlacementIssues 单源口径），
+ * 分母只计有效行——历史缺陷：口径行未排除致分母虚高、落位率被系统性压低；豁免行清单登记进消息可审计 */
 export function boqRowTraceIssues(traces: BoqRowTrace[]): ValidationIssue[] {
-  const unplaced = traces.filter(t => !t.placed);
+  const considered = traces.filter(t => !t.exempt);
+  const unplaced = considered.filter(t => !t.placed);
   if (unplaced.length === 0) return [];
-  const total = traces.length;
+  const total = considered.length;
   const rate = (total - unplaced.length) / total;
+  const exemptTraces = traces.filter(t => t.exempt);
+  const exemptNote = exemptTraces.length > 0
+    ? `（口径行 ${exemptTraces.length} 行已豁免不计入分母：${exemptTraces.slice(0, 5).map(t => t.itemName).join('、')}${exemptTraces.length > 5 ? ' 等' : ''}）`
+    : '';
 
   const issues: ValidationIssue[] = [];
   if (rate < 0.3) {
     issues.push({
       level: 'warning',
-      message: `BOQ 清单行级落位严重不足：${total - unplaced.length}/${total} 行（${Math.round(rate * 100)}%）`,
+      message: `BOQ 清单行级落位严重不足：${total - unplaced.length}/${total} 行（${Math.round(rate * 100)}%）${exemptNote}`,
       suggestion: `清单明细数量较大，建议优先补充主要分部分项、关键规格和大额工程量。未落位清单项示例：${unplaced.slice(0, 5).map(t => `${t.itemName} ${t.quantity}${t.unit}`).join('；')}`,
     });
   } else if (rate < 0.6) {
     issues.push({
       level: 'warning',
-      message: `BOQ 清单行级落位不足：${total - unplaced.length}/${total} 行（${Math.round(rate * 100)}%）`,
+      message: `BOQ 清单行级落位不足：${total - unplaced.length}/${total} 行（${Math.round(rate * 100)}%）${exemptNote}`,
       suggestion: `建议补充落位：${unplaced.slice(0, 5).map(t => t.itemName).join('、')}`,
     });
   }
@@ -368,9 +408,9 @@ type BoqRowMarker = { kind: 'division'; name: string } | { kind: 'item'; summary
 /** 清单表行分类（与 r14 探针同口径：编号 1.1/2.3.1 形态 + 三位小数量格排除 + 编号后首个中文名 2-15 字） */
 function classifyBoqRow(cells: string[]): BoqRowMarker {
   const trimmed = cells.map(cell => String(cell ?? '').trim());
-  // 条目行：项目编码（10-12 位）后第一个非空格为条目名（列序：序号|项目编码|项目名称，个别表格有空列占位）；
-  // 数量格（三位小数）前最近短格为单位
-  const codeIndex = trimmed.findIndex(cell => /^\d{10,12}$/u.test(cell));
+  // 条目行：项目编码形态（国标 10-12 位数字，或补充清单 WB/ZB+≥8 位数字）后第一个非空格为条目名
+  //（列序：序号|项目编码|项目名称，个别表格有空列占位）；数量格（三位小数）前最近短格为单位
+  const codeIndex = trimmed.findIndex(cell => /^\d{10,12}$/u.test(cell) || /^[A-Z]{1,3}\d{8,}$/u.test(cell));
   if (codeIndex >= 0) {
     let name = '';
     for (let k = codeIndex + 1; k < trimmed.length; k += 1) {
@@ -392,8 +432,14 @@ function classifyBoqRow(cells: string[]): BoqRowMarker {
       return { kind: 'item', summary: name };
     }
   }
-  // 分部行：带点编号（1.1 / 2.3.1 形态）且行内无三位小数数量格
-  const divisionIndex = trimmed.findIndex(cell => /^\d+(?:\.\d+){1,3}$/u.test(cell));
+  // 分部行三形态（行内无三位小数数量格）：带点编号（1.1 / 2.3.1，如「1.1 新建混凝土道路」）；
+  // 中文序数一级分部（一/二/…/十二，如「二 排水工程」「六 绿化工程」）；GB 清单编码分部
+  //（4 位分部 0101 / 6 位子分部 011101，如「0112 墙、柱面装饰与隔断、幕墙工程」）。
+  // 历史缺陷：只认带点编号——「二 排水工程」「0112 装饰分部」类上下文丢失，
+  // 其下专有分项（生态池/墙面彩绘/绿化栽植等）零注入规划与范围核对素材。
+  // 后两类要求编号位于行首（≤2 列），防工程量/备注格数字误判为分部
+  const divisionIndex = trimmed.findIndex((cell, index) => /^\d+(?:\.\d+){1,3}$/u.test(cell)
+    || (index <= 2 && (/^\d{4}(?:\d{2})?$/u.test(cell) || /^[一二三四五六七八九十]{1,3}$/u.test(cell))));
   if (divisionIndex >= 0 && !trimmed.some(cell => /^\d{1,3}(?:,\d{3})*\.\d{3}$/u.test(cell))) {
     for (let k = divisionIndex + 1; k < trimmed.length; k += 1) {
       const name = trimmed[k];
@@ -425,8 +471,10 @@ export function extractBoqDivisionCoverage(factsModel: DocumentFactsModel): BoqD
       if (!Array.isArray(row)) continue;
       const marker = classifyBoqRow(row);
       if (marker.kind === 'division') {
-        // 地名清空上下文（村名下的条目归属未知更深分部，不得回挂到上一个专业分部）
-        if (isGeographic(marker.name)) { currentName = ''; continue; }
+        // 村组名（如「2.1 马老郢」）为专业分部内的分组标记：不产生分部名、保持上层上下文
+        //（「二 排水工程 → 2.1 马老郢 → 生态池/检查井」条目归属「排水工程」）。
+        // 历史缺陷：清空上下文致村下条目丢失归属（生态池/彩绘/绿化类专有分项零注入）
+        if (isGeographic(marker.name)) continue;
         // 泛词保持当前上下文（子分部条目归入父分部）
         if (BOQ_DIVISION_GENERIC_NAME_RE.test(marker.name)) continue;
         if (!divisions.has(marker.name)) divisions.set(marker.name, []);
@@ -494,4 +542,357 @@ export function enforceBoqDivisionCoverageInMethodChapters(input: {
   // 就地更新章 drafts（rebuild 重拼不丢补段；重复运行时缺口已清零 → 静默）
   target.content = `${(target.content || '').trimEnd()}\n\n${paragraph}`;
   return { markdown: nextLines.join('\n'), appended: gaps.map(gap => gap.itemName) };
+}
+
+// ══════════════════════════ C-T2 数字溯源闭环 ══════════════════════════
+/**
+ * C-T2 数字溯源闭环（根治「疑似编造数值」误报淹没真未溯源）：
+ * 正文数字三分类——①项目事实（清单/图纸/招标原文语料反查，可溯源）②规范常数（标准编号/养护龄期/
+ * 试块留置/检测频次/温度阈值/质量指标/工艺公差/工艺压力参数/砂浆强度等级/绝缘电阻/管系列代号——
+ * 规范依据可显性标注）③管理数字（管理频次/施工组织编排/组织配置/合同程序条款/过程指标/
+ * 服务时限承诺/日期表述/商务金额——制度性要求，允许保留）。
+ *
+ * 生成后反查未溯源数字：能改定性即改（demoteUnsourcedNumericTokens 链尾确定性改定性），必须保留的
+ * 显性标注来源（保留规范常数时标注标准编号 → R1 分类命中，recheck 消解形成收敛闭环）；未溯源=0
+ * 进终稿验收（numericTraceabilityIssues 终检聚合 error，扫描口径与修复器同源单源）。
+ *
+ * 实测归因（本机制立项根因）：既有反查链报出的「未溯源数字」绝大多数为合法数字——
+ * 试块留置 100m³/检验批 400m³（规范常数）、检测频次 200m²、养护龄期 14 天、标准号 50268、
+ * 法规年份 2019、管理频次 1~2 次、施工组织编排多单元分组、合同程序条款「60 日历天」、
+ * 设计规格类小数值等——仅个别与清单量不符的数字真未溯源。
+ * 分类器豁免合法数字、修复链只处理真未溯源，避免修复轮反复改写正确数字导致
+ *「保留后 recheck 仍检出」的不收敛空转（该空转是 C-T2 立项前的缺陷根因）。
+ */
+
+/** 数字溯源分类：regulatory=规范常数；management=管理数字；unsourced=未溯源（进语料反查/修复链） */
+export type NumericTraceKind = 'regulatory' | 'management' | 'unsourced';
+
+export interface NumericTraceClassification {
+  kind: NumericTraceKind;
+  /** 命中判据（「标准编号」/「养护龄期」/…；unsourced 为空串） */
+  basis: string;
+}
+
+/** 未溯源数字扫描结果（token 原文 + 归一化形态 + 所在句 + 原位索引；检测器与修复器同源消费） */
+export interface NumericTraceFinding {
+  /** 原文 token（含原文空格/符号形态，供原位定位与删除） */
+  token: string;
+  /** 归一化 token（分类与语料反查口径） */
+  normalizedToken: string;
+  sentence: string;
+  index: number;
+}
+
+/** C-T2 扫描命中（含豁免项，供扫描明细与测试断言） */
+export interface NumericTraceHit {
+  token: string;
+  normalizedToken: string;
+  index: number;
+  sentence: string;
+  kind: NumericTraceKind;
+  basis: string;
+}
+
+/** 标准代号（GB/JGJ/CJJ/ISO…，含 /T 推荐性变体与 DB 地方标准） */
+const STANDARD_CODE_AGENCY = 'GB|JGJ|CJJ|CECS|ISO|SL|DL|JTS|JTG|JT|TB|DB\\d{2}|DB';
+
+/** 标准号语境模式（context 内匹配：标准代号 + 3~5 位数字 + 可选年份）——token 命中数字段或年份段即豁免 */
+const STANDARD_CODE_IN_CONTEXT_RE = new RegExp(`(?:${STANDARD_CODE_AGENCY})\\s*\\/?\\s*T?\\s*(\\d{3,5})(?:\\s*[-—–]\\s*(\\d{2,4}))?`, 'giu');
+
+/** 管理动作词（管理频次语境：「每日不少于 1 次安全检查」） */
+const MANAGEMENT_ACTION_RE = /检查|巡查|例会|培训|交底|演练|复核|记录|台账|考核|整改|保养|维护|监测|检测|排查|验收|清扫/u;
+
+/** 组织对象词（施工组织编排语境：「9 个片区分组平行施工」） */
+const ORGANIZATION_UNIT_RE = /作业面|班组|工区|标段|片区|地块|单元|分部|队伍|小组|机构|部门|岗位|区域|社区|村庄|村|路段|楼栋|站区|库区|厂区/u;
+
+/** 组织动作词（分组平行/组建配备语境） */
+const ORGANIZATION_ARRANGE_RE = /分组|平行|流水|包保|分区|分片|分块|划分|组建|成立|配备|配置|设置|设立|建立|指定|安排|派驻/u;
+
+/** 合同程序条款语境（招标/合同原文忠实引用：「合理期限（一般不超过 60 日历天）」） */
+const CONTRACT_CLAUSE_CONTEXT_RE = /违约金|延期竣工|解除合同|缺陷责任期|质量保证金|质保金|履约保证金|保修期|合理期限|工期顺延|误期赔偿|响应|抢修|回访/u;
+
+/** 删除前保护（token 左侧紧邻窗口尾）：量词/约数/比较/维度/关系字尾——删除数字后前文悬空
+ *（如「每座」「壁厚」「间距」字尾接数值）或语义反转（如「不少于」字尾接数量）。
+ * r28j M22 扩围：「.」「．」字尾保护——小节编号尾段（「#### 7.1.1 道路…」中「1 道」实为
+ * 编号末段+标题首字，删除后成「#### 7.1.路…」残缺编号直坠终检，两处终稿实锤）；
+ * 「#」字尾保护——标题行首符号（「### 3.1 道路…」的 token「3.1道」吞编号整体，
+ * 左窗口止于「### 」，删除后成「### 路…」） */
+const DEMOTE_LEFT_GUARD_RE = /(?:第|每|各|共|约|达|至|少|多|超|过|近|余|于|足|大|小|低|薄|浅|上|下|台|套|件|个|根|只|组|项|处|座|栋|幢|层|间|盏|樘|孔|株|户|盘|块|片|条|道|节|段|张|袋|桶|罐|车|宽|高|厚|深|长|径|距|度|量|差|积|比|率|值|数|额|重|龄|温|号|编|标|总|净|最|均|平|相|间|隔|离|为|是|计|按|取|以|向|抵|分|划|格|φ|Φ|≥|≤|＞|＜|>|<|=|±|\.|．|#)\s*$/u;
+
+/** 可删单位类（空间/数量/重量/长度类——删除后前文名词收尾仍成句；时间/次数/百分比/温度/
+ * 电气/金额/组织人员类不在此处置，改语义交 LLM 修复轮） */
+const DELETABLE_UNIT_RE = /(?:mm|cm|km|m2|hm2|m3|kg|t|亩|台|套|件|个|根|只|组|项|处|座|栋|幢|层|间|盏|樘|孔|株|户|盘|块|片|条|道|节|段|张|袋|桶|罐|车|米|m|l)$/u;
+
+/** r28h M4a 题注前缀前导（左窗口匹配）：token 数字段紧跟在题注编号「表N-」之后——表序数字属题注
+ * 编号而非正文数值，删除即毁题注（r28h2 实机：「表3-4 道路结构层主要物资投入计划表」的「4 道」
+ * 被判「未溯源数值+单位（道）」删除 →「表3-路结构层…」残缺编号直坠终检 table-caption blocker）。
+ * 完整题注（表3-4 道路…）与残缺题注（表3-路…）同判豁免；正文数值（「安排4道工序」）不受影响。
+ * r28j M22 扩「图」：图类题注同理（r28j stage[111] 实测「图9-2」的「2 项」被删 →「图9-项」） */
+const CAPTION_NUMBER_PREFIX_RE = /(?:表|图)\s*[\d一二三四五六七八九十]+\s*[-—–－.．]\s*$/u;
+
+/** C-T2 溯源扫描 token（数值+单位；单位集含工程度量与组织/管理计数单位）。单位缺省时由扫描过滤器
+ * 二次把关（仅年份与 3~5 位标准号数字进入判定，其余裸数不报）。 */
+const TRACE_TOKEN_RE = /\d+(?:\.\d+)?(?:\s*(?:mm|cm|km|m2|㎡|m²|m3|m³|hm2|亩|kg|g|t|吨|ml|l|升|mpa|kpa|kn|kw|mw|kv|v|hz|℃|%|万元|亿元|元|天|工作日|工作天|月|年|h|min|次|遍|轮|班|趟|周|季|点|人|名|组|支|队|台|套|件|个|根|只|项|处|座|栋|幢|层|间|批|盏|樘|孔|株|户|盘|块|片|条|道|节|段|张|袋|桶|罐|车|d|米|m))?/giu;
+
+/** 表格纯数字格（清单数量列「1.500」）——导出供 numericVerification 核源构建复用（同源口径） */
+export const CELL_NUMBER_RE = /^\d+(?:\.\d+)?$/u;
+
+/** 表格纯单位格（清单数量单位列「m2」）——导出供 numericVerification 核源构建复用（同源口径） */
+export const CELL_UNIT_RE = /^(?:m2|㎡|m²|平方米|平方|平米|m3|m³|立方米|立方|hm2|公顷|亩|mm|cm|km|m|米|kg|g|t|吨|个|台|套|项|处|座|株|组|批|次|人|天|月|年|万元|元|l|ml|樘|盏|根|只|块|片|条|道|层|间|栋|幢|户|袋|桶|罐|车|盘|孔|节|段|张|面|棵|丛)$/u;
+
+const NUMERIC_TRACE_UNSOURCED: NumericTraceClassification = { kind: 'unsourced', basis: '' };
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+/** 尾零规约：1.500 → 1.5、1.20 → 1.2、2.000 → 2（数值等价的原文形态差异不计入溯源缺口）。
+ * 导出供无主数值审计（authorityAudit）复用：权威核与正文 token 双侧同口径归约（单源）。 */
+export function normalizeQuantityZeros(value: string): string {
+  return value.replace(/(\d+\.\d*?)0+(?![\d])/gu, '$1').replace(/(\d+)\.(?![\d])/gu, '$1');
+}
+
+/** token 所在句提取（按句读标点/换行切分；修复指令与明细展示用） */
+function extractSentenceAt(markdown: string, index: number, length: number): string {
+  let start = index;
+  while (start > 0 && !/[。；;！!？?\n]/u.test(markdown[start - 1])) start -= 1;
+  let end = index + length;
+  while (end < markdown.length && !/[。；;!！?？?\n]/u.test(markdown[end])) end += 1;
+  return markdown.slice(start, Math.min(end + 1, markdown.length)).trim();
+}
+
+/**
+ * 数字溯源语料（归一化）：事实主表全量 + 表格行文本与「数字格×单位格」跨格组合
+ *（清单分列表「| 1.500 | m2 |」→「1.500m2」，覆盖数字与单位分列的既有形态）+ 尾零规约。
+ * 语料规模过小时反查无意义（由调用方按 corpus.length 门槛短路）。
+ */
+export function numericTraceCorpus(factsModel: DocumentFactsModel): string {
+  const parts: string[] = [];
+  for (const fact of trustedFacts(factsModel)) {
+    const value = stringifyFactValue(fact.value);
+    if (value) parts.push(value);
+  }
+  for (const table of factsModel.tables || []) {
+    for (const row of table.rows || []) {
+      if (!Array.isArray(row) || row.length === 0) continue;
+      const cells = row.map(cell => String(cell ?? '').trim());
+      parts.push(cells.join(' '));
+      const numbers = [...new Set(cells.filter(cell => CELL_NUMBER_RE.test(cell)).map(cell => normalizeQuantityZeros(cell)))];
+      if (numbers.length === 0) continue;
+      const units = [...new Set(cells.filter(cell => CELL_UNIT_RE.test(cell)))];
+      for (const number of numbers) {
+        for (const unit of units) parts.push(`${number}${unit}`);
+      }
+    }
+  }
+  // 逐段归一化后换行拼接：批量拼接再归一化会连同段间换行一并删除（归一化删除空白），
+  // 相邻段尾/首数字粘连（「…9.6m2」+「2 …」→「…9.6m22」）使数字边界守卫误 miss，
+  // 清单数量跨格组合的溯源整体失效（段间以换行保留数字边界）
+  return parts
+    .map(part => {
+      const normalized = normalizeEngineeringTextForFactMatch(part);
+      return normalized.replace(/(\d+\.\d*?)0+(?![\d])/gu, '$1').replace(/(\d+)\.(?![\d])/gu, '$1');
+    })
+    .join('\n');
+}
+
+/** 语料反查（数字边界守卫：防「9.6」命中「19.60」子串、「300」命中「1300」） */
+function corpusContainsQuantity(corpus: string, normalizedToken: string): boolean {
+  const variants = [normalizedToken];
+  const zeroTrimmed = normalizeQuantityZeros(normalizedToken);
+  if (zeroTrimmed !== normalizedToken) variants.push(zeroTrimmed);
+  return variants.some(variant => new RegExp(`(?<![\\d.])${escapeRegExp(variant)}(?![\\d.])`, 'u').test(corpus));
+}
+
+/**
+ * 数字溯源三分类器（C-T2 核心；qualityValidation / numericVerification / 本模块扫描共用单源）：
+ * 返回 regulatory/management 即豁免（合法数字，不进资料事实反查与修复轮）；unsourced 为候选，
+ * 由调用方语料反查最终判定（项目事实可溯源 → 排除；未命中 → 真未溯源）。
+ * 判定输入为原文 token 与语境窗口（句子或 ±36 字窗口均可），内部统一归一化形态匹配。
+ */
+export function classifyNumericTraceToken(input: { token: string; context: string }): NumericTraceClassification {
+  const rawToken = input.token.replace(/\s+/gu, '');
+  const token = normalizeEngineeringTextForFactMatch(input.token);
+  const context = input.context || '';
+  if (!token) return NUMERIC_TRACE_UNSOURCED;
+  // R1 标准编号：token 为标准号数字段（GB 50268）或标准号年份段（GB 50268-2019）
+  for (const match of context.matchAll(STANDARD_CODE_IN_CONTEXT_RE)) {
+    if (token === match[1]) return { kind: 'regulatory', basis: '标准编号' };
+    if (match[2] && token === match[2]) return { kind: 'regulatory', basis: '标准编号年份' };
+  }
+  // R2 年份表述（标准发布/法规修正年份属公共知识口径；编造日期由跨章检查治理）
+  if (/^(?:19|20)\d{2}年度?$/u.test(token)) return { kind: 'regulatory', basis: '年份表述' };
+  // R3 养护龄期（7d/14天/28天 + 养护|龄期|强度试验语境）
+  if (/^(?:3|7|10|14|21|28)(?:d|天)$/u.test(token) && /养护|龄期|标养|同条件|强度|试验/u.test(context)) return { kind: 'regulatory', basis: '养护龄期' };
+  // R4 试块留置/检验批（每 100m³ 留置一组；每 400m³ 或每工作班一组）
+  if (/^(?:50|100|150|200|250|400|500)m3$/u.test(token) && /试块|留置|检验批|砂浆|混凝土|浇筑|砌筑/u.test(context)) return { kind: 'regulatory', basis: '试块留置/检验批' };
+  if (/^(?:50|100)盘$/u.test(token)) return { kind: 'regulatory', basis: '试块留置' };
+  if (/^[1-9]组$/u.test(token) && /试块|留置|砂浆|混凝土|抗压|强度|钢筋/u.test(context)) return { kind: 'regulatory', basis: '试块留置' };
+  // R5 检测频次（每层每 200m² 不少于 1 点）
+  if (/^(?:100|200|400|1000)m2$/u.test(token) && /每层|压实度|检测|检验|测点|不少于|至少/u.test(context)) return { kind: 'regulatory', basis: '检测频次' };
+  if (/^\d+点$/u.test(token) && /检测|检验|测量|观测|测点|抽检|不少于|至少/u.test(context)) return { kind: 'regulatory', basis: '检测频次' };
+  // R6 温度阈值（入模温度不低于 5℃）
+  if (/℃$/u.test(token) && /温度|养护|浇筑|入模|气温|环境|温差|加热/u.test(context)) return { kind: 'regulatory', basis: '温度阈值' };
+  // R7 规范质量指标（压实度不低于 95% / 含泥量不超过 10%）
+  if (/^\d+(?:\.\d+)?%$/u.test(token) && /压实度|饱满度|含泥量|密实度|压实系数|保证率|灰剂量|油石比/u.test(context)) return { kind: 'regulatory', basis: '质量指标' };
+  // R8 工艺公差（厚度偏差不超过 ±5mm）
+  if (/^\d+(?:\.\d+)?mm$/u.test(token) && /偏差|公差|误差/u.test(context)) return { kind: 'regulatory', basis: '工艺公差' };
+  // R9 工艺压力参数（管道试压 4.0MPa、注浆压力 0.5MPa——规范试验值与设计工艺常数，非项目事实）
+  // r28m M24d D4 扩词：稳压|压降（r28l 实机「稳压1h压降不超过0.05MPa且无渗漏为合格」——
+  // 管道水压试验规范条款，原词表「试压/试验压力」等均不命中而落缺口）
+  if (/^\d+(?:\.\d+)?mpa$/u.test(token) && /试压|水压|气压|压力试验|试验压力|工作压力|注浆|强度试验|严密性|稳压|压降/u.test(context)) return { kind: 'regulatory', basis: '工艺压力参数' };
+  // R10 砂浆强度等级（M7.5 砌筑砂浆——规范等级代号，非项目数值）
+  if (/^m\d+(?:\.\d+)?$/u.test(token) && /砂浆|砌筑|抹灰|强度|等级/u.test(context)) return { kind: 'regulatory', basis: '砂浆强度等级' };
+  // R11 绝缘电阻（绝缘电阻不小于 0.5MΩ——电气验收规范常数；提取器对 MΩ 存在「M」尾截断形态）
+  if ((/^\d+(?:\.\d+)?mω$/u.test(token) || (/^\d+(?:\.\d+)?m$/u.test(token) && /[ωΩ]/u.test(context))) && /绝缘|接地|电阻|兆欧/u.test(context)) return { kind: 'regulatory', basis: '绝缘电阻' };
+  // R12 管系列代号（PPR 管 S3.2 系列——管材规格系列，非项目数值）
+  if (/^s\d+(?:\.\d+)?$/u.test(token) && /ppr|pb|pvc|pe|管|系列|冷热|给水/iu.test(context)) return { kind: 'regulatory', basis: '管系列代号' };
+  // R13 材料/设备规格型号（r28m M24d D4；s28l 实机 INT125-3P-50 / Q345-B——厂家型号与材质牌号，
+  // 非项目数值）；前缀排除 DN/De/SC/JDG/HRB/HPB（规格管类防误吞）与混凝土/钢筋/砂浆语境（C30 类
+  // 强度等级有自身溯源途径，不得借本族豁免）
+  if (/^(?!(?:dn|de|sc|jdg|hrb|hpb)\d)[a-z]{1,4}\d[\w./-]*$/u.test(token) && /材质|牌号|型号|配置|开关|断路器|配电|电缆|配电箱|控制箱|规格型号/u.test(context) && !/混凝土|钢筋|砂浆/u.test(context)) return { kind: 'regulatory', basis: '材料/设备规格型号' };
+  // R14 图纸构件/洞口/管段编号（r28m M24d D4；r28l D258、s28k M1222 实机——图内编号引用，非项目数值）；
+  // D→d 由归一化处理；排除直径/壁厚/管径语境（D300 管径规格）与砂浆语境（R10 已先行）
+  if (/^[md]\d{3,5}$/u.test(token) && /门窗|洞口|管段|管节|桩号|里程|井位|大样|详图|图集|编号|图纸/u.test(context) && !/直径|壁厚|管径|外径|内径|砂浆|砌筑/u.test(context)) return { kind: 'regulatory', basis: '图纸编号' };
+  // R15 规范条件阈值（r28m M24d D4；s28k 实机「风管边长大于630mm时按规范设置加固框」——
+  // 规范条文条件值（比较词+规范语境+数值单位三要件），非项目事实）
+  if (/(?:大于|不小于|超过|不大于|不超过|小于)/u.test(context) && /(?:规范|规定|要求|标准|条文|验收)/u.test(context) && /^\d+(?:\.\d+)?(?:mm|cm|m|m2|m3|℃|%)$/u.test(token)) return { kind: 'regulatory', basis: '规范阈值' };
+  // M1 管理频次（每日不少于 1 次安全检查 / 每周 2 次巡查）
+  if (/^\d+(?:次|遍|轮|班|趟)$/u.test(token) && /每|逐|定期|不少于|至少/u.test(context) && MANAGEMENT_ACTION_RE.test(context)) return { kind: 'management', basis: '管理频次' };
+  // M2a 施工组织编排（如「9 个片区分为若干班组平行施工」）
+  if (/^\d+个$/u.test(token) && ORGANIZATION_UNIT_RE.test(context) && ORGANIZATION_ARRANGE_RE.test(context)) return { kind: 'management', basis: '施工组织编排' };
+  // M2b 组织配置/岗位人数（配备专职安全员 2 名 / 成立 QC 小组 3 个）
+  if (/^\d+(?:人|名|组|支|队)$/u.test(token) && /配备|配置|设置|组建|成立|设立|建立|派驻|指定|安排/u.test(context) && /专职|兼职|管理|岗位|人员|班组|队伍|小组|安全|质量|技术|施工|材料|资料|机械|劳务|作业/u.test(context)) return { kind: 'management', basis: '组织配置' };
+  // M3 合同程序条款（缺陷责任期 24 个月 / 合理期限一般不超过 60 日历天——招标合同原文忠实引用）
+  if (/(?:天|月|年|d|万元|元|%)$/u.test(token) && CONTRACT_CLAUSE_CONTEXT_RE.test(context)) return { kind: 'management', basis: '合同程序条款' };
+  // M4 过程指标（焊接一次合格率 100% / 设备利用率 85%——施工部署自行编排的管理目标）
+  if (/^\d+(?:\.\d+)?%$/u.test(token) && /完成|进度|利用率|得分|负荷|覆盖|达到|控制|以上|以下|不低于|合格率|优良率|成活率|出勤率|到岗率|出工率|一次验收/u.test(context)) return { kind: 'management', basis: '过程指标' };
+  // M5 日期表述（计划 2026 年 8 月开工；用原文 token 形态区分「8月」日期与「8个月」时长——
+  // 时长类必须溯源，日期类为进度编排管理数字，与既有 isCalendarDateToken 降级口径一致）
+  if (/^\d+(?:\.\d+)?月$/u.test(rawToken) && /开工|竣工|计划|日期|旬|上旬|中旬|下旬|季度|汛期|雨季|冬季|夏季|月初|月底|年底|年中/u.test(context)) return { kind: 'management', basis: '日期表述' };
+  // M6 服务时限承诺（保修期内 24 小时响应、48 小时到场抢修——服务条款管理数字，非项目事实）
+  if (/^\d+(?:\.\d+)?小时$/u.test(token) && /保修|响应|抢修|到场|时限|服务|承诺|维修|热线|回访/u.test(context)) return { kind: 'management', basis: '服务时限承诺' };
+  // M7 工期合计编排（r28m M24d D3；r28l「各节点用时合计89天」、s28k「五阶段合计344天」实机——
+  // 进度编排管理数字与 M4/M5 同类，非资料反查锚定值；三要件：天单位 + 合计类词 + 工期语境词）
+  if (/^\d+天$/u.test(token) && /合计|共计|总计|累计|总和|总共/u.test(context) && /工期|工序|节点|进度|衔接|机动|预留|缓冲/u.test(context)) return { kind: 'management', basis: '工期合计编排' };
+  // 商务金额（暂列金额 60 万元等由商务条款检测器治理（commercial-data-in-body），不属溯源反查对象）
+  if (/(?:万元|亿元|元)$/u.test(token) && /暂列金额|暂估价|报价|单价|合价|综合单价|税率|增值税|预留金|招标控制价|限价|造价/u.test(context)) return { kind: 'management', basis: '商务金额' };
+  return NUMERIC_TRACE_UNSOURCED;
+}
+
+/**
+ * C-T2 数字溯源扫描：提取 → 过滤（表格行/章节编号/长编码/无单位裸数）→ 三分类。
+ * 无单位裸数仅年份与 3~5 位标准号数字产出命中（其余裸数为序号/编号噪声，不报不豁免——
+ * 防误报淹没真未溯源）；表格行数值属计划分解数据不反查（与既有反查口径一致）。
+ */
+export function scanNumericTrace(markdown: string): NumericTraceHit[] {
+  const hits: NumericTraceHit[] = [];
+  for (const match of markdown.matchAll(TRACE_TOKEN_RE)) {
+    const raw = match[0];
+    const index = match.index ?? 0;
+    const normalizedToken = normalizeEngineeringTextForFactMatch(raw);
+    if (!normalizedToken) continue;
+    // 章节编号（1.2、2.3 等无单位纯小数）不是工程数字，不进溯源判定
+    if (/^\d+\.\d+$/u.test(normalizedToken)) continue;
+    // 长编码（9 位以上纯数字：单号/联系电话/信用代码）不报
+    if (/^\d{9,}$/u.test(normalizedToken)) continue;
+    // 表格行中的数值（进度计划表/机械配置表）属计划排期分解数据，不做溯源反查
+    const lineStart = markdown.lastIndexOf('\n', index - 1) + 1;
+    const lineEnd = markdown.indexOf('\n', index);
+    const line = markdown.slice(lineStart, lineEnd < 0 ? markdown.length : lineEnd);
+    if (/^\s*\|/u.test(line.trim())) continue;
+    // 无单位裸数：仅年份（公共知识口径）与 3~5 位标准号数字有意义
+    const numericPart = /^\d+(?:\.\d+)?/u.exec(normalizedToken)?.[0] ?? '';
+    const unitPart = normalizedToken.slice(numericPart.length);
+    if (!unitPart && !/^(?:19|20)\d{2}$/u.test(normalizedToken) && !/^\d{3,5}$/u.test(normalizedToken)) continue;
+    const sentence = extractSentenceAt(markdown, index, raw.length);
+    const classification = classifyNumericTraceToken({ token: raw, context: sentence });
+    // 无单位裸数：仅当分类豁免（标准号/年份命中）时产出命中；未命中的裸数是编号/序号噪声，不报
+    if (!unitPart && classification.kind === 'unsourced') continue;
+    hits.push({ token: raw, normalizedToken, index, sentence, kind: classification.kind, basis: classification.basis });
+  }
+  return hits;
+}
+
+/**
+ * 未溯源数字反查（终稿验收口径）：扫描命中 ∩ 分类 unsourced ∩ 语料反查未命中。
+ * 规范常数/管理数字为豁免项（合法数字）——只有真未溯源进入修复链与终检聚合，口径与 demote 修复器同源。
+ */
+export function buildNumericTraceFindings(markdown: string, factsModel: DocumentFactsModel): NumericTraceFinding[] {
+  const corpus = numericTraceCorpus(factsModel);
+  if (corpus.length < 40) return [];
+  const findings: NumericTraceFinding[] = [];
+  for (const hit of scanNumericTrace(markdown)) {
+    if (hit.kind !== 'unsourced') continue;
+    if (corpusContainsQuantity(corpus, hit.normalizedToken)) continue;
+    findings.push({ token: hit.token, normalizedToken: hit.normalizedToken, sentence: hit.sentence, index: hit.index });
+  }
+  return findings;
+}
+
+/**
+ * C-T2 终检检测器：未溯源数字聚合（error 级进修复链）。消息锚「生成后事实反查失败」与既有反查链
+ * 同源——isHardExportBlockingIssue 显式豁免硬阻断（数字残留不阻断交付的产品口径），
+ * REPAIRABLE_QUALITY_ISSUE_RE 命中进修复循环。
+ */
+export function numericTraceabilityIssues(markdown: string, factsModel: DocumentFactsModel): ValidationIssue[] {
+  const findings = buildNumericTraceFindings(markdown, factsModel);
+  if (findings.length === 0) return [];
+  const tokens = [...new Set(findings.map(finding => finding.token.replace(/\s+/gu, '')))];
+  return [{
+    level: 'error',
+    severity: 'blocker',
+    category: 'evidence_coverage',
+    owner: 'llm',
+    repairability: 'llm_repairable',
+    message: `生成后事实反查失败：正文出现 ${tokens.length} 处未溯源数值 ${tokens.slice(0, 8).join('、')}${tokens.length > 8 ? ' 等' : ''}`,
+    suggestion: '未溯源数值必须改为定性表述或显式标注来源：来自清单/图纸的保留并明确来源（清单条目/图纸编号）；规范常数（试块留置/养护龄期/检测频次等）保留时显性标注规范名称与编号；其余改为不带具体数值的过程控制表述。',
+  }];
+}
+
+/** 删除残留标点清理（空括号/标点叠用/句首悬空标点；幂等） */
+function tidyRemovalArtifacts(text: string): string {
+  return text
+    .replace(/[（(]\s*[)）]/gu, '')
+    // r28h 扩围（r28h2 实机归因）：「按3m、4m、5m 等」并列数值被删后残留连续分隔标点
+    //（「按3m、、、、等」）——原清理只覆盖「标点+句末标点」，连续顿号残留直坠终门禁
+    //（punctuationArtifactIssues 报「、、」blocker）。同标点连写收敛为单个；分隔标点直接
+    // 悬接「等」（「3m、等」）时删除悬空标点
+    .replace(/([，,、；;])[ \t]*(?:\1[ \t]*)+/gu, '$1')
+    .replace(/[，,、；;][ \t]*(?=等)/gu, '')
+    .replace(/(?:[，,、；;：:]\s*)+(?=[。；;！!？?])/gu, '')
+    .replace(/(?<=[。；;！!？?\n])\s*[，,、；;]+/gu, '');
+}
+
+/**
+ * C-T2 链尾确定性改定性（方案「能改定性即改」）：真未溯源数字中的可删单位类（空间/数量/重量/
+ * 长度）直接删除改定性表述；删除前保护（量词/约数/维度/关系字尾）拦截「每座90m²」「壁厚5mm」
+ * 「间距1.2m」等删除后悬空或语义反转的形态；时间/次数/百分比/温度/金额类不由本器处置
+ *（删除会改变语义，交 LLM 修复轮改写）。删除后清理病句标点；幂等可重放（无项时零成本返回 null）。
+ */
+export function demoteUnsourcedNumericTokens(input: {
+  markdown: string;
+  factsModel: DocumentFactsModel;
+}): { markdown: string; fixedCount: number; details: string[] } | null {
+  const candidates = buildNumericTraceFindings(input.markdown, input.factsModel)
+    .filter(finding => {
+      if (!DELETABLE_UNIT_RE.test(finding.normalizedToken)) return false;
+      const leftWindow = input.markdown.slice(Math.max(0, finding.index - 8), finding.index);
+      if (DEMOTE_LEFT_GUARD_RE.test(leftWindow)) return false;
+      // r28h M4a：题注编号前导豁免（「表3-4 道路…」的「4 道」是题注表序段，删除即毁编号）
+      return !CAPTION_NUMBER_PREFIX_RE.test(leftWindow);
+    })
+    // 逆序替换（从文末向前——替换不改动更早位置的索引）
+    .sort((left, right) => right.index - left.index);
+  if (candidates.length === 0) return null;
+  let next = input.markdown;
+  const details: string[] = [];
+  for (const finding of candidates) {
+    // 位置校验（原文不一致即跳过——防外部变更导致错删）
+    if (next.slice(finding.index, finding.index + finding.token.length) !== finding.token) continue;
+    next = `${next.slice(0, finding.index)}${next.slice(finding.index + finding.token.length)}`;
+    details.push(`删除未溯源数值「${finding.token.replace(/\s+/gu, '')}」改定性：${finding.sentence.replace(/\s+/gu, ' ').slice(0, 40)}`);
+  }
+  if (details.length === 0) return null;
+  return { markdown: tidyRemovalArtifacts(next), fixedCount: details.length, details };
 }

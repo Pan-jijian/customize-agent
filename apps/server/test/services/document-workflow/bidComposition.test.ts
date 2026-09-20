@@ -187,3 +187,72 @@ describe('写作约束与门禁渲染', () => {
     expect(summary.details.some(item => item.includes('身份禁语'))).toBe(true);
   });
 });
+
+describe('F-T1 标书类型判定加固（双通道 + 显性告警）', () => {
+  it('勾选标记字符变体全族命中（☑√✔✓■●◼☒⊠▣）', () => {
+    for (const mark of ['☑', '√', '✔', '✓', '■', '●', '◼', '☒', '⊠', '▣']) {
+      const spec = extractBidCompositionSpec({ tenderTexts: [`本项目施工组织设计采用：□明标。${mark}暗标。`] });
+      expect(spec.bidType).toBe('blind');
+    }
+  });
+
+  it('字符混淆变体：字间距/括号包裹/emoji 变体选择符/词后标记均命中', () => {
+    const variants = [
+      '本项目施工组织设计采用：☑ 暗 标。',
+      '本项目施工组织设计采用：☑（暗标）。',
+      '本项目施工组织设计采用：√【暗标】。',
+      '本项目施工组织设计采用：☑\uFE0F暗标。',
+      '本项目施工组织设计采用：暗标（√）。',
+    ];
+    for (const text of variants) {
+      expect(extractBidCompositionSpec({ tenderTexts: [text] }).bidType).toBe('blind');
+    }
+  });
+
+  it('未勾选空框不触发：「□暗标」单独出现仍为 unknown（空框≠勾选）', () => {
+    const spec = extractBidCompositionSpec({ tenderTexts: ['本项目施工组织设计采用：□暗标。'] });
+    expect(spec.bidType).toBe('unknown');
+  });
+
+  it('语义通道兜底：无勾选标记时按语义条款判定（暗标侧）', () => {
+    const cases = [
+      '本项目施工组织设计按暗标要求编制，投标文件匿名递交。',
+      '本工程采用暗标评审方式，技术标不得出现投标人信息。',
+      '本项目执行暗标编制程序。',
+    ];
+    for (const text of cases) {
+      const spec = extractBidCompositionSpec({ tenderTexts: [text] });
+      expect(spec.bidType).toBe('blind');
+      expect(spec.evidence.some(item => item.includes('结构证据') && item.includes('语义判定通道'))).toBe(true);
+    }
+  });
+
+  it('语义通道兜底：明标侧（按明标要求编制）→ 明标', () => {
+    const spec = extractBidCompositionSpec({ tenderTexts: ['本项目施工组织设计按明标要求编制，允许正文插图。'] });
+    expect(spec.bidType).toBe('open');
+    expect(spec.bodyTablePolicy).toBe('allowed');
+  });
+
+  it('否定语境不误判：「不按暗标要求编制」不触发暗标语义通道', () => {
+    const spec = extractBidCompositionSpec({ tenderTexts: ['本项目不按暗标要求编制，正文可使用表格。'] });
+    expect(spec.bidType).toBe('unknown');
+  });
+
+  it('舒城真实语序（换行拆分 + 相邻条款标题）→ 暗标且勾选证据可见', () => {
+    const shucheng = ['7.本项目施工组织设计采用：', '', '□明标。', '', '☑暗标。', '', '8.施工组织设计采用暗标评审项目的编制要求'].join('\n');
+    const spec = extractBidCompositionSpec({ tenderTexts: [shucheng] });
+    expect(spec.bidType).toBe('blind');
+    expect(spec.bodyTablePolicy).toBe('forbidden');
+    expect(spec.evidence.some(item => item.includes('标书类型勾选证据：☑暗标'))).toBe(true);
+  });
+
+  it('unknown 显性告警：摘要带告警与风险后果，核查指引可查（不静默退化）', () => {
+    const spec = extractBidCompositionSpec({ tenderTexts: ['本项目施工组织设计内容应完整、方案合理可行。'] });
+    const summary = bidCompositionSummary(spec);
+    expect(summary.status).toBe('skipped');
+    expect(summary.message).toContain('⚠ 标书类型未判定（告警）');
+    expect(summary.message).toContain('重跑');
+    expect(summary.details.some(item => item.includes('核查指引'))).toBe(true);
+    expect(summary.details.some(item => item.includes('标记字符变体'))).toBe(true);
+  });
+});

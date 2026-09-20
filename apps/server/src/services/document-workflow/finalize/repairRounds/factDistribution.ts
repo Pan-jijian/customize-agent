@@ -12,6 +12,7 @@
  */
 import { displayStage, upsertProgressStage } from '../../progress';
 import { buildDocumentFactTraces, isActionableTraceFact } from '../../documentFactTrace';
+import { stripFactLabelPrefix } from '../../factsModel';
 import type { FinalizeSession } from '../finalizeSession';
 
 /** 单轮扩散值上限（防大文档全量霸屏；按 trace 遍历序取前 N，基础字段天然靠前）。
@@ -66,6 +67,16 @@ const DISTRIBUTION_RULES: Array<{ label: RegExp; chapterPattern: RegExp; variant
     chapterPattern: /施工部署|总体部署|施工方法|概况/u,
     variants: [
       value => `施工范围以${value}为界，各分项作业内容逐项组织实施。`,
+    ],
+  },
+  {
+    // C-T7（#50）：招标人事实仅存在于章头信息表/概况章（正文零引用致未落位告警）——项目管理/
+    // 组织机构类章是招标人（发包方）的常规引用场景，确定性扩散补齐跨章分布
+    label: /^(?:招标人|建设单位|发包人|项目业主)$/u,
+    chapterPattern: /概况|编制依据|施工部署|总体|组织设计|项目管理|机构/u,
+    variants: [
+      value => `本工程招标人为${value}，施工组织与合同履约管理对招标人负责。`,
+      value => `项目建设单位为${value}，各项报审报验按建设单位管理要求执行。`,
     ],
   },
   {
@@ -158,7 +169,9 @@ export async function stageFactDistribution(session: FinalizeSession): Promise<v
   let distributedValues = 0;
   for (const trace of traces) {
     if (distributedValues >= MAX_DISTRIBUTION_VALUES) break;
-    const value = String(trace.value || '').replace(/\s+/gu, ' ').trim();
+    // C-T7（#50）：trace 值剥标签前缀后按纯值口径扩散（「招标人：XX」与正文纯值同口径匹配）
+    const value = stripFactLabelPrefix(String(trace.value || '').replace(/\s+/gu, ' ').trim());
+    if (!value) continue;
     if (seenValues.has(value)) continue;
     const rule = DISTRIBUTION_RULES.find(item => item.label.test(trace.label || ''));
     if (!rule) continue;

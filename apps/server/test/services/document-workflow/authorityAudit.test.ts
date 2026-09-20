@@ -1,11 +1,15 @@
 /**
- * V5 P5 无主数值审计器测试（M6 闭环）：扫描 → 登记豁免 → 权威匹配 → 无主语境分流。
+ * V5 P5 无主数值审计器测试（M6 闭环；F-T4 审计 v2）：扫描 → 幽灵/表格/零值过滤 →
+ * 登记豁免 → 权威核匹配（蓝图 + 全源补充核）→ C-T2 分类器豁免 → 无主语境分流。
  *
  * 分流契约：资源/劳动力/机械/进度语境 → 推导缺口（收编清单）；工艺语境 → 工艺缺口（收编清单）；
  * 其余 → 未登记（疑似编造，验收口径「0 未登记项」= unregisteredCount 为 0）。
+ * F-T4：三桶任一非零 → authorityAuditIssues 产出 blocker（硬门禁，审计失败不可进交付）。
  */
 import { describe, expect, it } from 'vitest';
-import { auditAuthorityCoverage, authorityAuditDetails, authorityAuditSummary } from '@/services/document-workflow/authorityAudit';
+import { auditAuthorityCoverage, authorityAuditDetails, authorityAuditIssues, authorityAuditSummary } from '@/services/document-workflow/authorityAudit';
+import { buildNumericAuthority } from '@/services/document-workflow/finalize/repairRounds/numericVerification';
+import type { FinalizeSession } from '@/services/document-workflow/finalize/finalizeSession';
 import type { BlueprintData } from '@/services/document-workflow/integratedBlueprint';
 
 /** 全字段填充 fixture：与 authorityIndex 契约测试同源结构（覆盖全部数值叶子） */
@@ -103,16 +107,19 @@ describe('V5 P5 无主数值审计（M6）', () => {
     const report = auditAuthorityCoverage(markdown, makeBlueprintData());
     expect(report.unregisteredCount).toBe(0);
     const tokens = report.derivationGaps.map(finding => finding.token);
-    // 提取器对 m² 单位以 m 截断（m 分支先于 m² 且 ² 为词边界），与真实文档审计同口径
-    expect(tokens).toEqual(expect.arrayContaining(['98m', '194.05m', '37741m', '650cm', '4791.33m']));
+    // M24d D1 重排后 m² 单位整提不再以 m 截断（原「4791.33m」为截断漏网形态）
+    expect(tokens).toEqual(expect.arrayContaining(['98m', '194.05m', '37741m', '650cm', '4791.33m²']));
   });
 
-  it('第三轮收编：安全文明与专项试验语境未命中归工艺缺口', () => {
+  it('第三轮收编：安全文明与专项试验语境未命中归工艺缺口（R9 压力参数豁免）', () => {
     const markdown = '施工现场围挡设置，场区道路硬化100%；淋水压力不低于0.16MPa；脚手架横距不大于1.05m；作业风速达到10.8m/s停止吊装。';
     const report = auditAuthorityCoverage(markdown, makeBlueprintData());
     expect(report.unregisteredCount).toBe(0);
-    const tokens = report.processGaps.map(finding => finding.token);
-    expect(tokens).toEqual(expect.arrayContaining(['0.16MPa', '1.05m', '10.8m']));
+    // F-T4：0.16MPa 命中 R9 工艺压力参数（淋水试验压力）→ 规范/管理豁免；100% 撞核权威 100W（一般路灯 spec）计入 matched
+    expect(report.processGaps.map(finding => finding.token)).toEqual(['1.05m', '10.8m']);
+    expect(report.conventionExempt).toBe(1);
+    expect(report.matched).toBe(1);
+    expect(report.scanned).toBe(4);
   });
 
   it('第四轮收编·边界严格定位：「1.5m」首现不落在「31.5mm」子串内（语境取真实出现处）', () => {
@@ -141,32 +148,37 @@ describe('V5 P5 无主数值审计（M6）', () => {
     expect(tokens).toEqual(expect.arrayContaining(['24 套', '280cm', '172 人']));
   });
 
-  it('第四轮收编：降雨阈值/PPR 管系列/提升泵扬程语境未命中归工艺缺口', () => {
+  it('第四轮收编：降雨阈值/PPR 管系列/提升泵扬程语境未命中归工艺缺口（R12 管系列豁免）', () => {
     const markdown = '日降雨量达到 95mm 时暂停室外作业；冷热水系统采用 PPR 管 S3.2 系列；提升泵扬程 H=5.5m 复核合格。';
     const report = auditAuthorityCoverage(markdown, makeBlueprintData());
     expect(report.unregisteredCount).toBe(0);
-    const tokens = report.processGaps.map(item => item.token);
-    expect(tokens).toEqual(expect.arrayContaining(['95mm', 'S3.2', '5.5m']));
+    // F-T4：S3.2 命中 R12 管系列代号 → 规范/管理豁免，其余两项仍归工艺缺口
+    expect(report.processGaps.map(item => item.token)).toEqual(['95mm', '5.5m']);
+    expect(report.conventionExempt).toBe(1);
   });
 
-  it('推导缺口：资源/劳动力/机械语境未命中进收编清单', () => {
+  it('推导缺口：资源/劳动力/机械语境未命中进收编清单（M2b 组织配置豁免）', () => {
     const markdown = '高峰期投入劳动力 58 人，配置挖掘机 3 台，材料运输车辆 7 台。';
     const report = auditAuthorityCoverage(markdown, makeBlueprintData());
-    // 3 台命中权威（挖掘机 midValue(2,4)=3）；58 人 / 7 台 未命中且属资源语境
+    // 3 台命中权威（挖掘机 midValue(2,4)=3）；58 人命中 M2b 组织配置（配置+材料语境）→ 规范/管理豁免；
+    // 7 台 未命中且属资源语境 → 推导缺口
     expect(report.matched).toBe(1);
-    expect(report.derivationGaps.map(finding => finding.token)).toEqual(['58 人', '7 台']);
-    expect(report.derivationGaps[0]?.value).toBe('58');
+    expect(report.derivationGaps.map(finding => finding.token)).toEqual(['7 台']);
+    expect(report.derivationGaps[0]?.value).toBe('7');
     expect(report.unregisteredCount).toBe(0);
+    expect(report.conventionExempt).toBe(1);
   });
 
-  it('工艺缺口：工艺/验收参数语境未命中进收编清单', () => {
+  it('工艺缺口：工艺/验收参数语境未命中进收编清单（R3/R7/R10 豁免）', () => {
     const markdown = '混凝土浇筑完成 12 小时，随后开始养护 7 天；压实度不低于 93%，砂浆强度等级为 M7.5。';
     const report = auditAuthorityCoverage(markdown, makeBlueprintData());
-    // 12 小时命中权威（试验计划 count=12）；7 天 / 93% / M7.5 未命中且属工艺语境
+    // 12 小时命中权威（试验计划 count=12）；7 天 R3 养护龄期 / 93% R7 质量指标 / M7.5 R10 砂浆等级
+    // 全部豁免 → 规范/管理豁免 3，工艺缺口清零
     expect(report.matched).toBe(1);
-    expect(report.processGaps.map(finding => finding.token)).toEqual(['7 天', '93%', 'M7.5']);
+    expect(report.processGaps).toEqual([]);
     expect(report.derivationGaps).toEqual([]);
     expect(report.unregisteredCount).toBe(0);
+    expect(report.conventionExempt).toBe(3);
     // 12 小时值命中权威但语境属工艺桶（浇筑）→ contextualMatches
     expect(report.contextualMatches.map(finding => finding.token)).toEqual(['12 小时']);
   });
@@ -175,9 +187,10 @@ describe('V5 P5 无主数值审计（M6）', () => {
     const markdown = '回填方 118m³，随挖随填。';
     const report = auditAuthorityCoverage(markdown, makeBlueprintData());
     // 118 是「一般路灯」权威值核（撞核）；语境属工艺桶（回填）→ 计 matched 但记录 contextualMatches
+    // M24d D1 重排后 m³ 单位整提（原截断为 118m）
     expect(report.matched).toBe(1);
     expect(report.processGaps).toEqual([]);
-    expect(report.contextualMatches.map(finding => finding.token)).toEqual(['118m']);
+    expect(report.contextualMatches.map(finding => finding.token)).toEqual(['118m³']);
   });
 
   it('未登记项：无语境归属的未命中值计入 unattributed（疑似编造）', () => {
@@ -224,5 +237,128 @@ describe('V5 P5 无主数值审计（M6）', () => {
     const clean = auditAuthorityCoverage('总工期 240 日历天。', makeBlueprintData());
     expect(authorityAuditSummary(clean)).not.toContain('须核查');
     expect(authorityAuditDetails(clean)).toEqual(['全部数值命中权威索引或登记表，无未登记项。']);
+  });
+
+  // ═══ F-T4 审计 v2 矩阵（数值编造根治：提取修正 / 匹配扩容 / 豁免单源 / 硬门禁） ═══
+
+  it('F-T4 提取修正：零值核心（E0 类符号截断形态）不进扫描', () => {
+    const report = auditAuthorityCoverage('管井编号 E0。', makeBlueprintData());
+    expect(report.scanned).toBe(0);
+    expect(report.unregisteredCount).toBe(0);
+  });
+
+  it('F-T4 提取修正：表格行数值不做溯源反查（与 C-T2 scanNumericTrace 同口径）', () => {
+    const markdown = '正文说明段落。\n\n| 项目 | 数量 |\n| --- | --- |\n| 临时便道 | 98765 座 |\n\n收尾段落。';
+    const report = auditAuthorityCoverage(markdown, makeBlueprintData());
+    expect(report.scanned).toBe(0);
+    expect([...report.derivationGaps, ...report.processGaps, ...report.unattributed]).toEqual([]);
+  });
+
+  it('F-T4 匹配扩容：尾零规约双侧归一（0.80m ↔ 权威 0.8）', () => {
+    const report = auditAuthorityCoverage('斗容 0.80m³ 的挖掘机进场。', makeBlueprintData());
+    // 权威核 0.8（挖掘机 spec）与正文 0.80 归一后等价 → matched（语境属资源桶 → contextualMatches 观测）
+    // M24d D1 重排后 m³ 单位整提（原截断为 0.80m）
+    expect(report.matched).toBe(1);
+    expect(report.unregisteredCount).toBe(0);
+    expect(report.contextualMatches.map(finding => finding.token)).toEqual(['0.80m³']);
+  });
+
+  it('F-T4 匹配扩容：全源补充核（extraAuthorityTokens）不再误报投影缺口', () => {
+    const report = auditAuthorityCoverage('场地平整 685.32m³。', makeBlueprintData(), new Set(['685.32m³']));
+    // 685.32 来源在证据/清单而蓝图未投影：全源 token 转数值核心并入权威核 → matched
+    expect(report.matched).toBe(1);
+    expect(report.unregisteredCount).toBe(0);
+    expect(report.processGaps).toEqual([]);
+  });
+
+  it('F-T4 工艺缺口路径保持：分类器未否决的构造参数仍落桶（豁免不放宽收编口径）', () => {
+    const report = auditAuthorityCoverage('防水涂膜厚度 2.5mm，搭接宽度 35mm。', makeBlueprintData());
+    // 2.5mm/35mm 为构造厚度参数（R8 仅豁免 偏差/公差/误差 语境）→ 仍归工艺缺口
+    expect(report.processGaps.map(finding => finding.token)).toEqual(['2.5mm', '35mm']);
+    expect(report.conventionExempt).toBe(0);
+  });
+
+  it('F-T4 硬门禁：三桶任一非零 → blocker（fact_consistency + llm_repairable 直通硬阻断）', () => {
+    const clean = auditAuthorityCoverage('总工期 240 日历天。', makeBlueprintData());
+    expect(authorityAuditIssues(clean)).toEqual([]);
+    const unregistered = auditAuthorityCoverage('走廊净宽 2.4m，门洞宽度 0.9m 处设装饰条。', makeBlueprintData());
+    const issues = authorityAuditIssues(unregistered);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable' });
+    expect(issues[0].message).toContain('无主数值审计失败');
+    expect(issues[0].message).toContain('疑似编造（未登记）2 项 2.4m、0.9m');
+    // 收编缺口非零同样硬阻断（不只未登记桶）
+    const gap = auditAuthorityCoverage('防水涂膜厚度 2.5mm，搭接宽度 35mm。', makeBlueprintData());
+    expect(authorityAuditIssues(gap)[0]?.message).toContain('工艺库缺口 2 项 2.5mm、35mm');
+  });
+
+  it('F-T4 摘要：豁免计数入文案且不计缺口', () => {
+    const report = auditAuthorityCoverage('养护 7 天；压实度不低于 93%。', makeBlueprintData());
+    expect(report.conventionExempt).toBe(2);
+    expect(authorityAuditSummary(report)).toContain('规范/管理豁免 2');
+    expect(authorityAuditSummary(report)).not.toContain('须核查');
+    expect(authorityAuditSummary(report)).not.toContain('须补齐');
+  });
+
+  // ═══ M24d D1 面积盲区根治（r28k/s28l 实机：m² 被截断为 m + ㎡ 标点形态漏提 → 假未登记） ═══
+
+  it('M24d D1：正文「13.85m²」整提不截断，撞全源核即 matched（实机缺口根治形态）', () => {
+    const report = auditAuthorityCoverage('门卫建筑面积13.85m²。', makeBlueprintData(), new Set(['13.85m2']));
+    expect(report.scanned).toBe(1);
+    expect(report.matched).toBe(1);
+    expect(report.unregisteredCount).toBe(0);
+    expect([...report.derivationGaps, ...report.processGaps, ...report.unattributed]).toEqual([]);
+  });
+
+  it('M24d D1：无核时「13.85m²」以完整形态落未登记（不再截断为「13.85m」的漏网形态）', () => {
+    const report = auditAuthorityCoverage('门卫建筑面积13.85m²。', makeBlueprintData());
+    expect(report.unattributed.map(finding => finding.token)).toEqual(['13.85m²']);
+    expect(report.unregisteredCount).toBe(1);
+  });
+
+  it('M24d D1：非词形单位后接标点「937.72㎡；」不再漏提（尾部边界断言根治）', () => {
+    const report = auditAuthorityCoverage('绿化用地937.72㎡；园路铺装另计。', makeBlueprintData(), new Set(['937.72㎡']));
+    expect(report.scanned).toBe(1);
+    expect(report.matched).toBe(1);
+    expect(report.unregisteredCount).toBe(0);
+  });
+
+  // ═══ M24d D2 事实主表表格第 5 源（buildNumericAuthority → extraAuthorityTokens 传导） ═══
+
+  it('M24d D2：表格三形态（连写/分列/中文单位）数值入核', () => {
+    const session = {
+      allEvidence: [],
+      input: {},
+      structuredFacts: [],
+      factsModel: {
+        tables: [
+          // 连写形态（s28l 实机正文表格「工程量合计约 28792m2」同源）
+          { rows: [['门卫', '建筑面积13.85m2'], ['综合配套用房', '774.11m2']] },
+          // 分列形态（清单分列表「| 1436.400 | m2 |」：数字格×单位格跨格组合）
+          { rows: [['绿化用地', '1436.400', 'm2']] },
+          // 中文单位形态
+          { rows: [['公共广场', '961.42平方米']] },
+        ],
+      },
+    } as unknown as FinalizeSession;
+    const authority = buildNumericAuthority(session);
+    expect(authority.has('13.85m2')).toBe(true);
+    expect(authority.has('774.11m2')).toBe(true);
+    expect(authority.has('1436.400m2')).toBe(true);
+    expect(authority.has('961.42平方米')).toBe(true);
+  });
+
+  it('M24d D2：正文 m² 形态撞表格核（数值核心规约尾零，单位形态无关）→ matched 不落未登记', () => {
+    const session = {
+      allEvidence: [],
+      input: {},
+      structuredFacts: [],
+      factsModel: { tables: [{ rows: [['门卫', '13.85', 'm2']] }] },
+    } as unknown as FinalizeSession;
+    const authority = buildNumericAuthority(session);
+    const report = auditAuthorityCoverage('门卫建筑面积13.85m²。', undefined, authority);
+    expect(report.scanned).toBe(1);
+    expect(report.matched).toBe(1);
+    expect(report.unregisteredCount).toBe(0);
   });
 });

@@ -230,7 +230,12 @@ export function isQualificationSectionTitle(title: string): boolean {
 export function isBidderQualificationText(text: string): boolean {
   const normalized = text.trim().replace(/\s+/gu, '');
   if (!normalized) return false;
-  const hasBidderAnchor = /投标人|投标方|承包人资格|资格要求|资格审查|资格预审|资质要求|资质条件|资质等级|资格条件|财务状况|业绩要求|业绩证明|信用要求|联合体/u.test(normalized);
+  // M26 扩围（要求锚点实机归因：分包资格条款漏入 respond 池 ×3）：「接受分包的第三人资格/资质要求」
+  // 为《标准施工招标文件》前附表固定条项名，施组正文不以该语言响应——命中即资格材料条款
+  if (/接受分包/u.test(normalized)) return true;
+  // M26 扩围二：「投标企业」资格锚变体（「投标企业拟派项目经理…已有在建工程」）+「社保」
+  // 兼作锚（「安全员（社保同项目经理的社保要求）」类表格项无其他资格锚）
+  const hasBidderAnchor = /投标人|投标方|投标企业|承包人资格|资格要求|资格审查|资格预审|资质要求|资质条件|资质等级|资格条件|财务状况|业绩要求|业绩证明|信用要求|联合体|社保/u.test(normalized);
   if (!hasBidderAnchor) return false;
   // r8 扩围（实机 #2 复核：社保证明条款漏网）：「技术负责人…连续三个月社保缴费证明…社保缴纳单位应当是投标人」
   // 是资格审查材料条款（投标资格文件），非施组技术响应要求——资格词表补「社保」族
@@ -238,7 +243,7 @@ export function isBidderQualificationText(text: string): boolean {
   // 注册建造师，具备…安全生产考核合格证书（B证），且必须是本单位人员」是投标人资格材料条款，
   // 语义判定 0.57 边缘分（正文仅在机械章提「一级建造师」错位句）无法稳定判响应——资格词表补
   // 「注册建造师/建造师注册证书/安全生产考核合格证书/职称证书」执业资格族，词面出池断根
-  const hasQualificationTerm = /营业执照|资质证书|安全生产许可证|级及以上资质|注册建造师|建造师注册证书|安全生产考核合格证书|职称证书|财务状况|财务报告|审计报告|银行资信|业绩证明|类似业绩|信用记录|信用评价|不良行为记录|投标保证金|履约保证金|社保/u.test(normalized);
+  const hasQualificationTerm = /营业执照|资质证书|安全生产许可证|级及以上资质|注册建造师|建造师注册证书|安全生产考核合格证书|职称证书|财务状况|财务报告|审计报告|银行资信|业绩证明|类似业绩|信用记录|信用评价|不良行为记录|投标保证金|履约保证金|社保|在建工程|人员组成表/u.test(normalized);
   return hasQualificationTerm;
 }
 
@@ -258,6 +263,20 @@ export function isContractProcedureClause(text: string): boolean {
   if (/你方/u.test(normalized) && /我方/u.test(normalized)) return true;
   if (/发包人[^。；;]{0,30}?(?:审批|批准|备案|同意|许可)/u.test(normalized)) return true;
   if (/^[\d（(、.．\s]{0,8}监理人/u.test(normalized) && /(?:提交|报送|审批|延期|通知|检查|验收)/u.test(normalized)) return true;
+  // r28h M10 扩围（要求池纯度实机归因：「合同专用条款」形态占未响应条目约 1/3）：
+  // ④ GF 专用条款格式「关于…的(特别)约定：」——隐蔽检查期限/治安保卫/工程保险/安全生产达标目标
+  //    等合同权利义务约定，非施组应逐条响应的施工义务（LLM 漏判时本地兜底）；
+  //    技术条款用「要求/标准/应」，不用「…的约定：」格式，冒号尾锚定防「按约定施工」类误伤；
+  //    ⑤ 「（执行通用条款）」引用标记——合同条款自证形态。
+  // M26 扩围（要求锚点 27/72 实机归因）：⑥ GF 条款变体「…的有关约定：」（现场工艺试验/竣工验收
+  //    程序类）——旧词「的约定：」不覆盖「有关约定：」连续序列（r28k/s28k 实证漏网）；
+  //    ⑦ 合同程序双信号：合同主体词（承包人/发包人/监理人——合同语言主语，施组技术条款不用）
+  //    + 程序动词（报送/审批/保管/授权范围/教育/穿戴等履约管理动作）共现才是合同管理条款，
+  //    单信号不判（防「监理人见证取样」类技术条款误伤）。
+  if (/(?:特别约定|有关约定|的约定)[:：]/u.test(normalized)) return true;
+  if (/通用(?:合同)?条款/u.test(normalized)) return true;
+  if (/(?:承包人|发包人|监理人)/u.test(normalized)
+    && /(本合同|报送|提交|审批|备案|更换|违约责任|撤换|拒绝|保管|验收记录|签字|颁发|教育|穿戴|定期检查|授权范围|驻场|在岗)/u.test(normalized)) return true;
   return false;
 }
 

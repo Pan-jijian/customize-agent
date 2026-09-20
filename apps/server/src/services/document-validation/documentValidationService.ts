@@ -23,6 +23,28 @@ function shouldWarnMissingFactField(name: string) {
   return /\d|GB|JGJ|C\d|HRB|DN|mm|MPa|kPa|工期|质量|安全|项目名称|工程名称|招标人|建设地点|建筑面积|结构形式|层数/u.test(name);
 }
 
+/** 后台话术词右邻守卫（中文组合词的子串误报防护）：词尾与后随字可构成更大合法词时不算命中——
+ * 「规范包」+「括/含」即「标准规范包括」「规范包含」的正常拼写（r25 实测误报：
+ * 「适用于工程的标准规范包括：……」被报为后台流程话术）。逐命中点检查右邻，
+ * 所有命中点均为合法拼接时才判定未命中。 */
+const BACKSTAGE_PHRASE_RIGHT_GUARD: Record<string, RegExp> = { 规范包: /[括含]/u };
+
+function backstagePhraseHit(markdown: string, phrase: string): boolean {
+  const rightGuard = BACKSTAGE_PHRASE_RIGHT_GUARD[phrase];
+  if (!rightGuard) return markdown.includes(phrase);
+  let from = 0;
+  for (;;) {
+    const index = markdown.indexOf(phrase, from);
+    if (index < 0) return false;
+    const rightChar = markdown[index + phrase.length] || '';
+    if (rightChar && rightGuard.test(rightChar)) {
+      from = index + phrase.length;
+      continue;
+    }
+    return true;
+  }
+}
+
 export function validateDraftWithAutoSpec(input: {
   markdown: string;
   spec: AutoDocumentSpecPackage;
@@ -45,7 +67,7 @@ export function validateDraftWithAutoSpec(input: {
   }
   const forbidden = ['知识库证据', '资料类型', '提示词角色', '文档规范包', '规范包', '后台自动规范', '后台优化建议', '基础事实候选', '材料未提供', '未检索到'];
   for (const text of forbidden) {
-    if (markdown.includes(text)) issues.push({ level: 'error', message: `正文包含后台流程话术：${text}`, suggestion: '请重新生成或在审查阶段删除后台流程描述。' });
+    if (backstagePhraseHit(markdown, text)) issues.push({ level: 'error', message: `正文包含后台流程话术：${text}`, suggestion: '请重新生成或在审查阶段删除后台流程描述。' });
   }
   return issues;
 }

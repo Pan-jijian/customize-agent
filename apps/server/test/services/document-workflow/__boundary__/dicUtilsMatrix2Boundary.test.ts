@@ -104,7 +104,7 @@ describe('W10 dedupeCrossSectionSkeletonH4s 章级作用域', () => {
     expect(out).toContain('内容总述');
   });
 
-  it('非泛化 H4 跨 H3 重复 → 保留首次、删后续整块', () => {
+  it('非泛化 H4 跨 H3 重复：异质正文保留、空壳/纯复制副本删后续（M17）', () => {
     const md = [
       '## 第一章',
       '### 分部A',
@@ -113,10 +113,15 @@ describe('W10 dedupeCrossSectionSkeletonH4s 章级作用域', () => {
       '### 分部B',
       '#### 特殊要点',
       '正文B',
+      '### 分部C',
+      '#### 特殊要点',
+      '正文A',
     ].join('\n');
     const out = dedupeCrossSectionSkeletonH4s(md);
-    expect(out).toContain('正文A');
-    expect(out).not.toContain('正文B');
+    // 异质正文（正文B）保留；与首次块逐字相同的复制副本（第二处正文A）整块删除
+    expect(out).toContain('正文B');
+    expect(out.split('正文A').length - 1).toBe(1);
+    expect(out.split('#### 特殊要点').length - 1).toBe(2);
   });
 
   it('泛化白名单 H4（施工准备）跨 H3 重复 → 全部保留', () => {

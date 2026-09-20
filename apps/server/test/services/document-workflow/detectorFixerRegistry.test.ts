@@ -120,8 +120,8 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
     }
   });
 
-  it('LLM patch 修复轮 10 轮全部带 patchGuard 且锚定检测器存在、guard 检测器 全部 deterministicSafe', () => {
-    expect(LLM_PATCH_REPAIR_ROUNDS).toHaveLength(10);
+  it('LLM patch 修复轮 17 轮全部带 patchGuard 且锚定检测器存在、guard 检测器 全部 deterministicSafe', () => {
+    expect(LLM_PATCH_REPAIR_ROUNDS).toHaveLength(17);
     for (const entry of LLM_PATCH_REPAIR_ROUNDS) {
       expect(entry.kind).toBe('llm-patch');
       expect(entry.patchGuard).toBeDefined();
@@ -133,16 +133,16 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
     }
   });
 
-  it('content-depth-repair 多锚定声明（alsoAnchoredTo 五类均登记，r8 六检测器统一收口）', () => {
+  it('content-depth-repair 多锚定声明（alsoAnchoredTo 六类 + professional-score 均登记，r8 六检测器统一收口 + D-T1 专业评分）', () => {
     const round = LLM_PATCH_REPAIR_ROUNDS.find(entry => entry.id === 'content-depth-repair');
     expect(round?.anchoredTo).toBe('critical-section-depth');
-    expect(round?.alsoAnchoredTo).toEqual(['emergency-section-depth', 'construction-org-major-content', 'construction-org-division-section', 'precise-fact-usage', 'overview-recap']);
+    expect(round?.alsoAnchoredTo).toEqual(['emergency-section-depth', 'construction-org-major-content', 'construction-org-division-section', 'precise-fact-usage', 'overview-recap', 'professional-score']);
     for (const anchorId of round?.alsoAnchoredTo ?? []) {
       expect(detectorEntry(anchorId)).toBeDefined();
     }
   });
 
-  it('LLM patch 修复轮 10 轮 id 顺序快照（P11 全链接入登记，变更必须显式改快照并附理由）', () => {
+  it('LLM patch 修复轮 17 轮 id 顺序快照（P11 全链接入登记，变更必须显式改快照并附理由）', () => {
     expect(LLM_PATCH_REPAIR_ROUNDS.map(entry => entry.id)).toEqual([
       'fact-landing',
       'table-repair',
@@ -153,7 +153,14 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
       'global-consistency-repair',
       'quotation-balance-repair',
       'content-depth-repair',
+      'control-loop-repair',
+      'professional-chain-repair',
       'basis-regulations-repair',
+      'dangerous-applicability-repair',
+      'auto-spec-gate-repair',
+      'length-compression-repair',
+      'table-caption-repair',
+      'table-arithmetic-repair',
     ]);
   });
 
@@ -174,7 +181,7 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
     }
   });
 
-  it('FINALIZE_REPAIR_ROUNDS 顺序快照（19 轮锁死，变更必须显式改快照并附理由）', () => {
+  it('FINALIZE_REPAIR_ROUNDS 顺序快照（31 轮锁死，变更必须显式改快照并附理由）', () => {
     expect([...FINALIZE_REPAIR_ROUNDS]).toEqual([
       'fact-landing-round',
       'table-repair-round',
@@ -188,13 +195,25 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
       'requirement-response-repair',
       'requirement-verification',
       'content-depth-repair',
+      'control-loop-repair',
+      'professional-chain-repair',
       'post-review-surface',
       'terminology-strip',
       'regulation-number-typo',
       'quotation-balance-repair',
       'basis-regulations-repair',
+      'dangerous-applicability-repair',
+      'auto-spec-gate-repair',
       'toc-consistency',
+      'length-compression-repair',
       'fact-distribution-round',
+      'table-caption-repair',
+      'table-arithmetic-repair',
+      'empty-section-sweep',
+      'section-alignment-sweep',
+      'templating-sweep',
+      'duplicate-theme-merge',
+      'delivery-structure-closure',
     ]);
   });
 });

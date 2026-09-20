@@ -28,6 +28,7 @@ import {
   QUALITY_SEVERITY_RULES,
   SPEC_GATE_RULE_HANDLERS,
   STRUCTURED_DATA_CONTENT_RE,
+  TABLE_PLACEHOLDER_CELL_FORMS_RE,
   SPECIFICATION_CONTENT_RE,
   TOC_BLOCK_RE,
   TOC_INDENTED_SECTION_LINE_RE,
@@ -333,10 +334,20 @@ describe('Markdown 结构正则', () => {
     expect(NON_BLANK_RE.test('   ')).toBe(false);
   });
 
-  it('FORMAL_PLACEHOLDER_PATTERNS 识别占位式表达', () => {
+  it('FORMAL_PLACEHOLDER_PATTERNS 识别占位式表达（D-T5 口径：按资料/文件/说明 为留白，按方案/规范/标准/要求 为正常施组表述）', () => {
     expect(FORMAL_PLACEHOLDER_PATTERNS.some(p => p.test('详见附件'))).toBe(true);
-    expect(FORMAL_PLACEHOLDER_PATTERNS.some(p => p.test('| - |'))).toBe(true);
+    expect(FORMAL_PLACEHOLDER_PATTERNS.some(p => p.test('做法按资料确定'))).toBe(true);
+    // round-27 修复端 replaceForbiddenFormalPhrases 已裁定合法，检测端同步不报（r28f #41 误报归因）
+    expect(FORMAL_PLACEHOLDER_PATTERNS.some(p => p.test('试验员按规范留置试块'))).toBe(false);
+    expect(FORMAL_PLACEHOLDER_PATTERNS.some(p => p.test('论证通过后按方案实施'))).toBe(false);
     expect(FORMAL_PLACEHOLDER_PATTERNS.some(p => p.test('具体做法如下'))).toBe(false);
+  });
+
+  it('TABLE_PLACEHOLDER_CELL_FORMS_RE 覆盖 —/无/待定 词形（D-T5 扩围，豁免判定在 qualityValidation 单源）', () => {
+    expect(TABLE_PLACEHOLDER_CELL_FORMS_RE.test('—')).toBe(true);
+    expect(TABLE_PLACEHOLDER_CELL_FORMS_RE.test('无')).toBe(true);
+    expect(TABLE_PLACEHOLDER_CELL_FORMS_RE.test('待定')).toBe(true);
+    expect(TABLE_PLACEHOLDER_CELL_FORMS_RE.test('5台')).toBe(false);
   });
 
   it('PROMPT_EXAMPLE_BLOCK_RE 抽取示例片段', () => {

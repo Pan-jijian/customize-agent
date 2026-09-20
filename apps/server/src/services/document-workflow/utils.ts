@@ -394,7 +394,8 @@ const CONTAINER_H3_RE = /主要分部分项工程施工方案|项目主要施工
  * 主题块成稿照抄其他块骨架时，串章 H4 与正确位置 H4 分属不同 H3，dedupeRepeatedSubsections 只做同 H3
  * 去重，跨 H3 同名全部漏网（真实回归：6.4 块输出 6.1.1/6.3.1/6.3.2 同名 H4，目录小节串章实锤）。
  * 规则：H4 名与章内任一 H3 名相同 → 删除该 H4 块（H4 不得与 H3 同名，由 H3 外壳直接承担）；
- * H4 名跨 H3 重复且非泛化词白名单 → 保留首次出现，删除后续串章副本。
+ * H4 名跨 H3 重复且非泛化词白名单 → 仅「零正文空壳」或「与首次同名块正文逐字相同的纯复制」
+ * 删除后续副本（M17 内容保护：有独有正文的异质同名块保留——多单位工程同专业真实内容）。
  * 章级作用域（## 分章）：跨章同名小节（1.4↔6.4 等）不受影响。 */
 export function dedupeCrossSectionSkeletonH4s(markdown: string): string {
   const lines = markdown.split(/\r?\n/u);
@@ -423,10 +424,23 @@ export function dedupeCrossSectionSkeletonH4s(markdown: string): string {
         h4Blocks.push({ line: index, name, rawTitle, parentH3: currentH3 });
       }
     }
-    const seenNames = new Map<string, number>();
+    // M17 块边界预计算（删除范围与正文判定同口径）：blockEndAfter[line] = 该行之后首个 ^#{2,4} 标题行
+    const blockEndAfter: number[] = new Array(end - start);
+    {
+      let nextHeading = end;
+      for (let index = end - 1; index >= start; index -= 1) {
+        blockEndAfter[index - start] = nextHeading;
+        if (/^#{2,4}\s+/u.test(lines[index].trim())) nextHeading = index;
+      }
+    }
+    const firstBodyByName = new Map<string, string>();
+    const seenNames = new Set<string>();
     for (const block of h4Blocks) {
-      const prior = seenNames.get(block.name);
-      seenNames.set(block.name, block.line);
+      // 块正文（去空白，H5 行及其内容计入）：仅用于同名副本复制判定，不参与结构改写
+      const blockBody = lines.slice(block.line + 1, blockEndAfter[block.line - start]).join('').replace(/\s+/gu, '');
+      const prior = seenNames.has(block.name);
+      if (!prior) firstBodyByName.set(block.name, blockBody);
+      seenNames.add(block.name);
       // 4.19.6 回归（丰乐镇第二轮验收，容器块 3447 字总述被连坐删除）：
       // 编号形态 H4（「3 绿化工程」等分组编号组织）与容器总述小节（「主要分部分项工程施工方案」）内
       // 引用全章分部名的 H4，与章内同名 H3 是结构性引用而非同名复制，不得按 H4↔H3 同名串章规则整块删除
@@ -435,15 +449,15 @@ export function dedupeCrossSectionSkeletonH4s(markdown: string): string {
       const insideContainerH3 = CONTAINER_H3_RE.test(block.parentH3);
       const isH3Name = h3Titles.has(block.name) && !numberedH4 && !insideContainerH3;
       const isGeneric = GENERIC_H4_TITLE_WHITELIST.has(block.name);
-      const shouldDrop = isH3Name || (!isGeneric && prior !== undefined);
+      // M17 内容保护（r28i/s28i 根因专项 C 定案）：跨 H3 同名副本仅「零正文空壳」或「正文与首次
+      // 同名块逐字相同（纯复制）」才删除；有独有正文的后续块保留——多单位工程（公厕/门卫/配套用房等）
+      // 天然输出同名专业 H4（门窗工程/屋面及防水/电气/给排水系统……），各对象内容独立，旧「看名删块」
+      // 连坐丢失 42 块 12571 字 → 5 个 H3 掏空后连标题删除（终稿字数不足 blocker 根因）。
+      // 真串章复制场景不受影响：空壳或逐字复制才能命中（重复句已由句级去重前置收口）。
+      const duplicatedCopy = prior && (blockBody.length === 0 || blockBody === firstBodyByName.get(block.name));
+      const shouldDrop = isH3Name || (!isGeneric && duplicatedCopy);
       if (!shouldDrop) continue;
-      let blockEnd = end;
-      for (let index = block.line + 1; index < end; index += 1) {
-        if (/^#{2,4}\s+/u.test(lines[index].trim())) {
-          blockEnd = index;
-          break;
-        }
-      }
+      const blockEnd = blockEndAfter[block.line - start];
       for (let index = block.line; index < blockEnd; index += 1) drops.add(index);
     }
   }
@@ -693,9 +707,14 @@ export function isBidDisciplineSentence(text: string): boolean {
  * 被兜底补写进施组正文）：否决投标/废标/投标无效/不予评审/取消投标资格类条款属评标规则
  * （商务文件内容），不属施组响应范围——检测/路由/补写/写作规则四端统一按程序性条款过滤。
  * 「废标」加负向断言防误伤「报废标准」类施工用词。
+ * M26 扩围（要求锚点 27/72 实机归因）：评标办法评分表单（「评审因素 分值 评分标准」「详细评审
+ * 标准」「得0.5-1.0分」「≤F≤」——PDF 表格串行碎片）同属评标规则域，非施组响应义务
+ * （r28k/s28k 实机该类碎片被判 respond 后锚点「90分≤F≤100分」类无法落位拉低命中率）。
  */
 export function isBidEvaluationRuleText(text: string): boolean {
-  return /否决[^。；\n]{0,8}投标|废标(?!准)|无效投标|投标无效|不予评审|取消[^。；\n]{0,6}投标资格/u.test(text);
+  if (/否决[^。；\n]{0,8}投标|废标(?!准)|无效投标|投标无效|不予评审|取消[^。；\n]{0,6}投标资格/u.test(text)) return true;
+  if (/评审因素|评分因素|分值评分|详细评审标准|≤F≤/u.test(text)) return true;
+  return /得\s*\d+(?:\.\d+)?\s*(?:-\s*\d+(?:\.\d+)?\s*)?分/u.test(text);
 }
 
 /**

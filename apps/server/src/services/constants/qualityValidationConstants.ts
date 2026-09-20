@@ -116,14 +116,26 @@ export const STRUCTURED_DATA_CONTENT_RE = /表格|数据|列表|明细|参数|�
 /** 正文必须体现设计/方案/说明类资料时使用的匹配规则。 */
 export const SPECIFICATION_CONTENT_RE = /设计|方案|说明|节点|流程|步骤|尺寸|做法|配置|规则|标准/u;
 
-/** 正文占位式表达检查规则。 */
+/** 正文占位式表达检查规则（短语级）。D-T5 口径统一两处修正：
+ * ①「按类」只保留「按资料/按文件/按说明」（指向不明的留白）——「按方案/按规范/按标准/按要求」
+ *   为正常施组表述，round-27 修复端 replaceForbiddenFormalPhrases 已裁定不替换，检测端此前照报
+ *   导致 r28f #41 对「按规范留置试块/按方案配置」类合法句全部误报；
+ * ② 表格数据格占位符（`—`/`无`/`待定` 等）移入 TABLE_PLACEHOLDER_CELL_FORMS_RE + 豁免判定
+ *   （qualityValidation.isNonExemptTablePlaceholderCell，按合计行/规格类列语境豁免）——原裸正则
+ *   无豁免口径，豁免列「—」被 #42 照报（r28f 实测 23 处误报），阻断/警告/patchGuard 三处单源。 */
 export const FORMAL_PLACEHOLDER_PATTERNS = [
   /见(?:资料|文件|说明|方案|附件|相关文件)/u,
-  /按(?:资料|文件|说明|方案|规范|标准|要求)/u,
+  /按(?:资料|文件|说明)/u,
   /满足(?:相关|有关)?要求/u,
   /依据本项目已确认资料/u,
-  /\|\s*(?:[/—-]|无|暂无|待定|待补充|N\/?A)\s*\|/iu,
 ] as const;
+
+/** 表格数据格占位符词形（D-T5 单源，阻断层 markdownTableQualityIssues 与警告层 formalPlaceholderIssues、
+ * patchGuard 预检三处共用；「无」为 r28f #42 口径差归因的扩围词形）。 */
+export const TABLE_PLACEHOLDER_CELL_FORMS_RE = /^(?:—+|-+|-|\/|N\/A|n\/a|待定|待补充|待确认|待查|待补|若干|暂无|无数据|无)$/u;
+
+/** 表格数据格模糊量占位（约82kW 类「约N」前缀；数值确定化由修复链承担）。 */
+export const TABLE_PLACEHOLDER_APPROX_RE = /^约\d/u;
 
 /** AutoSpec 配置校验中不允许出现的 Markdown 一级标题。 */
 export const MARKDOWN_TOP_HEADING_RE = /^#\s+/mu;

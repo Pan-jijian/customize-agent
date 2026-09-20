@@ -71,14 +71,14 @@ describe('禁用词库', () => {
   });
 });
 
-describe('splitScoringBlocks 评分块切分（r14 精度修正：标题边界 + 阈值 12）', () => {
-  it('标题行为边界：单换行串联多小节 → 每小节独立成块（不再并入跨小节大块）', () => {
-    // 旧口径（仅空行分块）下无空行的「标题\n正文」链被并为一整块，标题沉入块中部；
-    // 新口径按标题行边界先行切分，每小节标题位于块首，与评审查询近词面对齐
+describe('splitScoringBlocks 评分块切分（r14 精度修正：标题边界 + 阈值 12；r26 标题块独立）', () => {
+  it('标题行与正文单换行紧贴 → 标题独立成块（不再与正文并入同块稀释近词面对齐）', () => {
+    // r26 实测：6 强制模块仅命中 4——标题与正文合并嵌入时标题语义被正文稀释；
+    // 标题行摘出为独立判定单元后与模块查询近词面对齐（短正文 <12 字被过滤）
     const blocks = splitScoringBlocks(['#### 7.1.1 扬尘污染防治措施', '施工内容甲。', '#### 7.1.2 建筑工人实名制管理', '施工内容乙。'].join('\n'));
     expect(blocks).toEqual([
-      '#### 7.1.1 扬尘污染防治措施\n施工内容甲。',
-      '#### 7.1.2 建筑工人实名制管理\n施工内容乙。',
+      '#### 7.1.1 扬尘污染防治措施',
+      '#### 7.1.2 建筑工人实名制管理',
     ]);
   });
 
@@ -94,14 +94,15 @@ describe('splitScoringBlocks 评分块切分（r14 精度修正：标题边界 +
     expect(blocks).toEqual([]);
   });
 
-  it('R13 实测回归：6 小节单换行串联 → 6 块（块均字数下降，每小节独立判定单元）', () => {
+  it('R13 实测回归：6 小节单换行串联 → 12 块（标题块与正文块各自独立判定单元）', () => {
     const sections = Array.from({ length: 6 }, (_, i) => [
       `#### 7.1.${i + 1} 小节标题第${i + 1}部分内容说明`,
       `本小节正文内容用于验证切分粒度，段落编号 ${i + 1}。`,
     ].join('\n'));
     const blocks = splitScoringBlocks(sections.join('\n'));
-    expect(blocks).toHaveLength(6);
-    expect(blocks.every(block => block.startsWith('####'))).toBe(true);
+    expect(blocks).toHaveLength(12);
+    expect(blocks.filter((_, index) => index % 2 === 0).every(block => block.startsWith('####'))).toBe(true);
+    expect(blocks.filter((_, index) => index % 2 === 1).every(block => !block.startsWith('#'))).toBe(true);
   });
 });
 

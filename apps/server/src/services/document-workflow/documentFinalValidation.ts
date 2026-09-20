@@ -2,18 +2,19 @@ import { closedLoopDensityIssues, plannedAutoSpecGateIssues, basisRegulationsCov
 import { majorContentGovernanceIssues } from './constructionOrgQualityRules';
 import type { FactTokenScopeClassifier } from './factTokenClassifier';
 import type { ProfessionalDepthAnalysis, ProfessionalDepthClassifier } from './professionalDepthClassifier';
-import { boqDivisionCoverageIssues, boqRowTraceIssues, buildBoqRowTraces } from './documentFactTrace';
+import { boqDivisionCoverageIssues, boqRowTraceIssues, buildBoqRowTraces, numericTraceabilityIssues } from './documentFactTrace';
 import { chapterDependencyIssues, documentDeliveryScoreIssues, evidenceUsageCoverageIssues, paragraphGenericIssues } from './documentDeliveryReport';
-import { bodyCompositionTableIssues, plannedStructureIssues, promptDocumentRuleIssues, tertiaryHeadingIssues } from './markdownComposer';
+import { bodyCompositionFigureIssues, bodyCompositionTableIssues, plannedStructureIssues, promptDocumentRuleIssues, tableCaptionIssues, tertiaryHeadingIssues } from './markdownComposer';
 import { webEvidenceLeakageIssues } from './webResearchService';
 import { constructionOrgChapterDataCoverageIssues, constructionOrgConsistencyIssues } from './constructionOrgConsistency';
 import { constructionOrgBonusModuleIssues, constructionOrgControlLoopIssues, constructionOrgDivisionSectionIssues, constructionOrgGenericLanguageIssues, constructionOrgMajorContentIssues, constructionOrgProfessionalChainIssues } from './constructionOrgQualityRules';
-import { ambiguousEitherOrIssues, areaArithmeticIssues, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, REQUIREMENTS_SEMANTIC_SENTENCE_LIMIT, closurePhraseDensityCapIssues, commercialDataInBodyIssues, crossProjectValueCopyIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, equipmentBatchConflicts, equipmentEntryTimingIssues, excavationDepthLockIssues, excavationHazardClassificationIssues, extractSupportSystemAuthority, fabricatedAwardIssues, fabricatedStartDateIssues, fieldValueMismatchIssues, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, hazardExclusionContradictionIssues, invertedDateRangeIssues, collisionNumberedHeadingIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, overviewRecapIssues, paragraphOpeningRepeatIssues, paragraphTailRepeatIssues, phaseLaborMixingIssues, preliminaryActionTimingIssues, repeatedWordIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, supportFormFactConsistencyIssues, supportSystemConflictIssues } from './documentIntegrityChecks';
+import { ambiguousEitherOrIssues, areaArithmeticIssues, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, REQUIREMENTS_SEMANTIC_SENTENCE_LIMIT, closurePhraseDensityCapIssues, commercialDataInBodyIssues, crossProjectValueCopyIssues, crossSectionNumericConflictIssues, dangerousListConsistencyIssues, duplicateParagraphIssues, duplicateTableIssues, equipmentBatchConflicts, equipmentEntryTimingIssues, excavationDepthLockIssues, excavationHazardClassificationIssues, extractSupportSystemAuthority, fabricatedAwardIssues, fabricatedStartDateIssues, fieldValueMismatchIssues, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, hazardExclusionContradictionIssues, identityLeakageIssues, invertedDateRangeIssues, collisionNumberedHeadingIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, overviewRecapIssues, paragraphOpeningRepeatIssues, paragraphTailRepeatIssues, phaseLaborMixingIssues, preliminaryActionTimingIssues, repeatedWordIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, supportFormFactConsistencyIssues, supportSystemConflictIssues, tableArithmeticInconsistencyIssues } from './documentIntegrityChecks';
 import { buildSemanticSimilarity } from './semanticSimilarity';
 import { normalizeChapterTitleLine, requirementAcceptanceIssues, tenderRequirementCheckItems, tenderRequirementSemanticQuery } from './tenderRequirements';
 import { internalTerminologyAnchorIssues } from './internalTerminologyAnchors';
 import { parameterConceptConflictIssues } from './parameterConceptConflicts';
 import type { BillFactLock } from './billFactLock';
+import type { DrawingFactLock } from './drawingFactLock';
 import { constructionSystemCoverageIssues } from './constructionSystemCoverage';
 import { dangerousApplicabilityIssues } from './dangerousApplicability';
 import { stagePhrasingIssues } from './stagePhrasing';
@@ -126,10 +127,16 @@ export async function buildStandardFinalValidationIssues(input: {
   blueprintData?: BlueprintData;
   /** 标书编制规格：正文禁表（暗标纯文字口径）——缺表类门禁豁免与正文残留表格反向阻断依据 */
   bodyTableForbidden?: boolean;
+  /** 标书编制规格：正文禁图（暗标纯文字口径）——正文残留图片/图件占位反向阻断依据（F-T3） */
+  bodyFigureForbidden?: boolean;
+  /** 标书编制规格：投标人身份禁语（暗标）——正文身份标记零容忍终检依据（F-T3） */
+  identityMarksForbidden?: boolean;
   /** 标书编制规格：封面口径（招标「不设内封面」优先于提示词要求） */
   coverForbidden?: boolean;
   /** B1 清单事实锁（4.27.0 A1）：参数口径冲突组多值分别命中不同清单条目时判误报降级 info（不阻断） */
   billFactLock?: BillFactLock;
+  /** B-T3 图纸事实锁：可用图纸引用率验收（图纸事实在正文落位 ≥1 处/份）的判定源 */
+  drawingFactLock?: DrawingFactLock;
 }): Promise<ValidationIssue[]> {
   const factVerification = await generatedFactVerificationIssuesAsync(input.markdown, input.factsModel, { scopeClassifier: input.factTokenScopeClassifier });
   // 招标要求正文级语义检测（终局全量对账）：要求条目 ↔（章节标题 + 正文句）同闭包 embedding，
@@ -295,6 +302,12 @@ export async function buildStandardFinalValidationIssues(input: {
     ...det('chapter-dependency', () => chapterDependencyIssues(input.chapters, analyses)),
     ...det('document-delivery-score', () => documentDeliveryScoreIssues(input.markdown, input.chapters, input.factsModel, analyses)),
     ...det('generated-fact-verification', () => factVerification),
+    // C-T2 未溯源数值验收（扫描口径与分类器/修复器单源）：终稿未溯源数字 = 0（规范常数/管理数字
+    // 已豁免；真未溯源由 llm_repairable 进修复链，链尾 demote 确定性改定性兜底；不硬阻断导出）
+    ...det('numeric-traceability', () => numericTraceabilityIssues(input.markdown, input.factsModel)),
+    // C-T3 表内算术自洽验收（含显性合计标记的表格：分项和=合计；与修复轮 stageTableArithmeticRepair
+    // 同源重扫，检测定位=修复定位；llm_repairable 进修复链，不硬阻断导出）
+    ...det('table-arithmetic-consistency', () => tableArithmeticInconsistencyIssues(input.markdown)),
     ...det('duplicate-basic-info', () => duplicateBasicInfoIssues(input.markdown)),
     ...await det('formal-style', () => formalStyleIssues(input.markdown)),
     ...det('tertiary-heading', () => tertiaryHeadingIssues(input.markdown)),
@@ -308,7 +321,7 @@ export async function buildStandardFinalValidationIssues(input: {
     // C5 应急预案小节深度门槛（≥300 字 + 组织/流程/物资三要素，标题召回 + bge 语义判定）
     ...await det('emergency-section-depth', () => emergencySectionDepthIssues(input.markdown)),
     ...det('boq-row-trace', () => boqRowTraceIssues(buildBoqRowTraces(input.markdown, input.factsModel))),
-    ...det('drawing-reference', () => drawingReferenceIssues(input.markdown, input.factsModel)),
+    ...det('drawing-reference', () => drawingReferenceIssues(input.markdown, input.drawingFactLock)),
     ...det('web-evidence-leakage', () => webEvidenceLeakageIssues(input.markdown)),
     ...det('formal-placeholder', () => formalPlaceholderIssues(input.markdown)),
     ...det('prompt-example-leak', () => promptExampleLeakIssues(input.markdown, input.promptBindings)),
@@ -316,9 +329,15 @@ export async function buildStandardFinalValidationIssues(input: {
     ...det('planned-auto-spec-gate', () => plannedAutoSpecGateIssues(input.markdown, input.template)),
     // 暗标正文禁表（标书编制规格）：缺表类门禁豁免（正文缺表不再缺陷）+ 残留表格反向阻断（正文纯文字，图表仅限文末附表区）
     ...det('bid-composition-body-table', () => bodyCompositionTableIssues(input.markdown, input.bodyTableForbidden)),
+    // F-T3 暗标正文禁图（标书编制规格）：残留图片/图件占位反向阻断（确定性剥离链的终检兜底）
+    ...det('bid-composition-body-figure', () => bodyCompositionFigureIssues(input.markdown, input.bodyFigureForbidden)),
+    // F-T3 暗标身份禁语零容忍终检（identityMarksForbidden）：业绩/获奖表述与证书编号类自我标识即 blocker
+    ...det('identity-marks-forbidden', () => identityLeakageIssues(input.markdown, input.identityMarksForbidden)),
     ...det('planned-structure', () => plannedStructureIssues(input.markdown, input.template, input.bodyTableForbidden)),
+    // R20 C3 表题注终检：正文区表格逐张核验「表X-Y」（注入器安全网，昭标豁免）
+    ...det('table-caption', () => tableCaptionIssues(input.markdown, input.bodyTableForbidden)),
     ...await det('prompt-document-rule', () => promptDocumentRuleIssues(input.markdown, input.promptDocumentRules, undefined, { bodyTableForbidden: input.bodyTableForbidden, coverForbidden: input.coverForbidden })),
-    // round-18 E11：安徽省属地适配与政策合规（创优目标/四节一环保量化/工伤保险），
+    // E11：属地适配与政策合规（创优目标/四节一环保量化/工伤保险），
     // 排在末尾使修复循环 slice 截断时让位高优先级 blocker；round-20 S1 已加语义判定（async）
     ...await det('local-adaptation-keyword', () => localAdaptationKeywordIssues(input.markdown, input.factsModel)),
     // P2/P4 清单分项覆盖义务（评分报告公厕/过路涵/污水管网/排水沟/沟塘清淤/小菜园整体缺失）：

@@ -4,7 +4,7 @@
  * 无不可用降级路径。语义通道全部 mock（避免测试加载 Transformers.js 重依赖）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, invertedDateRangeIssues, paragraphTailRepeatIssues, scanParagraphTailRepeats, collisionNumberedHeadingIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixInvertedDateRanges, fixParagraphOpeningRepeats, fixParagraphTailRepeats, fixCollisionNumberedHeadings, fixPlaceholderTableCells, fixTruncatedSentenceArtifacts, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
+import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, invertedDateRangeIssues, paragraphTailRepeatIssues, scanParagraphTailRepeats, collisionNumberedHeadingIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixInvertedDateRanges, fixZeroLengthDayRanges, fixParagraphOpeningRepeats, fixParagraphTailRepeats, fixCollisionNumberedHeadings, fixEmbeddedHeadingLines, fixPlaceholderTableCells, fixTruncatedSentenceArtifacts, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
 import { markdownTableQualityIssues } from '@/services/document-workflow/qualityValidation';
 import { normalizeTableTitleInHeaders, repairTableBlockLines } from '@/services/document-workflow/tableRepairHelpers';
 import { scanStructureDefects } from '@/services/document-workflow/structureIntegrityRules';
@@ -378,6 +378,64 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
     expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
   });
 
+  it('r25 资源共享表块豁免：表块邻域声明共用调配时表内专项用途列数值不入互斥池（通用形态）', () => {
+    const markdown = [
+      '机械设备按分项共用调配，不再单独增配大型设备。', '',
+      '**表4-1 机械设备配置**', '',
+      '| 设备名称 | 规格 | 数量 | 用途 |',
+      '| 挖掘机 | 按设计断面 | 5台 | 路床土方开挖、沟槽开挖 |', '',
+      '**表4-2 管网设备**', '',
+      '| 设备名称 | 规格 | 数量 | 用途 |',
+      '| 挖掘机 | 0.6m³ | 1台 | 池体土方开挖、格栅井沟槽开挖 |',
+    ].join('\n');
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('r25 共享语境豁免不越界：无共享声明的表块与正文行照常互斥检出', () => {
+    const tableCase = [
+      '**表4-1 机械设备配置**', '',
+      '| 设备名称 | 规格 | 数量 | 用途 |',
+      '| 挖掘机 | 按设计断面 | 5台 | 沟槽开挖 |', '',
+      '沟槽作业另配挖掘机1台。',
+    ].join('\n');
+    expect(crossSectionNumericConflictIssues(tableCase).length).toBeGreaterThan(0);
+    const proseCase = '沟槽开挖配置挖掘机5台。沟槽回填另配挖掘机1台。共用调配不再单独增配。';
+    expect(crossSectionNumericConflictIssues(proseCase).length).toBeGreaterThan(0);
+  });
+
+  it('r28f B1 分对象配置表分池：两表挖掘机各归用途部位池不互比（r28e 实测误报收口）', () => {
+    // r28e 实机阻断（表4-1 道路施工机械 vs 表4-2 生态池设备）：两表是分施工对象的配置口径——
+    // 挖掘机「5台｜路槽开挖」与「1台｜生态池基坑开挖」因用途列部位词（路槽/基坑）不在部位词表
+    // 同入未标注池误报互斥；补词后两行各归其位、各池单值不互比
+    const markdown = [
+      '表4-1 主要道路施工机械投入计划', '',
+      '| 机械名称 | 规格型号 | 数量 | 用途 |',
+      '| --- | --- | --- | --- |',
+      '| 挖掘机 | 按设计选型 | 5台 | 路槽开挖、土方装运 |',
+      '| 自卸汽车 | 按设计选型 | 5台 | 土方及碎石运输 |', '',
+      '表4-2 生态池施工设备投入计划表', '',
+      '| 设备名称 | 规格型号 | 数量 | 用途 |',
+      '| --- | --- | --- | --- |',
+      '| 挖掘机 | 按设计选型 | 1台 | 生态池基坑开挖 |',
+    ].join('\n');
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('r28f B1 边界：用途列同部位词时两表数值仍互斥照报（分池不放松同部位口径检查）', () => {
+    const markdown = [
+      '表4-1 主要道路施工机械投入计划', '',
+      '| 机械名称 | 规格型号 | 数量 | 用途 |',
+      '| --- | --- | --- | --- |',
+      '| 挖掘机 | 按设计选型 | 5台 | 路槽开挖 |', '',
+      '表4-2 生态池施工设备投入计划表', '',
+      '| 设备名称 | 规格型号 | 数量 | 用途 |',
+      '| --- | --- | --- | --- |',
+      '| 挖掘机 | 按设计选型 | 3台 | 路槽开挖、土方装运 |',
+    ].join('\n');
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.some(issue => /挖掘机/u.test(issue.message) && /路槽/u.test(issue.message))).toBe(true);
+  });
+
   it('同锚点相邻数值差异也报（无差异阈值豁免，十五版机械四套数字 5 vs 4 形态）', () => {
     const markdown = '潜水泵8台。现场配置潜水泵7台。';
     expect(crossSectionNumericConflictIssues(markdown).some(issue => /潜水泵/u.test(issue.message) && /8台/u.test(issue.message) && /7台/u.test(issue.message))).toBe(true);
@@ -427,6 +485,27 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
     const markdown = '资料员同步归档审核记录，确保60日历天内完成响应闭环。计划工期90日历天。关键节点按210日历天总工期倒排。';
     const issues = crossSectionNumericConflictIssues(markdown);
     expect(issues.some(issue => /计划总工期/u.test(issue.message) && /90日历天 与 210日历天/u.test(issue.message))).toBe(true);
+  });
+
+  it('r28 扩围 增量配置豁免：「增配1具」不与他处 6具 误判互斥（r27b 实况复刻）', () => {
+    // r27b 实机阻断：应急物资表「每作业面不少于2具干粉灭火器…生态池工区增配1具」（1具为基准外
+    // 局部增补）与另处「灭火器 4kg 6具」同部位组报互斥——“不少于2具”由既有保障线下限豁免收口，
+    // 剩“增配1具”入池；增配/增补/追加类增量动词前导的数值是相对既有配置的追加量非总量口径，不入池
+    const markdown = [
+      '| 灭火器 | 4kg | 6具 | 停放区 |',
+      '| 灭火器 | 规格按消防器材配置标准选用，生态池工区增配1具 | 停放区 |',
+    ].join('\n');
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('r28 增量豁免不越界：「增加至X具」类总数表述不含增量动词 → 真矛盾照报', () => {
+    // “增加至10具”是配置总数的新口径宣称（不含增配/增补等增量动词）——与 6具 并存照常互斥
+    const markdown = [
+      '| 灭火器 | 4kg | 6具 | 停放区 |',
+      '| 灭火器 | 后续增加至10具 | 停放区 |',
+    ].join('\n');
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.some(issue => /灭火器/u.test(issue.message) && /6具/u.test(issue.message) && /10具/u.test(issue.message))).toBe(true);
   });
 
   it('4.17.2 项目编号矛盾：50062 与 50112 并存检出（庐江实测）', () => {
@@ -653,6 +732,19 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
     expect(fix.markdown).toContain('本项目20个自然村分散施工');
     expect(fix.markdown).not.toContain('9个自然村');
     expect(fix.markdown).toContain('按3个自然村分组');
+  });
+
+  it('r28m M24a A1：「9个自然村作业面核对」的数值是作业组织单元口径 → 不入互斥池', () => {
+    // r28k 实机归因：「施工员每日按9个自然村作业面核对…」与覆盖村数并存时被误判村数矛盾——
+    // 数字后 12 字窗口含组织单元词（作业面/施工点/施工段）即跳过，与 citation.ts villageRe 负向排除同源
+    const markdown = '施工员每日按9个自然村作业面核对现场进度与人员到岗情况。本项目覆盖20个自然村。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('r28m M24a A1 边界：真覆盖村数异值（无组织单元词尾随）→ 照常互斥', () => {
+    const markdown = '本项目覆盖9个自然村，共20个自然村分散施工。';
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.some(issue => /自然村/u.test(issue.message) && /9个自然村 与 20个自然村/u.test(issue.message))).toBe(true);
   });
 
   it('4.17.4 fixAdjacentPhraseDuplication：应急人员句隔位重复折叠', () => {
@@ -1370,6 +1462,27 @@ describe('specLocationMismatchIssues 规格错位检测（F14）', () => {
     const markdown = '沟槽开挖采用0.6～1.0m³挖掘机配合人工清底，槽底预留200mm厚土体由人工修整至设计标高。';
     expect(specLocationMismatchIssues(markdown, map)).toEqual([]);
   });
+
+  it('r28c 回归：栏板「固定件间距不大于500mm」是排布间距参数，不判栏板厚度错位（间距豁免）', () => {
+    // 第四轮审计唯一 blocker 原文：「…固定横杆与栏板…横杆水平度偏差不超过5mm，栏板固定件
+    // 间距不大于500mm」——500mm 是固定件排布间距（构件间关系参数），清单「栏板」权威为板厚
+    // 150mm/200mm，间距与规格属不同概念，40 字窗口误绑必须豁免（前句 5mm 偏差值由 r12 公差豁免）
+    const markdown = '立杆安装完成后固定横杆与栏板，横杆水平度偏差不超过5mm，栏板固定件间距不大于500mm，最后对围栏整体线形进行调整。';
+    expect(specLocationMismatchIssues(markdown, thicknessMap())).toEqual([]);
+  });
+
+  it('r28c 回归：间距词族（中心距/间距为）与多间距词并列（间距、排距均）均豁免', () => {
+    // 间距概念词族覆盖紧凑连接词形态；并列取最后一个间距词（「排距」）仍豁免（词间顿号不阻断）
+    const markdown = '栏板中心距不大于500mm；栏板间距为500mm，栏板固定件间距、排距均不大于500mm。';
+    expect(specLocationMismatchIssues(markdown, thicknessMap())).toEqual([]);
+  });
+
+  it('r28c 回归：真错位「栏板厚度500mm」不因间距豁免放过（豁免边界守护）', () => {
+    // 无间距概念词时的板材规格错位仍报（「栏板」权威 150mm/200mm，正文写 500mm 属真错位）
+    const markdown = '栏板厚度500mm，采用C30商品砼浇筑。';
+    const issues = specLocationMismatchIssues(markdown, thicknessMap());
+    expect(issues.some(issue => /栏板/u.test(issue.message))).toBe(true);
+  });
 });
 
 // ═══════ F6 劳动力口径隔离（resourceConsistencyIssues） ═══════
@@ -1855,6 +1968,49 @@ describe('fixTruncatedSentenceArtifacts（B2 截断句残留确定性修复）',
     const result = fixTruncatedSentenceArtifacts(markdown);
     expect(result.fixedCount).toBe(0);
   });
+
+  it('r28h 归因：并列数值删除残留「、、、、」叠用 → 收敛为单个顿号（r28h2 实测形态）', () => {
+    // r28h2 实测「宽度按3m、、、、等设计路幅控制」：并列数值删除后连续顿号直坠终门禁
+    //（punctuationArtifactIssues blocker）；收敛为单顿号并幂等（第二遍零命中）
+    const markdown = '宽度按3m、、、、等设计路幅控制。';
+    const result = fixTruncatedSentenceArtifacts(markdown);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('宽度按3m、等设计路幅控制。');
+    expect(result.markdown).not.toContain('、、');
+    expect(fixTruncatedSentenceArtifacts(result.markdown).fixedCount).toBe(0);
+  });
+});
+
+describe('fixEmbeddedHeadingLines（r28h 行内嵌标题拆行）', () => {
+  it('s28h2 实测：正文行尾粘连章标题 → 拆行恢复标题结构', () => {
+    const result = fixEmbeddedHeadingLines('（9）发现脏、差，有缺损。## 第九章 确保文明施工的技术组织措施');
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toBe('（9）发现脏、差，有缺损。\n## 第九章 确保文明施工的技术组织措施');
+  });
+
+  it('r28h2 实测：段尾粘连 H4 小节标题 → 拆行', () => {
+    const result = fixEmbeddedHeadingLines('避免影响村民夜间出行，做好照明设施维护记录。#### 10.2.3 施工便道与居民通行组织');
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('维护记录。\n#### 10.2.3 施工便道与居民通行组织');
+  });
+
+  it('同一行多个粘连标题 → 全部拆行且幂等', () => {
+    const result = fixEmbeddedHeadingLines('（9）发现脏、差。## 第九章 确保文明施工### 9.1 总体要求');
+    expect(result.fixedCount).toBe(2);
+    expect(result.markdown).toBe('（9）发现脏、差。\n## 第九章 确保文明施工\n### 9.1 总体要求');
+    expect(fixEmbeddedHeadingLines(result.markdown).fixedCount).toBe(0);
+  });
+
+  it('零误伤：独立标题/表格行/单井号编号 → 零改动', () => {
+    const markdown = [
+      '## 第九章 确保文明施工的技术组织措施',
+      '| 备注 | 编号#A1 |',
+      '混凝土强度等级C30#柱顶标高4.200',
+      '验收合格#2机组已并网',
+    ].join('\n');
+    const result = fixEmbeddedHeadingLines(markdown);
+    expect(result).toEqual({ markdown, fixedCount: 0, details: [] });
+  });
 });
 
 describe('markdownTableQualityIssues 规格型号列「—」豁免（丰乐镇实测：蛙式打夯机无型号，修复轮编造 HW-60）', () => {
@@ -1878,6 +2034,51 @@ describe('markdownTableQualityIssues 规格型号列「—」豁免（丰乐镇�
   it('规格型号列「若干」仍判占位符（只有破折号豁免，模糊词不豁免）', () => {
     const issues = markdownTableQualityIssues(table('若干'));
     expect(issues.some(issue => issue.message.includes('占位符'))).toBe(true);
+  });
+
+  // r28g B7 归因（r28f 实测·9 列机械设备附表）：「额定功率/生产能力」同属设备出厂固有参数，
+  // 源资料不提供、强填同类诱导编造——与规格型号列同豁免；其余列「—」仍按占位阻断。
+  const wideTable = (powerValue: string, qtyValue = '2台') => [
+    '| 设备名称 | 规格型号 | 数量 | 额定功率 | 生产能力 |',
+    '| --- | --- | --- | --- | --- |',
+    '| 挖掘机 | 0.6~1.0m³ | 1台 | 90kW | 120m³/台班 |',
+    `| 蛙式打夯机 | — | ${qtyValue} | ${powerValue} | — |`,
+  ].join('\n');
+
+  it('额定功率/生产能力列「—」不判占位符（设备出厂参数，源资料不提供）', () => {
+    const issues = markdownTableQualityIssues(wideTable('—'));
+    expect(issues.filter(issue => issue.message.includes('占位符'))).toEqual([]);
+  });
+
+  it('非豁免列「—」仍判占位符（数量列；豁免列扩围未过宽）', () => {
+    const issues = markdownTableQualityIssues(wideTable('90kW', '—'));
+    expect(issues.some(issue => issue.message.includes('占位符'))).toBe(true);
+  });
+
+  it('额定功率列「若干」仍判占位符（破折号豁免不扩展到模糊词）', () => {
+    const issues = markdownTableQualityIssues(wideTable('若干'));
+    expect(issues.some(issue => issue.message.includes('占位符'))).toBe(true);
+  });
+
+  // D-T5 占位符清零：词形扩围「无」（—/无/待定 数据列全覆盖）+「规格/强度等级」类列破折号豁免锁定
+  it('D-T5 扩围：非豁免列「无」判占位符（r28f #42 词形差归因：警告层有「无」而阻断层缺）', () => {
+    const issues = markdownTableQualityIssues(table('0.6~1.0m³', '无'));
+    expect(issues.some(issue => issue.message.includes('占位符'))).toBe(true);
+  });
+
+  it('D-T5 扩围边界：规格型号列「无」仍判占位符（破折号豁免不扩展词形，与「若干」同口径）', () => {
+    const issues = markdownTableQualityIssues(table('无'));
+    expect(issues.some(issue => issue.message.includes('占位符'))).toBe(true);
+  });
+
+  it('D-T5 「规格/强度等级」列「—」豁免（r28f 清单表实测形态：/规格/ 头词命中豁免）', () => {
+    const table = [
+      '| 物资名称 | 规格/强度等级 | 单位 | 数量 |',
+      '| --- | --- | --- | --- |',
+      '| 塑料检查井 | — | 座 | 555 |',
+    ].join('\n');
+    const issues = markdownTableQualityIssues(table);
+    expect(issues.filter(issue => issue.message.includes('占位符'))).toEqual([]);
   });
 });
 
@@ -2165,6 +2366,61 @@ describe('invertedDateRangeIssues / fixInvertedDateRanges（十五版报告时�
     const r = fixInvertedDateRanges(markdown);
     expect(r.fixedCount).toBe(2);
     expect(r.markdown).not.toContain('第90日至');
+  });
+});
+
+describe('r28j fixZeroLengthDayRanges（同日零长区间收敛 · M15）', () => {
+  it('「第360日至第360日」→ 收敛为「第360日」（s28i 实机归因形态）', () => {
+    const markdown = '预留开工后第360日至第360日作为联调复验与移交缓冲。';
+    const r = fixZeroLengthDayRanges(markdown);
+    expect(r.fixedCount).toBe(1);
+    expect(r.markdown).toBe('预留开工后第360日作为联调复验与移交缓冲。');
+  });
+
+  it('波浪线连接符「第120日～第120日」同源收敛（与检测器字符类同源）', () => {
+    const markdown = '资料归档节点定在第120日～第120日完成移交。';
+    const r = fixZeroLengthDayRanges(markdown);
+    expect(r.fixedCount).toBe(1);
+    expect(r.markdown).toBe('资料归档节点定在第120日完成移交。');
+  });
+
+  it('非零长区间不动 + 收敛后幂等（零命中静默）', () => {
+    const normal = '施工准备与清杂拆除阶段（第1日～第7日）完成临时设施布设。';
+    expect(fixZeroLengthDayRanges(normal).fixedCount).toBe(0);
+    expect(fixZeroLengthDayRanges(normal).markdown).toBe(normal);
+    const fixed = fixZeroLengthDayRanges('预留开工后第360日至第360日作为联调复验与移交缓冲。').markdown;
+    expect(fixZeroLengthDayRanges(fixed).fixedCount).toBe(0);
+  });
+
+  it('同句多处零长区间全部收敛', () => {
+    const markdown = '第30日至第30日完成基础验收，第60日至第60日完成主体结构封顶。';
+    const r = fixZeroLengthDayRanges(markdown);
+    expect(r.fixedCount).toBe(2);
+    expect(r.markdown).toBe('第30日完成基础验收，第60日完成主体结构封顶。');
+  });
+});
+
+describe('r28j crossSectionNumericConflictIssues XPS 几何构造参数豁免（M16）', () => {
+  it('几何半径与真厚度混排不报（s28i 实机：「倒角成圆弧形，半径10mm」）', () => {
+    const markdown = '屋面节能构造按设计层次组织施工：上铺155厚挤塑聚苯乙烯泡沫塑料，阴角处用水泥砂浆倒角成圆弧形，半径10mm。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('数值前置几何半径「半径为10mm的XPS板」不入池（pattern2 绝对位置取窗）', () => {
+    const markdown = '半径为10mm的XPS板搭接铺设，搭接缝处密封处理。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('真厚度值仍互斥：50mm vs 130mm 照常报（机制守护）', () => {
+    const markdown = 'XPS板厚50mm铺设。屋面挤塑聚苯板厚度130mm。';
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.some(issue => /XPS|挤塑聚苯/u.test(issue.message) && /50/u.test(issue.message) && /130/u.test(issue.message))).toBe(true);
+  });
+
+  it('几何构造句与真厚度共句：真厚度照常入池互斥（「圆弧转角处XPS板厚50mm」前 6 字无完整几何词）', () => {
+    const markdown = '圆弧转角处XPS板厚50mm铺设。屋面挤塑聚苯板厚度130mm。';
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.some(issue => /XPS|挤塑聚苯/u.test(issue.message))).toBe(true);
   });
 });
 

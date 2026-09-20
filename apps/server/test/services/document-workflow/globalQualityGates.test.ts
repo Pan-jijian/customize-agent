@@ -6,7 +6,7 @@
  * LLM/语义通道全部 mock（避免真实 LLM 与本地 bge 模型调用）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { AMBIGUOUS_RESIDUE_RE, enforcePlannedSectionCompleteness, enforceWorkPackageSkeletons, repairTemplatingIssues, runGlobalConsistencyReviewLoop } from '@/services/document-workflow/globalQualityGates';
+import { AMBIGUOUS_RESIDUE_RE, enforcePlannedSectionCompleteness, enforceWorkPackageSkeletons, mergeDuplicateThematicSections, mergeNearDuplicateSectionHeadings, reconcileUnplannedSectionHeadings, repairTemplatingIssues, runGlobalConsistencyReviewLoop } from '@/services/document-workflow/globalQualityGates';
 import type { DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate } from '@/services/document-workflow/types';
 import type * as RolePipelineModule from '@/services/document-workflow/rolePipeline';
 
@@ -556,13 +556,14 @@ describe('enforcePlannedSectionCompleteness（缺规划小节补写收口：F1�
     const input = makePlannedInput({ chapterDraftsFinal: [chapter] });
     const result = await enforcePlannedSectionCompleteness(input);
     expect(result.plannedSectionFixApplied).toBe(false);
-    // 缺「资源配置计划」触发 1 次补写调用，锚点 = 章末标题行（append 模式）
+    // 缺「资源配置计划」触发 1 次补写调用，锚点 = 章末标题行（章末追加模式：锚点仅作存在性校验）
     expect(repairMock).toHaveBeenCalledTimes(1);
     const firstCall = repairMock.mock.calls[0][0];
     expect(firstCall.chapter.title).toBe('劳动力安排计划');
-    expect(firstCall.anchorTexts).toEqual([{ text: '### 1.3 劳动力保障与工资支付措施', append: true }]);
-    // 编号口径：缺节在 sections 中第 1 位 → ### 1.1（章序 1）
-    expect(firstCall.issues[0]).toContain('### 1.1 资源配置计划');
+    expect(firstCall.anchorTexts).toEqual([{ text: '### 1.3 劳动力保障与工资支付措施', append: true, appendAt: 'chapter-end' }]);
+    // 编号口径（r28g B）：章末追加语义下取章内现有 H3 最大小节号 +1（1.1/1.2/1.3 → 1.4），
+    // 不再复用规划序位（r28f 实测：规划首节单字漂移被判缺失后补写复用 7.1 → 编号重复直坠门禁）
+    expect(firstCall.issues[0]).toContain('### 1.4 资源配置计划');
     // 专属任务卡：劳动力章 × 资源配置计划 组合规则注入
     expect(firstCall.issues[0]).toContain('只写劳动力资源');
     expect(firstCall.issues[0]).toContain('工种结构与人数');
@@ -583,7 +584,7 @@ describe('enforcePlannedSectionCompleteness（缺规划小节补写收口：F1�
     ].join('\n'));
     chapter.sections = ['资源配置计划', '劳动力组织与实名制管理', '分阶段劳动力投入与动态调配', '劳动力保障与工资支付措施'];
     repairMock.mockImplementation(async args => ({
-      content: `${args.chapter.content}\n\n### 1.1 资源配置计划\n钢筋工十五人、木工二十人，分阶段进退场。`,
+      content: `${args.chapter.content}\n\n### 1.4 资源配置计划\n钢筋工十五人、木工二十人，分阶段进退场。`,
       appliedCount: 1,
       producedCount: 1,
       repairType: 'quality' as never,
@@ -591,7 +592,7 @@ describe('enforcePlannedSectionCompleteness（缺规划小节补写收口：F1�
     const input = makePlannedInput({ chapterDraftsFinal: [chapter] });
     const result = await enforcePlannedSectionCompleteness(input);
     expect(result.plannedSectionFixApplied).toBe(true);
-    expect(chapter.content).toContain('### 1.1 资源配置计划');
+    expect(chapter.content).toContain('### 1.4 资源配置计划');
   });
 
   it('修复轮调用（传入 finalGateRepairStages）：planned-section-repair 事件双写且 running 原位收口', async () => {
@@ -707,6 +708,345 @@ describe('enforcePlannedSectionCompleteness（缺规划小节补写收口：F1�
     const result = await enforcePlannedSectionCompleteness(input);
     expect(result.plannedSectionFixApplied).toBe(false);
     expect(repairMock).not.toHaveBeenCalled();
+  });
+
+  it('章内无现有 H3：补写编号退回规划序位（r28g B 回退口径）', async () => {
+    const chapter = makeChapter('ch-1', '资源配置计划', '## 资源配置计划');
+    chapter.sections = ['资源配置计划'];
+    const input = makePlannedInput({ chapterDraftsFinal: [chapter] });
+    const result = await enforcePlannedSectionCompleteness(input);
+    expect(result.plannedSectionFixApplied).toBe(false);
+    expect(repairMock).toHaveBeenCalledTimes(1);
+    const firstCall = repairMock.mock.calls[0][0];
+    // 无现有 H3 → 退回规划序位（第 1 位 → 1.1）
+    expect(firstCall.issues[0]).toContain('### 1.1 资源配置计划');
+  });
+
+  it('补写回滚守卫（r28g C）：补写轮切开锚点 H4 产生空标题 → 回滚保留修复前正文', async () => {
+    const original = [
+      '## 安全文明施工措施',
+      '本章安全措施按标准化工地要求组织。',
+      '',
+      '### 1.1 安全生产责任体系',
+      '逐级签订安全生产责任书，明确考核标准。',
+      '',
+      '#### 特殊技术标准和要求',
+      '执行国家现行有效版本的技术标准。',
+    ].join('\n');
+    const chapter = makeChapter('ch-1', '安全文明施工措施', original);
+    chapter.sections = ['安全责任体系与目标落位', '安全生产责任体系'];
+    repairMock.mockImplementation(async () => ({
+      // 模拟 r28f 实测形态：补写轮把锚点 H4 与其正文切开（H4 变空壳直坠终检「空小节」）
+      content: [
+        '## 安全文明施工措施',
+        '本章安全措施按标准化工地要求组织。',
+        '',
+        '### 1.1 安全生产责任体系',
+        '逐级签订安全生产责任书，明确考核标准。',
+        '',
+        '#### 特殊技术标准和要求',
+        '### 1.2 安全责任体系与目标落位',
+        '落位补写正文（原 H4 正文被并入）。',
+      ].join('\n'),
+      appliedCount: 1,
+      producedCount: 1,
+      repairType: 'quality' as never,
+    }));
+    const input = makePlannedInput({ chapterDraftsFinal: [chapter] });
+    const result = await enforcePlannedSectionCompleteness(input);
+    // 复检指标不降反升（空标题 0→1）→ 回滚，正文保持修复前
+    expect(result.plannedSectionFixApplied).toBe(false);
+    expect(chapter.content).toBe(original);
+  });
+
+  it('补写后近名合并（r28g D）：补写轮引入的规划名变体与精确版收敛，正文零丢失', async () => {
+    const chapter = makeChapter('ch-1', '安全生产管理', [
+      '## 安全生产管理',
+      '',
+      '### 1.1 安全责任体系与目标落位',
+      '逐级签订安全生产责任书。',
+    ].join('\n'));
+    chapter.sections = ['安全责任体系与目标落位', '安全生产费用保障与使用制度'];
+    repairMock.mockImplementation(async args => ({
+      content: `${args.chapter.content}\n\n### 1.2 安全生产费用保障与使用制度\n安全费用专款专用，按月计量支付。\n\n### 1.3 安全生产费用保障与使用规定\n规定版本补充说明正文。`,
+      appliedCount: 1,
+      producedCount: 1,
+      repairType: 'quality' as never,
+    }));
+    const input = makePlannedInput({ chapterDraftsFinal: [chapter] });
+    const result = await enforcePlannedSectionCompleteness(input);
+    expect(result.plannedSectionFixApplied).toBe(true);
+    // 1.3（规划名变体）与 1.2（精确规划名）近名 → 合并：标题行摘除、正文并入 1.2 块
+    expect(chapter.content).not.toContain('### 1.3');
+    expect(chapter.content).toContain('### 1.2 安全生产费用保障与使用制度');
+    expect(chapter.content).toContain('规定版本补充说明正文。');
+  });
+});
+
+describe('mergeNearDuplicateSectionHeadings（近名合并：r28g D 时序兜底）', () => {
+  it('错字版与规划名版并存：合并为一节（保留首现、标题归规划名、正文零丢失）', () => {
+    const chapter = makeChapter('ch-1', '安全生产管理', [
+      '## 安全生产管理',
+      '',
+      '### 1.1 安全责任体系与目标落实',
+      '落实版本正文段落。',
+      '',
+      '### 1.4 安全责任体系与目标落位',
+      '落位版本正文段落。',
+    ].join('\n'));
+    chapter.sections = ['安全责任体系与目标落位', '安全生产费用保障'];
+    const result = mergeNearDuplicateSectionHeadings([chapter]);
+    expect(result.mergedCount).toBe(1);
+    expect(chapter.content).toContain('### 1.1 安全责任体系与目标落位');
+    expect(chapter.content).not.toContain('### 1.4');
+    expect(chapter.content).toContain('落实版本正文段落。');
+    expect(chapter.content).toContain('落位版本正文段落。');
+  });
+
+  it('双归属防线：规划本身即近名小节对（落位/落实同在 sections）时不合并', () => {
+    const chapter = makeChapter('ch-1', '安全目标管理', [
+      '## 安全目标管理',
+      '',
+      '### 1.1 安全责任体系与目标落位',
+      '落位正文。',
+      '',
+      '### 1.2 安全责任体系与目标落实',
+      '落实正文。',
+    ].join('\n'));
+    chapter.sections = ['安全责任体系与目标落位', '安全责任体系与目标落实'];
+    const result = mergeNearDuplicateSectionHeadings([chapter]);
+    expect(result.mergedCount).toBe(0);
+  });
+});
+
+describe('mergeNearDuplicateSectionHeadings 单行漂移改名（D-T6 ② r28f 归因）', () => {
+  it('单行漂移：唯一近名未覆盖漂移行就地改名回规划名（前缀编号保留、正文零丢失）', () => {
+    const chapter = makeChapter('ch-1', '确保安全生产的技术组织措施', [
+      '## 确保安全生产的技术组织措施',
+      '',
+      '### 7.1 安全责任体系与目标落实',
+      '落实版本正文段落。',
+    ].join('\n'));
+    chapter.sections = ['安全责任体系与目标落位', '安全生产费用保障与使用制度'];
+    const result = mergeNearDuplicateSectionHeadings([chapter]);
+    expect(result.mergedCount).toBe(1);
+    expect(chapter.content).toContain('### 7.1 安全责任体系与目标落位');
+    expect(chapter.content).not.toContain('目标落实');
+    expect(chapter.content).toContain('落实版本正文段落。');
+    expect(result.details[0]).toContain('对齐规划名');
+    // 幂等：改名后复跑零变更（已精确覆盖规划名，不再命中漂移分支）
+    const again = mergeNearDuplicateSectionHeadings([chapter]);
+    expect(again.mergedCount).toBe(0);
+  });
+
+  it('歧义形态保守跳过：漂移行同时近名多个未覆盖规划小节时不改名（零触碰）', () => {
+    const chapter = makeChapter('ch-1', '安全生产管理', [
+      '## 安全生产管理',
+      '### 7.1 安全责任体系与目标落实',
+      '落实版本正文段落。',
+    ].join('\n'));
+    chapter.sections = ['安全责任体系与目标落位', '安全责任体系与目标落地'];
+    const result = mergeNearDuplicateSectionHeadings([chapter]);
+    expect(result.mergedCount).toBe(0);
+    expect(chapter.content).toContain('目标落实');
+  });
+});
+
+describe('reconcileUnplannedSectionHeadings（规划外小节降 H4：D-T6 ②）', () => {
+  const PLANNED_FOUR = ['安全生产责任体系与目标落位', '安全生产费用保障与使用制度', '安全教育培训与技术交底', '危险源辨识与风险分级管控'];
+
+  it('r28f 形态：规划外非近名 H3 降为 H4（并入上方规划小节主题块，内容零改动）', () => {
+    const chapter = makeChapter('ch-1', '确保安全生产的技术组织措施', [
+      '## 确保安全生产的技术组织措施',
+      '### 1.1 安全生产责任体系与目标落位',
+      '落位正文。',
+      '### 1.2 安全生产费用保障与使用制度',
+      '费用正文。',
+      '### 1.3 安全教育培训与技术交底',
+      '教育正文。',
+      '### 1.4 危险源辨识与风险分级管控',
+      '风险正文。',
+      '### 1.5 安全生产检查与隐患整改',
+      '检查正文。',
+    ].join('\n'));
+    chapter.sections = PLANNED_FOUR;
+    const result = reconcileUnplannedSectionHeadings([chapter]);
+    expect(result.demotedCount).toBe(1);
+    expect(chapter.content).toContain('#### 安全生产检查与隐患整改');
+    expect(chapter.content).not.toContain('### 1.5');
+    expect(chapter.content).toContain('检查正文。');
+    expect(result.details[0]).toContain('降为 H4');
+    // 幂等：降级后 H3 数不再超规划，复跑零变更
+    const again = reconcileUnplannedSectionHeadings([chapter]);
+    expect(again.demotedCount).toBe(0);
+  });
+
+  it('近名形态跳过：属 merge 辖区（降级会造成缺节 blocker）', () => {
+    const chapter = makeChapter('ch-1', '确保安全生产的技术组织措施', [
+      '## 确保安全生产的技术组织措施',
+      '### 1.1 安全生产责任体系与目标落位',
+      '落位正文。',
+      '### 1.2 安全生产费用保障与使用制度',
+      '费用正文。',
+      '### 1.3 安全教育培训与技术交底',
+      '教育正文。',
+      '### 1.4 危险源辨识与风险分级管控',
+      '风险正文。',
+      '### 1.5 安全生产责任体系与目标落实',
+      '落实版本正文。',
+    ].join('\n'));
+    chapter.sections = PLANNED_FOUR;
+    const before = chapter.content;
+    const result = reconcileUnplannedSectionHeadings([chapter]);
+    expect(result.demotedCount).toBe(0);
+    expect(chapter.content).toBe(before);
+  });
+
+  it('章首规划外跳过：上方无规划 H3 无归属可并入（保守交终检报告）', () => {
+    const chapter = makeChapter('ch-1', '安全生产管理', [
+      '## 安全生产管理',
+      '### 1.1 安全生产检查与隐患整改',
+      '检查正文。',
+      '### 1.2 安全责任体系与目标落位',
+      '落位正文。',
+    ].join('\n'));
+    chapter.sections = ['安全责任体系与目标落位'];
+    const before = chapter.content;
+    const result = reconcileUnplannedSectionHeadings([chapter]);
+    expect(result.demotedCount).toBe(0);
+    expect(chapter.content).toBe(before);
+  });
+
+  it('防撞名后缀跳过：「（1）」形态属 fixCollisionNumberedHeadings 辖区（不降级）', () => {
+    const chapter = makeChapter('ch-1', '安全生产管理', [
+      '## 安全生产管理',
+      '### 1.1 安全责任体系与目标落位',
+      '落位正文。',
+      '### 1.2 安全生产检查与隐患整改（1）',
+      '检查正文。',
+    ].join('\n'));
+    chapter.sections = ['安全责任体系与目标落位'];
+    const result = reconcileUnplannedSectionHeadings([chapter]);
+    expect(result.demotedCount).toBe(0);
+  });
+
+  it('成稿未超规划数时不触发（与 sectionCountOverflowIssues 同域）', () => {
+    const chapter = makeChapter('ch-1', '安全生产管理', [
+      '## 安全生产管理',
+      '### 1.1 安全责任体系与目标落位',
+      '落位正文。',
+    ].join('\n'));
+    chapter.sections = ['安全责任体系与目标落位'];
+    const before = chapter.content;
+    const result = reconcileUnplannedSectionHeadings([chapter]);
+    expect(result.demotedCount).toBe(0);
+    expect(chapter.content).toBe(before);
+  });
+});
+
+describe('mergeDuplicateThematicSections（重复主题小节合并：D-T7 ②）', () => {
+  it('同桶两节并存：保留首现、drop 标题行摘除、正文并入、规划数组同步、章内编号重排', () => {
+    const chapter = makeChapter('ch-1', '施工资源配置计划', [
+      '## 施工资源配置计划',
+      '### 1.1 劳动力配置计划',
+      '劳动力配置正文：高峰期投入充足作业人员。',
+      '### 1.2 劳动力保证措施',
+      '劳动力保证正文：农忙季节提前预留队伍。',
+      '### 1.3 材料供应计划',
+      '材料供应正文：按进度分批进场。',
+    ].join('\n'));
+    chapter.sections = ['劳动力配置计划', '劳动力保证措施', '材料供应计划'];
+    const result = mergeDuplicateThematicSections([chapter]);
+    expect(result.mergedCount).toBe(1);
+    expect(chapter.sections).toEqual(['劳动力配置计划', '材料供应计划']);
+    expect(chapter.content).toContain('### 1.1 劳动力配置计划');
+    expect(chapter.content).not.toContain('劳动力保证措施');
+    expect(chapter.content).toContain('劳动力保证正文：农忙季节提前预留队伍。');
+    // 合并不消耗编号：后续小节重排为 1.2（原 1.3），编号序列无空档
+    expect(chapter.content).toContain('### 1.2 材料供应计划');
+    expect(result.details[0]).toContain('「劳动力保证措施」并入「劳动力配置计划」');
+  });
+
+  it('同桶三节并存：guard 循环逐对收敛至单节（规划数组逐项同步删除、编号无空档）', () => {
+    const chapter = makeChapter('ch-1', '施工资源配置计划', [
+      '## 施工资源配置计划',
+      '### 1.1 劳动力配置计划',
+      '配置正文。',
+      '### 1.2 劳动力保证措施',
+      '保证正文。',
+      '### 1.3 劳动力动态管理',
+      '动态正文。',
+    ].join('\n'));
+    chapter.sections = ['劳动力配置计划', '劳动力保证措施', '劳动力动态管理'];
+    const result = mergeDuplicateThematicSections([chapter]);
+    expect(result.mergedCount).toBe(2);
+    expect(chapter.sections).toEqual(['劳动力配置计划']);
+    expect((chapter.content.match(/^### /gmu) || [])).toHaveLength(1);
+    expect(chapter.content).toContain('保证正文。');
+    expect(chapter.content).toContain('动态正文。');
+  });
+
+  it('跨词命中同桶（机械设备计划）：施工设备管理并入机械配置计划', () => {
+    const chapter = makeChapter('ch-1', '施工资源配置计划', [
+      '## 施工资源配置计划',
+      '### 2.1 机械配置计划',
+      '机械配置正文。',
+      '### 2.2 施工设备管理',
+      '设备管理正文。',
+    ].join('\n'));
+    chapter.sections = ['机械配置计划', '施工设备管理'];
+    const result = mergeDuplicateThematicSections([chapter]);
+    expect(result.mergedCount).toBe(1);
+    expect(chapter.sections).toEqual(['机械配置计划']);
+    expect(chapter.content).not.toContain('施工设备管理');
+    expect(chapter.content).toContain('设备管理正文。');
+    expect(chapter.content).toContain('### 1.1 机械配置计划');
+  });
+
+  it('正文缺 H3 落位：无法定位成对 → 不合并（保守交终检报告）', () => {
+    const chapter = makeChapter('ch-1', '施工资源配置计划', [
+      '## 施工资源配置计划',
+      '### 1.1 劳动力配置计划',
+      '配置正文。',
+    ].join('\n'));
+    chapter.sections = ['劳动力配置计划', '劳动力保证措施'];
+    const before = chapter.content;
+    const result = mergeDuplicateThematicSections([chapter]);
+    expect(result.mergedCount).toBe(0);
+    expect(chapter.sections).toEqual(['劳动力配置计划', '劳动力保证措施']);
+    expect(chapter.content).toBe(before);
+  });
+
+  it('非同桶（劳动力 + 材料）：单桶单项不触发合并', () => {
+    const chapter = makeChapter('ch-1', '施工资源配置计划', [
+      '## 施工资源配置计划',
+      '### 1.1 劳动力配置计划',
+      '配置正文。',
+      '### 1.2 材料供应计划',
+      '材料正文。',
+    ].join('\n'));
+    chapter.sections = ['劳动力配置计划', '材料供应计划'];
+    const before = chapter.content;
+    const result = mergeDuplicateThematicSections([chapter]);
+    expect(result.mergedCount).toBe(0);
+    expect(chapter.content).toBe(before);
+  });
+
+  it('幂等：合并后复跑零变化', () => {
+    const chapter = makeChapter('ch-1', '施工资源配置计划', [
+      '## 施工资源配置计划',
+      '### 1.1 劳动力配置计划',
+      '配置正文。',
+      '### 1.2 劳动力保证措施',
+      '保证正文。',
+    ].join('\n'));
+    chapter.sections = ['劳动力配置计划', '劳动力保证措施'];
+    const first = mergeDuplicateThematicSections([chapter]);
+    expect(first.mergedCount).toBe(1);
+    const settled = chapter.content;
+    const again = mergeDuplicateThematicSections([chapter]);
+    expect(again.mergedCount).toBe(0);
+    expect(chapter.content).toBe(settled);
   });
 });
 

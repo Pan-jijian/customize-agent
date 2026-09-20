@@ -114,6 +114,8 @@ export interface DocumentTemplateChapter {
   tableSections?: string[];
   tableRequirements?: string[];
   tablePlans?: PlannedTablePlan[];
+  /** 图类呈现要求（R20 C1 明标：招标要求的图类元件——横道图/网络图/布置图——语义归属后转写的文字框图/时间轴承载指令；暗标正文禁图表时为空） */
+  diagramRequirements?: string[];
   /** 定格证据文件（包内相对路径，如 "招标文件.pdf"；跨资料包在词法上无法表达） */
   pinnedEvidenceFilePaths?: string[];
 }
@@ -392,6 +394,22 @@ export interface DocumentFactsModel {
  * 技术标正文零商务句——相关响应属商务标内容。 */
 export type TenderRequirementPolicy = 'respond' | 'comply';
 
+/** 结构/呈现形态（招标明文要求的呈现方式，A-T1 第三态通道）：diagram=图/网络图/横道图/平面布置图；
+ * org_chart=框图/组织机构图；table=表格/组成表；chart_text=文字结合图表形式 */
+export type TenderStructureForm = 'diagram' | 'org_chart' | 'table' | 'chart_text';
+
+/** 结构/呈现要求（第三态独立通道）：判定为 excludable 的格式类条款同样被扫描——
+ * 「以框图方式表示」「结合图表形式」「网络图/横道图」等信息不随响应域排除而丢失，
+ * 供写作注入（本章须以××形态呈现××）与终稿验收（图位/表落位对照）消费。 */
+export interface TenderStructureRequirement {
+  /** 要素名（呈现对象，如「项目管理机构」「施工总平面布置图」「施工进度计划」） */
+  element: string;
+  /** 呈现形态 */
+  form: TenderStructureForm;
+  /** 来源原文（命中结构信号的条款原句） */
+  sourceText: string;
+}
+
 /** 单条实质要求（条款穷举+逐条判定产物）：text 为条款原文（忠实引用），coreTerms 为正文命中检测核心词，
  * sources 为多来源聚合（同一要求在招标/补疑重复出现时合并，不丢来源） */
 export interface TenderRequirementEntry {
@@ -425,6 +443,8 @@ export interface TenderRequirementsReconciliation {
   mergedCount: number;
   batchCount: number;
   retriedBatches: number;
+  /** 结构/呈现要求计数（A-T1 第三态通道显性对账：含被排除条款扫描产出；不参与响应域对账等式） */
+  structureCount?: number;
 }
 
 /**
@@ -438,6 +458,8 @@ export interface TenderRequirementModel {
   /** 排除记录（不要的，带原因，对账/审计用） */
   excluded: TenderRequirementExclusion[];
   reconciliation: TenderRequirementsReconciliation;
+  /** 结构/呈现要求（第三态独立通道：招标明文呈现形态，被排除的格式类条款同样扫描） */
+  structureRequirements?: TenderStructureRequirement[];
   /** 判定链是否实际执行（LLM 不可用/资料为空时为 false，下游不得据此阻断） */
   extracted: boolean;
   /** 提取源文本哈希（判定可复现溯源用） */
@@ -533,4 +555,6 @@ export interface BoqRowTrace {
   placed: boolean;
   placedInChapter?: string;
   placedInSection?: string;
+  /** C-T5 落位口径豁免：汇总口径行（分部小计/合计/规费/税金等）非清单明细项，不计入落位率分母（登记可审计） */
+  exempt?: boolean;
 }

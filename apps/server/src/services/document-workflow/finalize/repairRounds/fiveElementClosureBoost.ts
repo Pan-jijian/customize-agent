@@ -76,6 +76,15 @@ function isExcludedBlock(text: string): boolean {
   return false;
 }
 
+/** 行后首个非空行（表题行防粘连判定：下一非空行以「|」开头即当前行紧邻表格上方） */
+function nextNonBlankLine(lines: string[], fromIndex: number): string {
+  for (let cursor = fromIndex + 1; cursor < lines.length; cursor += 1) {
+    const text = (lines[cursor] ?? '').trim();
+    if (text) return text;
+  }
+  return '';
+}
+
 /** 块级扫描与补强（幂等：补句后块已达 4 项线，复跑自然跳过） */
 export function enforceFiveElementClosureBoost(markdown: string): { markdown: string; fixedCount: number } | null {
   const lines = markdown.split('\n');
@@ -135,10 +144,27 @@ export function enforceFiveElementClosureBoost(markdown: string): { markdown: st
     const sentence = pickSentence(hits, pools, parseInt(stableHash(segment.text).slice(0, 8), 16) || 0);
     if (!sentence) continue;
     usage.set(sentence, (usage.get(sentence) || 0) + 1);
-    // 段末行是标题行时向上找正文行（防标题被拼接污染）
+    // 段末行是标题行、或其后首个非空行是表格行（表题行/表前引导行形态）时向上找正文行——
+    // 防补句被拼进标题行或表题行（r27 扩围归因：补句拼到表题行后经题注链按粘连形态拆行、
+    // 续文被移至表后独立成段，同句跨块复用触发「段落完全重复」误报——通用结构判据，无
+    // 项目语义）；段内全为标题/表题行时跳过本段不补
     let target = segment.endLine;
-    while (target >= segment.startLine && /^#{1,6}\s/u.test((lines[target] ?? '').trim())) target -= 1;
+    while (target >= segment.startLine) {
+      const current = (lines[target] ?? '').trim();
+      if (/^#{1,6}\s/u.test(current) || nextNonBlankLine(lines, target).startsWith('|')) {
+        target -= 1;
+        continue;
+      }
+      break;
+    }
     if (target < segment.startLine) continue;
+    // D-T6 ③ 长段防护（r28f 归因：写作期切分上限 360 的段被补句 30 拼接后 390 超终检 380
+    // 阈值直坠过长段落判定）：拼接后行超 370 字符时放弃本段补写——长段消除为 P0 结构判据，
+    // 优先于本段闭合密度收益；该段保持原样（≤380 不触发链尾切分），其它来源的长段由链尾
+    // splitOverlengthBodyParagraphs 收口。跳过后复跑同条件跳过（幂等零变化）。
+    const targetRaw = lines[target] ?? '';
+    const targetText = targetRaw.endsWith('\r') ? targetRaw.slice(0, -1) : targetRaw;
+    if (targetText.length + sentence.length > 370) continue;
     inserts.push({ lineIndex: target, sentence });
   }
   if (inserts.length === 0) return null;

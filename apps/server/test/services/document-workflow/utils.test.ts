@@ -18,6 +18,7 @@ import {
   findExtraneousBlockTitles,
   hasProcessSequenceExpression,
   isBidDisciplineSentence,
+  isBidEvaluationRuleText,
   nearSubsectionTitleMatch,
   normalizeSubsectionTitleForDedup,
   removeExtraneousBlockSections,
@@ -337,7 +338,7 @@ describe('stripExtraneousBlockHeadings（标题层确定性修复：删标题留
 });
 
 describe('dedupeCrossSectionSkeletonH4s（跨 H3 同名 H4 串章骨架删除）', () => {
-  it('跨 H3 同名 H4 保留首次、删除串章副本（真实回归 6.4 串章形态）', () => {
+  it('跨 H3 同名 H4 空壳副本删除（真实回归 6.4 串章形态：抄骨架后正文为空）', () => {
     const markdown = [
       '## 第六章 安全文明生产',
       '### 安全文明施工部署与流水组织',
@@ -352,20 +353,59 @@ describe('dedupeCrossSectionSkeletonH4s（跨 H3 同名 H4 串章骨架删除）
       '#### 周边环境、管线与既有建构筑物保护',
       '正文四',
       '#### 施工部署与施工流水组织',
-      '串章一',
       '#### 文明施工与扬尘噪声管控',
-      '串章二',
       '#### 红线外土方覆盖扬尘防治',
-      '串章三',
     ].join('\n');
     const result = dedupeCrossSectionSkeletonH4s(markdown);
     expect(result).toContain('正文一');
     expect(result).toContain('正文二');
     expect(result).toContain('正文三');
     expect(result).toContain('正文四');
-    expect(result).not.toContain('串章一');
-    expect(result).not.toContain('串章二');
-    expect(result).not.toContain('串章三');
+    // 末尾三个零正文空壳副本整块删除，标题仅保留首次出现
+    expect(result.split('#### 施工部署与施工流水组织').length - 1).toBe(1);
+    expect(result.split('#### 文明施工与扬尘噪声管控').length - 1).toBe(1);
+    expect(result.split('#### 红线外土方覆盖扬尘防治').length - 1).toBe(1);
+  });
+
+  it('跨 H3 同名 H4 纯复制副本删除（正文与首次同名块逐字相同）', () => {
+    const markdown = [
+      '## 第六章 安全文明生产',
+      '### 分部A',
+      '#### 专项管控要点',
+      '按监测、洒水、覆盖三线联动管控扬尘噪声。',
+      '### 分部B',
+      '#### 专项管控要点',
+      '按监测、洒水、覆盖三线联动管控扬尘噪声。',
+    ].join('\n');
+    const result = dedupeCrossSectionSkeletonH4s(markdown);
+    // 后续副本正文与首次块逐字相同（去空白归一口径）= 纯复制 → 整块删除
+    expect(result.split('#### 专项管控要点').length - 1).toBe(1);
+    expect(result.split('按监测、洒水、覆盖三线联动管控扬尘噪声。').length - 1).toBe(1);
+  });
+
+  it('跨 H3 同名 H4 正文异质（多单位工程同名专业）全部保留（M17 回归锁定）', () => {
+    // r28i/s28i 实测：公厕/门卫/配套用房各自输出同名专业 H4（门窗工程/屋面及防水……），
+    // 各对象内容独立；旧「看名删块」连坐丢失 42 块 12571 字 → 5 个 H3 掏空后连标题删除
+    const markdown = [
+      '## 第二章 主要施工方法',
+      '### 青青家园公厕-土建装饰装修工程',
+      '#### 门窗工程',
+      '青青家园公厕门窗工程包括金属门、金属窗。',
+      '#### 屋面及防水工程',
+      '青青家园公厕屋面1（不上人屋面）工程量为97.47m²。',
+      '### 门卫-土建装饰装修工程',
+      '#### 门窗工程',
+      '门卫门窗工程作业对象为单层门卫用房，金属门工程量2.2m2。',
+      '#### 屋面及防水工程',
+      '门卫屋面为不上人屋面，工程量11.56m2。',
+    ].join('\n');
+    const result = dedupeCrossSectionSkeletonH4s(markdown);
+    expect(result).toContain('青青家园公厕门窗工程包括金属门、金属窗。');
+    expect(result).toContain('门卫门窗工程作业对象为单层门卫用房，金属门工程量2.2m2。');
+    expect(result).toContain('青青家园公厕屋面1（不上人屋面）工程量为97.47m²。');
+    expect(result).toContain('门卫屋面为不上人屋面，工程量11.56m2。');
+    expect(result.split('#### 门窗工程').length - 1).toBe(2);
+    expect(result.split('#### 屋面及防水工程').length - 1).toBe(2);
   });
 
   it('H4 与章内任一 H3 同名即删除该 H4 块', () => {
@@ -727,5 +767,29 @@ describe('isBidDisciplineSentence（评分报告 P3 异常低价串章回归）'
   it('施工语境合法表述不误伤（低价不等于异常低价评审条款）', () => {
     expect(isBidDisciplineSentence('采用低价环保材料降低施工成本。')).toBe(false);
     expect(isBidDisciplineSentence('优化施工方案以降低材料损耗与机械台班费用。')).toBe(false);
+  });
+});
+
+describe('isBidEvaluationRuleText（M26 扩围：评标办法评分表单碎片）', () => {
+  it('否决/废标规则命中（既有口径不回归）；「报废标准」负向断言不误伤', () => {
+    expect(isBidEvaluationRuleText('技术文件明显文不对题的，一律否决其投标')).toBe(true);
+    expect(isBidEvaluationRuleText('未按招标文件要求密封的，投标无效')).toBe(true);
+    expect(isBidEvaluationRuleText('报价高于最高投标限价的，不予评审')).toBe(true);
+    expect(isBidEvaluationRuleText('施工机具达到报废标准的一律清退')).toBe(false);
+  });
+
+  it('M26 扩围：评审因素/评分因素/详细评审标准/≤F≤/得分表单碎片命中（PDF 表格串行形态）', () => {
+    expect(isBidEvaluationRuleText('评审因素 分值 评分标准 施工组织设计 30分')).toBe(true);
+    expect(isBidEvaluationRuleText('评分因素包括施工方案与技术措施')).toBe(true);
+    expect(isBidEvaluationRuleText('采用详细评审标准进行打分')).toBe(true);
+    expect(isBidEvaluationRuleText('90分≤F≤100分，得满分')).toBe(true);
+    expect(isBidEvaluationRuleText('投标报价得分按公式计算：得0.5-1.0分')).toBe(true);
+  });
+
+  it('零误伤反向守护：施工技术条款不命中（整词收敛）', () => {
+    expect(isBidEvaluationRuleText('混凝土强度等级评定标准应符合规范要求')).toBe(false);
+    expect(isBidEvaluationRuleText('分项工程质量验收标准执行GB50204')).toBe(false);
+    expect(isBidEvaluationRuleText('模板支撑体系搭设间距不大于1.2m')).toBe(false);
+    expect(isBidEvaluationRuleText('')).toBe(false);
   });
 });

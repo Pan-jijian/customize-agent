@@ -4,14 +4,16 @@
  * 2. 正常施工组织小节标题零误伤；
  * 3. extractGeneratedSections（写手正文 H3 提取）不再把条款碎片收进 sections；
  * 4. stripTenderClauseFragmentHeadings 剥离正文脏 H3 行、保留行下正文；
- * 5. stripDataConsistencyLeakSentences 剥离「上表…一致/修正为」表格口径自查泄漏段。
+ * 5. stripDataConsistencyLeakSentences 剥离「上表…不一致/修正为」表格口径自查泄漏段。
+ * 6. r28h M5：demoteNonFormalH2 / filterResolvedFinalIssues 附表区（附表一~N 系统直出）H2 不降级、不判非法。
+ * 7. r28j M21：结构行守卫（正文行与标题单换行连接时禁止整段删除）+ 判据收窄（「一致」不再误匹配「一致性」）。
  * 历史缺陷：fix4 只在显式 OUTLINE 提取环节加条款句过滤，写手正文 H3 提取环节漏接，
  * 导致「3项规定」「56m15：…」等碎片进入小节目录（评分报告（19）问题 2）。
  */
 import { describe, expect, it } from 'vitest';
 import { isTenderClauseFragmentTitle } from '@/services/document-workflow/outline';
 import { extractGeneratedSections } from '@/services/document-workflow/markdownComposer';
-import { stripDataConsistencyLeakSentences, stripTenderClauseFragmentHeadings } from '@/services/document-workflow/documentGeneratorHelpers';
+import { demoteNonFormalH2, filterResolvedFinalIssues, stripDataConsistencyLeakSentences, stripTenderClauseFragmentHeadings } from '@/services/document-workflow/documentGeneratorHelpers';
 
 describe('isTenderClauseFragmentTitle 条款碎片拦截', () => {
   it('评标办法条款碎片标题全部拦截', () => {
@@ -148,5 +150,103 @@ describe('stripDataConsistencyLeakSentences 表格口径自查泄漏剥离', () 
     const cleaned = stripDataConsistencyLeakSentences(content);
     expect(cleaned).not.toContain('口径必须唯一');
     expect(cleaned).toContain('按设计图纸确定给水管线口径并完成试压。');
+  });
+
+  it('M21 结构行守卫：正文段与章/节标题单换行连接时禁止整段删除（r28j 实机形态零改动）', () => {
+    const content = [
+      '上表为进场报验登记台账的样表格式，各批次材料进场后由质量员按表核对报验资料的完整性、一致性与可追溯性。',
+      '班组实行实名制管理，工资通过专用账户按月足额发放。',
+      '## 第六章 确保工程质量的技术组织措施',
+      '### 6.1 施工部署',
+      '项目部围绕施工作业面分散分布的特点，按施工片区组建作业班组。',
+    ].join('\n');
+    expect(stripDataConsistencyLeakSentences(content)).toBe(content);
+  });
+
+  it('M21 判据收窄：「上表…一致性…」正常表格说明句不再误判泄漏', () => {
+    const content = '上表为材料进场报验登记的样表格式，核对报验资料的一致性与可追溯性。';
+    expect(stripDataConsistencyLeakSentences(content)).toBe(content);
+  });
+
+  it('M21 真泄漏仍删：「应改为」推算特征词命中整段删除', () => {
+    const content = '上表合计行高峰期用工人数应与分阶段投入明细表核对，应改为 130 人。';
+    expect(stripDataConsistencyLeakSentences(content)).not.toContain('应改为');
+  });
+
+  it('M21 结构行守卫降级：真泄漏行删除、标题与正常行保留', () => {
+    const content = [
+      '全文不得出现跨章冲突，各章节数据必须保持一致。',
+      '## 第七章 确保安全生产的技术组织措施',
+      '### 7.1 安全管理体系',
+      '本工程建立以项目经理为第一责任人的安全生产责任制。',
+    ].join('\n');
+    const cleaned = stripDataConsistencyLeakSentences(content);
+    expect(cleaned).not.toContain('跨章冲突');
+    expect(cleaned).toContain('## 第七章 确保安全生产的技术组织措施');
+    expect(cleaned).toContain('### 7.1 安全管理体系');
+    expect(cleaned).toContain('本工程建立以项目经理为第一责任人的安全生产责任制。');
+  });
+
+  it('M21 幂等：结构行守卫清洗结果再次清洗不变', () => {
+    const content = [
+      '全文不得出现跨章冲突，各章节数据必须保持一致。',
+      '## 第七章 确保安全生产的技术组织措施',
+      '本工程建立以项目经理为第一责任人的安全生产责任制。',
+    ].join('\n');
+    const once = stripDataConsistencyLeakSentences(content);
+    expect(once).not.toContain('跨章冲突');
+    expect(stripDataConsistencyLeakSentences(once)).toBe(once);
+  });
+});
+
+/**
+ * r28h M5 附表管理（s28h2 终门禁 21/37 号误报归因）：附表一~N 为系统直出文末附表区
+ * （composeAppendices，rebuildAndRecompute 终稿追加），与附录区同为非章节结构——
+ * H2 保留原级（不降级）且不参与「非正式章二级标题」判定；真非法 H2 行为不变。
+ */
+describe('demoteNonFormalH2 附表区 H2 不降级（r28h M5）', () => {
+  it('附表一~N H2 保留原级，非法 H2 仍降级为 ###', () => {
+    const markdown = [
+      '## 第3章 施工组织措施',
+      '### 3.1 施工部署',
+      '## 附表一 主要施工机械设备配置表',
+      '## 附表二 拟投入本工程劳动力计划表',
+      '## 附表12 检测计量器具配置表',
+      '## 质量目标承诺书',
+    ].join('\n');
+    const out = demoteNonFormalH2(markdown).split('\n');
+    expect(out).toContain('## 附表一 主要施工机械设备配置表');
+    expect(out).toContain('## 附表二 拟投入本工程劳动力计划表');
+    // 阿拉伯数字编号形态一并豁免
+    expect(out).toContain('## 附表12 检测计量器具配置表');
+    expect(out).toContain('## 第3章 施工组织措施');
+    // 真非法 H2 仍降级
+    expect(out).toContain('### 质量目标承诺书');
+    expect(out).not.toContain('### 附表一 主要施工机械设备配置表');
+  });
+  it('目录/附录豁免不受附表改动影响', () => {
+    const markdown = ['## 目录', '## 附录一 技术文件清单', '## 附表三 拟投入本工程劳动力计划表'].join('\n');
+    const out = demoteNonFormalH2(markdown).split('\n');
+    expect(out).toContain('## 目录');
+    expect(out).toContain('## 附录一 技术文件清单');
+    expect(out).toContain('## 附表三 拟投入本工程劳动力计划表');
+  });
+});
+
+describe('filterResolvedFinalIssues 附表残留消化（r28h M5）', () => {
+  const h2Issue = { level: 'error' as const, message: '正文存在非正式章二级标题：质量目标承诺书' };
+  it('仅附表 H2 残留 → H2 类 issue 消化', () => {
+    const markdown = '## 第1章 施工组织设计\n### 1.1 编制依据\n## 附表一 主要施工机械设备配置表';
+    expect(filterResolvedFinalIssues(markdown, [h2Issue])).toEqual([]);
+  });
+  it('真非法 H2 存在 → H2 类 issue 保留', () => {
+    const markdown = '## 第1章 施工组织设计\n## 质量目标承诺书';
+    expect(filterResolvedFinalIssues(markdown, [h2Issue])).toHaveLength(1);
+  });
+  it('附表豁免不误伤页码引用通道（两通道独立）', () => {
+    const markdown = '## 附表二 拟投入本工程劳动力计划表\n详见第12页。';
+    const pageIssue = { level: 'warning' as const, message: '正文存在资料页码引用' };
+    const kept = filterResolvedFinalIssues(markdown, [h2Issue, pageIssue]);
+    expect(kept).toEqual([pageIssue]);
   });
 });

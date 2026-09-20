@@ -246,3 +246,32 @@ describe('J professionalContentIssues 进度章字面要素对兜底（4.44 #38�
     expect(scheduleIssues(content)).toHaveLength(1);
   });
 });
+
+// ── K. 资源章字面要素对兜底（r28f B3 根治：r28e 实测「拟投入的主要施工机械、设备计划」要素齐全仍被判缺） ──
+
+describe('K professionalContentIssues 资源章字面要素对兜底（r28f B3）', () => {
+  const resourceNeeds: ProfessionalDepthAnalysis = {
+    dimensions: { factuality: true, structure: true, depth: true, executable: true, specificity: true, consistency: true },
+    contentNeeds: { schedule: true, quality: true, safety: true, resource: false, construction: true },
+    concrete: true,
+    closedLoop: true,
+  };
+  const title = '拟投入的主要施工机械、设备计划';
+  const resourceIssues = (content: string) => professionalContentIssues([{ title, content }], new Map([[title, resourceNeeds]]))
+    .filter(issue => issue.message.includes('资源章节缺少'));
+
+  it('B3 修复：语义判缺 + 资源对象进场与调度机制字面同现 → 兜底判覆盖不报（r28e 实测句）', () => {
+    const content = '机械进场时间按施工准备阶段第1日至第7日分批组织，首批挖掘机、自卸汽车在开工令下发后按进度计划进场。设备调度由项目部机械员统一负责，按先满足开挖面、再保障碾压面的原则调配机具。'.repeat(15);
+    expect(resourceIssues(content)).toHaveLength(0);
+  });
+
+  it('B3 对照：仅资源对象进场（无调度/保管类机制）→ 仍报（要素对不单侧放行）', () => {
+    const content = '机械进场时间按施工准备阶段第1日至第7日分批组织，首批挖掘机、自卸汽车按进度计划进场。现场管理按制度执行，各作业面协同推进。'.repeat(15);
+    expect(resourceIssues(content)).toHaveLength(1);
+  });
+
+  it('B3 对照：泛主体「人员进场+调配」薄内容不兜底（防关键词罗列段）', () => {
+    const content = '劳务人员进场当日完成实名核验，用工峰值调配与跨村组轮转按计划执行。'.repeat(30);
+    expect(resourceIssues(content)).toHaveLength(1);
+  });
+});

@@ -1,4 +1,5 @@
 import { getLocalSemanticProvider } from './semanticSimilarity';
+import { longestCommonHanSubstringSpan } from './numericalConsistency';
 import type { BillFactLock, BillFactLockEntry } from './billFactLock';
 import type { BlueprintQuantity } from './integratedBlueprint';
 import type { ValidationIssue } from './types';
@@ -34,6 +35,12 @@ const GENERIC_MEASURE_WORDS = [
   '尺寸', '层数', '次数', '跨度', '半径', '总长', '全长',
 ] as const;
 
+/** 纯边界虚词概念表（4.52 P3a 归因）：概念归一后仅为区间虚词（「以内」「以上」类）时退出聚类——
+ * 「±」公差符号不在前缀字符类内，数字前导经 trailingDigits 并回后前缀坍缩为空，concept 只剩
+ * 虚词（实测「槽底标高偏差控制在±20mm以内」×「管底垫层顶面标高偏差控制在±10mm以内」坍缩同簇
+ * 误报多口径）；公差标注按对象天然多口径并存，概念信息不足时不参与互斥。 */
+const BARE_RELATION_WORDS = ['以内', '以外', '以上', '以下', '之间', '左右', '以前', '以后', '之前', '之后'] as const;
+
 /** 概念引导语剥离白名单（r15 丰乐镇 B1 归因）：正文工程量列举常用「主要作业对象为X」句式，
  * 跨对象 token 共享同一引导语形态时被 bge 误聚同簇——实测「主要作业对象为塑料管铺设」
  * ×「主要作业对象为菜园围栏」余弦 0.687 ≥0.6（同簇 8205.53 vs 2360 误报口径冲突），
@@ -51,8 +58,17 @@ const CONCEPT_TASK_DEADLINE_RE = /^(?:由)?责任[\u4e00-\u9fa5]{0,4}在(?:内)?
 
 /** 概念黑名单（run1 实测误报收口）：对象计数类概念——「13 个自然村 / 1 个标段 / 2 处踏勘点位」
  * 是对象的枚举计数而非同一参数的多口径取值，跨对象 bge 误聚簇时数字天然异构（13 vs 1）；
- * 此类数字一致性由跨章/审计通道把关，不参与参数口径互斥（「养护」类时长按对象天然多口径同）。 */
-const CONCEPT_BLACKLIST_RE = /自然村|村组|标段|区域|点位|养护/u;
+ * 此类数字一致性由跨章/审计通道把关，不参与参数口径互斥（「养护」类时长按对象天然多口径同）。
+ * r23 扩围（r22 实况）：「马老郢组800m、夏岗组250m」类分组单元名（村组/作业组/班组等
+ * 「X组」结尾）同为对象分组概念——各分组量值天然异构，同样不参与互斥。
+ * r28m M24a F1 扩围（s28k/s28l 实机）：单体属性概念（「地上2层、地上1层」「门卫建筑高度3m」）——
+ * 不同单体（门卫/配套用房）的层数/高度天然不同，无清单条目可裁决，参与互斥必误报。 */
+const CONCEPT_BLACKLIST_RE = /自然村|村组|标段|区域|点位|养护|地上|地下|建筑高度|[\u4e00-\u9fa5]{1,4}组$/u;
+
+/** 变体限定词（r28m M24a F2 退聚；r28k/s28k 实机「局部8cm/10cm」）：「局部/个别/少数/多数/大部分」
+ * 限定的数值是子集/局部口径（「厚度10cm，局部厚度8cm」为合法子集声明），与整体口径不可互斥；
+ * 带限定词的 token 不进互斥池（宁漏勿错——同限定词的多处真冲突由跨章/审计通道把关）。 */
+const VARIANT_QUALIFIER_RE = /^(?:局部|个别|少数|多数|大部分)/u;
 
 /** 动作词表（丰乐镇复测 #82 簇 A/B）：同簇各 token 原文分别含互不相同的施工/管理动作词
  * （「签订 vs 提交」「开挖 vs 封闭」）时，是不同工序各自的动作参量而非同一参数多口径——
@@ -137,7 +153,14 @@ function extractParamTokens(markdown: string): ParamToken[] {
       }
       const value = Number(valueText);
       const unit = match[3] || '';
-      const suffix = (match[4] || '').trim();
+      const suffixRaw = (match[4] || '').trim();
+      // r28f B2 归因（r28e 实测）：「健身器材17个与石桌石凳8个基础采用…」的后缀把相邻枚举项
+      // 连同其数值吞入本 token（concept=「健身器材与石桌石凳8个基」）→ bge 桥接聚类把健身器材
+      // （17个）与石桌石凳（8个）误聚同簇误报多口径——后缀在「连接词（与/和/及）+≤12字+数字」
+      // 处截断：该段是下一枚举项（自带数值）的开头，不是本值的对象语境；连接词后无数字的语境
+      // 后缀（「…与石桌石凳基础采用」）保留，避免误削概念信息
+      const embeddedItem = /[与和及][^与和及]{0,12}?\d/u.exec(suffixRaw);
+      const suffix = embeddedItem ? suffixRaw.slice(0, embeddedItem.index) : suffixRaw;
       // 概念语境 = 数值前后短语去空白；语境过短（纯标点/无概念词）不参与聚类
       const rawConcept = `${prefix}${suffix}`.replace(/[\s,，、；;：:]/gu, '');
       // r15 B1 归因：剥离「主要作业对象为」类引导语后再聚类（防跨对象共享引导语误聚，见 CONCEPT_LEAD_IN_RE）；
@@ -147,8 +170,13 @@ function extractParamTokens(markdown: string): ParamToken[] {
       if (concept.length < 2 || !/[\u4e00-\u9fa5A-Za-z]{2,}/u.test(concept) || !Number.isFinite(value) || value <= 0) continue;
       // 纯通用量词概念跳过：无具体对象无从判定口径，不同对象同量词聚簇必误报
       if (GENERIC_MEASURE_WORDS.some(word => normalizeConcept(concept) === word)) continue;
+      // 纯边界虚词概念跳过（4.52 P3a）：公差符号打断前缀致 concept 坍缩为「以内」类虚词时
+      // 概念信息不足，不参与口径互斥（见 BARE_RELATION_WORDS）
+      if (BARE_RELATION_WORDS.some(word => normalizeConcept(concept) === word)) continue;
       // 对象计数类概念跳过（非参数口径，见 CONCEPT_BLACKLIST_RE）
       if (CONCEPT_BLACKLIST_RE.test(concept)) continue;
+      // 变体限定词退聚（r28m M24a F2）：带「局部/个别/少数/多数/大部分」限定词的子集口径不参与互斥
+      if (VARIANT_QUALIFIER_RE.test(concept)) continue;
       // 同一表述的全部出现合并为 occurrences（4.27.0 A1）：判定仍按「同 raw 只算一个口径」去重，
       // 但硬替换须逐处定位全部出现位置——历史缺陷：同值多处出现只改首处的替换残留
       const occurrence = {
@@ -345,12 +373,40 @@ export async function conceptConflictGroups(markdown: string): Promise<ConceptCo
           && unitGroup.every(token => token.occurrences.some(occurrence => sentenceTextAt(markdown, occurrence.matchIndex) === sentence))
           && [...sentence.matchAll(/\d+(?:\.\d+)?/gu)].some(match => Math.abs(Number(match[0]) - valuesSum) <= Math.max(0.5, valuesSum * 0.01)));
         if (inDecompositionSentence) continue;
-        // 排除并列枚举：任一 token 的出现位后 12 字内含「、/ + 数字」枚举链（如「10cm、8cm」
+        // 排除并列枚举：任一 token 的出现位前/后 12 字内含「、/ + 数字」枚举链（如「10cm、8cm」
         // 匹配「、8」；「厚15cm、C30」匹配「、C30」）≥2 个即属多规格枚举声明——修复 4.32.0：
         // 原检查针对 token.raw 而 PARAM_TOKEN_RE 字符类不含顿号/斜杠（永假死代码），改按
-        // occurrence.matchIndex 取出现位上下文判定（检测定位=原文定位）
-        const enumerations = unitGroup.filter(token => token.occurrences.some(occurrence => /[、/](?:与)?[A-Za-z]?\d/u.test(markdown.slice(occurrence.matchIndex, occurrence.matchIndex + token.raw.length + 12))));
+        // occurrence.matchIndex 取出现位上下文判定（检测定位=原文定位）；4.52 P3a 前窗对称化：
+        // 尾成员枚举链的顿号在其前窗（「300×300断面3003m、500×600断面1797m」的尾 token 前有
+        // 「、500×」而后窗无顿号）——仅后窗判定收集不全致真枚举误报多口径（「300断面」簇实测）
+        const enumerations = unitGroup.filter(token => token.occurrences.some(occurrence => {
+          const after = markdown.slice(occurrence.matchIndex, occurrence.matchIndex + token.raw.length + 12);
+          const before = markdown.slice(Math.max(0, occurrence.matchIndex - 12), occurrence.matchIndex);
+          return /[、/](?:与)?[A-Za-z]?\d/u.test(after) || /[、/](?:与)?[A-Za-z]?\d/u.test(before);
+        }));
         if (enumerations.length >= 2) continue;
+        // 对象限定词不相容豁免（r23 P3b 归因）：「工具式脚手架搭设面积76.62m²」与「外脚手架
+        // 搭设面积122.36m²」是不同脚手架对象各自的参量，bge 因共享核心词「脚手架搭设面积」误聚
+        // 同簇；同组全部 token 概念两两扣除最长公共连续汉字子串后，剩余限定词均非空且互不包含
+        // 时，属不同对象各自参量（非同参数多口径），跳过；同概念（残留全空）或含蕴含关系的
+        // 口径（「管道闭水试验」vs「闭水试验」残留「管道」vs 空）仍判冲突。置于全部既有防线后：
+        // 只收口穿透到 push 前的跨对象误聚，不改变各防线责任链。
+        const distinctObject = unitGroup.length >= 2 && unitGroup.every((left, leftIndex) => unitGroup.every((right, rightIndex) => {
+          if (leftIndex >= rightIndex) return true;
+          // r28 扩围（r27b 归因：同值异述对破坏跨对象豁免——「其中道路硬化面积约2783㎡」与
+          // 「道路硬化面积约2783㎡」共享核心 LCS 后左侧残留「其中」、右侧残留空，every 被同值对打断）：
+          // 同值对豁免——取值完全相同的两 token（同一数值的不同表述）不构成口径冲突，无需参与
+          // 跨对象分辨；仅放宽同值对，冲突判定仍由全部异值对承载（真冲突「同概念异值」的异值对
+          // 残留为空即不豁免，照常报出）
+          if (left.value === right.value) return true;
+          const span = longestCommonHanSubstringSpan(left.concept, right.concept);
+          if (span.length < 2) return false;
+          const common = left.concept.slice(span.start, span.end);
+          const leftRest = left.concept.replace(common, '');
+          const rightRest = right.concept.replace(common, '');
+          return leftRest.length > 0 && rightRest.length > 0 && !leftRest.includes(rightRest) && !rightRest.includes(leftRest);
+        }));
+        if (distinctObject) continue;
         groups.push({ concept: unitGroup[0].concept, values: unitGroup });
         if (groups.length >= 4) break;
       }

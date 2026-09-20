@@ -4,7 +4,7 @@
  * 另有阶段五模糊应答语义升级单测：词面命中仅召回，语义 gate 复核才计套话句（负例零误杀）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildVagueResponseGate, difficultyCountermeasureReport, fillerDensityReport, fiveElementBlockStats, isZeroInfoSloganSentence, judgeFillerSentences, scanFillerSentences } from '@/services/document-workflow/tenderBidChecks';
+import { buildVagueResponseGate, difficultyCountermeasureReport, extractKeyDifficultySection, fillerDensityReport, fiveElementBlockStats, isTemplatePrefixSentence, isZeroInfoSloganSentence, judgeFillerSentences, scanFillerSentences, scanTemplatePrefixSentences } from '@/services/document-workflow/tenderBidChecks';
 
 vi.mock('@/services/document-workflow/semanticSimilarity', () => ({
   buildSemanticSimilarity: vi.fn(),
@@ -237,5 +237,110 @@ describe('difficultyCountermeasureReport 条目明细（重难点修复锚点源
     const report = await difficultyCountermeasureReport('### 1.1 工程特点与施工条件分析\n\n本工程位于肥西县，共20个自然村。');
     expect(report.countermeasures).toBe(0);
     expect(report.entries).toHaveLength(0);
+  });
+});
+
+describe('isTemplatePrefixSentence 模板化前缀句判定（D-T7 ① 单源判定器）', () => {
+  it('词首命中矩阵：本节/本章/本小节/以下从/综上所述 等元话语导语', () => {
+    expect(isTemplatePrefixSentence('本节将从施工准备开始组织')).toBe(true);
+    expect(isTemplatePrefixSentence('本章围绕质量目标展开部署')).toBe(true);
+    expect(isTemplatePrefixSentence('本小节主要说明施工流程安排')).toBe(true);
+    expect(isTemplatePrefixSentence('以下从三个方面说明资源配置')).toBe(true);
+    expect(isTemplatePrefixSentence('综上所述，本工程组织措施可行')).toBe(true);
+    expect(isTemplatePrefixSentence('总体而言，各项措施形成闭环')).toBe(true);
+  });
+
+  it('编号/标题号/列表符剥离后判定：条目前缀不影响词首命中', () => {
+    expect(isTemplatePrefixSentence('1.2 本章将从施工组织方面进行说明')).toBe(true);
+    expect(isTemplatePrefixSentence('（1）本节主要介绍施工流程安排')).toBe(true);
+    expect(isTemplatePrefixSentence('- 本章将重点阐述安全保证措施')).toBe(true);
+    expect(isTemplatePrefixSentence('### 本节将说明施工准备工作')).toBe(true);
+  });
+
+  it('零宽字符加固：句子穿插 U+200B 类字符仍命中（r28f 实测形态）', () => {
+    expect(isTemplatePrefixSentence('本节\u200b将说明施工准备工作')).toBe(true);
+    expect(isTemplatePrefixSentence('\u200b本章拟从资源配置角度展开')).toBe(true);
+  });
+
+  it('负例零误杀：施工描述句与工程信息句不命中', () => {
+    expect(isTemplatePrefixSentence('混凝土浇筑后洒水养护并形成记录')).toBe(false);
+    expect(isTemplatePrefixSentence('项目部发扬力争上游的企业精神')).toBe(false);
+    expect(isTemplatePrefixSentence('本工程位于肥西县，共20个自然村')).toBe(false);
+    expect(isTemplatePrefixSentence('')).toBe(false);
+    expect(isTemplatePrefixSentence('   ')).toBe(false);
+  });
+});
+
+describe('scanTemplatePrefixSentences 句池单源（D-T7 ① 检测端=回滚复检同源）', () => {
+  it('markdown 级扫描：按。；; 切句、≥12 字闸、返回剥离零宽后的原句', () => {
+    const markdown = [
+      '本节\u200b将说明施工准备工作与总体部署。项目部组织图纸会审。',
+      '以下从资源配置、进度管控两个方面展开。',
+    ].join('\n');
+    expect(scanTemplatePrefixSentences(markdown)).toEqual([
+      '本节将说明施工准备工作与总体部署',
+      '以下从资源配置、进度管控两个方面展开',
+    ]);
+  });
+
+  it('短句闸：不足 12 字的前缀句不计入', () => {
+    expect(scanTemplatePrefixSentences('本节将从速。')).toEqual([]);
+  });
+
+  it('标题行与目录条目行不进句池（含零宽标题行——#53 根因加固）', () => {
+    const markdown = [
+      '\u200b## 第六章 确保工程质量的技术组织措施',
+      '第六章 确保工程质量的技术组织措施',
+      '本节将说明施工准备工作与总体部署。',
+    ].join('\n');
+    expect(scanTemplatePrefixSentences(markdown)).toEqual(['本节将说明施工准备工作与总体部署']);
+  });
+});
+
+describe('extractKeyDifficultySection 提取边界（D-T7 行首锚定 + 逐级边界）', () => {
+  it('H4 小节命中：提取截到下一 H2-H4，不吞后续小节（r28f 实证：旧口径吞掉后续章正文）', () => {
+    const markdown = [
+      '#### 1.1.3 重点难点分析',
+      '基坑降水难度大需控制变形。',
+      '#### 1.1.4 施工条件',
+      '场地条件良好。',
+      '## 下一章',
+      '无关正文。',
+    ].join('\n');
+    const section = extractKeyDifficultySection(markdown);
+    expect(section).toContain('基坑降水难度大需控制变形。');
+    expect(section).not.toContain('场地条件良好');
+    expect(section).not.toContain('无关正文');
+  });
+
+  it('H3 小节命中：H3 内 H4 子标题不提前截断，截到下一 H2/H3', () => {
+    const markdown = [
+      '### 1.2 工程重点难点',
+      '难点一正文。',
+      '#### 1.2.1 子项',
+      '子项正文。',
+      '### 1.3 其他小节',
+      '其他正文。',
+    ].join('\n');
+    const section = extractKeyDifficultySection(markdown);
+    expect(section).toContain('难点一正文。');
+    expect(section).toContain('子项正文。');
+    expect(section).not.toContain('其他正文。');
+  });
+
+  it('无标题小节时回退识别表（表头「重点难点」词面同源，至首个非表格行结束）', () => {
+    const markdown = [
+      '### 1.1 工程特点与施工条件分析',
+      '针对分散施工条件，项目部建立项目重难点识别表。',
+      '| 重点难点 | 形成原因 | 专项措施 |',
+      '| --- | --- | --- |',
+      '| 村内巷道狭窄 | 宽度不足 | 小型机械配合人工 |',
+      '',
+      '后续正文。',
+    ].join('\n');
+    const section = extractKeyDifficultySection(markdown);
+    expect(section).toContain('| 重点难点 | 形成原因 | 专项措施 |');
+    expect(section).toContain('村内巷道狭窄');
+    expect(section).not.toContain('后续正文。');
   });
 });

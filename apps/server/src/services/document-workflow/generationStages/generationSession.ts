@@ -46,6 +46,7 @@ import type { DocumentBudget } from '../budget';
 import type { GenerationBudget } from '../generationBudget';
 import type { IntegratedBlueprint } from '../integratedBlueprint';
 import type { BillFactLock } from '../billFactLock';
+import type { DrawingFactLock } from '../drawingFactLock';
 import type { RequirementSemanticPlan } from '../requirementSemantics';
 import type { BidCompositionSpec } from '../bidComposition';
 import type { Semaphore } from '../utils';
@@ -59,7 +60,7 @@ import type { extractLocalFactPool } from '../factsModel';
 import type { buildProfessionalDepthClassifier } from '../professionalDepthClassifier';
 import type { buildScopedProjectIntelligence } from '../projectIntelligence';
 import type { buildSemanticSimilarity } from '../semanticSimilarity';
-import type { TenderRequirementAssignment } from '../tenderRequirements';
+import type { TenderRequirementAssignment, TenderStructureAssignment } from '../tenderRequirements';
 import type { DiversityProfile } from '../diversityProfile';
 import type { SectionFingerprintPool } from '../sectionFingerprint';
 
@@ -227,8 +228,13 @@ export interface GenerationSessionBlueprint {
   blueprintActive: boolean;
   /** 要求分配（阶段 3：每条要求唯一主责章，章级注入与章级验收同源；分配对账 assignments.length===entries.length） */
   requirementAssignments: TenderRequirementAssignment[];
+  /** A-T1 结构/呈现要求章归属（存疑不挂：unattached 仅显性展示，不注入写作） */
+  structureAssignments: TenderStructureAssignment[];
+  structureUnattached: TenderStructureAssignment[];
   /** 清单事实锁（阶段 3 构建：条目→特征→工程量行级确定性锁，写作直读 + 生成后数值核对共用） */
   billFactLock: BillFactLock | undefined;
+  /** B-T3 图纸事实锁（阶段 3 构建：图纸设计说明/构造做法/材料规格/设备参数行级直读 + 引用率验收共用） */
+  drawingFactLock: DrawingFactLock | undefined;
 }
 
 /** chapterLoop：阶段 4 产物（成稿期起点与终态） */

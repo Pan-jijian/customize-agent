@@ -14,6 +14,10 @@
  * 2. 机械台数：单条目锚定「名称后 ≤2 桥接字 + 数字+台」（禁 12 字无锚定搜索——基线实测
  *    「其中3台」「1台转入」分配语境被误采）；同名多条目按规格词语境单独比对（不互串）。
  * 3. 材料拆分：同名多规格 + 同族单位 + 合计行豁免。
+ *
+ * + C-T4 跨章机械矩阵共用抽取（scanEquipmentCountClaims / normalizeEquipmentClaimName /
+ *   equipmentNameAtEndOf）：constructionOrgConsistency 机械数量型号规则（资料事实对账）与
+ *   qualityValidation 跨章机械互斥（正文多值，进修复链）共用名称归一单源，避免检测口径漂移。
  */
 import type { BlueprintData, BlueprintEquipmentItem, BlueprintMaterialPlanItem } from './integratedBlueprint';
 
@@ -48,6 +52,84 @@ const MATERIAL_SPLIT_QUANTITY_RE = /^[)）、:：,，\s]{0,2}(?:混凝土|砼)?\
 const TRADE_CLAIM_RE = /^([^0-9]{0,2}?)(\d+(?:\.\d+)?)\s*人/u;
 const EQUIPMENT_CLAIM_RE = /^([^0-9]{0,2}?)(\d+(?:\.\d+)?)\s*台/u;
 const STAGE_LABOR_TOTAL_RE = /阶段[^。；\n]{0,30}?(\d+(?:\.\d+)?)\s*人/u;
+
+// ═══════════════════════════ C-T4 机械台数宣称抽取（跨章一致性矩阵单一扫描源） ═══════════════════════════
+// 机械名从固定词表泛化为通用抽取（2~8 字、以 机/吊/泵/车/夯 结尾 + 虚词截断归一 + 量词残留/片段拦截 +
+// 备用租赁辅助配置丢弃 + 否定分句豁免）：constructionOrgConsistency 机械数量型号规则与
+// qualityValidation 跨章机械矩阵共用，检测定位与名称归一单源。
+
+export interface EquipmentCountClaim {
+  /** 归一化机械名（多值互斥/资料事实对账的键） */
+  name: string;
+  /** 原始捕获名（含被截断的上下文前缀；展示取最短者） */
+  raw: string;
+  count: number;
+  /** 匹配起点（配套比/分组语境等位置判定使用） */
+  start: number;
+  /** 完整匹配文本（含名称、桥接与数字单位） */
+  text: string;
+}
+
+/** 机械名后缀（含蛙夯：与既有质量门禁词表口径一致） */
+const EQUIPMENT_NAME_SUFFIX_SOURCE = '机|吊|泵|车|夯';
+/** 机械名前导虚词/动词截断集：贪婪捕获吞入谓语时取最后一个虚词之后的剩余部分为名。
+ * 不含自/起/重/装/载/挖/掘等设备名用字；「配套/备用/其中/其余/阶段/标段」类前缀由此归位 */
+const EQUIPMENT_NAME_PREFIX_STOP_RE = /[为配置备启投拟需计划增租赁购采设进出按据由从向对把被使等该此其每各和与及或在是将宜并可未非不另又还有部现中套余的用入要场阶段]/u;
+/** 首字即量词的名（「台挖掘机」「组挖掘机」等每台X配套结构的截断残留）非设备名，丢弃 */
+const EQUIPMENT_NAME_QUANTIFIER_PREFIX_RE = /^(?:[台辆部具个组米吨座])/u;
+/** 非设备名片段（「主力机」类谓语残留）丢弃 */
+const EQUIPMENT_NAME_FRAGMENT_RE = /^(?:主力|主要|常用|配套|相关|专用|通用|各类|多种|其余|剩余|上述|前者|后者)/u;
+/** 辅助配置前缀（备用/租赁/租用）：与主配置台数合法并存，不参与口径对账与互斥（宁漏报不误报） */
+const EQUIPMENT_AUXILIARY_PREFIX_RE = /(?:备用|租赁|租用)/u;
+/** 否定语境（不使用/无需…）是合理技术决策非配置声明，所在分句不采宣称 */
+const EQUIPMENT_CLAIM_NEGATION_RE = /不使用|不采用|不配置|无需|未采用|不得使用|禁止使用/u;
+/** 文末机械名（资料事实短值「塔式起重机」类形态；无 /g，可安全共享） */
+const EQUIPMENT_NAME_END_RE = new RegExp(`([\\p{Script=Han}A-Za-z0-9]{2,8}(?:${EQUIPMENT_NAME_SUFFIX_SOURCE}))$`, 'u');
+
+/** 机械名归一：undefined 表示该捕获非设备名（量词残留/片段/辅助配置），调用方丢弃 */
+export function normalizeEquipmentClaimName(captured: string): string | undefined {
+  const cleaned = captured.replace(/\s+/gu, '');
+  let name = cleaned;
+  for (let index = cleaned.length - 1; index >= 0; index -= 1) {
+    if (!EQUIPMENT_NAME_PREFIX_STOP_RE.test(cleaned[index])) continue;
+    if (EQUIPMENT_AUXILIARY_PREFIX_RE.test(cleaned.slice(0, index + 1))) return undefined;
+    name = cleaned.slice(index + 1);
+    break;
+  }
+  if (name.length < 2) return undefined;
+  if (EQUIPMENT_NAME_QUANTIFIER_PREFIX_RE.test(name)) return undefined;
+  if (EQUIPMENT_NAME_FRAGMENT_RE.test(name)) return undefined;
+  return name;
+}
+
+/** 机械台数宣称扫描：名称（2~8 字，机/吊/泵/车/夯 结尾）+ ≤12 桥接字（禁跨句读/顿逗/表格竖线）
+ * + 数字 + 台/套/辆；名称经虚词截断归一，否定分句不采（正文与资料事实短值共用） */
+export function scanEquipmentCountClaims(text: string): EquipmentCountClaim[] {
+  const claims: EquipmentCountClaim[] = [];
+  const pattern = new RegExp(`([\\p{Script=Han}A-Za-z0-9]{2,8}(?:${EQUIPMENT_NAME_SUFFIX_SOURCE}))[^\\d。；;\\n|、，]{0,12}(\\d+)\\s*(?:台|套|辆)`, 'gu');
+  for (const match of text.matchAll(pattern)) {
+    const start = match.index ?? 0;
+    const clauseStart = Math.max(
+      text.lastIndexOf('，', start), text.lastIndexOf('。', start), text.lastIndexOf('；', start),
+      text.lastIndexOf(';', start), text.lastIndexOf('\n', start), text.lastIndexOf('、', start),
+    );
+    // 否定窗口延伸至名称捕获尾部（「无需另配发电机 1 台」的「无需」在捕获内部）
+    if (EQUIPMENT_CLAIM_NEGATION_RE.test(text.slice(clauseStart + 1, start + match[1].length))) continue;
+    const name = normalizeEquipmentClaimName(match[1]);
+    if (!name) continue;
+    const count = Number(match[2]);
+    if (!Number.isFinite(count) || count <= 0) continue;
+    claims.push({ name, raw: match[1], count, start, text: match[0] });
+  }
+  return claims;
+}
+
+/** 文末机械名识别（资料事实短值「塔式起重机」类形态）；无匹配或非设备名返回 undefined */
+export function equipmentNameAtEndOf(text: string): string | undefined {
+  const match = EQUIPMENT_NAME_END_RE.exec(text);
+  if (!match) return undefined;
+  return normalizeEquipmentClaimName(match[1]);
+}
 
 function materialUnitFamily(unit: string): string | null {
   const text = (unit || '').replace(/\s+/gu, '');

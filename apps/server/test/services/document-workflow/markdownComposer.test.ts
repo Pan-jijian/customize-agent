@@ -34,6 +34,7 @@ import {
   sectionHeadingIssues,
   sourcePhraseIssues,
   stripMarkdownDocumentFence,
+  tableCaptionIssues,
   tertiaryHeadingIssues,
   writerSystemPrefix,
 } from '@/services/document-workflow/markdownComposer';
@@ -277,6 +278,30 @@ describe('sanitizeFormalMarkdown', () => {
     const atEnd = sanitizeFormalMarkdown('#### 具体安排如下');
     expect(atEnd).toContain('#### 具体安排如下');
   });
+
+  it('r26 B3：招标答疑问答句整句清除（请明确回复/未明确回复），「按图纸」污染随之根除', () => {
+    const markdown = [
+      '管网工程中涉及到的道路破复做法，请明确回复：道路破复按图纸上的大样，按照原状恢复即可。',
+      '',
+      '12、过路涵，涵头做法，未明确回复：c25混凝土浇筑。',
+      '本工程质量目标为合格，按合格标准组织全过程质量控制。',
+    ].join('\n');
+    const result = sanitizeFormalMarkdown(markdown);
+    expect(result).not.toContain('请明确回复');
+    expect(result).not.toContain('未明确回复');
+    expect(result).not.toContain('按图纸');
+    expect(result).toContain('本工程质量目标为合格，按合格标准组织全过程质量控制。');
+  });
+
+  it('r26 B1：合法「标准规范包括」行不被后台话术清洗误删', () => {
+    const result = sanitizeFormalMarkdown('1.4.1适用于工程的标准规范包括：招标文件及其附件。');
+    expect(result).toContain('标准规范包括');
+  });
+
+  it('r26 B3 反例：「申请明确回复机制」类正常动词搭配不误删（左负向后顾）', () => {
+    const result = sanitizeFormalMarkdown('项目部申请明确回复机制与责任分工，确保流程闭环。');
+    expect(result).toContain('申请明确回复机制');
+  });
 });
 
 describe('removeAdjacentDuplicateHeadings', () => {
@@ -374,6 +399,45 @@ describe('plannedStructurePrompt / plannedStructureIssues', () => {
   it('缺表格章节报必要表格缺失', () => {
     const issues = plannedStructureIssues('## 第一章 工程概况\n正文。', template);
     expect(issues.some(item => item.message.includes('缺少必要的正式表格'))).toBe(true);
+  });
+
+  it('规划表逐表对账：章内有其它表但缺 1 张计划表 → 检出该表（R20 逐表口径）', () => {
+    const withPlans: DocumentTemplate = {
+      ...template,
+      chapters: [{
+        id: 'ch-1', title: '工程概况', purpose: '', queries: [], requiredFacts: [], sections: [],
+        tablePlans: [
+          { id: 'p1', title: '劳动力投入计划表', chapterTitle: '工程概况', section: '', required: false, reason: '规划产出', fields: [] },
+          { id: 'p2', title: '主要材料进场计划表', chapterTitle: '工程概况', section: '', required: false, reason: '规划产出', fields: [] },
+        ],
+      }],
+    };
+    const markdown = ['## 第一章 工程概况', '劳动力投入计划表', '', '| 序号 | 工种 | 人数 |', '|---|---|---|', '| 1 | 普工 | 10 |'].join('\n');
+    const issues = plannedStructureIssues(markdown, withPlans);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].level).toBe('error');
+    expect(issues[0].category).toBe('table');
+    expect(issues[0].message).toContain('主要材料进场计划表');
+  });
+
+  it('逐表对账全承接 → 无缺表 error；暗标禁表 → 直接豁免', () => {
+    const withPlans: DocumentTemplate = {
+      ...template,
+      chapters: [{
+        id: 'ch-1', title: '工程概况', purpose: '', queries: [], requiredFacts: [], sections: [],
+        tablePlans: [
+          { id: 'p1', title: '劳动力投入计划表', chapterTitle: '工程概况', section: '', required: false, reason: '规划产出', fields: [] },
+          { id: 'p2', title: '主要材料进场计划表', chapterTitle: '工程概况', section: '', required: false, reason: '规划产出', fields: [] },
+        ],
+      }],
+    };
+    const markdown = [
+      '## 第一章 工程概况', '劳动力投入计划表', '', '| 序号 | 工种 | 人数 |', '|---|---|---|', '| 1 | 普工 | 10 |', '',
+      '主要材料进场计划表', '', '| 序号 | 材料名称 | 单位 |', '|---|---|---|', '| 1 | 水泥 | t |',
+    ].join('\n');
+    expect(plannedStructureIssues(markdown, withPlans).filter(item => item.category === 'table')).toEqual([]);
+    // 暗标正文禁表：缺表类门禁整体豁免（图表由文末附表区承接）
+    expect(plannedStructureIssues(markdown, withPlans, true)).toEqual([]);
   });
 });
 
@@ -657,5 +721,57 @@ describe('dedupeDuplicateSectionHeadings（4.40 d5d 同章同名 H3 小节确定
     const second = dedupeDuplicateSectionHeadings(first.markdown);
     expect(second.fixedCount).toBe(0);
     expect(second.markdown).toBe(first.markdown);
+  });
+});
+
+describe('tableCaptionIssues 表题注终检（R20 C3）', () => {
+  it('正文表格均带题注时零报出', () => {
+    const markdown = [
+      '## 第三章 XX',
+      '表3-1 劳动力投入计划表',
+      '| 序号 | 工种 |', '|---|---|', '| 1 | 普工 |',
+    ].join('\n');
+    expect(tableCaptionIssues(markdown)).toEqual([]);
+  });
+
+  it('无题注表题行报 error 且含表名与数量', () => {
+    const markdown = [
+      '## 第三章 XX',
+      '劳动力投入计划表',
+      '| 序号 | 工种 |', '|---|---|', '| 1 | 普工 |',
+    ].join('\n');
+    const issues = tableCaptionIssues(markdown);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].level).toBe('error');
+    expect(issues[0].message).toContain('劳动力投入计划表');
+    expect(issues[0].message).toContain('1 张');
+  });
+
+  it('无表题行的表格报出（人工核对形态）', () => {
+    const markdown = [
+      '## 第三章 XX',
+      '以下是安排情况。',
+      '| 序号 | 工种 |', '|---|---|', '| 1 | 普工 |',
+    ].join('\n');
+    const issues = tableCaptionIssues(markdown);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('无表题行');
+  });
+
+  it('暗标（正文禁表）直接豁免', () => {
+    const markdown = ['## 第三章 XX', '劳动力投入计划表', '| 序号 | 工种 |', '|---|---|', '| 1 | 普工 |'].join('\n');
+    expect(tableCaptionIssues(markdown, true)).toEqual([]);
+  });
+
+  it('附表区（## 附表N）表格不参与校验', () => {
+    const markdown = [
+      '## 第三章 XX',
+      '表3-1 劳动力投入计划表',
+      '| 序号 | 工种 |', '|---|---|', '| 1 | 普工 |',
+      '## 附表一 法定附表',
+      '未编号附表表',
+      '| 序号 | 名称 |', '|---|---|', '| 1 | 甲 |',
+    ].join('\n');
+    expect(tableCaptionIssues(markdown)).toEqual([]);
   });
 });

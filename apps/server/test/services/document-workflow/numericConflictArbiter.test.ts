@@ -136,3 +136,107 @@ describe('arbitrateNumericConflicts（A2 规格错位）', () => {
     expect(result.replacements).toEqual([]);
   });
 });
+
+describe('arbitrateNumericConflicts（A3 名称-数值绑定裁决，M24b）', () => {
+  it('分支②：值属他条目 + 本条目权威唯一 → 硬替换（过梁位写 3.07m3 实属管道垫层 3.06m3）', async () => {
+    const markdown = '过梁现浇混凝土3.07m3，管道垫层混凝土3.06m3。';
+    const result = await arbitrateNumericConflicts(markdown, {
+      billFactLock: billLock([
+        lockEntry({ seq: 1, name: '过梁', quantity: 4.5, unit: 'm3' }),
+        lockEntry({ seq: 2, name: '管道垫层', quantity: 3.06, unit: 'm3' }),
+      ]),
+    });
+    expect(result.replacements).toHaveLength(1);
+    expect(result.replacements[0]).toMatchObject({ start: 7, end: 11, replacement: '4.5' });
+    expect(result.details[0]).toContain('过梁');
+    expect(result.details[0]).toContain('3.07m3→4.5m3');
+    expect(result.noAnchorGroups).toEqual([]);
+  });
+
+  it('r28k 回归①：DN50 位写 11.23m（实属 DN32）→ 替换为 DN50 清单权威值', async () => {
+    const markdown = 'DN50管道铺设11.23m。';
+    const result = await arbitrateNumericConflicts(markdown, {
+      billFactLock: billLock([
+        lockEntry({ seq: 1, name: 'DN50管道', quantity: 7965, unit: 'm' }),
+        lockEntry({ seq: 2, name: 'DN32管道', quantity: 11.23, unit: 'm' }),
+      ]),
+    });
+    expect(result.replacements).toHaveLength(1);
+    expect(result.replacements[0]).toMatchObject({ replacement: '7965' });
+    expect(result.details[0]).toContain('DN50管道');
+  });
+
+  it('r28k 回归②：灭火器位写 2套（实属垃圾箱）→ 替换为灭火器清单权威值', async () => {
+    const markdown = '现场配置灭火器2套。';
+    const result = await arbitrateNumericConflicts(markdown, {
+      billFactLock: billLock([
+        lockEntry({ seq: 1, name: '灭火器', quantity: 30, unit: '套' }),
+        lockEntry({ seq: 2, name: '垃圾箱', quantity: 2, unit: '套' }),
+      ]),
+    });
+    expect(result.replacements).toHaveLength(1);
+    expect(result.replacements[0]).toMatchObject({ replacement: '30' });
+    expect(result.details[0]).toContain('灭火器');
+  });
+
+  it('分支①：值 ∈ 本条目量集（转写宽容截断）→ 一致（跳过，不替换）', async () => {
+    const markdown = '过梁现浇混凝土4m3。';
+    const result = await arbitrateNumericConflicts(markdown, {
+      billFactLock: billLock([lockEntry({ seq: 1, name: '过梁', quantity: 4.5, unit: 'm3' })]),
+    });
+    expect(result.replacements).toEqual([]);
+    expect(result.noAnchorGroups).toEqual([]);
+  });
+
+  it('分支③：同名多条无法裁决替换目标 → 无锚留 LLM（附全条目量清单）', async () => {
+    const markdown = '过梁现浇混凝土3.07m3。';
+    const result = await arbitrateNumericConflicts(markdown, {
+      billFactLock: billLock([
+        lockEntry({ seq: 1, name: '过梁', quantity: 4.5, unit: 'm3' }),
+        lockEntry({ seq: 2, name: '过梁', quantity: 5.2, unit: 'm3' }),
+        lockEntry({ seq: 3, name: '管道垫层', quantity: 3.06, unit: 'm3' }),
+      ]),
+    });
+    expect(result.replacements).toEqual([]);
+    expect(result.noAnchorGroups).toHaveLength(1);
+    expect(result.noAnchorGroups[0]).toContain('过梁');
+    expect(result.noAnchorGroups[0]).toContain('2 条');
+  });
+
+  it('单位不兼容：值属他条目但本条目权威单位不同 → 不动（不跨量纲替换）', async () => {
+    const markdown = '灭火器配置2个。';
+    const result = await arbitrateNumericConflicts(markdown, {
+      billFactLock: billLock([
+        lockEntry({ seq: 1, name: '灭火器', quantity: 30, unit: '套' }),
+        lockEntry({ seq: 2, name: '垃圾箱', quantity: 2, unit: '个' }),
+      ]),
+    });
+    expect(result.replacements).toEqual([]);
+    expect(result.noAnchorGroups).toEqual([]);
+  });
+
+  it('替换后值撞他条目量集不误回滚（复检与候选同源：值 ∈ 本条目量集即收敛）', async () => {
+    const markdown = '过梁现浇混凝土3.07m3。';
+    const result = await arbitrateNumericConflicts(markdown, {
+      billFactLock: billLock([
+        lockEntry({ seq: 1, name: '过梁', quantity: 4.5, unit: 'm3' }),
+        lockEntry({ seq: 2, name: '圈梁', quantity: 4.5, unit: 'm3' }),
+        lockEntry({ seq: 3, name: '管道垫层', quantity: 3.06, unit: 'm3' }),
+      ]),
+    });
+    expect(result.replacements).toHaveLength(1);
+    expect(result.replacements[0]).toMatchObject({ replacement: '4.5' });
+    expect(result.noAnchorGroups).toEqual([]);
+  });
+
+  it('槽位词豁免同源：名称后厚度类工艺参数不参与绑定裁决', async () => {
+    const markdown = '过梁高度3.07m，管道垫层3.06m3。';
+    const result = await arbitrateNumericConflicts(markdown, {
+      billFactLock: billLock([
+        lockEntry({ seq: 1, name: '过梁', quantity: 4.5, unit: 'm3' }),
+        lockEntry({ seq: 2, name: '管道垫层', quantity: 3.06, unit: 'm3' }),
+      ]),
+    });
+    expect(result.replacements).toEqual([]);
+  });
+});

@@ -30,6 +30,44 @@ export function retryDelayMs(error?: unknown, attempt = 0): number {
   return LLM_RETRY_DELAY_BASE_MS + Math.floor(Math.random() * LLM_RETRY_DELAY_JITTER_MS);
 }
 
+// r26 空响应风暴长退避（服务端瞬态故障骑窗）：实测服务端故障窗口内所有调用返回 HTTP 200 但内容为空
+//（reasoningTokens=0）；旧实现「客户端重试 1 次（固定 1.2~2s）+ 块 2 轮 + 章重试」把全部预算在窗口内
+// 几分钟烧尽 → 整批章节块失败阻断。全局连续空响应计数：任一调用成功即清零（健康期偶发单点空响应
+// 不触发）；连续 ≥3 次视为故障窗口信号，此后每次调用前长退避（20s/45s/60s 分级 + 0~5s jitter），
+// 把重试相位摊开骑过窗口，成功即恢复满速。
+const EMPTY_STORM_L1_MS = 20000;
+const EMPTY_STORM_L2_MS = 45000;
+const EMPTY_STORM_CAP_MS = 60000;
+let consecutiveEmptyResponses = 0;
+
+/** 空响应风暴退避基数（导出供单测）：<3 次=0（不惩罚健康期偶发）；3~5 次=20s；6~9 次=45s；≥10 次=60s */
+export function emptyStormBackoffMs(streak: number): number {
+  if (streak < 3) return 0;
+  if (streak < 6) return EMPTY_STORM_L1_MS;
+  if (streak < 10) return EMPTY_STORM_L2_MS;
+  return EMPTY_STORM_CAP_MS;
+}
+
+/** 连续空响应计数复位（导出供单测隔离） */
+export function resetEmptyStormStreak() {
+  consecutiveEmptyResponses = 0;
+}
+
+/** 当前连续空响应计数（导出供单测断言接线） */
+export function currentEmptyStormStreak() {
+  return consecutiveEmptyResponses;
+}
+
+/** 可中止的等待（用户中止立即 reject，不阻塞取消） */
+function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new Error('用户中止')); return; }
+    const onAbort = () => { clearTimeout(timer); reject(new Error('用户中止')); };
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 /**
  * 全局 LLM 并发上限：用户既定决策——LLM 并发调用不应受限制（实测模型端点并发量高，不会因并发限流）。
  * 默认完全解除上限（Number.POSITIVE_INFINITY，所有调用全并发、无排队）；llmMaxConcurrency
@@ -121,6 +159,8 @@ const warmedPrefixKeys = new Set<string>();
 function prefixWarmupEnabled() {
   return process.env.DOCUMENT_PREFIX_WARMUP !== '0';
 }
+/** 预热超时兜底（毫秒）：预热是缓存优化、不阻塞正确性；超时后照常发射组内请求并允许后续窗口重试预热 */
+const PREFIX_WARMUP_TIMEOUT_MS = 30_000;
 const PREFIX_SCHEDULE_DEFAULT_WINDOW_MS = 120;
 const PREFIX_SCHEDULE_ADAPTIVE_THRESHOLD = 16;
 const PREFIX_SCHEDULE_ADAPTIVE_WINDOW_MS = 500;
@@ -163,26 +203,59 @@ export function flushScheduledLaunches(batch: ScheduledLlmLaunch[]) {
     else groups.push([item]);
   }
   for (const group of groups) {
-    const candidate = group.find(item => item.warmup && item.warmupKey);
-    const needWarmup = prefixWarmupEnabled()
-      && group.length >= 2
-      && candidate?.warmup
-      && candidate.warmupKey
-      && !warmedPrefixKeys.has(candidate.warmupKey);
-    if (!needWarmup) {
-      for (const item of group) item.launch();
-      continue;
-    }
-    const warmupKey = candidate.warmupKey!;
-    warmedPrefixKeys.add(warmupKey);
-    void candidate.warmup!()
-      .catch(() => {
-        // 预热失败（瞬态网络等）：移除预热标记供后续窗口重试；正式请求照常发射，退化为无预热并发
+    try {
+      const candidate = group.find(item => item.warmup && item.warmupKey);
+      const needWarmup = prefixWarmupEnabled()
+        && group.length >= 2
+        && candidate?.warmup
+        && candidate.warmupKey
+        && !warmedPrefixKeys.has(candidate.warmupKey);
+      // 一次性门闩：超时兜底与预热 settle 竞争时保证组内请求只发射一次
+      let launched = false;
+      const launchGroup = () => {
+        if (launched) return;
+        launched = true;
+        for (const item of group) {
+          try {
+            item.launch();
+          } catch (error) {
+            // 单条发射异常不阻断同组其余请求（各调用方 await 的 Promise 由自身 launch 内部兜底）
+            console.error('[llm] 调度发射单条异常:', error);
+          }
+        }
+      };
+      if (!needWarmup) {
+        launchGroup();
+        continue;
+      }
+      const warmupKey = candidate!.warmupKey!;
+      warmedPrefixKeys.add(warmupKey);
+      // 预热超时兜底：预热是缓存优化、不得阻塞正确性——预热请求挂起（网络黑洞等永不 settle）时
+      // 超时后照常发射组内请求，并移除 warmed 标记供后续窗口重试。历史缺陷：预热永不 settle 时整组请求
+      // 永不发射，上层 await 永挂且零日志零网络（第 5 章循环 r28h 挂起实锤形态）。
+      const warmupTimeout = setTimeout(() => {
         warmedPrefixKeys.delete(warmupKey);
-      })
-      .then(() => {
-        for (const item of group) item.launch();
-      });
+        launchGroup();
+      }, PREFIX_WARMUP_TIMEOUT_MS);
+      const onWarmupSettled = (failed: boolean) => {
+        clearTimeout(warmupTimeout);
+        // 预热失败（瞬态网络等）：移除预热标记供后续窗口重试；正式请求照常发射，退化为无预热并发
+        if (failed) warmedPrefixKeys.delete(warmupKey);
+        launchGroup();
+      };
+      // 预热调用同步抛异常也降级为失败语义（rejected），不阻断组发射
+      const warmupPromise = (() => {
+        try {
+          return candidate!.warmup!();
+        } catch (error) {
+          return Promise.reject(error);
+        }
+      })();
+      void warmupPromise.then(() => onWarmupSettled(false)).catch(() => onWarmupSettled(true));
+    } catch (error) {
+      // 组级兜底：分组/预热准备阶段的同步异常不阻断其余组的发射
+      console.error('[llm] 调度发射组级异常:', error);
+    }
   }
 }
 
@@ -368,6 +441,16 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
     const EMPTY_CONTENT = Symbol('empty-content');
     const attemptOnce = async (maxTokensArg: number | undefined, thinkingTrimmingHint = false): Promise<string> => {
       if (options.signal?.aborted) throw new Error('用户中止');
+      // r26 空响应风暴长退避：连续空响应达阈值 → 本次调用前长退避（把重试相位摊开骑过服务端故障窗口）
+      const stormBase = emptyStormBackoffMs(consecutiveEmptyResponses);
+      if (stormBase > 0) {
+        const waitMs = stormBase + Math.floor(Math.random() * 5000);
+        if (options.diagnostics) {
+          options.diagnostics.llm.emptyStormWaits = (options.diagnostics.llm.emptyStormWaits || 0) + 1;
+          options.diagnostics.llm.lastInfo = `空响应风暴长退避 ${Math.round(waitMs / 1000)}s（连续空响应 ${consecutiveEmptyResponses} 次）`;
+        }
+        await sleepWithAbort(waitMs, options.signal);
+      }
       // 无客户端时间限制：调用仅受用户中止信号约束；服务端故障、偶发 stall（undici 默认
       // headers/body 超时 300s 后以明确错误返回）与 HTTP 状态码/网络错误一起由错误驱动重试处理
       const callSignal = options.signal;
@@ -434,6 +517,8 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
             // （空响应/正文截断类缺陷的根因观测点，4a）
             if (response.usage.reasoningTokens) stats.reasoningTokens = (stats.reasoningTokens || 0) + response.usage.reasoningTokens;
           }
+          // 空响应风暴计数清零：任一成功即恢复满速（健康期偶发空响应不累积触发长退避）
+          consecutiveEmptyResponses = 0;
           return content;
         }
         throw EMPTY_CONTENT;
@@ -455,6 +540,8 @@ export async function callDocumentLlm(system: string, prompt: string, jsonOnly =
         return content;
       } catch (error) {
         lastError = error;
+        // r26 空响应风暴计数：故障窗口内每次空响应都计入（任一成功即清零，见成功路径）
+        if (error === EMPTY_CONTENT) consecutiveEmptyResponses += 1;
         if (options.signal?.aborted) throw new Error('用户中止', { cause: error });
         if ((error !== EMPTY_CONTENT && !isTransientLlmError(error)) || attempt >= maxAttempts) break;
         if (options.diagnostics) options.diagnostics.llm.retries += 1;

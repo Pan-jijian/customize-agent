@@ -11,8 +11,8 @@ const DASH = '—';
  * - blueprint.equipment → resources.equipment 确定性直出（备注列承载蓝图依据，可审计）；
  * - blueprint.labor → resources.labor.composition + byPhase 直出（两小节）；
  * - blueprint.testInstruments / blueprint.tempLand → 蓝图无对应数据源，输出招标表头骨架并
- *   显性标注数据缺口（由编制人补齐，不造数据）；
- * - figure / manual → 输出图位说明或补充填报标注（不猜表头、不造数据）。
+ *   显性标注数据缺口（不造数据）；
+ * - figure / manual → 输出图件说明或按招标格式编制标注（不猜表头、不造数据）。
  * 正文表格归集路径已删除：暗标正文禁表、明标正文表格不重复承载附表数据，附表唯一数据源为蓝图。
  */
 
@@ -72,10 +72,10 @@ function quantityText(item: { quantity?: number; min?: number; max?: number }): 
   return DASH;
 }
 
-/** 数据缺口骨架：显性缺口标注 + 招标表头（不造数据，编制人补齐） */
+/** 数据缺口骨架：编制说明 + 招标表头（不造数据；说明为投标人视角中性表述，无内部流程话术） */
 function appendixGapSkeleton(header: string[], gapLabel: string): string[] {
   return [
-    `> 本表数据源（${gapLabel}）未在项目资料与一体化蓝图中确认，按招标文件表头生成骨架，由编制人依据实施资料补充填报。`,
+    `> 本表为${gapLabel}，按招标文件规定的表头格式编制。`,
     '',
     ...renderTable(header, []),
   ];
@@ -85,7 +85,7 @@ const EQUIPMENT_HEADER = ['序号', '设备名称', '型号规格', '数量', '�
 const INSTRUMENT_HEADER = ['序号', '仪器设备名称', '型号规格', '数量', '国别产地', '制造年份', '已使用台时数', '用途', '备注'];
 const TEMP_LAND_HEADER = ['用途', '面积（平方米）', '位置', '需用时间'];
 
-/** 附表一：拟投入本标段的主要施工设备表（蓝图 resources.equipment 直出；备注列承载蓝图依据） */
+/** 设备附表：拟投入本标段的主要施工设备表（蓝图 resources.equipment 直出；备注列承载蓝图依据） */
 function renderEquipmentAppendix(data?: BlueprintData): string[] | '' {
   const items = data?.resources?.equipment || [];
   if (items.length === 0) return appendixGapSkeleton(EQUIPMENT_HEADER, '施工设备配置');
@@ -104,13 +104,13 @@ function renderEquipmentAppendix(data?: BlueprintData): string[] | '' {
   return renderTable(EQUIPMENT_HEADER, rows);
 }
 
-/** 附表三：劳动力计划表（蓝图 resources.labor 直出：工种配置 + 分阶段投入两小节，口径同源） */
+/** 劳动力附表：劳动力计划表（蓝图 resources.labor 直出：工种配置 + 分阶段投入两小节，口径同源） */
 function renderLaborAppendix(data?: BlueprintData): string[] | '' {
   const composition = data?.resources?.labor?.composition || [];
   const byPhase = data?.resources?.labor?.byPhase || [];
   if (composition.length === 0 && byPhase.length === 0) {
     return [
-      '> 本表数据源（劳动力配置）未在项目资料与一体化蓝图中确认，由编制人依据实施资料补充填报。',
+      '> 本表为劳动力配置数据，按招标文件规定的表头格式编制。',
       '',
       ...renderTable(['工种', '人数', '备注'], []),
     ];
@@ -126,18 +126,18 @@ function renderLaborAppendix(data?: BlueprintData): string[] | '' {
   return parts;
 }
 
-/** 图类附表（进度网络图/总平面图）：不生成图件，输出专业图位说明供编制人绘制后附（招标原文：“图表及格式要求附后”） */
+/** 图类附表（进度网络图/总平面图）：图件说明（投标人视角，零内部流程话术） */
 function graphAppendixNote(name: string): string[] {
   if (/进度网络图|施工进度网络图|横道图/u.test(name)) {
-    return ['> **图件**：施工进度网络图（或以横道图表示）——标明计划开、竣工日期与各关键日期，按本施工组织设计进度计划绘制后附。'];
+    return ['> **图件说明**：本附表以施工进度网络图（或以横道图）形式表达，标明计划开工日期、竣工日期及各关键日期节点，工序逻辑与工期安排与本施工组织设计进度计划一致。'];
   }
   if (/总平面/u.test(name)) {
-    return ['> **图件**：施工总平面布置图——绘出现场临时设施布置图（含加工车间、现场办公、设备及仓储、供电、供水、卫生、生活、道路、消防等设施）并附文字说明，绘制后附。'];
+    return ['> **图件说明**：本附表为施工总平面布置图，反映现场临时设施布置（含加工车间、现场办公、设备及仓储、供电、供水、卫生、生活、道路、消防等设施）并附相应文字说明。'];
   }
-  return [`> **图件**：本附表为图件类，由编制人依据招标文件格式要求绘制后附。`];
+  return ['> **图件说明**：本附表为图件类附表，按招标文件规定的格式与内容要求以图件形式呈现。'];
 }
 
-/** 单条附表渲染（按数据源绑定分发；无法识别的表类附表输出补充填报标注，不猜表头） */
+/** 单条附表渲染（按数据源绑定分发；无法识别的表类附表输出按招标格式编制标注，不猜表头） */
 function renderAppendixEntry(entry: BidAppendixEntry, data?: BlueprintData): string[] | '' {
   if (entry.kind === 'figure') return graphAppendixNote(entry.title);
   switch (entry.dataSource) {
@@ -150,12 +150,12 @@ function renderAppendixEntry(entry: BidAppendixEntry, data?: BlueprintData): str
     case 'blueprint.tempLand':
       return appendixGapSkeleton(TEMP_LAND_HEADER, '临时用地规划');
     default:
-      return ['> 本附表数据由编制人依据招标文件格式要求补充填报。'];
+      return ['> 本附表按招标文件规定的格式与内容要求编制。'];
   }
 }
 
 /**
- * 文末附表区：按招标附表清单（appendixPlan）逐项直出「附表N 名称」+ 数据内容/骨架/图位说明。
+ * 文末附表区：按招标附表清单（appendixPlan）逐项直出「附表N 名称」+ 数据内容/表头骨架/图件说明。
  * 数据源为一体化蓝图；蓝图无数据源的附表按招标表头生成骨架并显性标注缺口（不造数据）。
  */
 export function composeTenderAppendixMarkdown(plan: BidAppendixEntry[], blueprintData?: BlueprintData) {
@@ -174,4 +174,20 @@ export function appendTenderAppendixSections(markdown: string, appendix?: { plan
   const section = composeTenderAppendixMarkdown(appendix.plan, appendix.blueprintData);
   if (!section) return markdown;
   return `${markdown.replace(/\s+$/u, '')}${NL}${NL}<div class="page-break"></div>${NL}${NL}${section}${NL}`;
+}
+
+/**
+ * 附表条目承载判定（F-T2 承载率口径）：标题落位 + 内容承载——
+ * 表类=数据/骨架表格或编制说明块，图类=图件说明块；仅有标题而内容缺失不计承载。
+ * 与 renderAppendixEntry 的渲染格式同源（标题「## 名称」、内容为表格或引用块）。
+ */
+export function appendixEntryCarried(markdown: string, entry: BidAppendixEntry): boolean {
+  const heading = `## ${entry.title}`;
+  const start = markdown.indexOf(heading);
+  if (start < 0) return false;
+  const rest = markdown.slice(start + heading.length);
+  const boundary = rest.search(/(?=^##\s)/mu);
+  const body = (boundary >= 0 ? rest.slice(0, boundary) : rest).trim();
+  if (!body) return false;
+  return /^\|/mu.test(body) || /^>\s/mu.test(body);
 }

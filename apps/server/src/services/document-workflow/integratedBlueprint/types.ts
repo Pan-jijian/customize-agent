@@ -144,8 +144,12 @@ export interface BlueprintQuantity {
   sourceFile?: string;
   seq?: number;
   /** 分村/分工程明细（V5 P1：同名条目按 villageGroup/section 分组的分项值；value=全部合计）。
-   * 分村多值合法性判定与跨工程同值复制检测的依据（探测到分组值才算合法分层口径） */
+   * 分村多值合法性判定与跨工程同值复制检测的依据（探测到分组值才算合法分层口径 ） */
   groups?: Array<{ group: string; value: number }>;
+  /** 规格-数量拆分（R20 路灯「100W 共118套」根因治理）：同名条目跨规格时按特征描述规格 token
+   * （100W/120W 等）分组的各规格小计；值=名称合计的共享规格组（如全组同高 4.5m）已过滤，≥2 组才保留。
+   * 写作层逐项照抄依据（禁将规格小计写为名称合计、禁合计挂单一规格）+ 规格-数量绑定断言的权威 */
+  specBreakdown?: Array<{ spec: string; value: number }>;
 }
 
 export interface BlueprintInspectionBatch {

@@ -358,7 +358,7 @@ export function buildBlueprintData(input: {
   const strategy = input.strategy;
   const quantities = deriveQuantitiesFromBoq(boq);
   const redLineFacts = extractRedLineFacts(boq);
-  // 自然村数量红线事实（P2.4）：项目名正则提取（如「20个美丽宜居自然村」）优先，降级清单分组数；拦截跨项目残留「9 个自然村」
+  // 自然村数量红线事实（P2.4）：项目名正则提取（村数表述形如「N个×××自然村」）优先，降级清单分组数；拦截跨项目残留「9 个自然村」
   const villageCount = extractVillageCount(input.projectName, input.basicFacts || '') || boq.villages.length;
   if (villageCount > 0) {
     redLineFacts.push({ key: '自然村数量', value: `${villageCount} 个自然村`, source: '招标文件项目名称（清单自然村分组兜底）' });
@@ -409,7 +409,7 @@ export function buildBlueprintData(input: {
     milestones,
     resources: { labor, equipment },
     materialsPlan,
-    fundPlan: { wageRule: '工资性工程款按合造价〔2022〕8号执行', usagePlan: '按进度分阶段使用' },
+    fundPlan: { wageRule: '工资性工程款按工程所在地造价管理规定执行', usagePlan: '按进度分阶段使用' },
     testPlan: [],
     earthworkBalance,
     tempUtilities,

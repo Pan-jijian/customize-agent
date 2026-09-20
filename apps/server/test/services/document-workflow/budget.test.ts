@@ -427,6 +427,26 @@ describe('documentBudgetIssues', () => {
     expect(issues.some(issue => issue.level === 'error' && issue.message.includes('超过目标字数'))).toBe(true);
   });
 
+  it('r26 B5：minimum 超幅 24%（LLM 波动区间）→ warning 不阻断', () => {
+    const budget = makeBudget({ mode: 'minimum', targetChars: 50000, minChars: 50000 });
+    const issues = documentBudgetIssues(budget, '字'.repeat(62000));
+    expect(issues.some(issue => issue.level === 'warning' && issue.message.includes('明显超出目标字数'))).toBe(true);
+    expect(issues.some(issue => issue.level === 'error')).toBe(false);
+  });
+
+  it('r26 B5：minimum 超幅 ≥40%（实质性膨胀）→ error 阻断', () => {
+    const budget = makeBudget({ mode: 'minimum', targetChars: 50000, minChars: 50000 });
+    const issues = documentBudgetIssues(budget, '字'.repeat(72000));
+    expect(issues.some(issue => issue.level === 'error' && issue.message.includes('严重超出目标字数'))).toBe(true);
+  });
+
+  it('r26 B5：minimum 超幅 17% → 仅 warning（不阻断）', () => {
+    const budget = makeBudget({ mode: 'minimum', targetChars: 50000, minChars: 50000 });
+    const issues = documentBudgetIssues(budget, '字'.repeat(58500));
+    expect(issues.length).toBeGreaterThanOrEqual(1);
+    expect(issues.every(issue => issue.level === 'warning')).toBe(true);
+  });
+
   it('篇幅达标 → 不告警', () => {
     const budget = makeBudget({ minChars: 1000, maxChars: 5000 });
     expect(documentBudgetIssues(budget, '字'.repeat(2000))).toEqual([]);

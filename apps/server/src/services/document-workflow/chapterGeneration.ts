@@ -9,9 +9,9 @@ import { callDocumentLlm, callDocumentLlmJson, contextLayerChars, getDocumentLlm
 import { alignSimilarHeadingsToPlan, dedupeRepeatedSubsections, findDuplicateH4Titles, findExtraneousBlockTitles, normalizeSubsectionTitleForDedup, stringifyFactValue, stripExtraneousBlockHeadings, throwIfAborted } from './utils';
 import { measureGenerationStep } from './rolePipeline';
 import { normalizePlannedSections, professionalSectionTaskCard, sectionTitleEquivalent } from './promptRuleExtraction';
-import { tablePlansPrompt, unassignedSectionTablePlans } from './constructionOrgTablePlan';
+import { diagramRequirementsPrompt, tablePlansPrompt, unassignedSectionTablePlans } from './constructionOrgTablePlan';
 import { bidCompositionWritingRules, isBodyTableForbidden, type BidCompositionSpec } from './bidComposition';
-import { constructionOrgBonusModulePrompt, constructionOrgChapterRulePrompt } from './constructionOrgQualityRules';
+import { constructionOrgBonusModulePrompt, constructionOrgChapterRulePrompt, constructionOrgProjectTypePrompt } from './constructionOrgQualityRules';
 import { buildProcessKnowledgePrompt, matchProcessKnowledgeCards } from './constructionProcessKnowledge';
 import { renderBlueprintBlockSlice, renderBlueprintDataTextForBlock } from './integratedBlueprint';
 import type { BlueprintChapter, BlueprintData } from './integratedBlueprint';
@@ -383,9 +383,14 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     : '本章没有预设小节；请按用户提示词、模板章节、角色要求和绑定材料自然组织正文。';
   const sectionBudgetInstruction = buildSectionBudgetInstruction(chapter, options.targetWords || options.minWords || 0, options.sectionQuotas);
   // 标书编制规格（阶段 1 判定）：暗标正文禁表（招标要求）时表格计划指令短路（不注入表格硬性要求）
-  const tablePlanInstruction = isBodyTableForbidden(options.bidComposition) ? '' : tablePlansPrompt(chapter);
+    const tablePlanInstruction = isBodyTableForbidden(options.bidComposition) ? '' : tablePlansPrompt(chapter);
+    // R20 C1 图类呈现指令（明标：文字框图/时间轴承载；暗标正文禁图表时短路，图类归附表区）
+    const diagramInstruction = isBodyTableForbidden(options.bidComposition) ? '' : diagramRequirementsPrompt(chapter);
   const constructionOrgRuleInstruction = constructionOrgChapterRulePrompt(chapter);
   const constructionOrgBonusInstruction = constructionOrgBonusModulePrompt(chapter);
+  // D-T9 专业工序链约束（两级判定：章标题+小节标题优先，回退资料文本——资料内容驱动，不依赖
+  // 项目名称）：与本节域匹配的工序链组织要求（混合项目中公厕装饰装修章只受装饰约束）
+  const constructionOrgProjectTypeInstruction = constructionOrgProjectTypePrompt({ templateName: template.name, requirement, chapters: [chapter], materialText: projectContext });
   // 锚定专项规则（章标题+要点清单整体判别）：blockChapter.sections 是主题块的 H4 要点标题，
   // 统一按章标题+要点清单注入分部分项/主要施工内容专项要求（历史缺陷：仅按小节标题判别时拿不到专项规则导致概略）
   const anchoredRuleInstructions = chapterAnchoredRules(chapter.title, chapter.sections || []);
@@ -453,8 +458,10 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     sectionInstruction,
     sectionBudgetInstruction,
     tablePlanInstruction,
+    diagramInstruction,
     constructionOrgRuleInstruction,
     constructionOrgBonusInstruction,
+    constructionOrgProjectTypeInstruction,
     ...anchoredRuleInstructions,
     // s1-slim 块级聚焦：蓝图参数桶（块 token 条目级筛选后）与蓝图片段（只展开块相关工作包）在此注入——
     // 块变化段（各块互不相同、本就不可缓存），不影响上文共享前缀；行文案与全量渲染同一来源
@@ -503,8 +510,10 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
       sectionInstruction,
       sectionBudgetInstruction,
       tablePlanInstruction,
+      diagramInstruction,
       constructionOrgRuleInstruction,
       constructionOrgBonusInstruction,
+      constructionOrgProjectTypeInstruction,
       ...anchoredRuleInstructions,
       // s1-slim 块级聚焦两段计入 L3（块变化段；与上方 prompt 组装同源表达式）
       options.blueprintDataText || '',
@@ -1704,7 +1713,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
             extraneous: findExtraneousBlockTitles(withBlockShell, block.title, sectionTitles, [...otherBlockTitleSet], [...block.subPoints.flatMap(point => point.sources), ...blockSkeletonNames]),
           };
         });
-        // 4.40 块写作字数双向硬合同 = [0.85,1.15]×块目标（详见下方字数判定段的完整口径）
+        // 4.40 块写作字数双向硬合同 = [0.85,1.15]×块目标（4.51 末轮容差 1.2×；详见下方字数判定段的完整口径）
         // P4：首轮确定性错误数值阻断重试（feedback 携带正确值）；第二轮仍错误时放行（避免无限重试，
         // 错误数值交由下游 Reviewer/跨章一致性审查兜底）
         const numericBlocking = attempt === 0 && numericReconciliation.mismatched.length > 0;
@@ -1720,14 +1729,25 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         //  - 欠产侧 [0.7,0.85)：记录放行（规划层已把块预算校准到模型自然输出区间，微缺口重写
         //    收敛期望为负）；<0.7 仅首轮（attempt 0）阻断补足重写一次，二轮仍欠产放行交终检链兜底
         //    （照 numericBlocking「首轮阻断、二轮放行」成熟模式）；
-        //  - 超产侧 >1.15：任何轮次一律阻断——首轮阻断携压缩指令重写，二轮仍超产 → 块失败
-        //    （上层隔离重写，仍失败即章阻断、文档显式失败：零降级，宁缺毋假）。不设「二轮放行」：
-        //    提示词已下达同一合同区间（lengthContractLine），压缩是确定性可行的收敛方向（合并同类
-        //    工序/删除重复铺陈），与欠产侧「补足需新事实」的不可控性有本质区别。
+        //  - 超产侧 >1.15：前轮（attempt 0）一律阻断携压缩指令重写；4.51 末轮容差（r28 实机修正）：
+        //    压缩反馈（目标 0.8~0.95×）下模型收敛不完全（机械块二轮 2141 字=1.19×、概况块二轮
+        //    1496 字仅超合同线 1 字均仍被阻断）——「末轮仍超产 → 块失败」在单块章上放大为整章阻断、
+        //    文档缺章，损失远大于微超产本身；末轮放宽到 1.2× 容差线内接受（记录观测，交终检链复核），
+        //    仍 >1.2× 才判块失败（上层隔离重写，仍失败即章阻断、文档显式失败：严重超产零降级、
+        //    宁缺毋假不变）。1.2× 与章级超产审计线（stageChapterLoop 章完成率 >1.2× 告警）及文档级
+        //    阻断线（目标总额 +20%）分层对齐：块容差只吸收末轮抖动，累计放大由章/文档级观测兜底。
+        const overProduceLine = Math.ceil(block.targetWords * 1.15);
+        // 4.51 末轮容差线：仅最后一轮生效（前轮仍 1.15× 全阻断，压缩收敛方向不变）
+        const overProduceToleranceLine = Math.ceil(block.targetWords * 1.2);
+        const effectiveOverLine = attempt === blockMaxAttempts - 1 ? overProduceToleranceLine : overProduceLine;
         const underProduceBlocking = attempt === 0 && chars < Math.floor(block.targetWords * 0.7);
-        const overProduceBlocking = chars > Math.ceil(block.targetWords * 1.15);
+        const overProduceBlocking = chars > effectiveOverLine;
         if (underProduceBlocking || overProduceBlocking) {
-          console.error(`[gen][block-qc] 篇幅失守阻断 attempt=${attempt}（${chars} 字 vs 块目标 ${block.targetWords} 字，欠产线 <${Math.floor(block.targetWords * 0.7)} / 超产线 >${Math.ceil(block.targetWords * 1.15)}）${attempt > 0 && overProduceBlocking ? '［二轮仍超产 → 块失败］' : ''}: ${block.title}`);
+          console.error(`[gen][block-qc] 篇幅失守阻断 attempt=${attempt}（${chars} 字 vs 块目标 ${block.targetWords} 字，欠产线 <${Math.floor(block.targetWords * 0.7)} / 超产线 >${effectiveOverLine}）${attempt > 0 && overProduceBlocking ? '［二轮仍超产 → 块失败］' : ''}: ${block.title}`);
+        } else if (chars > overProduceLine) {
+          // 4.51 末轮容差放行观测（仅末轮可达：前轮超合同线即入上方阻断分支）
+          console.error(`[gen][block-qc] 篇幅超产末轮容差放行（${chars} 字 vs 块目标 ${block.targetWords} 字，合同超产线 ${overProduceLine} / 容差线 ${overProduceToleranceLine}）: ${block.title}`);
+          if (input.diagnostics) input.diagnostics.llm.lastInfo = `块篇幅超产末轮容差放行：${block.title}（${chars} 字，合同超产线 ${overProduceLine} / 容差线 ${overProduceToleranceLine}）`;
         } else if (chars < Math.floor(block.targetWords * 0.85)) {
           console.error(`[gen][block-qc] 篇幅欠产接受区放行（${chars} 字 vs 块目标 ${block.targetWords} 字，达标区 ${Math.floor(block.targetWords * 0.85)}~${Math.ceil(block.targetWords * 1.15)}）: ${block.title}`);
         }
@@ -1774,10 +1794,10 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           // 修复后字数达标即通过——标题层问题由代码确定性修复，不因整块删除掉档触发重试/失败
           const repaired = stripExtraneousBlockHeadings(dedupeRepeatedSubsections(withBlockShell), block.title, sectionTitles, [...block.subPoints.flatMap(point => point.sources)]);
           const repairedChars = documentTextLength(repaired);
-          // 字数合同同步复核（4.40 双向硬合同）：修复只会减字数（标题剥离会掉档）——修复后仍超产
-          // （>1.15×）不得经本通道放行（超产侧无豁免轮次）；欠产侧 <0.7× 仅首轮不放行、二轮放行
-          // （与直通路径同一口径）
-          const repairedOverProduce = repairedChars > Math.ceil(block.targetWords * 1.15);
+          // 字数合同同步复核（4.40 双向硬合同 + 4.51 末轮容差）：修复只会减字数（标题剥离会掉档）——
+          // 修复后仍超产（前轮 >1.15× / 末轮 >1.2× 容差线，与直通路径同一口径）不得经本通道放行；
+          // 欠产侧 <0.7× 仅首轮不放行、二轮放行（与直通路径同一口径）
+          const repairedOverProduce = repairedChars > effectiveOverLine;
           const repairedUnderProduce = repairedChars < Math.floor(block.targetWords * 0.7);
           if (!repairedOverProduce && (attempt > 0 || !repairedUnderProduce)) {
             if (input.diagnostics && (extraneous.length > 0 || duplicates.length > 0)) input.diagnostics.llm.lastInfo = `块标题层已确定性修复：${block.title}（清单外 ${extraneous.length} 个、重复 H4 ${duplicates.length} 个；${chars}→${repairedChars} 字）`;

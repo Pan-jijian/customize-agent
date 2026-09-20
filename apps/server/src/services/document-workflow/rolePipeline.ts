@@ -166,6 +166,11 @@ export interface AnchorSpec {
   endText?: string;
   /** 补写定位模式：replacement 必须以锚点原文开头逐字保留，随后追加补写内容 */
   append?: boolean;
+  /** 章末追加模式（append 的定位语义变体）：锚点仅作存在性校验，replacement 追加到章末，
+   * 锚点原文原位不动——适用于「章末标题行后仍有其正文」的补写场景：锚点行后插入会把该
+   * 标题行切成空壳（r28j：s28i 第五章 H4 后接正文，补写插入后 emptyHeadingCount 19→20
+   * → P12 回滚「修复 patch 未落地」）；锚点行后插入仅在其为章末行时才与章末追加等价 */
+  appendAt?: 'chapter-end';
 }
 
 function uniqueTextRange(content: string, patch: ChapterMarkdownPatch) {
@@ -370,6 +375,45 @@ function applyAnchorPatch(input: { content: string; anchor: string; replacement?
   return { content: sanitizeFormalMarkdown(removeUnwantedDrawingImages(next, input.forbidDrawingImages)), applied: next !== input.content };
 }
 
+/** 章末追加（append 的定位语义变体）：锚点仅作存在性校验，replacement 追加到章末，锚点原文原位不动。
+ * 适用场景：锚点（章末标题行）后仍接有其正文——锚点行后插入会把该标题行切成空壳（r28j 实测：
+ * s28i 第五章 H4「公厕及配套用房土建施工」后接正文，补写插入后 emptyHeadingCount 19→20 上升 →
+ * P12 回滚「修复 patch 未落地」）；章末追加语义下锚点行与其后随正文均原位保留，补写小节落章尾。
+ * LLM 复述锚点前缀（【章末追加】指令要求不复述，输出仍偶有复述）由 stripAnchorEcho 剥离去重。 */
+export function applyChapterEndAppend(input: { content: string; anchor: string; replacement?: string; title: string; forbidDrawingImages: boolean }) {
+  const addition = input.replacement?.trim() ?? '';
+  if (addition.length === 0) return { content: input.content, applied: false };
+  const anchorCompact = input.anchor.replace(/\s+/gu, '');
+  if (anchorCompact.length < 4) return { content: input.content, applied: false };
+  // 锚点仅作存在性校验：此处缺席（LLM 改坏了锚点行/补错章）即拒绝，不写任何内容
+  if (!input.content.replace(/\s+/gu, '').includes(anchorCompact)) return { content: input.content, applied: false };
+  // 追加模式预算放大：追加内容只会使正文变长，无破坏性（与 applyAnchorPatch appendMode 同口径）
+  const budget = Math.max(4000, Math.min(24000, Math.ceil(documentTextLength(input.content) * 1.2)));
+  if (addition.length > budget) return { content: input.content, applied: false };
+  if (input.forbidDrawingImages && /!\[[^\]]*\]\([^)]*\)/iu.test(addition)) return { content: input.content, applied: false };
+  const body = stripAnchorEcho(addition, anchorCompact) ?? addition;
+  if (body.trim().length === 0) return { content: input.content, applied: false };
+  const next = sanitizeFormalMarkdown(removeUnwantedDrawingImages(`${input.content.replace(/\s+$/u, '')}\n\n${body.trim()}\n`, input.forbidDrawingImages));
+  if (!markdownStructureValid(next, input.title, input.content)) return { content: input.content, applied: false };
+  if (documentTextLength(next) < Math.floor(documentTextLength(input.content) * 0.65)) return { content: input.content, applied: false };
+  return { content: next, applied: next !== input.content };
+}
+
+/** 剥离 LLM 补写输出开头的锚点复述前缀（compact 逐字消费 + 跳过空白）：完整复述锚点 → 返回剩余
+ * 正文；未复述或复述不完整 → undefined（调用方回退整体使用）。防止锚点行被二次写入章尾产生重复标题。 */
+function stripAnchorEcho(replacement: string, anchorCompact: string): string | undefined {
+  let pi = 0;
+  let ri = 0;
+  while (pi < anchorCompact.length && ri < replacement.length) {
+    const char = replacement[ri];
+    if (/\s/u.test(char)) { ri += 1; continue; }
+    if (char !== anchorCompact[pi]) return undefined;
+    pi += 1;
+    ri += 1;
+  }
+  return pi === anchorCompact.length ? replacement.slice(ri).trimStart() : undefined;
+}
+
 /** A1 区间锚点整节重写：标题行（startAnchor）到结束锚点（endText 起始，不含）整体替换为 replacement。
  * 结构类缺陷（主要施工内容结构/重复小节合并）句子级 patch 修不了结构，锚点=小节标题行+下一同级标题，
  * LLM 只输出该小节改写后的完整正文（含标题行），杜绝「补写段与旧正文并存」的重复污染。 */
@@ -415,10 +459,11 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
   const anchorListLine = (spec: AnchorSpec, index: number) => {
     const original = input.anchorTexts?.[index];
     const isRange = typeof original === 'object' && original.append !== true;
-    const marker = spec.append ? '【补写定位】' : isRange ? '【整节重写】' : '';
+    const marker = spec.appendAt === 'chapter-end' ? '【章末追加】' : spec.append ? '【补写定位】' : isRange ? '【整节重写】' : '';
     return `${index}. ${marker}“${spec.text}”${isRange && spec.endText !== undefined ? `（截至“${spec.endText}”之前，结尾标题不替换）` : ''}`;
   };
-  const hasAppendAnchor = (input.anchorTexts || []).some(spec => typeof spec === 'object' && spec.append === true);
+  const hasAppendAnchor = (input.anchorTexts || []).some(spec => typeof spec === 'object' && spec.append === true && spec.appendAt !== 'chapter-end');
+  const hasChapterEndAppend = (input.anchorTexts || []).some(spec => typeof spec === 'object' && spec.appendAt === 'chapter-end');
   const hasRangeAnchor = (input.anchorTexts || []).some(spec => typeof spec === 'object' && spec.append !== true);
   // 证据注入预算：与写作侧同口径（evidencePromptBudgetForTarget）。历史缺陷：修复器全量注入每章
   // 2.8万-3.3万字符证据 → 超上下文窗口 400 失败 → 修复闭环瘫痪（真实生成 75 次失败、瞬态重试 0 次）
@@ -438,6 +483,7 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
     anchorMode
       ? ['系统已提供需要改写/删除的目标原文清单（按序号对应）。目标原文已从正文精确摘录，你只需逐条输出改写后的替换文本；replacement 只输出改写后的正文内容，禁止复述或修改目标原文以外的任何内容。如某条目标原文当前已不存在或无需修改，跳过该条不输出。',
         hasAppendAnchor ? '标注【补写定位】的目标原文是章节内的定位句：replacement 必须以该目标原文开头逐字保留，随后追加补写内容；禁止删除或改写目标原文本身。' : '',
+        hasChapterEndAppend ? '标注【章末追加】的目标原文只是补写定位标记：直接输出要追加到本章末尾的新小节正文（含新小节标题行），不要复述目标原文，不得改动或删除任何已有内容。' : '',
         hasRangeAnchor ? '标注【整节重写】的目标原文是小节标题行：replacement 必须以该标题行开头（逐字保留标题行），随后输出该小节改写后的完整正文（含修复后的结构与全部保留事实），不得输出该小节以外的任何内容；清单中给出的“截至”标题行不属于替换范围，不得出现在 replacement 中。' : '',
       ].filter(Boolean).join('\n')
       : '每个 patch 必须能通过 originalText 或 targetStart/targetEnd 在原章节中唯一定位；replacement 只替换该局部片段。',
@@ -567,7 +613,9 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
       const index = Number(patch.anchorIndex);
       const spec = Number.isInteger(index) ? anchorSpecs[index] : undefined;
       if (spec && spec.text) {
-        const anchorApplied = spec.endText !== undefined
+        const anchorApplied = spec.appendAt === 'chapter-end'
+          ? applyChapterEndAppend({ content, anchor: spec.text, replacement: patch.replacement, title: input.chapter.title, forbidDrawingImages: input.forbidDrawingImages })
+          : spec.endText !== undefined
           ? applyAnchorRangePatch({ content, startAnchor: spec.text, endAnchor: spec.endText, replacement: patch.replacement, title: input.chapter.title, forbidDrawingImages: input.forbidDrawingImages })
           : applyAnchorPatch({ content, anchor: spec.text, replacement: patch.replacement, title: input.chapter.title, forbidDrawingImages: input.forbidDrawingImages, appendMode: spec.append === true });
         content = anchorApplied.content;

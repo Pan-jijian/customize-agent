@@ -72,4 +72,61 @@ describe('enforceFiveElementClosureBoost（五要素闭合链尾补强）', () =
       expect(after).toBe(before);
     }
   });
+
+  it('段末行紧邻表格（表题行形态）时补句落上方正文行末，表题行不被污染', () => {
+    const body = '公厕装饰按先基础、再主体、后饰面的顺序组织作业。';
+    const markdown = [
+      body,
+      '表4-1 主要机械投入计划',
+      '',
+      '| 机械名称 | 数量 | 用途 |',
+      '| --- | --- | --- |',
+      '| 挖掘机 | 2台 | 土方开挖 |',
+    ].join('\n');
+    const result = enforceFiveElementClosureBoost(markdown);
+    expect(result).not.toBeNull();
+    expect(result?.fixedCount).toBe(1);
+    const lines = (result?.markdown || '').split('\n');
+    const captionIdx = lines.findIndex(line => line.trim() === '表4-1 主要机械投入计划');
+    expect(captionIdx).toBe(1);
+    // 补句拼在表题行上方正文行末（表格块零触碰），表题行保持原样
+    expect(lines[0]!.startsWith(body)).toBe(true);
+    expect(lines[0]!.length).toBeGreaterThan(body.length);
+    expect(lines[captionIdx + 2]).toBe('| 机械名称 | 数量 | 用途 |');
+    expect(lines[captionIdx + 4]).toBe('| 挖掘机 | 2台 | 土方开挖 |');
+  });
+
+  it('段内全为标题/表题行时跳过本段不补（结构行零风险）', () => {
+    expect(enforceFiveElementClosureBoost('#### 6.2.3 苗木栽植成活与养护及成品保护措施落实情况')).toBeNull();
+  });
+});
+
+describe('enforceFiveElementClosureBoost D-T6 ③ 长段防护（拼接后超 370 字符放弃补写）', () => {
+  /** 同三要素构成（role+frequency+acceptance，缺 plan/process）：短版正常补写、长版触发防护 */
+  const composeBlock = (padTimes: number) => {
+    let block = THREE_HIT_BLOCK;
+    for (let i = 0; i < padTimes; i += 1) block += ZERO_HIT_BLOCK;
+    return block;
+  };
+
+  it('拼接后超 370 的长块跳过补写（保持原样零变更）', () => {
+    // THREE(66) + 6×ZERO(48) = 354 字符：拼接后必超 370（任一候选句 ≥ 29 字）且 ≤ 380（不触发链尾切分）
+    const longBlock = composeBlock(6);
+    expect(hitsOf(longBlock)).toBe(3);
+    expect(longBlock.length).toBe(354);
+    expect(enforceFiveElementClosureBoost(longBlock)).toBeNull();
+    // 幂等：同条件复跑仍零变更
+    expect(enforceFiveElementClosureBoost(longBlock)).toBeNull();
+  });
+
+  it('防护边界对照：同要素构成的短块正常补写（拼接后行长 ≤ 370）', () => {
+    const shortBlock = composeBlock(1);
+    expect(hitsOf(shortBlock)).toBe(3);
+    const result = enforceFiveElementClosureBoost(shortBlock);
+    expect(result).not.toBeNull();
+    expect(result?.fixedCount).toBe(1);
+    const lines = (result?.markdown || '').split('\n');
+    expect(lines[0]!.length).toBeLessThanOrEqual(370);
+    expect(hitsOf(result?.markdown || '')).toBeGreaterThanOrEqual(4);
+  });
 });

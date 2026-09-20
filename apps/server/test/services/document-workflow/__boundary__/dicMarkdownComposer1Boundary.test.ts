@@ -77,9 +77,34 @@ describe('M1 removeUnwantedDrawingImages', () => {
     expect(removeUnwantedDrawingImages(md, true)).toBe('');
   });
 
-  it('非图纸图（现场照片）→ 保留', () => {
+  it('非图纸图（现场照片）→ 同样删除（F-T3 收紧：暗标正文一律纯文字）', () => {
     const md = '![现场照片](f.png)';
-    expect(removeUnwantedDrawingImages(md, true)).toBe(md);
+    expect(removeUnwantedDrawingImages(md, true)).toBe('');
+  });
+
+  it('F-T3：行内图片（句中）→ 剥离图片语法保留文字', () => {
+    const md = '施工前![现场照片](f.png)应完成交接。';
+    expect(removeUnwantedDrawingImages(md, true)).toBe('施工前应完成交接。');
+  });
+
+  it('F-T3：列表前缀整行图片 → 删行', () => {
+    const md = '正文\n- ![基坑支护设计图](d.png)\n后续';
+    expect(removeUnwantedDrawingImages(md, true)).toBe('正文\n\n后续');
+  });
+
+  it('F-T3：HTML img 标签 → 删除（整行与行内）', () => {
+    expect(removeUnwantedDrawingImages('<img src="a.png" />', true)).toBe('');
+    expect(removeUnwantedDrawingImages('前<img src="a.png">后', true)).toBe('前后');
+  });
+
+  it('F-T3：图件占位括号语（全/半角）→ 删除', () => {
+    expect(removeUnwantedDrawingImages('正文（图位：管线综合布置图）后续', true)).toBe('正文后续');
+    expect(removeUnwantedDrawingImages('(此处插入施工平面布置图)', true)).toBe('');
+  });
+
+  it('F-T3：多行图片删除后空行归一', () => {
+    const md = '甲\n![图1](a.png)\n![图2](b.png)\n乙';
+    expect(removeUnwantedDrawingImages(md, true)).toBe('甲\n\n乙');
   });
 });
 
@@ -291,9 +316,11 @@ describe('M7 cleanFormalSourcePhrases / sourcePhraseIssues', () => {
     expect(cleanFormalSourcePhrases(md)).toBe(md);
   });
 
-  it('「本节根据招标文件…」→ 残留「本节」', () => {
-    // 真行为：L247 删除「根据…编制」后残留「本节」，L250 兜底正则要求「根据/依据」词面不命中
-    expect(cleanFormalSourcePhrases('本节根据招标文件及设计图纸编制。')).toBe('本节');
+  it('「本节根据招标文件…」→ 整行收敛（r28j M15 收窄后行为：第二条链锚定不再中段删除，纯话术单句由兜底链整行丢弃）', () => {
+    // r28i 归因后收窄：句中「我方应根据…」类引用不再被删；「本节根据…编制。」属纯来源话术单句，
+    // 由 L338 兜底链整行收敛（旧行为残留残缺「本节」）；含正文的长句因兜底链要求单句全匹配而保留
+    expect(cleanFormalSourcePhrases('本节根据招标文件及设计图纸编制。')).toBe('');
+    expect(cleanFormalSourcePhrases('本节根据招标文件编制，主要内容包括土方开挖、基础施工等全部工序。')).toContain('主要内容包括土方开挖');
   });
 
   it('sourcePhraseIssues：来源罗列 → blocker', () => {
@@ -316,6 +343,30 @@ describe('M7 cleanFormalSourcePhrases / sourcePhraseIssues', () => {
   it('sourcePhraseIssues 上限 20 条', () => {
     const md = Array.from({ length: 25 }, () => '本方案根据招标文件及设计图纸，作出安排。').join('\n');
     expect(sourcePhraseIssues(md)).toHaveLength(20);
+  });
+
+  // ── r28j M15 收窄守护（r28i 实机两处灾难性误删）──
+  it('r28i 误删句 1：「按设计图纸与工程量清单特征组织施工」做法句 → 不清洗（「按」非引导词+句界锚定）', () => {
+    const md = '青砖步道分项按设计图纸与工程量清单特征组织施工：铺装层采用青砖顺接，缝宽均匀。';
+    expect(cleanFormalSourcePhrases(md)).toBe(md);
+    expect(sourcePhraseIssues(md)).toEqual([]);
+  });
+
+  it('r28i 误删句 2：评标办法引用句（句中「我方应根据…」）→ 不清洗（句界锚定+去万能中段）', () => {
+    const md = '1.我方应根据对现场的踏勘情况（如有）及本招标文件评标办法关于施工组织设计的评审因素，采用文字并结合图表形式编制。';
+    expect(cleanFormalSourcePhrases(md)).toBe(md);
+    expect(sourcePhraseIssues(md)).toEqual([]);
+  });
+
+  it('真罗列句仍命中：本方案根据招标文件、工程量清单…（主语组扩围后行首句拦截）', () => {
+    const cleaned = cleanFormalSourcePhrases('本方案根据招标文件、工程量清单，对主体结构施工作出安排。');
+    expect(cleaned).not.toContain('招标文件、工程量清单');
+    expect(cleaned).toContain('对主体结构施工作出安排');
+  });
+
+  it('r28j 兜底链收窄：话术+正文混排行不整行丢弃（逗号作正文标志，保内容零丢失）', () => {
+    const cleaned = cleanFormalSourcePhrases('本节根据招标文件编制，主要内容包括土方开挖、基础施工等全部工序。');
+    expect(cleaned).toContain('主要内容包括土方开挖');
   });
 });
 

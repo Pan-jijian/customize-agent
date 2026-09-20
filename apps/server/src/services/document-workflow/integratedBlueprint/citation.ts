@@ -82,6 +82,11 @@ function maskMarkdownTableLines(markdown: string): string {
   return markdown.split('\n').map(line => (/^\s*\|/u.test(line.trim()) ? ' '.repeat(line.length) : line)).join('\n');
 }
 
+/** 数值近似相等（两位小数容差，与数值对账口径一致） */
+function nearlyEqualValue(a: number, b: number): boolean {
+  return Math.abs(a - b) <= 0.01 + 1e-6 * Math.max(Math.abs(a), Math.abs(b));
+}
+
 /** 结构定位（零语义豁免）：不一致引用入候选；判定辅助事实只携带结构化数据投影（分工程明细/村名单） */
 export function collectBlueprintCitationCandidates(markdown: string, data: BlueprintData): BlueprintCitationCollection {
   const candidates: CitationAdjudicationCandidate[] = [];
@@ -124,16 +129,24 @@ export function collectBlueprintCitationCandidates(markdown: string, data: Bluep
     for (const match of masked.matchAll(dayRe)) {
       const value = Number(match[1]);
       if (!(value > 0) || value === data.contract.totalDays) continue;
+      // r28j M16 扩围（r28i 归因）：「…亮化与收尾工程节点用时2天，合计89天，预留机动工期1天」的
+      // 「工期1天」被 dayRe 误采为总工期口径候选（89+1=90 与蓝图权威数学一致）；数字前同分句窗口含
+      // 预留/机动/缓冲词时属工期分解的缓冲项，非总工期口径陈述，不入候选
+      // r28m M24a F3 扩围：关键线路/首件/样板/分区/分片/阶段/单体——同分句窗口含此类子项口径词时
+      // 属进度分解子项表述（「关键线路控制工期300天」），非项目总工期口径陈述
       const start = (match.index ?? 0) + match[0].indexOf(match[1]);
+      const daySegStart = Math.max(masked.lastIndexOf('，', start), masked.lastIndexOf(',', start), masked.lastIndexOf('。', start), masked.lastIndexOf('；', start), masked.lastIndexOf('\n', start)) + 1;
+      if (/预留|机动|缓冲|关键线路|首件|样板|分区|分片|阶段|单体/u.test(masked.slice(daySegStart, start))) continue;
       pushCandidate({ kind: 'total-days', subject: '总工期', value, unit: '日历天', authority: data.contract.totalDays, start, end: start + match[1].length, sentence: buildCitationSentenceContext(masked, match.index ?? 0, match[0].length) });
     }
   }
   // 自然村数量：不一致村数引用即候选（分区数学/分配语境交判定层）——「自然村分组/施工组」是
   // 作业组织概念（非村数陈述），不入候选（概念边界，非词表豁免）
+  // r28m M24a A1：负向排除同步扩容「作业面|施工点|施工段」（与 detectors.ts orgTail 同源判据）
   const villageFact = data.redLineFacts.find(fact => fact.key === '自然村数量');
   const villageAuthority = villageFact ? Number(/(\d+)/u.exec(villageFact.value)?.[1]) : 0;
   if (villageAuthority > 0) {
-    const villageRe = /(\d+)\s*个(?:美丽宜居)?自然村(?!分组|施工组)/gu;
+    const villageRe = /(\d+)\s*个[^，。；、\s\n]{0,8}?自然村(?!分组|施工组|作业面|施工点|施工段)/gu;
     const villageFacts = data.project.scope ? [`蓝图项目范围：${data.project.scope}`] : undefined;
     for (const match of masked.matchAll(villageRe)) {
       const value = Number(match[1]);
@@ -206,6 +219,20 @@ export function collectBlueprintCitationCandidates(markdown: string, data: Bluep
     if (!Number.isFinite(value) || value <= 0) continue;
     if (value === quantity.value) continue;
     const start = ne + (match.index ?? 0) + match[0].indexOf(match[1]);
+    // 规格小计结构豁免（与数值对账「规格-数值绑定」同源·通用）：名称命中邻域（名前 16 字至数值
+    // 起点之间）出现该名称 specBreakdown 某规格 token，且数值命中该规格小计（干净切分门：小计和≈
+    // 名称合计）→「规格+名称+数值」三元组是规格小计的列举（如「100W LED灯具109套」「120W
+    // LED灯具9套」），不属以名称合计口径陈述的引用，不入候选——防判定层把正确小计误判 conflict
+    // 后由 citation-numeric-replay 改回名称合计值，与规格-数值绑定确定性修复形成往返拉扯（小计
+    // 被改写回合计即规格错位缺陷复活）。无规格限定的同名数值仍照常入候选（保守，交判定层裁决）
+    const specBreakdown = quantity.specBreakdown ?? [];
+    if (specBreakdown.length >= 2) {
+      const splitSum = specBreakdown.reduce((sum, item) => sum + item.value, 0);
+      if (nearlyEqualValue(splitSum, quantity.value)) {
+        const specWindow = masked.slice(Math.max(0, ns - 16), start).toLowerCase().replace(/\s+/gu, '');
+        if (specBreakdown.some(item => nearlyEqualValue(item.value, value) && specWindow.includes(item.spec.toLowerCase().replace(/\s+/gu, '')))) continue;
+      }
+    }
     // 判定辅助事实：清单分工程明细（分工程口径/跨工程同值复制的判定依据，结构化数据投影）
     const groups = quantity.groups ?? [];
     const facts = groups.length > 0

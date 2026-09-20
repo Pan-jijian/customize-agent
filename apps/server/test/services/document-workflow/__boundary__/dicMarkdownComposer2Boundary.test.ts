@@ -221,8 +221,8 @@ describe('N2 cleanFormalSourcePhrases 形态族', () => {
     expect(cleanFormalSourcePhrases('按照设计图纸要求执行')).toBe('按照设计图纸要求执行');
   });
 
-  it('本节残留形态 → 残留「本节」', () => {
-    expect(cleanFormalSourcePhrases('本节根据招标文件及设计图纸编制。')).toBe('本节');
+  it('本节话术单句 → 整行收敛（r28j M15 收窄后：第二条链锚定不再中段删除，纯话术单句由兜底链整行丢弃）', () => {
+    expect(cleanFormalSourcePhrases('本节根据招标文件及设计图纸编制。')).toBe('');
   });
 
   it('施工图设计说明组合 → 项目技术文件', () => {
@@ -459,7 +459,7 @@ describe('N5 hasInlineListCollision', () => {
     expect(hasInlineListCollision('1. 甲。2. 乙。3. 丙')).toBe(false);
   });
 
-  it('句号分隔双编号单字内容 → 不冲突（\S 吃单字后 .+ 无法对齐 MARKER）', () => {
+  it('句号分隔双编号单字内容 → 不冲突（\\S 吃单字后 .+ 无法对齐 MARKER）', () => {
     // 真行为：\S 吃掉单字「甲」后，.+ 从「。2. 乙」回溯，MARKER 前需要恰好一个
     // (?:\s|[。；;]) 字符对齐，「。2」之间无空白/标点 → 整体不命中
     expect(hasInlineListCollision('完成检查。1. 甲。2. 乙')).toBe(false);

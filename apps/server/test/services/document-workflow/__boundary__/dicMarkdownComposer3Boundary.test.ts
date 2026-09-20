@@ -427,13 +427,17 @@ describe('O3 promptDocumentRuleIssues 深挖', () => {
     const rules = { minChars: 100 } as PromptDocumentRuleSet & { minChars: number };
     const longText = '施工方案正文内容充分详尽，覆盖施工准备过程控制检查验收和资料归档要求，形成责任明确过程可控资料完整的管理闭环，确保现场管理要求与施工进度资源组织和验收节点同步推进，明确各岗位质量安全责任并落实检查频次和整改闭环机制，使各项措施与本工程实施条件相匹配。';
     const issues = await promptDocumentRuleIssues(longText, rules);
-    expect(issues.some(issue => issue.message.includes('正文长度低于提示词要求'))).toBe(false);
+    expect(issues.some(issue => issue.message.includes('正文长度低于字数目标'))).toBe(false);
   });
 
-  it('minChars 低于 95% → warning', async () => {
+  it('minChars 低于 95% → warning（不升级 blocker，M18 回归锁定）', async () => {
     const rules = { minChars: 200 } as PromptDocumentRuleSet & { minChars: number };
     const issues = await promptDocumentRuleIssues('短正文', rules);
-    expect(issues.some(issue => issue.message.includes('正文长度低于提示词要求'))).toBe(true);
+    const lengthIssue = issues.find(issue => issue.message.includes('正文长度低于字数目标'));
+    expect(lengthIssue).toBeDefined();
+    // 文案不含「提示词」字样，不命中升级映射（r28i/s28i 实测曾被误升级为 blocker 直坠终稿门禁）
+    expect(lengthIssue?.level).toBe('warning');
+    expect(lengthIssue?.severity).toBeUndefined();
   });
 
   it('warning 升级映射 severity=blocker', async () => {

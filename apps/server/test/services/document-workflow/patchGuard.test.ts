@@ -88,9 +88,27 @@ describe('deterministicDefectPrecheck', () => {
     expect(deterministicDefectPrecheck('依据本项目已确认资料确定做法。').some(hit => hit.includes('占位符'))).toBe(true);
   });
 
+  it('D-T5：表格数据格占位符与阻断层同口径（豁免列「—」不判，非豁免列判）', () => {
+    const exempted = '| 设备名称 | 规格型号 | 数量 |\n| --- | --- | --- |\n| 蛙式打夯机 | — | 2台 |';
+    expect(deterministicDefectPrecheck(exempted).some(hit => hit.includes('占位符'))).toBe(false);
+    const defective = '| 设备名称 | 规格型号 | 数量 |\n| --- | --- | --- |\n| 蛙式打夯机 | — | 待定 |';
+    expect(deterministicDefectPrecheck(defective).some(hit => hit.includes('占位符'))).toBe(true);
+  });
+
+  it('D-T5：按规范/按方案 为正常施组表述不判（r28f #41 误报归因，与 round-27 修复端口径对齐）', () => {
+    expect(deterministicDefectPrecheck('试验员按规范留置试块。').some(hit => hit.includes('占位符'))).toBe(false);
+    expect(deterministicDefectPrecheck('论证通过后按方案实施。').some(hit => hit.includes('占位符'))).toBe(false);
+  });
+
   it('截断句残留双冒号命中（B2 修复器同源口径）', () => {
     expect(deterministicDefectPrecheck('具体分工如下：： 第一项。')).toContain('截断句残留双冒号');
     expect(deterministicDefectPrecheck('验收标准。： 详见规范。')).toContain('截断句残留双冒号');
+  });
+
+  it('r28h 扩围：连续顿号叠用命中（与 fixTruncatedSentenceArtifacts「、{2,}」步骤同源口径）', () => {
+    const hits = deterministicDefectPrecheck('宽度按3m、、、、等设计路幅控制。');
+    expect(hits).toContain('截断句残留双冒号');
+    expect(hits).toContain('句读标点叠用/括号不闭合');
   });
 });
 

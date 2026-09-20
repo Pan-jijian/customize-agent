@@ -630,8 +630,10 @@ describe('G1 三条两可归一谱系', () => {
     expect(result.markdown).toBe('方案一：钢板桩支护；方案二：1:0.5放坡加钢板桩支护；方案三：放坡支护。');
     expect(result.fixedCount).toBe(3);
   });
-  it('G1 变体不命中（钢板桩或型钢支撑）', () => {
-    expect(fixAmbiguousEitherOrCandidates('基坑采用钢板桩或型钢支撑。').fixedCount).toBe(0);
+  it('G1 裸形态命中（钢板桩或型钢支撑，r26 后缀可选扩展）', () => {
+    const result = fixAmbiguousEitherOrCandidates('基坑采用钢板桩或型钢支撑。');
+    expect(result.markdown).toBe('基坑采用钢板桩支护。');
+    expect(result.fixedCount).toBe(1);
   });
   it('G1 放坡与支护间隔远不命中', () => {
     expect(fixAmbiguousEitherOrCandidates('基坑采用放坡开挖，另有支护体系。').fixedCount).toBe(0);
@@ -729,6 +731,43 @@ describe('H2 数据行/正文留白清洗（见图纸类 forbiddenTexts，舒城
     const result = fixForbiddenConfigurationTerms(md);
     expect(result.markdown).toBe(md);
     expect(result.fixedCount).toBe(0);
+  });
+});
+
+// ── H3. D-T4 ③ 合同程序条款转述清洗（r28f #20 实测形态）──
+
+describe('H3 D-T4 合同程序条款转述清洗', () => {
+  const FULL_PASSAGE = '项目部对进入施工范围的全部作业人员实行实名制闭环管理。我方拟派项目经理目前无在岗项目，或虽在其他项目上担任项目经理岗位，但承诺在本项目中标后合同签订前能够从其他项目变更至本项目并全面履约。项目经理到岗后由公司人力资源部门办理原项目任职解除或变更手续，并在合同签订前将变更证明文件报建设单位核验；项目经理未完成变更前，项目部不办理开工令签发，确保项目经理在本项目全面履约。人员进场前完成实名登记。';
+
+  it('H3-1 资格承诺句改写为到岗履职表述 + 变更/签发程序句删除（两形态联动）', () => {
+    const result = fixForbiddenConfigurationTerms(FULL_PASSAGE);
+    expect(result.fixedCount).toBe(2);
+    expect(result.markdown).toContain('项目经理按投标承诺及时到岗，全面负责本工程现场管理，在岗期间不兼任其他在建项目职务。');
+    expect(result.markdown).not.toContain('目前无在岗项目');
+    expect(result.markdown).not.toContain('不办理开工令签发');
+    expect(result.markdown).not.toContain('变更证明文件报建设单位核验');
+    expect(result.markdown).toContain('人员进场前完成实名登记。');
+  });
+
+  it('H3-2 「本招标项目」变体兼容与句号保留', () => {
+    const md = '我方拟派项目经理目前无在岗项目，或虽在其他项目上担任项目经理岗位，但承诺在本招标项目中标后合同签订前能够从其他项目变更至本招标项目并全面履约。';
+    const result = fixForbiddenConfigurationTerms(md);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toBe('项目经理按投标承诺及时到岗，全面负责本工程现场管理，在岗期间不兼任其他在建项目职务。');
+  });
+
+  it('H3-3 无实测形态不动（幂等）', () => {
+    const md = '项目经理按投标承诺到岗履职，全面负责本工程现场管理，在岗期间不兼任其他在建项目职务。';
+    const result = fixForbiddenConfigurationTerms(md);
+    expect(result.markdown).toBe(md);
+    expect(result.fixedCount).toBe(0);
+  });
+
+  it('H3-4 单独出现的变更/签发程序句（无资格承诺前置）删除', () => {
+    const md = '人员到岗管理按程序执行。项目经理到岗后由公司人力资源部门办理原项目任职解除或变更手续，并在合同签订前将变更证明文件报建设单位核验；项目经理未完成变更前，项目部不办理开工令签发，确保项目经理在本项目全面履约。人员退场按流程办理。';
+    const result = fixForbiddenConfigurationTerms(md);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toBe('人员到岗管理按程序执行。人员退场按流程办理。');
   });
 });
 

@@ -6,16 +6,38 @@ import { displayChapterTitle, formalChapterTitle, isTenderClauseFragmentTitle, n
 import { composeEnhancedCoverMarkdown } from './composeAppendices';
 import { buildSemanticGate } from './semanticGate';
 import { THREE_SOURCE_WRITE_RULES } from './writingSpec';
+import { extractMarkdownTableCandidates, injectTableCaptions, matchMissingTablePlans, normalizeFigureNumbering, normalizeTableNumbering } from './constructionOrgTablePlan';
+
+/**
+ * 暗标禁图剥离（标书编制规格 bodyFigurePolicy=forbidden / forbidDrawingImages=true）：正文一律纯文字，
+ * 图片（markdown 图片语法整行/行内、HTML img 标签）与图件占位括号语均为无效或违规载体
+ * ——产物图片无资产支撑（坏引用）且暗标正文禁图，确定性与生成侧同口径剥离。
+ * forbid=false（明标）原样返回（图位机制为文字图题行，不受影响）。
+ */
+/** 图件占位括号语（全/半角括号，单源）：「（图位：…）」「（此处插入…）」「（…图件占位…）」 */
+const FIGURE_PLACEHOLDER_RE = /（(?:图位|此处插入)[^）]{0,40}）|（[^）]{0,12}图件占位[^）]{0,40}）|\((?:图位|此处插入)[^)]{0,40}\)|\([^)]{0,12}图件占位[^)]{0,40}\)/gu;
 
 export function removeUnwantedDrawingImages(markdown: string, forbid: boolean) {
   if (!forbid) return markdown;
-  return markdown.replace(/^!\[[^\]]*(?:图纸|drawing|cad|地图|平面|剖面|立面)[^\]]*\]\([^)]*\)\s*$/gimu, '').replace(/\n{3,}/gu, '\n\n');
+  return markdown
+    .replace(/^[ \t]*(?:[-*+]|\d+[.、])?\s*!\[[^\]]*\]\([^)]*\)\s*$/gmu, '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/gu, '')
+    .replace(/<img\b[^>]*\/?>/giu, '')
+    .replace(FIGURE_PLACEHOLDER_RE, '')
+    .replace(/\n{3,}/gu, '\n\n');
 }
 
-export const WORKFLOW_PHRASE_RE = /^.*(?:知识库证据|知识库已确认事实|资料类型|提示词角色|后台自动规范|规范包|事实字段|资料未提供|未检索到|待确认事项|证据来源|来源清单|校验结果|修复任务包|修复类型|修复对象|输出要求|当前项目绑定资料|已召回证据|证据边界|可审查草稿|Reviewer|Repairer).*$(?:\s)?|^.*本节围绕.+确保各项措施与本工程实施条件相匹配。?\s*$(?:\s)?|^.*建立施工准备、过程控制、检查验收和资料归档要求.*$(?:\s)?|^.*形成责任明确、过程可控、资料完整的管理闭环。?\s*$(?:\s)?|^.*确保现场管理要求与施工进度、资源组织和验收节点同步推进。?\s*$(?:\s)?|^\s*(?:管理闭环|责任明确、过程可控、资料完整|与本工程实施条件相匹配)[。；;]?\s*$(?:\s)?/gmu;
+export const WORKFLOW_PHRASE_RE = /^.*(?:知识库证据|知识库已确认事实|资料类型|提示词角色|后台自动规范|规范包(?!括|含)|事实字段|资料未提供|未检索到|待确认事项|证据来源|来源清单|校验结果|修复任务包|修复类型|修复对象|输出要求|当前项目绑定资料|已召回证据|证据边界|可审查草稿|Reviewer|Repairer).*$(?:\s)?|^.*本节围绕.+确保各项措施与本工程实施条件相匹配。?\s*$(?:\s)?|^.*建立施工准备、过程控制、检查验收和资料归档要求.*$(?:\s)?|^.*形成责任明确、过程可控、资料完整的管理闭环。?\s*$(?:\s)?|^.*确保现场管理要求与施工进度、资源组织和验收节点同步推进。?\s*$(?:\s)?|^\s*(?:管理闭环|责任明确、过程可控、资料完整|与本工程实施条件相匹配)[。；;]?\s*$(?:\s)?/gmu;
 /** 后台/兜底话术词表（正式正文硬约束，单源）：写作时执行器（blockQualityExecutors 格式类）
  * 与终检 formalTextGateIssues（agentWorkflow）同源消费——命中即阻断/重写（检测定位=写作执行定位）。 */
 export const BACKSTAGE_OR_FALLBACK_TEXT_RE = /知识库|系统暂未|项目资料暂未|资料未明确|暂未明确|待确认|待资料复核|待系统|通用兜底(?:段落|模板)?|兜底(?:占位|模板|内容)|未检索到|资料不足|无法确认|建议补充|不适用|COL\d+|可核验信息|以本项目招标文件明确内容为准/u;
+
+/** 招标答疑问答句式（通用词表，r26 B3 治理）：答疑澄清清单文本特征——「请（招标人/发包人）
+ * 明确回复：…」「未明确回复：…」类问答互动句式；正式正文为陈述体，不得转载答疑问答
+ *（r25 实测：2.6 节被抄入「……具体做法，请明确回复：道路破复按图纸上的大样……」整段答疑文本）。
+ * sanitizeFormalMarkdown 按句清除含锚点的句子（行内其余合法句保留）。左负向后顾排除
+ * 「申请/提请/报请/呈请」等正常动词搭配；「请予明确/请予以明确」独立分支覆盖不带“回复”的短要求句。 */
+export const TENDER_QA_QUESTION_RE = /(?<![申提报呈])(?:请|望)(?:招标人|发包人|建设单位|贵方|贵单位|招标方)?(?:予|予以|尽快|及时|明确)?(?:回复|答复|澄清)|(?<![申提报呈])(?:请|望)(?:予|予以)(?:明确|指示|确认)|未(?:明确|予|予以)?(?:回复|答复|澄清)/u;
 
 const RAW_SOURCE_LINE_RE = /^\s*(?:#{1,6}\s*)?(?:PDF\s*第\s*\d+\s*页|rule\b|文件[:：]|片段[:：]|来源[:：]).*$/gimu;
 const ASCII_FLOW_LINE_RE = /^\s*(?:[│┃┆┊┌┐└┘├┤┬┴┼─━╭╮╰╯]|[↓↑→←⇒⇨➡])+\s*$/gmu;
@@ -283,7 +305,11 @@ export function stripMarkdownDocumentFence(markdown: string) {
   return match ? match[1].trim() : markdown;
 }
 
-export const SOURCE_ENUMERATION_PHRASE_RE = /(?:项目部|本项目|本工程)?(?:根据|依据|结合|按照|以)?(?:本项目|项目|[^。；;\n]{0,30}?)?(?:招标文件|补疑澄清文件|补遗澄清文件|补疑补遗|答疑(?:回复)?文件|答疑修正口径|补充答疑修正口径|澄清文件|工程量清单|设计图纸|施工图纸|图纸资料|设计修改通知单)(?:[、,，及和与\s]*(?:招标文件|补疑澄清文件|补遗澄清文件|补疑补遗|答疑(?:回复)?文件|答疑修正口径|补充答疑修正口径|澄清文件|工程量清单|设计图纸|施工图纸|图纸资料|设计修改通知单|现行规范|规范)){1,}(?:[^。；;\n]{0,80})?[，,]/u;
+/** 来源罗列话术（正式正文禁）：r28j M15 收窄（r28i 实机归因）——旧式无句界锚定 + 万能中段（[^。；;\n]{0,30}?）+ 80 字结尾窗口会把合法做法句误吞（「青砖步道分项按设计图纸与工程量清单特征组织施工：……」被删出病句、评标办法引用句「我方应根据……本招标文件评标办法……」被删成「1.我方应」）；收窄为句首锚定（行首/句读收尾处起匹配——「按设计图纸」类做法引用、「根据…评标办法…编制」类句中引用不再命中）+ 主语组扩围（行首合法罗列句「本方案/我公司根据招标文件…」仍命中；句中「我方应根据…」因锚定不命中）+ 去「以」引导 + 结尾窗口 80→40。编制依据类小节集中的「依据文件罗列」由 cleanFormalSourcePhrases 的小节豁免保留。 */
+export const SOURCE_ENUMERATION_PHRASE_RE = /(?<=^|[。；;\n])(?:本方案|本施工组织设计|本工程|本项目|项目部|我方|我公司|投标人)?(?:根据|依据|结合|按照)?(?:本项目|项目)?(?:招标文件|补疑澄清文件|补遗澄清文件|补疑补遗|答疑(?:回复)?文件|答疑修正口径|补充答疑修正口径|澄清文件|工程量清单|设计图纸|施工图纸|图纸资料|设计修改通知单)(?:[、,，及和与\s]*(?:招标文件|补疑澄清文件|补遗澄清文件|补疑补遗|答疑(?:回复)?文件|答疑修正口径|补充答疑修正口径|澄清文件|工程量清单|设计图纸|施工图纸|图纸资料|设计修改通知单|现行规范|规范)){1,}(?:[^。；;\n]{0,40})?[，,]/gmu;
+
+/** 检测侧无状态副本（r28j 顺带修复）：带 g 的共享正则 .test 多次调用间 lastIndex 串状态会漏报（上一行命中后 lastIndex>0，下一行从该位置继续）——检测逐行 test 用无 g 副本；清洗侧 replace 自管理 lastIndex 不受影响。 */
+const SOURCE_ENUMERATION_PHRASE_TEST_RE = new RegExp(SOURCE_ENUMERATION_PHRASE_RE.source, 'mu');
 
 const BASIS_SECTION_TITLE_RE = /编制依据|编制说明|法律法规|规范标准|标准依据/u;
 
@@ -306,10 +332,13 @@ export function cleanFormalSourcePhrases(markdown: string) {
     const cleaned = line
       .replace(SOURCE_ENUMERATION_PHRASE_RE, '')
       .replace(/(?:施工图设计说明|工程量清单项目特征|补充答疑修正口径|答疑修正口径)(?:[、,，及和与\s]*(?:施工图设计说明|工程量清单项目特征|补充答疑修正口径|答疑修正口径)){1,}/gu, '项目技术文件')
-      .replace(/(?:根据|依据|以)(?:[^。；;\n]{0,30})?(?:招标文件|补疑澄清文件|补遗澄清文件|补疑补遗|答疑(?:回复)?文件|答疑修正口径|补充答疑修正口径|澄清文件|工程量清单|设计图纸|施工图纸)(?:[^。；;\n]{0,40})(?:编制|确定|要求|为编制基础)[。；;]?/gu, '')
+      .replace(/(?<=^|[。；;\n])(?:根据|依据)(?:[^。；;\n]{0,30})?(?:招标文件|补疑澄清文件|补遗澄清文件|补疑补遗|答疑(?:回复)?文件|答疑修正口径|补充答疑修正口径|澄清文件|工程量清单|设计图纸|施工图纸)(?:[^。；;\n]{0,40})(?:编制|确定|要求|为编制基础)[。；;]?/gmu, '')
       .replace(/(?<=\S)\s{2,}(?=\S)/gu, ' ')
       .trimEnd();
-    if (!/^(?:本节|本小节|本章)?(?:内容|措施)?(?:根据|依据)(?:招标文件|补疑澄清文件|补遗澄清文件|答疑(?:回复)?文件|澄清文件|工程量清单|设计图纸|施工图纸)[^。；;\n]*[。；;]?$/u.test(cleaned.trim())) {
+    // r28j 收窄：`[^。；;\n]*` → `[^。；;\n，,]*`（逗号作正文标志）——旧式允许话术前缀跨逗号整行匹配，
+    //「本节根据招标文件编制，主要内容包括…」类话术+正文混排行会被整行丢弃（内容损失）；
+    // 收窄后仅无逗号纯话术单句整行收敛，混排行保留（保内容零丢失）
+    if (!/^(?:本节|本小节|本章)?(?:内容|措施)?(?:根据|依据)(?:招标文件|补疑澄清文件|补遗澄清文件|答疑(?:回复)?文件|澄清文件|工程量清单|设计图纸|施工图纸)[^。；;\n，,]*[。；;]?$/u.test(cleaned.trim())) {
       output.push(cleaned);
     }
   }
@@ -326,7 +355,7 @@ export function sourcePhraseIssues(markdown: string): ValidationIssue[] {
       return;
     }
     if (/^\s*\|/u.test(trimmed)) return;
-    if (SOURCE_ENUMERATION_PHRASE_RE.test(line) && !inBasisSection) issues.push({ level: 'error', severity: 'blocker', category: 'style', owner: 'system', message: `正式正文不得出现资料来源罗列话术：第 ${index + 1} 行`, suggestion: '删除“根据/依据招标文件、清单、图纸”等来源罗列，直接保留项目事实、施工内容和控制措施；编制依据类小节可集中罗列依据文件。' });
+    if (SOURCE_ENUMERATION_PHRASE_TEST_RE.test(line) && !inBasisSection) issues.push({ level: 'error', severity: 'blocker', category: 'style', owner: 'system', message: `正式正文不得出现资料来源罗列话术：第 ${index + 1} 行`, suggestion: '删除“根据/依据招标文件、清单、图纸”等来源罗列，直接保留项目事实、施工内容和控制措施；编制依据类小节可集中罗列依据文件。' });
     if (/^\s*\*\*[^*]{2,40}表\*\*\s*$/u.test(line)) issues.push({ level: 'error', severity: 'blocker', category: 'format', owner: 'system', message: `正式正文不得用粗体段落充当表名：第 ${index + 1} 行`, suggestion: '表名必须转换为 #### 四级标题，避免导出后混入正文段落。' });
   });
   return issues.slice(0, 20);
@@ -564,6 +593,12 @@ export function sanitizeFormalMarkdown(markdown: string) {
       // 同行的表头被表格解析器当作表头首列 → “表格列数不一致”误报且修复轮永不收敛；表格也无法正常渲染。
       // 仅拆“行首无管道 + 句末标点 + 以 | 开头的完整表格行收尾”的形态（$1 不含 | 保证不误拆表格数据行内句号）。
       line = line.replace(/^([^|]*[。；;])\s*(\|[^|\n]+\|\s*)$/u, '$1\n$2');
+      // 招标答疑问答句清除（r26 B3）：含问答锚点的句子整体删除（句级：行内其余合法句保留），
+      // 删空的语句让行自然归空（空行由后续块间距规范化/渲染归一收口）——答疑转载文本
+      // 不得进入正式正文（配置要求禁词“按图纸”的污染来源由此根除）
+      if (TENDER_QA_QUESTION_RE.test(line)) {
+        line = line.split(/(?<=[。；！？])/u).filter(sentence => !TENDER_QA_QUESTION_RE.test(sentence)).join('');
+      }
       return line;
     })
     .join('\n')
@@ -1328,7 +1363,8 @@ function normalizeFormalChapterHeadings(markdown: string, chapters: Array<Pick<D
     if (chapterIndex >= 0 && h2PlainSection) {
       const plainTitle = displayChapterTitle(h2PlainSection[1] || '');
       if (/^本章目录$/u.test(plainTitle)) return '';
-      if (/^附录/u.test(plainTitle)) return line;
+      // 附表区（附表一~N，composeAppendices 直出）与附录区同为非章节结构：保留 H2 原行不降级为 ###
+      if (/^附录/u.test(plainTitle) || /^附表\s*[一二三四五六七八九十\d]{1,3}/u.test(plainTitle)) return line;
       return normalizeSectionHeading(plainTitle);
     }
     const section = /^###\s+(?:(\d+)\.(\d+)\s+)?(.+)$/u.exec(trimmed);
@@ -1604,8 +1640,9 @@ export async function promptDocumentRuleIssues(markdown: string, rules?: PromptD
     // 4.40 根治：「目录」是系统导航块（tocPolicy!=='forbidden' 时 finalizeDocumentMarkdown 经 ensureFormalToc 确定性生成/替换），
     // 与文末「附录」附表区同为非章节结构，一律不参与一级章节契约比对——旧豁免条件（tocPolicy==='required'）
     // 与提示词目录语句绑定，提示词去掉目录语句后系统目录反被本校验误报「未允许的一级章节」；
+    // r28h M5 附表管理：附表一~N 为系统直出文末附表区，同属非章节结构一并豁免（37 号误报实测）；
     // 目录的存在性/禁止性只由目录政策检查承担（上文缺少目录/残留目录分支），本处不再重复判定。
-    const actualHeadings = [...markdown.matchAll(/^##\s+(.+)$/gmu)].map(match => displayChapterTitle(match[1] || '')).filter(title => title !== '目录' && !/^附录/u.test(title));
+    const actualHeadings = [...markdown.matchAll(/^##\s+(.+)$/gmu)].map(match => displayChapterTitle(match[1] || '')).filter(title => title !== '目录' && !/^附录/u.test(title) && !/^附表\s*[一二三四五六七八九十\d]{1,3}/u.test(title));
     const normalizedExactHeadings = exactHeadings.map(displayChapterTitle);
     const missingHeadings = exactHeadings.filter(title => !actualHeadings.includes(displayChapterTitle(title)));
     const extraHeadings = runtimeRules.forbidExtraHeadings ? actualHeadings.filter(title => !normalizedExactHeadings.includes(displayChapterTitle(title))) : [];
@@ -1616,9 +1653,44 @@ export async function promptDocumentRuleIssues(markdown: string, rules?: PromptD
   if (subjectHits.length > 0) issues.push({ level: 'warning', message: `正文残留禁用主体表达：${subjectHits.join('、')}`, suggestion: '请统一改为用户提示词指定的表达主体。' });
   const plainLength = markdown.replace(/\s/gu, '').length;
   // 提示词字数目标是生成预算口径：95% 以上视为达标（生成波动容差），不足按 warning 提示而非阻断，
-  // 与 documentBudgetIssues 的“低于目标字数”warning 口径一致
-  if (runtimeRules.minChars && plainLength < Math.floor(runtimeRules.minChars * 0.95)) issues.push({ level: 'warning', message: `正文长度低于提示词要求：当前 ${plainLength} 字，要求不少于 ${runtimeRules.minChars} 字`, suggestion: '请按章节深度扩写，但不得编造资料外事实。' });
+  // 与 documentBudgetIssues 的“低于目标字数”warning 口径一致。M18：文案不写「提示词」字样——
+  // 下方升级映射按 message 特征词「提示词/禁止/禁用/…」把提示词合规类 warning 升级为 blocker，
+  // 字数提示不属该族（r28i/s28i 实测：字数条被误升级直坠终稿门禁）；同时避让导出层
+  // 「低于目标字数」阻断正则，维持「warning 提示而非阻断」的既定口径
+  if (runtimeRules.minChars && plainLength < Math.floor(runtimeRules.minChars * 0.95)) issues.push({ level: 'warning', message: `正文长度低于字数目标：当前 ${plainLength} 字，目标不少于 ${runtimeRules.minChars} 字`, suggestion: '请按章节深度扩写，但不得编造资料外事实。' });
   return issues.map(issue => issue.level === 'warning' && /提示词|禁止|禁用|必含关键词|必需表格|主体表达/u.test(issue.message) ? { ...issue, level: 'error' as const, severity: issue.severity || ('blocker' as const) } : issue);
+}
+
+/**
+ * 正文表题注终检（R20 C3 安全网）：正文区表格逐张核验「表X-Y」题注（附表区不参与，暗标豁免）。
+ * 正常路径由 finalizeDocumentMarkdown 的 injectTableCaptions 确定性注入保证 100%；
+ * 报出的是无表题行等注入器不可及的形态（人工核对命名后重新生成）。
+ */
+export function tableCaptionIssues(markdown: string, bodyTableForbidden?: boolean): ValidationIssue[] {
+  if (bodyTableForbidden) return [];
+  const appendixIndex = markdown.search(/^##\s+附表\s*[一二三四五六七八九十\d]{1,3}/mu);
+  const body = appendixIndex >= 0 ? markdown.slice(0, appendixIndex) : markdown;
+  const uncaptioned = extractMarkdownTableCandidates(body).filter(candidate => !candidate.captioned);
+  if (uncaptioned.length === 0) return [];
+  const sample = uncaptioned.slice(0, 5).map(candidate => (candidate.title ? `「${candidate.title}」` : '（无表题行）')).join('、');
+  return [{
+    level: 'error',
+    category: 'format',
+    owner: 'user',
+    repairability: 'manual_review',
+    message: `正文 ${uncaptioned.length} 张表格缺少题注编号（表X-Y）：${sample}${uncaptioned.length > 5 ? ' 等' : ''}`,
+    suggestion: '题注由系统在成稿归一阶段按「表{章号}-{表序} 表名」确定性注入；未注入的通常是无表题行的表格形态，请人工核对该表格并补表名后重新生成。',
+  }];
+}
+
+/** 正文表题注覆盖率（产品评分 v2 编制规范性/媒介落实构成分量，与 tableCaptionIssues 同源口径）：
+ * 正文区（附表区前）表格逐张核验题注；暗标（正文禁表）或正文无表时 total=0，调用方按不可用降级。 */
+export function tableCaptionCoverage(markdown: string, bodyTableForbidden?: boolean): { total: number; captioned: number } {
+  if (bodyTableForbidden) return { total: 0, captioned: 0 };
+  const appendixIndex = markdown.search(/^##\s+附表\s*[一二三四五六七八九十\d]{1,3}/mu);
+  const body = appendixIndex >= 0 ? markdown.slice(0, appendixIndex) : markdown;
+  const candidates = extractMarkdownTableCandidates(body);
+  return { total: candidates.length, captioned: candidates.filter(candidate => candidate.captioned).length };
 }
 
 export function plannedStructureIssues(markdown: string, template: DocumentTemplate, bodyTableForbidden?: boolean): ValidationIssue[] {
@@ -1631,7 +1703,25 @@ export function plannedStructureIssues(markdown: string, template: DocumentTempl
     }
     const body = block.heading + block.body;
     // 暗标正文禁表（标书编制规格）：模板法定表格小节已裁定移入文末附表区，正文缺表不再作为缺陷
-    if (!bodyTableForbidden && chapter.tableSections?.length && !hasMarkdownTable(body)) issues.push({ level: 'warning', category: 'table', message: `${chapter.title} 缺少必要的正式表格`, suggestion: '建议按模板 tableSections/tableRequirements 在对应小节补充正式 Markdown 表格。' });
+    if (bodyTableForbidden) continue;
+    const plans = chapter.tablePlans || [];
+    if (plans.length === 0) {
+      // 无规划表时的章级兜底（原口径保留）：tableSections 声明了表格但正文一张都没有
+      if (chapter.tableSections?.length && !hasMarkdownTable(body)) issues.push({ level: 'warning', category: 'table', message: `${chapter.title} 缺少必要的正式表格`, suggestion: '建议按模板 tableSections/tableRequirements 在对应小节补充正式 Markdown 表格。' });
+      continue;
+    }
+    // R20 逐表对账（通用判据，无项目硬编码）：规划表逐张核验正文承接（一对一贪心 + 完整标题/核心词/表头字段三通道），
+    // 未承接即 error 进修复链（error 自动升 blocker → 残留进人工复核清单，与 4.50 交付解耦口径一致）
+    for (const plan of matchMissingTablePlans(plans, body)) {
+      issues.push({
+        level: 'error',
+        category: 'table',
+        owner: 'llm',
+        repairability: 'llm_repairable',
+        message: `${chapter.title} 缺少计划表格：${plan.title}${plan.required ? '（提示词必需表）' : ''}${plan.fields.length ? `（表头：${plan.fields.map(field => field.name).join('、')}）` : ''}`,
+        suggestion: `请按规划表头在相关小节补齐 markdown 表格「${plan.title}」，表名独立成行、表格前有引导句；表内项目特有数值必须来自项目资料或项目图谱，不得编造。`,
+      });
+    }
   }
   return issues;
 }
@@ -1655,6 +1745,30 @@ export function bodyCompositionTableIssues(markdown: string, bodyTableForbidden?
     repairability: 'llm_repairable',
     message: `正文残留 Markdown 表格 ${tables} 处（招标暗标编制要求正文纯文字，图表仅限文末附表区）`,
     suggestion: '请把表格承载的数据改写为段落式连贯叙述（数值、口径保持不变），删除表格表头与分隔线结构；不得新增或删除其它正文内容。',
+  }];
+}
+
+/**
+ * 暗标正文禁图反向门禁（标书编制规格 bodyFigurePolicy=forbidden）：扫描正文区域残留图片
+ * （markdown 图片语法/HTML img/图件占位），残留即 blocker 进导出门禁——正文图片违反招标暗标
+ * 编制要求（正文应纯文字，图表入文末附表区）。文末附表区（## 附表N）与封面块不属正文口径，不在阻断范围。
+ */
+export function bodyCompositionFigureIssues(markdown: string, bodyFigureForbidden?: boolean): ValidationIssue[] {
+  if (!bodyFigureForbidden) return [];
+  const appendixIndex = markdown.search(/^##\s+附表\s*[一二三四五六七八九十\d]{1,3}/mu);
+  const bodyMarkdown = (appendixIndex >= 0 ? markdown.slice(0, appendixIndex) : markdown).replace(/<div class="document-cover">[\s\S]*?<\/div>/gu, '');
+  const images = [...bodyMarkdown.matchAll(/!\[[^\]]*\]\([^)]*\)|<img\b[^>]*\/?>/giu)].length;
+  const placeholders = [...bodyMarkdown.matchAll(FIGURE_PLACEHOLDER_RE)].length;
+  const total = images + placeholders;
+  if (total === 0) return [];
+  return [{
+    level: 'error',
+    severity: 'blocker',
+    category: 'structure',
+    owner: 'llm',
+    repairability: 'llm_repairable',
+    message: `正文残留图片/图件占位 ${total} 处（招标暗标编制要求正文纯文字，图表仅限文末附表区）`,
+    suggestion: '请删除图片语法、HTML 图片标签与图件占位，图片承载的信息改以段落式文字叙述补充；不得改动其它正文内容。',
   }];
 }
 
@@ -1752,7 +1866,12 @@ export function finalizeDocumentMarkdown<T extends Pick<DocumentDraftChapter, 't
   // 历史缺陷：仅 tocPolicy==='required' 时替换，unspecified 场景下 LLM 目录原样保留（目录与正文标题不一致）
   const tocAppliedMarkdown = options.promptRules?.tocPolicy !== 'forbidden' ? ensureFormalToc(normalizedMarkdown, finalizedChapters) : normalizeFormalChapterHeadings(normalizedMarkdown, finalizedChapters);
   const finalizedMarkdown = applyPromptDocumentRules(sortChapterSectionsByNumber(normalizeTertiaryHeadings(sanitizeFormalMarkdown(tocAppliedMarkdown))), options.promptRules, options.bodyTableForbidden);
-  return { markdown: finalizedMarkdown, chapters: finalizedChapters };
+  // R20 C3 题注：明标正文表题确定性注入「表X-Y 表名」（幂等，所有重建路径共用；暗标正文无表，直接跳过）
+  // r25 B1：注入后接编号唯一化（拆题注粘连 + 章内重排消解重复编号 + 引用同步）——
+  // 重建插入的表（如基本信息表）与首轮已编表撞号时的机制级收口，全部为编号/结构判据
+  // B-T1 图题链：与表题同范式（幂等，无图题零改动）——图题编号随重建链重跑归一化，保证导出产物与终检同口径
+  const captionedMarkdown = options.bodyTableForbidden ? finalizedMarkdown : normalizeFigureNumbering(normalizeTableNumbering(injectTableCaptions(finalizedMarkdown)));
+  return { markdown: captionedMarkdown, chapters: finalizedChapters };
 }
 
 export function composeDocumentMarkdown(draft: Omit<GeneratedDocumentDraft, 'markdown'>, options: { forbidDrawingImages?: boolean; promptRules?: PromptDocumentRuleSet; bodyTableForbidden?: boolean; coverForbidden?: boolean } = {}): string {

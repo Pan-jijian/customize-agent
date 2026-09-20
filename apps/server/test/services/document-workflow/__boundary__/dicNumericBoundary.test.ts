@@ -656,3 +656,32 @@ describe('K4 日历日期 token（月/年）同步+异步升级门双链豁免',
     expect(issues.some(issue => issue.message.includes('生成后事实反查失败') && /12月|9月/.test(issue.message))).toBe(false);
   });
 });
+
+// ── K5. C-T2 数字溯源三分类豁免（r28f 归因：规范常数/管理数字误报淹没真未溯源） ──
+
+describe('K5 C-T2 分类器豁免（规范常数/管理数字不进反查池，真未溯源不越界）', () => {
+  const baseFacts = () => completeFactsOf({
+    project: [factOf({ fieldName: '工程名称', value: '舒城县城区道路及配套设施提升改造工程' })],
+    schedule: [factOf({ fieldName: '总工期', value: '180日历天' })],
+    quality: [factOf({ fieldName: '质量目标', value: '合格，符合国家现行施工验收规范及设计文件要求，一次性验收合格' })],
+    safety: [factOf({ fieldName: '安全目标', value: '杜绝重伤及以上安全事故，轻伤事故频率控制为零，创建安全标准化示范工地' })],
+  });
+
+  it('K5 规范常数与管理数字密集正文 → 零反查 issue（r28f 合法数字不再误报）', () => {
+    const md = '本工程总工期180日历天。混凝土浇筑每100m³留置一组试块，标准养护龄期不少于14天，同条件养护试块按每400m³检验批留置3组。路基压实度检测每层每200m²不少于1点，混凝土入模温度不低于5℃，压实度不低于95%，面层厚度偏差不超过5mm。每日不少于1次安全巡查，将9个自然村分组平行施工，配备专职安全员2名。缺陷责任期内修复合理期限一般不超过60天，焊缝一次验收合格率100%。依据GB 50268-2019规范执行。';
+    const issues = generatedFactVerificationIssues(md, baseFacts());
+    expect(issues).toEqual([]);
+  });
+
+  it('K5 对照：真未溯源总量口径数字仍报（豁免不越界）', () => {
+    const md = '本工程总工期180日历天，围墙修复29天。';
+    const issues = generatedFactVerificationIssues(md, baseFacts());
+    expect(issues.some(issue => issue.message.includes('生成后事实反查失败') && issue.message.includes('29天'))).toBe(true);
+  });
+
+  it('K5 对照：软桶真未溯源数字达到阈值仍计数提示', () => {
+    const md = '投入人工共7人，机械3台，检查4项，测量5处，记录6层，栽植面积90m²。';
+    const issues = generatedFactVerificationIssues(md, baseFacts());
+    expect(issues.some(issue => issue.message.includes('生成后事实反查提示'))).toBe(true);
+  });
+});

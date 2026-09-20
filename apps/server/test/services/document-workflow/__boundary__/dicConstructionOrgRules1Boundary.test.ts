@@ -238,7 +238,7 @@ describe('Y4 constructionOrgControlLoopIssues', () => {
     expect(issues[0].level).toBe('warning');
   });
 
-  it('质量闭环恰好缺 3 词 → 报（ceil(6/2)=3 边界）', () => {
+  it('质量闭环缺 3 词 → 报（全要素判定，message 列缺失清单）', () => {
     const issues = constructionOrgControlLoopIssues([draftChapter('质量管理', '已完成自检互检交接检。')]);
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('整改');
@@ -246,8 +246,10 @@ describe('Y4 constructionOrgControlLoopIssues', () => {
     expect(issues[0].message).toContain('归档');
   });
 
-  it('质量闭环缺 2 词 → 不报（<ceil(6/2)）', () => {
-    expect(constructionOrgControlLoopIssues([draftChapter('质量管理', '自检互检交接检完成，问题整改后归档。')])).toEqual([]);
+  it('质量闭环缺 1 词 → 报（D-T2 主责章全要素判定：缺任一即不成链）', () => {
+    const issues = constructionOrgControlLoopIssues([draftChapter('质量管理', '自检互检交接检完成，问题整改后归档。')]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('复查');
   });
 
   it('安全闭环缺 6 词 → warning（含提示词）', () => {
@@ -256,14 +258,17 @@ describe('Y4 constructionOrgControlLoopIssues', () => {
     expect(issues[0].suggestion).toContain('风险辨识');
   });
 
-  it('进度闭环缺 3 词 → 报（5 词 ceil=3）', () => {
+  it('进度闭环缺 4 词 → 报（全要素判定）', () => {
     const issues = constructionOrgControlLoopIssues([draftChapter('进度管理', '已制定进度计划。')]);
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('进度闭环');
   });
 
-  it('进度闭环缺 2 词 → 不报（5 词 ceil=3）', () => {
-    expect(constructionOrgControlLoopIssues([draftChapter('进度管理', '按计划定期检查进度，发现滞后及时纠偏。')])).toEqual([]);
+  it('进度闭环缺 2 词 → 报（D-T2 全要素判定）', () => {
+    const issues = constructionOrgControlLoopIssues([draftChapter('进度管理', '按计划定期检查进度，发现滞后及时纠偏。')]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('偏差');
+    expect(issues[0].message).toContain('复核');
   });
 
   it('环保闭环缺 2 词 → 报（4 词 ceil=2）', () => {
@@ -288,6 +293,44 @@ describe('Y4 constructionOrgControlLoopIssues', () => {
 
   it('标题不匹配任何闭环 pattern → 不检查', () => {
     expect(constructionOrgControlLoopIssues([draftChapter('工程概况', '')])).toEqual([]);
+  });
+
+  // ═══ D-T2 主责章定位（r28f 误报族根治 + 修复轮消费契约） ═══
+  it('D-T2 主责章只看标题：机械设备计划章（含「计划」）→ 不报进度链（r28f 误报族）', () => {
+    expect(constructionOrgControlLoopIssues([draftChapter('拟投入的主要施工机械、设备计划', '正文')])).toEqual([]);
+  });
+
+  it('D-T2 主责章只看标题：主要施工方法章（sections 含验收）→ 不报质量链（sections 串扰根治）', () => {
+    const chapter = { ...draftChapter('主要施工方法', '正文'), sections: ['质量验收'] };
+    expect(constructionOrgControlLoopIssues([chapter])).toEqual([]);
+  });
+
+  it('D-T2 主责章取首个标题命中章：首章成链 → 后续命中章缺词不报（链载体唯一化）', () => {
+    const chapters = [
+      { ...draftChapter('质量管理', '自检、互检、交接检、整改、复查、归档全部落实。'), id: 'c1' },
+      { ...draftChapter('质量保证措施', '正文'), id: 'c2' },
+    ];
+    expect(constructionOrgControlLoopIssues(chapters)).toEqual([]);
+  });
+
+  it('D-T2 主责章取首个标题命中章：首章缺词 → 只报首章（chapterId 指向主责章）', () => {
+    const chapters = [
+      { ...draftChapter('质量管理', '正文'), id: 'c1' },
+      { ...draftChapter('质量保证措施', '自检、互检、交接检、整改、复查、归档全部落实。'), id: 'c2' },
+    ];
+    const issues = constructionOrgControlLoopIssues(chapters);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].chapterId).toBe('c1');
+  });
+
+  it('D-T2 issue 携带 chapterId/severity/category/provenance（修复轮消费契约）', () => {
+    const issues = constructionOrgControlLoopIssues([draftChapter('质量管理', '正文')]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].chapterId).toBe('d1');
+    expect(issues[0].severity).toBe('warning');
+    expect(issues[0].category).toBe('control_loop');
+    expect(issues[0].provenance?.detectorId).toBe('construction-org-control-loop');
+    expect(issues[0].provenance?.fingerprint).toBeTruthy();
   });
 
   it('sections 参与 pattern 判定（安全+文明双规则同命中）', () => {

@@ -130,6 +130,23 @@ function candidateCacheKey(candidate: CitationAdjudicationCandidate): string {
   return [candidate.kind, candidate.subject, candidate.value, candidate.unit, candidate.authority, candidate.facts?.join('|') ?? '', stableHash(candidate.sentence)].join('§');
 }
 
+/** 结论-依据自否检测（r22 实测归因）：判定层批量输出偶发结论-依据错位——rationale 明确否定冲突
+ *（「非总工期数值，故不冲突」）而 conclusion 仍标 conflict，报出即 blocker 阻断且自动修复轮无从收敛。
+ * 语义：剥除显式否定短语后依据文本已无「冲突/不一致」肯定表述，且原文含否定口径/否定冲突短语时
+ * 视为依据自否成立。误伤边界：真冲突依据（「以项目级口径陈述且与权威不一致」）含肯定「不一致」→
+ * 不自否；否定与肯定并存的自相矛盾依据也保守不降级（仅纯自否形态生效）。
+ * r24 B6 词族扩展（实机归因）：实测 rationale「…两套口径的表述未构成对权威值的冲突」
+ *——「未构成/未形成/未视为/不存在…冲突」是高频否定动宾形态，旧词表只收四字否定短语永不命中，
+ * 结论错位直坠终门禁；扩展「(未|不|没有|不曾|从未|并非)+动词+(0～10字间距)+冲突/不一致」完整动宾
+ * 否定族（动词集为判定/识别类动词闭集；「不一致」前需接判定动词方命中，真冲突句「与权威不一致」
+ * 中「不」直接接「一致」不在动词集，不会误伤）。 */
+export function rationaleNegatesConflict(rationale: string): boolean {
+  const negated = /不冲突|并非冲突|不存在冲突|不予冲突|无冲突|(?:未|不|没有|不曾|从未|并非)(?:构成|形成|产生|发生|视为|属于|存在|发现|出现|检出|识别)[^，。；;、]{0,10}?(?:冲突|不一致)|非[^，。；;、]{0,12}?(?:口径|数值|陈述)/u;
+  if (!negated.test(rationale)) return false;
+  const stripped = rationale.replace(new RegExp(negated.source, 'gu'), '');
+  return !/冲突|不一致/u.test(stripped);
+}
+
 function buildAdjudicationPrompt(candidates: CitationAdjudicationCandidate[]): string {
   const rows = candidates.map(candidate => JSON.stringify({
     id: candidate.id,
@@ -187,12 +204,16 @@ export async function adjudicateCitationCandidates(
     }
     for (const candidate of batch) {
       const raw = rawById.get(candidate.id);
-      const conclusion: AdjudicationConclusion = raw?.conclusion === 'consistent' || raw?.conclusion === 'conflict' || raw?.conclusion === 'uncertain'
-        ? raw.conclusion
-        : 'uncertain';
       const rationale = typeof raw?.rationale === 'string' && raw.rationale.trim()
         ? raw.rationale.trim().slice(0, 120)
         : (raw ? '模型未给出判定依据' : '模型输出缺少该候选的判定');
+      let conclusion: AdjudicationConclusion = raw?.conclusion === 'consistent' || raw?.conclusion === 'conflict' || raw?.conclusion === 'uncertain'
+        ? raw.conclusion
+        : 'uncertain';
+      // 结论-依据自否校正（r22 实测归因）：批量判定偶发「conclusion=conflict + rationale 明确否定冲突」
+      // 的自相矛盾记录（实测「机动工期1天」获依据「非总工期数值，故不冲突」却标 conflict 报 blocker
+      // 阻断）；依据文本为语义分析产物、信息量高于分类字段，纯自否成立时以依据为准降级 consistent 放行
+      if (conclusion === 'conflict' && rationaleNegatesConflict(rationale)) conclusion = 'consistent';
       const record: AdjudicationRecord = { id: candidate.id, conclusion, rationale };
       records.set(candidate.id, record);
       // 仅缓存模型有效输出（失败/缺记录不缓存，下轮重试）

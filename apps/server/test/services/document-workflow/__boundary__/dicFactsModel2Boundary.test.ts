@@ -286,6 +286,40 @@ describe('B4 detectFactConflicts', () => {
     const conflicts = await detectFactConflicts(facts);
     expect(conflicts.length).toBeLessThanOrEqual(8);
   });
+
+  it('D-T4 ④ 时长 vs 日期跨形态不互比（计划工期=90日历天 vs 开工日期=2026年9月24日）', async () => {
+    const conflicts = await detectFactConflicts([
+      fact('90日历天', { key: 'plan_duration', fieldName: '周期要求', sourceFile: '招标文件.pdf' }),
+      fact('2026年9月24日（具体开工日期以开工通知为准）', { key: 'start_date', fieldName: '周期要求', sourceFile: '招标文件.pdf' }),
+    ]);
+    expect(conflicts).toEqual([]);
+  });
+
+  it('D-T4 ④ 同形态多值照报：时长族 90日历天 vs 120日历天', async () => {
+    const conflicts = await detectFactConflicts([
+      fact('90日历天', { key: 'plan_duration', fieldName: '周期要求', sourceFile: 'A.pdf' }),
+      fact('120日历天', { key: 'plan_duration_b', fieldName: '周期要求', sourceFile: 'B.pdf' }),
+    ]);
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]).toContain('事实冲突：周期要求');
+  });
+
+  it('D-T4 ④ 同形态多值照报：日期族 2026年9月24日 vs 2026年10月1日', async () => {
+    const conflicts = await detectFactConflicts([
+      fact('2026年9月24日', { key: 'start_date', fieldName: '周期要求', sourceFile: 'A.pdf' }),
+      fact('2026年10月1日', { key: 'start_date_b', fieldName: '周期要求', sourceFile: 'B.pdf' }),
+    ]);
+    expect(conflicts).toHaveLength(1);
+  });
+
+  it('D-T4 ④ 混入未判形态值时维持全量互比（防真冲突被静默）', async () => {
+    const conflicts = await detectFactConflicts([
+      fact('90日历天', { key: 'plan_duration', fieldName: '周期要求', sourceFile: 'A.pdf' }),
+      fact('2026年9月24日', { key: 'start_date', fieldName: '周期要求', sourceFile: 'B.pdf' }),
+      fact('工期暂定90天，以实际为准', { key: 'duration_note', fieldName: '周期要求', sourceFile: 'C.pdf' }),
+    ]);
+    expect(conflicts).toHaveLength(1);
+  });
 });
 
 // ═══════ B5 buildFactsModel ═══════

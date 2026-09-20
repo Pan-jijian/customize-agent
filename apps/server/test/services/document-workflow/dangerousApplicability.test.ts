@@ -28,9 +28,17 @@ describe('dangerousApplicabilityIssues', () => {
     expect(dangerousApplicabilityIssues('本工程采用悬挑式脚手架。')).toHaveLength(1);
   });
 
-  it('起重吊装：设备名与作业形态词（垂直运输/起重伤害）双覆盖', () => {
+  it('起重吊装：设备名与有向前提词（起重伤害）双覆盖（r24 B7 收窄后保留词）', () => {
     expect(dangerousApplicabilityIssues('现场配置塔式起重机 2 台。')).toHaveLength(1);
     expect(dangerousApplicabilityIssues('材料垂直运输涉及的起重伤害风险。')).toHaveLength(1);
+  });
+
+  it('r24 B7 收窄：裸「吊装/垂直运输」普通工序描述不判适用（硬设备词/伤害名/量纲词才是前提）', () => {
+    expect(dangerousApplicabilityIssues('化粪池吊装就位后分层回填并逐层夯实。')).toEqual([]);
+    expect(dangerousApplicabilityIssues('灯杆吊装采用高空作业车配合，接线调试后验收。')).toEqual([]);
+    expect(dangerousApplicabilityIssues('材料水平与垂直运输由人工配合小型机具完成。')).toEqual([]);
+    expect(dangerousApplicabilityIssues('起吊重量为120kN的构件采用履带吊安装。')).toHaveLength(1);
+    expect(dangerousApplicabilityIssues('吊装荷载超过100kN时须编制专项施工方案。')).toHaveLength(1);
   });
 
   it('吊篮/拆除工程词面即适用', () => {

@@ -49,12 +49,22 @@ export function fabricatedStartDateIssues(markdown: string, factsModel: Document
   // 三个月社保缴费证明」为招标条款原文转写（补写轮写入），条款原文日期是评标资格事实而非
   // 自行设定的开工日期；「（含）以来」与社保/缴费类语境与开工日期编造无交集，豁免零误伤
   const CLAUSE_DATE_CONTEXT_RE = /（含）以来|\(含\)以来|社保|社会保险|养老保险|缴费证明|五险/u;
+  // r28h M8 实机归因（s28h2）：法规文件成文/印发日期属公共知识引用而非自行设定日期——
+  // 「对2024年12月25日住房城乡建设部办公厅印发的《危大工程专项施工方案严重缺陷清单（试行）》」
+  // 被报「编造开工日期」blocker（经核实 2024-12-25 为该文件真实落款日期）。判据（日期右侧紧邻
+  // 窗口，先截断至首个句读）：文件动词（印发/发布/公布/施行/修订/颁布/出台/批复）后随书名号《
+  //（「印发的《…》」「自X日起施行的《…》」）；自行设定的开工日期不会紧跟此形态，豁免零误伤
+  const STATUTORY_DOC_DATE_AFTER_RE = /(?:印发|发布|公布|施行|修订|颁布|出台|批复)[^。；\n]{0,8}《/u;
   for (const match of markdown.matchAll(CALENDAR_DATE_RE)) {
     const date = `${match[1]}年${match[2]}月${match[3]}日`;
     if (knownDates.has(date)) continue;
     const start = Math.max(0, (match.index || 0) - 40);
     const context = markdown.slice(start, (match.index || 0) + date.length + 40);
     if (CLAUSE_DATE_CONTEXT_RE.test(context)) continue;
+    // 日期右侧紧邻窗口（截断至首个句读）：法规文件成文日期引用豁免（r28h M8）
+    const afterRaw = markdown.slice((match.index || 0) + date.length, (match.index || 0) + date.length + 32);
+    const afterCut = afterRaw.search(/[。；\n]/u);
+    if (STATUTORY_DOC_DATE_AFTER_RE.test(afterCut >= 0 ? afterRaw.slice(0, afterCut) : afterRaw)) continue;
     if (hasMaterialDates) {
       // 资料已有其他日期但正文出现资料外日期：仍属编造；仅进度计划类节点日期可由工期推导（合法，跳过）
       if (RESOURCE_DATE_LIKE_ANCHOR_RE.test(context)) continue;
@@ -827,34 +837,31 @@ export async function sixHundredPercentCoverageIssues(markdown: string): Promise
   return issues;
 }
 
-// ── 7b. 安徽省属地适配与政策合规（round-18 E11）：创优目标/四节一环保量化/工伤保险 ──
-// 属地判定为省级：建设地点位于安徽省（含省内任一地级市）即触发属地适配项，
-// 不再针对合肥单市（用户反馈：适配对象是安徽省工程，不是合肥本地适配）。
+// ── 7b. 属地适配与政策合规（E11）：创优目标/四节一环保量化/工伤保险 ──
+// 属地判定产品级通用：建设地点类字段有值即触发属地增强项——不限具体省份（历史实现硬编码
+// 单省城市名单表，其他省份工程零触发、属地增强项漏检）。属地增强项为 warning 级不阻断交付。
 // W2/P1 改造：三项均为开放语义空间，纯语义判定（bge 直判），不再使用词面词表；
-// 创优目标检测与建议均不注入任何具体奖项名称（庐州杯等），奖项一律以评分项要求提取结果为准。
+// 创优目标检测与建议均不注入任何具体奖项名称，奖项一律以评分项要求提取结果为准。
 
-const ANHUI_LOCATION_LABEL_RE = /建设地点|工程地点|项目地点|实施地点|服务地点|交付地点|建设地址/u;
+const LOCATION_LABEL_RE = /建设地点|工程地点|项目地点|实施地点|服务地点|交付地点|建设地址/u;
 
-const ANHUI_CITY_NAMES = ['安徽', '合肥', '芜湖', '蚌埠', '淮南', '马鞍山', '淮北', '铜陵', '安庆', '黄山', '滁州', '阜阳', '宿州', '六安', '亳州', '池州', '宣城'];
-
-/** 项目是否位于安徽省（factsModel 建设地点类字段值含“安徽”或省内任一地级市） */
-
-function isAnhuiProject(factsModel: DocumentFactsModel): boolean {
-  return factsModel.project.some(fact => ANHUI_LOCATION_LABEL_RE.test(`${fact.fieldName || ''}${fact.key || ''}`) && ANHUI_CITY_NAMES.some(city => stringifyFactValue(fact.value).includes(city)));
+/** 项目是否存在属地（建设地点类字段有值）：属地增强项（创优目标/四节一环保量化）触发条件 */
+function hasProjectLocation(factsModel: DocumentFactsModel): boolean {
+  return factsModel.project.some(fact => LOCATION_LABEL_RE.test(`${fact.fieldName || ''}${fact.key || ''}`) && Boolean(stringifyFactValue(fact.value).trim()));
 }
 
 export async function localAdaptationKeywordIssues(markdown: string, factsModel: DocumentFactsModel): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = [];
-  const anhuiProject = isAnhuiProject(factsModel);
+  const hasLocation = hasProjectLocation(factsModel);
   const queries: Array<{ key: string; text: string }> = [];
-  if (anhuiProject) {
+  if (hasLocation) {
     queries.push({ key: 'award', text: '争创省市级优质工程奖、安全文明标准化工地' });
     queries.push({ key: 'greenQuant', text: '非传统水源利用率、废弃物回收率等绿色施工量化指标' });
   }
   queries.push({ key: 'workInjury', text: '按规定为作业人员办理工伤保险' });
   if (queries.length === 0) return issues;
   const coverage = await judgeQueryCoverage(queries, bodySentencesForSemantic(markdown));
-  if (anhuiProject) {
+  if (hasLocation) {
     // 属地创优目标：正文无创优目标语义（检测与建议均不注入具体奖项名称——奖项以评分项要求提取结果逐字为准）
     // 4.31 降级 warning（丰乐镇 v6 #84）：属地增强项非硬性交付门——正文全篇未提创优目标时不应阻断交付，
     // 保留可观测性由质量报告引导补充（与同为增强项的 constructionOrgBonusModuleIssues info 口径同向）
@@ -865,7 +872,7 @@ export async function localAdaptationKeywordIssues(markdown: string, factsModel:
         category: 'structure',
         owner: 'llm',
         repairability: 'llm_repairable',
-        message: '属地创优目标缺失：正文未提及省市级优质工程/文明标准化工地等创优目标（安徽省属地适配项）',
+        message: '属地创优目标缺失：正文未提及省市级优质工程/文明标准化工地等创优目标（属地适配项）',
         suggestion: '在质量目标或创优规划小节补写与项目实际规模相符的创优目标表述；奖项名称必须以评分项要求提取结果（招标文件原文）为准逐字落位，禁止自行编造或替换为其他奖项名称。',
       });
     }
@@ -1141,7 +1148,66 @@ const POSITIVE_SELF_REFERENCE_RE = /编制范围为[^。；;]{0,40}?所界定的
 //   致该分支未命中（「扣减」原只在收口表），动作表并入「扣减」；真伤护栏复验：「本工程不进行
 //   分包」（无动作词）、「评分指标存在缺口尚未明确」（无动作词）、「专项设计文件尚未完成，
 //   待后续补充」（「补充」不入动作表）均无动作词+收口词链，保持召回。
-const SELF_UNDERMINING_PROCEDURAL_EXEMPT_RE = /未落实[^。；;]{0,24}?(?:整改|复查|销项|复验)|未(?:明确|列明|注明)[^。；;]{0,36}?按[^。；;]{0,44}?(?:执行|选取|确定|取用|调整|选用)|(?:发现|对|明确|约定|签订|制定|建立|规定|凡|任何|所有|新增)[^。；;]{0,48}?(?:缺失|损坏|不全|脱岗|未审批|不合格|未完成|未明确|未落实|隐患)[^。；;]{0,72}?(?:整改|复查|销项|约谈|补齐|补测|复测|补报|归档|复核|确认|登记|通知|上报|通报|更新|处置|修复|更换|纠正|恢复|完善|处理|落实|责任|时限|考核|处罚|扣减|调离|清退|停止作业|恢复施工)|(?:不得|严禁|禁止)[^。；;]{0,40}?(?:避免|防止)[^。；;]{0,20}?(?:返工|窝工|损失|事故)|(?:重难点|难点)(?:源于|在于)[^。；;]{0,80}?(?:若|如)未[^。；;]{0,40}?(?:将|会|可能)|(?:考核|考评|评比|评分)[^。；;]{0,50}?(?:不合格|不达标|不到位|不称职|失职|缺失|超时|违规)[^。；;]{0,36}?(?:绩效扣减|扣减|扣款|调离|清退|退场|问责|处罚|奖惩|奖罚)|(?:如|若)[^。；;]{0,60}?(?:发包人|招标人|建设单位)[^。；;]{0,60}?(?:有权|可要求|可以要求|可提出|可以提出)|(?:凡|任何|所有)[^。；;]{0,24}?未[^。；;]{0,40}?(?:人员|工人)[^。；;]{0,20}?(?:不得|严禁|禁止)[^。；;]{0,20}?(?:进入|上岗|进场|作业)|(?:新增|各|每|作业面|工作面|进入|安排)[^。；;]{0,30}?未[^。；;]{0,30}?(?:前|的)[^。；;]{0,24}?(?:不得|严禁|禁止|不予)|(?:未能|未按|未完成|未明确|未落实|未闭合|未审批|缺失|损坏|缺漏|不合格|隐患)[^。；;]{0,40}?(?:整改|复查|销项|恢复|复核|确认|登记|更新|处置|修复|更换|纠正|完善|落实|补齐|补测|复测|归档|通知|上报|通报|约谈|扣减|停止作业)[^。；;]{0,20}?(?:复查|销项|确认|登记|归档|责任|时限|考核|处罚|扣减|调离|清退|落实|复核|恢复|整改|处置|更新|完成|闭合)|未(?:完成|通过|复审|核验|审查|审核|验收|办理)[^。；;]{0,14}?(?:不得|严禁|禁止|不予)[^。；;]{0,14}?(?:上岗|作业|进场|进入|担任|从事|投用|使用|操作)/u;
+// r23 扩围（r23 P3b 归因：工序准入管控句漏网）：「任何一段管网未完成闭水试验或回填压实度
+//   未达标，该段道路结构层不得开工」——「未完成…不得开工」是工序交接准入规则（前道工序
+//   质量未确认不得进入下道工序），属标准管控语言非短板自述；⑫ 分支中距 14→26、尾部动作表
+//   并入「开工|施工|回填|浇筑|铺筑|隐蔽|覆盖|开放|通行|吊装|拆除」；真伤护栏复验：「专项
+//   设计文件尚未完成，待后续补充」无「不得」结构、「评分指标存在缺口尚未明确」无准入动作，
+//   均保持召回。
+// r25 扩围（r24b B5 归因：条件-调配-保障三段式误报）：「对连续N日未完成计划的区段，负责人当日
+//   调整班组配置，从已完成区段调拨人员补位，确保工期不突破」——「未完成」是资源调配的触发条件、
+//   「调整/调拨」是调配动作、「确保…不突破」是目标保障，属进度纠偏的管理措施描述，非投标短板
+//   自述；⑬ 新增「条件（对…未…的/区段…）→资源调配动作→目标保障」三段式分支；真伤护栏复验：
+//   「本工程不进行分包」（无三段式结构）、「评分指标存在缺口尚未明确」（无调配+保障链）、
+//   「专项设计文件尚未完成，待后续补充」（无「对/针对」条件引导）均保持召回。
+// r27 扩围（r26d 归因：恶劣天气影响统计-纠偏-保障句误报）：「每次恶劣天气结束后，施工员
+//   在2小时内统计受影响作业面、损失工时与未完成工序，项目经理对照总控线路判断是否触发滞后
+//   预警，触发后按既定纠偏流程组织资源补充与作业面加密，确保90日历天总工期不受突破」——
+//   「统计/未完成/损失」是偏差监测输入、「组织资源补充/加密」是纠偏动作、「确保…不受突破」
+//   是目标保障，属进度监控纠偏的管理措施描述，非投标短板自述；⑭ 新增「监测统计（统计/评估/
+//   分析/核算/汇总/排查/监测）→偏差/隐患→纠偏动作（组织/调整/增派…）→目标保障（确保/保障/
+//   保证）」四段式分支；真伤护栏复验：「专项设计文件尚未完成，待后续补充」「评分指标存在缺口
+//   尚未明确」（无监测词起点或无纠偏+保障链）均保持召回。
+// r28g 扩围（r28f 归因：三句管控承诺误报）：「项目经理未完成变更前，项目部不办理开工令签发」
+//   （未完成…前＋不办理类禁办动作=到岗管控）、「未完成信息登记…的人员，一律不得进入作业面」
+//   （未完成…的＋不得进入=人员准入）、「缺失或过期的当日补充更换」（缺失/过期＋当日＋补充更换
+//   =即时处置闭环）三句均为标准管控语言被召回；⑮ 无引导词「未…（前/的）…禁办/禁入动作」
+//   分支（否定动作面补不办理/不签发/不安排/不组织/不批准/不开放/不下发），⑯ 人员准入分支
+//   窗口 26→32 且起始词补未接受/未取得，⑰ 新增「缺失/损坏/缺漏/过期/失效＋当日/立即/及时＋
+//   补充/更换/修复/整改」即时处置分支；真伤护栏复验：「专项设计文件尚未完成，待后续补充」
+//   「评分指标存在缺口尚未明确」无（前/的）+禁办动作链、无即时处置动作链，均保持召回。
+// r28j 扩围（r28i 归因：三类招标条款/管理口号句误报）：「本工程范围内部分实施内容缺乏成文标准或
+//   规范时，发包人（或其委托的第三方）有权在合理期限内（一般不超过60日历天）提出书面技术要求」
+//   （无如/若引导的招标授权条款——分支⑦前置扩「…时，＋招标主体」形态）、「发现记录缺失当日
+//   补录并追查原因」（分支③动作表补录/追查）、「处理坚持四不放过原则，即事故原因未查清不放过…」
+//   （新增「未X不放过」法规口号枚举分支）；真伤护栏复验：「专项设计文件尚未完成，待后续补充」
+//   无「…时，＋招标主体」链、无「未X不放过」枚举，保持召回。
+export const SELF_UNDERMINING_PROCEDURAL_EXEMPT_RE = /未落实[^。；;]{0,24}?(?:整改|复查|销项|复验)|未(?:明确|列明|注明)[^。；;]{0,36}?按[^。；;]{0,44}?(?:执行|选取|确定|取用|调整|选用)|(?:发现|对|明确|约定|签订|制定|建立|规定|凡|任何|所有|新增)[^。；;]{0,48}?(?:缺失|损坏|不全|脱岗|未审批|不合格|未完成|未明确|未落实|隐患)[^。；;]{0,72}?(?:整改|复查|销项|约谈|补齐|补测|复测|补报|归档|复核|确认|登记|通知|上报|通报|更新|处置|修复|更换|纠正|恢复|完善|处理|落实|责任|时限|考核|处罚|扣减|调离|清退|停止作业|恢复施工|补录|追查)|(?:不得|严禁|禁止)[^。；;]{0,40}?(?:避免|防止)[^。；;]{0,20}?(?:返工|窝工|损失|事故)|(?:重难点|难点)(?:源于|在于)[^。；;]{0,80}?(?:若|如)未[^。；;]{0,40}?(?:将|会|可能)|(?:考核|考评|评比|评分)[^。；;]{0,50}?(?:不合格|不达标|不到位|不称职|失职|缺失|超时|违规)[^。；;]{0,36}?(?:绩效扣减|扣减|扣款|调离|清退|退场|问责|处罚|奖惩|奖罚)|(?:如|若)[^。；;]{0,60}?(?:发包人|招标人|建设单位)[^。；;]{0,60}?(?:有权|可要求|可以要求|可提出|可以提出)|[^。；;]{0,24}?时[，,][^。；;]{0,32}?(?:发包人|招标人|建设单位)[^。；;]{0,60}?(?:有权|可要求|可以要求|可提出|可以提出)|未[^。；;]{0,16}?不放过|(?:凡|任何|所有)[^。；;]{0,24}?未[^。；;]{0,40}?(?:人员|工人)[^。；;]{0,20}?(?:不得|严禁|禁止)[^。；;]{0,20}?(?:进入|上岗|进场|作业)|未[^。；;]{0,32}?(?:前|的)[^。；;]{0,32}?(?:不得|严禁|禁止|不予|不办理|不签发|不安排|不组织|不批准|不开放|不下发|不投入使用)|(?:未能|未按|未完成|未明确|未落实|未闭合|未审批|缺失|损坏|缺漏|不合格|隐患)[^。；;]{0,40}?(?:整改|复查|销项|恢复|复核|确认|登记|更新|处置|修复|更换|纠正|完善|落实|补齐|补测|复测|归档|通知|上报|通报|约谈|扣减|停止作业)[^。；;]{0,20}?(?:复查|销项|确认|登记|归档|责任|时限|考核|处罚|扣减|调离|清退|落实|复核|恢复|整改|处置|更新|完成|闭合)|未(?:完成|通过|复审|核验|审查|审核|验收|办理|达标|整改|闭合|接受|取得)[^。；;]{0,32}?(?:不得|严禁|禁止|不予|不办理|不签发|不安排|不组织|不批准|不开放)[^。；;]{0,16}?(?:上岗|作业|进场|进入|担任|从事|投用|使用|操作|开工|复工|施工|回填|浇筑|砌筑|铺筑|摊铺|安装|隐蔽|覆盖|封闭|推进|实施|开放|通行|吊装|拆除|验收)|(?:对|针对)[^。；;]{0,20}?未[^。；;]{0,24}?(?:的|区段|部位|工序|作业面|任务|班组)[^。；;]{0,60}?(?:调整|调拨|调配|增派|增补|加强|优化)[^。；;]{0,60}?(?:确保|保障|保证)[^。；;]{0,24}?(?:不突破|不超|满足|达标|完成|实现)|(?:统计|评估|分析|核算|汇总|排查|监测)[^。；;]{0,30}?(?:未能|未按|未完成|未明确|未落实|缺失|损坏|损失|不合格|隐患|滞后|影响)[^。；;]{0,50}?(?:组织|调整|调拨|调配|增派|增补|补充|加密|加强|优化|纠偏|补位)[^。；;]{0,50}?(?:确保|保障|保证)[^。；;]{0,24}?(?:不[^。；;]{0,6}?(?:突破|超期|滞后|延误|影响|低于|少于|超过)|满足|达标|完成|实现|符合)|(?:缺失|损坏|缺漏|过期|失效)[^。；;]{0,24}?(?:当日|当天|立即|及时|随时|限期|按批|按次|定期)[^。；;]{0,16}?(?:补充|更换|修复|整改|处置|更新|补齐|完善|销项)/u;
+
+/** 条件-处置-放行三段式管控规则从句（r23 P3b 归因实测：「未闭合的由材料员补齐后方可报验」）：
+ * 负向词前置过滤对整句测试时，「未X的」条件从句的负向词把管控规则句误推入语义召回——规则句的
+ * 负向词是触发条件、处置动作+放行条件是流程本体（「未X的由责任人处置后方可放行」是标准管理语言），
+ * 非项目现状断言。剥离该从句后再测负向词：剥离后无负向词即规则句（不召回）；真自伤为现状断言
+ *（「部分设计尚未完成」主干断言），剥离从句后负向词仍在主干，保持召回。 */
+const REMEDIATION_CONDITION_CLAUSE_RE = /未[^，。；;\n]{1,12}的[，,]?(?:由|经|应|须|需|统一|一律|责成)[^，。；;\n]{0,16}?(?:补齐|补正|补录|补报|整改|纠正|复核|复验|复测|返工|修整|处理)[^，。；;\n]{0,20}?(?:方可|才能|不得|严禁)/gu;
+
+/** r28h M6 自伤候选负向词闸门语境剥离链（s28h2 终门禁 16/17/18 号实测归因）：负向词前置过滤对
+ * 三类非现状断言语境误命中——①否定/防护语境（「确认无松动、无缺失」「杜绝/避免/防止+缺失类词」：
+ * 负向词被否定或是防控目标）；②禁止借口框架（「不得以详图缺失为由擅自变更做法」：负向词是禁止引用的
+ * 借口而非自述短板）；③条件假设句（「若各专业之间缺乏统一标准，极易出现…问题」：从句+后果为风险
+ * 推演）。剥离三类语境后再测负向词：仍命中=真自伤候选（主干现状断言），全部剥离后无命中=不召回。 */
+const NEGATED_DEFICIENCY_RE = /(?:无|没有|不存在|未发现|未出现|杜绝|避免|防止|严禁|不得出现)(?:出现|发生|存在|产生)?(?:尚未完成|尚未|未完成|未明确|未采用|未落实|未确定|未闭合|存在缺口|有待|待补充|待完善|跟踪完善|不够|不明确|缺失|缺少|缺乏|风险较大|难以保证|无法保证|正在办理|暂未|未能|需进一步)/gu;
+const PROHIBITED_EXCUSE_CLAUSE_RE = /(?:不得|严禁|禁止|绝不|不能|不可)以[^，。；]{1,24}为(?:由|借口|理由)/gu;
+const HYPOTHETICAL_MARKER_RE = /(?:倘若|如果|一旦|万一|若(?!干))/u;
+
+function stripUnderminingContexts(sentence: string): string {
+  const stripped = sentence
+    .replace(REMEDIATION_CONDITION_CLAUSE_RE, '')
+    .replace(NEGATED_DEFICIENCY_RE, '')
+    .replace(PROHIBITED_EXCUSE_CLAUSE_RE, '');
+  const marker = stripped.match(HYPOTHETICAL_MARKER_RE);
+  return marker && marker.index !== undefined ? stripped.slice(0, marker.index) : stripped;
+}
 
 export async function selfUnderminingCandidateIssues(markdown: string): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = [];
@@ -1158,10 +1224,12 @@ export async function selfUnderminingCandidateIssues(markdown: string): Promise<
   // R9 契约（分包否定式自述必须召回）：「本工程不进行分包」类负面自述无通用负向词面，由
   // 「不进行分包|不再分包|不转包」形态覆盖（fixSelfUnderminingCandidates 同源配套改写：
   // 检测召回 ↔ 确定性修复通道一一对应，不得单向失配）
+  // r28h M6：闸门测前先剥离否定/禁止借口/条件假设三类语境（stripUnderminingContexts），
+  // 负向词仅存活于现状断言主干时才算候选（16/17/18 号误报实测见剥离链注释）
   const UNDERMINING_NEGATIVE_RE = /尚未|未完成|未明确|未采用|未落实|未确定|未闭合|存在缺口|有待|待补充|待完善|跟踪完善|不够|不明确|缺失|缺少|缺乏|风险较大|难以保证|无法保证|正在办理|暂未|未能|需进一步|不进行分包|不再分包|不转包/u;
   const underminingSimilarity = await buildSemanticSimilarity(sentences, [...SELF_UNDERMINING_QUERIES]);
   const hits = [...new Set(sentences.filter(sentence =>
-    UNDERMINING_NEGATIVE_RE.test(sentence)
+    UNDERMINING_NEGATIVE_RE.test(stripUnderminingContexts(sentence))
     && !POSITIVE_SELF_REFERENCE_RE.test(sentence)
     && !SELF_UNDERMINING_PROCEDURAL_EXEMPT_RE.test(sentence)
     && SELF_UNDERMINING_QUERIES.some(query => underminingSimilarity(sentence, query) >= SEMANTIC_COVERAGE_THRESHOLD)))];
@@ -1567,9 +1635,12 @@ export const CROSS_SECTION_ANCHORS = [
   {
     key: 'xps', label: '挤塑聚苯板（XPS）厚度', unit: 'mm', kind: 'number' as const,
     // 模式 1 排除宽度/拼缝/不大于/采用等语境（防「拼缝宽度不大于2mm」「外挑楼板采用70mm厚岩棉板」误采）；
+    // r28j 扩围（r28i 归因：s28i 实机「阴角处用水泥砂浆倒角成圆弧形，半径10mm」入池成 XPS 第二口径
+    // 误报）：排除表补几何构造词「半径/倒角/圆弧/弧度」——节点构造参数（圆角半径）非保温层厚度，
+    // 锚点词→数值路径上出现几何词即不采；真厚度值路径（「板厚度50mm」）无几何词不受影响；
     // 模式 2 覆盖「130mm厚挤塑聚苯」数值前置形态
     patterns: [
-      /(?:挤塑聚苯|XPS)(?:(?!(?:宽度|拼缝|不大于|不超过|小于|≤|采用|使用|选用|铺设|粘贴)).){0,40}?(\d+(?:\.\d+)?)\s*mm/gu,
+      /(?:挤塑聚苯|XPS)(?:(?!(?:宽度|拼缝|不大于|不超过|小于|≤|采用|使用|选用|铺设|粘贴|半径|倒角|圆弧|弧度)).){0,40}?(\d+(?:\.\d+)?)\s*mm/gu,
       /(\d+(?:\.\d+)?)\s*mm[^。；;\n|]{0,10}?(?:挤塑聚苯|XPS)/gu,
     ],
   },
@@ -1689,8 +1760,9 @@ export const CROSS_SECTION_ANCHORS = [
   {
     key: 'villageCount', label: '自然村数量', unit: '个自然村', kind: 'number' as const,
     // P2.4：正文自然村数量与项目名锁定口径不符（跨项目残留「9 个自然村」）即统一；
-    // 「自然村分组」「自然村施工组」为作业组织口径不参与（丰乐镇复测「9个自然村施工组」误报）
-    patterns: [/(\d+)\s*个(?:美丽宜居)?自然村(?!分组|施工组)/gu],
+    // 「自然村分组」「自然村施工组」为作业组织口径不参与（复测「9个自然村施工组」误报）；
+    // 村名前缀修饰通用化（任意 ≤8 字修饰词，如「美丽宜居」「和美」）——不绑定具体项目名形态
+    patterns: [/(\d+)\s*个[^，。；、\s\n]{0,8}?自然村(?!分组|施工组)/gu],
   },
   {
     key: 'circularSaw', label: '圆盘锯数量', unit: '台', kind: 'number' as const,
@@ -1916,8 +1988,12 @@ const ENUMERATION_DECLARE_RE = /分别为|分别对应|分别用于|分别按|�
 // 历史实现「不同标号直接互斥」逼 LLM 修复轮把多规格归一成一种（用户实锤：全文只用一种规格的制度性推手）
 // 单字「板」不进词表：材料名词尾字（挤塑聚苯板/泡沫塑料板/岩棉板）会被误当部位，
 // 使「XPS 30mm。屋面采用130mm」的 30mm 归入「板」组而漏报互斥；部位语境由长词（楼板/顶板/底板/筏板）覆盖
+// r28f B1 归因（r28e 实测）：分施工对象的设备配置表用途列部位词不在词表时，两表数值同入未标注池
+// 误报互斥——表4-1道路施工机械「挖掘机…5台｜路槽开挖」与表4-2生态池设备「挖掘机…1台｜生态池
+// 基坑开挖」是各自范围的配置口径；补入「基坑/路槽」（通用开挖作业部位）后两行各归其位、各池
+// 单值不互比（F14b 未标注合并仅在恰一个标注池时生效，两行均有标注后不再合并）
 
-const LOCATION_WORD_SOURCE = '女儿墙|外墙|内墙|隔墙|地梁|圈梁|构造柱|过梁|垫层|承台|筏板|底板|基础|主体|梁|柱|墙|楼板|屋面|地面|楼面|顶板|楼梯|阳台|雨篷|台阶|散水|坡道|找坡|找平|保护层|防水层|保温层|隔汽层|地坪|办公区|生活区|库房|加工区|堆放区|驻地|周转场|停放区|仓库|材料库|路基|沟槽|基槽';
+const LOCATION_WORD_SOURCE = '女儿墙|外墙|内墙|隔墙|地梁|圈梁|构造柱|过梁|垫层|承台|筏板|底板|基础|主体|梁|柱|墙|楼板|屋面|地面|楼面|顶板|楼梯|阳台|雨篷|台阶|散水|坡道|找坡|找平|保护层|防水层|保温层|隔汽层|地坪|办公区|生活区|库房|加工区|堆放区|驻地|周转场|停放区|仓库|材料库|路基|沟槽|基槽|基坑|路槽';
 
 // A14 每台X配备部位形态（丰乐镇第三轮实测：“每台燃油机械配备4kg干粉灭火器不少于1具”
 // 的“每台燃油机械”是部位语境，“机械”不在 LOCATION_WORD_SOURCE，导致 1具 混入未标注组误报互斥）
@@ -1993,6 +2069,36 @@ export function isUnitPairRatioMatch(markdown: string, matchIndex: number, raw: 
   return /每[^，,。；;\n|]{0,16}(?:对应|配备|配置|配套|编组|配)[^，,。；;\n|]{0,10}\d+\s*[台辆][^，,。；;\n|]{0,6}$/u.test(unitPairWindow);
 }
 
+// r25 扩围（r24b B2 归因·通用形态）：设备表「用途」列列举多个分项名（同一设备服务于多个分项）
+// 时，整行扫描会把表内数值归入用途列里的某个部位词组，与其它表的单分项配置口径误判互斥——
+// 表块上下文声明资源跨分项共享调配（共用/不再单独增配/轮换使用）时，表内数值是共享调配口径，
+// 与单分项配置口径不构成同部位矛盾，不参与互斥池
+export const RESOURCE_SHARING_CONTEXT_RE = /共用[^。；;\n]{0,10}|不(?:再)?单独(?:增配|新增|购置|添置|配置)|不另行(?:增配|新增|购置)|轮换使用|周转使用|交叉使用/u;
+
+/** 表格行匹配是否处于资源共用表块语境（r25 B2 归因·零专名）：仅表格行生效；从匹配行向上、
+ * 向下逐行探取（跳过表格行、空行与题注行），任一方向首个普通行命中共享词即成立；撞标题行或
+ * 扫描预算（1200 字符）耗尽即止（保守不豁免）。非表格行返回 false——正文部位分组口径不受影响。 */
+export function tableBlockHasSharingContext(markdown: string, matchIndex: number, lineStart: number): boolean {
+  const lineEndIndex = markdown.indexOf('\n', matchIndex);
+  const lineEnd = lineEndIndex === -1 ? markdown.length : lineEndIndex;
+  const lineText = markdown.slice(lineStart, lineEnd);
+  if (!/^\s*\|/u.test(lineText) || !/\|\s*$/u.test(lineText.trim())) return false;
+  const probe = (lines: string[]): boolean => {
+    for (const line of lines) {
+      if (/^\s*\|/u.test(line) || !line.trim()) continue;
+      if (/^\s*\*{0,2}表\s*[\d一二三四五六七八九十]+\s*[-–—][\d.]+/u.test(line)) continue;
+      if (/^#{1,6}\s/u.test(line)) return false;
+      return RESOURCE_SHARING_CONTEXT_RE.test(line);
+    }
+    return false;
+  };
+  const upwardStart = Math.max(0, lineStart - 1200);
+  const upward = markdown.slice(upwardStart, lineStart).split('\n');
+  upward.pop();
+  if (probe(upward.reverse())) return true;
+  return probe(markdown.slice(lineEnd + 1, lineEnd + 1 + 1200).split('\n'));
+}
+
 export function crossSectionNumericConflictIssues(markdown: string): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   for (const anchor of CROSS_SECTION_ANCHORS) {
@@ -2035,6 +2141,18 @@ export function crossSectionNumericConflictIssues(markdown: string): ValidationI
         }
         // 并列枚举豁免：「50mm/70mm」「C30/C35」属同句多规格正常枚举，不判冲突
         if (ENUMERATION_VALUE_RE.test(raw)) continue;
+        // r28j 扩围（r28i 归因：s28i 实机「阴角处用水泥砂浆倒角成圆弧形，半径10mm」被采为 XPS 池
+        // 第二口径）：几何构造参数语境豁免——数值前紧邻 6 字含半径/倒角/圆弧/弧度类构造几何词时，
+        // 该数值是节点构造参数（圆角/弧线）而非锚点物理量（板厚/容量/数量），不参与互斥池；
+        // 紧贴窗口（非全路径扫描）防误伤真规格句（「圆弧转角处XPS板厚50mm」的 50mm 前 6 字
+        // 不含完整几何词，照常入池）；绝对位置取窗，pattern2 数值前置形态同样覆盖
+        {
+          const digitOffset = match[1] !== undefined ? raw.indexOf(String(match[1])) : -1;
+          if (digitOffset >= 0) {
+            const digitAbs = (match.index || 0) + digitOffset;
+            if (/半径|倒角|圆弧|弧度/u.test(markdown.slice(Math.max(0, digitAbs - 6), digitAbs))) continue;
+          }
+        }
         // F14c 跨工序切换豁免：「垫层，再浇筑C30」的 C30 属后续构件，不参与本部位互斥池
         if (PROCESS_SWITCH_WORD_RE.test(raw)) continue;
         // 阶段细分豁免（与蓝图引用检测器 dayRe 同源，零漂移实测）：「道路施工集中在
@@ -2059,12 +2177,20 @@ export function crossSectionNumericConflictIssues(markdown: string): ValidationI
         // 的 1 具是使用行为（从配置总量中调出），非配置口径宣称——「从…中调配/取用/借用」
         // 结构中的数值不参与互斥池；「每个自然村施工点配置干粉灭火器2具」的配置值不受影响
         if (/[中内](?:调配|取用|挪用|借用|调用|划拨)|(?:从|由)[^。；;\n]{0,20}?[中内](?:调配|取用|挪用|借用|调用|划拨)/u.test(raw)) continue;
+        // r28 扩围（r27b 归因：「生态池工区增配1具」误报）：增量配置豁免——「增配/增补/追加/
+        // 补足/另配/增设」类增量动词前导的数值是相对既有配置的基准外追加量，非总量口径宣称
+        //（「每作业面不少于2具…增配1具」的 1具 是局部增补），不参与互斥池；「增加至X具」
+        // 类总数表述不含增量动词，照常互查
+        if (/增配|增补|追加|补足|另配|增设/u.test(raw)) continue;
         // r8 扩围（实机 #7 复核：组织单元引用误报）：「9个自然村网格分区包保」「9个自然村分组」
         // 的数值是施工组织单元口径（网格/分组/责任区），与项目覆盖自然村总数不同物——数字后
         // 12 字内出现组织单元词即跳过；项目覆盖总数声明（「覆盖20个自然村」）不受影响
         if (anchor.key === 'villageCount') {
           const orgTail = markdown.slice((match.index || 0) + raw.length, (match.index || 0) + raw.length + 12);
-          if (/分组|施工组|网格|责任区|单元|片区|班组|包保/u.test(orgTail)) continue;
+          // r28m M24a A1：orgTail 词表扩容「作业面|施工点|施工段」（r28k 实机：「施工员每日按9个自然村
+          // 作业面核对…」的数值是作业组织单元口径，与项目覆盖自然村总数不同物——与 citation.ts villageRe
+          // 负向排除同源判据，两处同步）
+          if (/分组|施工组|网格|责任区|单元|片区|班组|包保|作业面|施工点|施工段/u.test(orgTail)) continue;
         }
         // r11 配套比豁免（通用口径，判定见 isUnitPairRatioMatch 注释）
         if (isUnitPairRatioMatch(markdown, match.index || 0, raw)) continue;
@@ -2073,6 +2199,8 @@ export function crossSectionNumericConflictIssues(markdown: string): ValidationI
         let lineEnd = markdown.indexOf('\n', match.index);
         if (lineEnd === -1) lineEnd = markdown.length;
         if (NEGATIVE_DECLARATION_RE.test(markdown.slice(lineStart, lineEnd))) continue;
+        // r25 扩围（r24b B2 归因·通用）：表格行数值处于资源共用表块语境时不参与互斥池
+        if (tableBlockHasSharingContext(markdown, match.index || 0, lineStart)) continue;
         const group = locationGroupForMatch(markdown, match.index || 0, raw, lineStart);
         // pump 词面分池键：`${词面}｜${部位}`（词面前缀仅用于分组隔离，报告时剥离）；
         // 部位为空时不加前缀——无部位语境两词面同池互查（R8-1 潜水泵4台 vs 提升泵8台 → 报）
@@ -2252,6 +2380,14 @@ export function scanSpecLocationMismatchHits(markdown: string, specAuthorityMap?
         // 规格（150mm/200mm）属不同概念——原豁免词表不含「顺直度/接缝」且窗口 28/10 过窄；
         // 扩围偏差概念词（顺直度/接缝/拼缝/缝隙/误差/公差）与公差构造词（控制在/±/≤），窗口放宽
         if (/(?:偏差|误差|公差|缝隙|接缝|拼缝|高差|顺直度|垂直度|平整度|轴线|标高|高程)[^。；;\n|]{0,16}(?:不超过|不得大于|不大于|控制在|±|≤)/u.test(contextBefore.slice(-36))) continue;
+        // r28c 间距参数豁免（第四轮审计唯一 blocker 归因）：「…固定横杆与栏板…横杆水平度偏差
+        // 不超过5mm，栏板固定件间距不大于500mm」的 500mm 是固定件排布间距（构件间关系参数），
+        // 被 40 字窗口误绑为「栏板」板材规格（清单权威为板厚 150mm/200mm）——间距与规格属不同
+        // 概念；found 前紧邻间距概念词（间距/中心距/净距/排距/间隔，与值之间只允许 ≤8 字连接词
+        // 且不含句读——「间距、排距均不大于」取最后一个间距词仍豁免）即不判错位；
+        // 「栏板厚度500mm」这类无间距词的真错位不受影响
+        const preFound = match[0].slice(0, match[0].indexOf(found));
+        if (/(?:间距|中心距|净距|排距|间隔)[^。；;\n|，,、]{0,8}$/u.test(preFound)) continue;
         // F14h 跨部位截断豁免（零漂移实测）：「C20定型混凝土管道基础307m，…涵头采用C25
       // 混凝土浇筑」的 C25 紧邻后文「涵头」部位词，属涵头规格（清单条目 18 特征原文
       // 「涵头混凝土 C25」），不是管道基础错位——窗口内 found 前 14 字出现其它部位词即跳过
@@ -2478,12 +2614,26 @@ export function ambiguousEitherOrIssues(markdown: string): ValidationIssue[] {
     const preceding = normalized.slice(Math.max(0, (match.index || 0) - 6), (match.index || 0));
     if (/临时/u.test(preceding + match[0]) && /支护|围护|放坡|坡率|开挖/u.test(match[0])) continue;
     if (/围挡|警示|防护栏|爬梯|栈桥|便道/u.test(match[0])) continue;
+    // ③r22 P3a 扩围（实测「均采用可拆卸、可周转的轻钢结构或集装箱式设施」误报）：临建/周转设施
+    // 形态豁免——「或」两侧含临建设施形态词（集装箱/活动房/板房/棚房/岗亭/彩钢）且匹配语境
+    //（前窗 30 字+后窗 12 字）含临时属性词（临时/临建/可拆卸/可周转/撤场）时，列举的是临时
+    // 设施做法选型（堆场/加工点/工具房类），非基础/支护形式等永久工程关键设计决策；
+    // 真两可（「桩基或独立基础」「放坡或钢板桩」）无临建形态词不受影响
+    const facilityWindow = normalized.slice(Math.max(0, (match.index || 0) - 30), (match.index || 0) + match[0].length + 12);
+    if (/临时|临建|可拆卸|可周转|撤场/u.test(facilityWindow) && /集装箱|活动房|板房|棚房|岗亭|彩钢/u.test(match[1] + match[2])) continue;
     // r8 扩围（实机 #8 复核：「面标高按相邻园路或宅前地坪顺接」误报）：顺接/衔接类做法语境——
     // 「按A或B顺接」的「或」列的是现场衔接对象（依相邻条件定），做法本身唯一确定，非设计
     // 决策两可；真两可决策（「桩基或独立基础」）右组无衔接动词，不受影响
     if (/顺接|衔接|接顺|接入|连通|找坡|找平/u.test(match[2])) continue;
     const afterWindow = normalized.slice((match.index || 0) + match[0].length, (match.index || 0) + match[0].length + 6);
     if (/^(?:顺接|衔接|接顺|接入|连通|找坡|找平)/u.test(afterWindow)) continue;
+    // r28 扩围（r27b 归因：「道路面层浇筑或沟槽开挖前」误报）：时序状语豁免——「或」列举整体
+    // 以时间标记收尾（前/后/之前/之后）时，连接的是两个作业时点/对象（「X或Y前，先…」是先通
+    // 后封、分段流水的时序安排），非设计决策两可；右组贪婪会把紧邻的「前/后」吞入匹配尾
+    //（实机归因：右组「沟槽开挖前」致后窗判定落空），故以匹配尾收束为主判、后窗判定兜底
+    //（右组满 8 字时标记落入后窗）；条件词「时」不放行防真两可借条件句残留
+    if (/(?:前|后)$/u.test(match[0])) continue;
+    if (/^(?:之前|之后|前|后)/u.test(afterWindow)) continue;
     // r14 扩围（r13 丰乐镇实测：工序链两可误报）：「测量放线→基础或清表作业→主体安装或
     // 砌筑→面层收口」的「或」位于箭头链工序序列内（匹配前后 8 字内含「→」），是分项适用
     // 工序差异（不同分项做不同工序），非设计决策两可——跳过；真两可决策无箭头链不受影响
@@ -2491,6 +2641,16 @@ export function ambiguousEitherOrIssues(markdown: string): ValidationIssue[] {
       const chainStart = Math.max(0, (match.index || 0) - 8);
       const chainEnd = Math.min(normalized.length, (match.index || 0) + match[0].length + 8);
       if (normalized.slice(chainStart, chainEnd).includes('→')) continue;
+    }
+    // r27 扩围（r26d 归因：质量缺陷处置句误报）：「发现基础强度不足或固定不牢的构件由施工员
+    // 组织返工，质检员复验合格后销项」——「或」两侧为质量缺陷情形枚举，全句为「发现缺陷→
+    // 返工/复验/销项」的处置闭环（标准管控语言），非设计决策两可；判定：两侧并集含质量缺陷
+    // 词且匹配后窗含处置动作词时豁免。真两可（「桩基或独立基础」）两侧为工程对象词、无缺陷
+    // 词，不受影响
+    const defectPair = match[1] + match[2];
+    if (/(?:强度不足|固定不牢|松动|变形|开裂|渗漏|破损|脱落|锈蚀|超差|不合格|缺陷|损坏|缺失|偏差|偏移|沉降|位移|错台|起皮|空鼓)/u.test(defectPair)) {
+      const disposalWindow = normalized.slice((match.index || 0) + match[0].length, (match.index || 0) + match[0].length + 40);
+      if (/返工|返修|整改|修复|加固|更换|补强|补做|处理|消除|纠正|复验|复查|销项|验收/u.test(disposalWindow)) continue;
     }
     // 非贪婪取最左侧词族：贪婪 .* 回溯会命中最右侧短词（「坑采用地下连续墙」取到「连续墙」
     // 丢失「地下」前缀——实义截断）；词族按长词优先排序，最左侧位置首备选即最长实义词
@@ -2666,13 +2826,32 @@ const EQUIPMENT_ENTRY_WORDS = ['塔式起重机', '施工升降机', '施工电�
 
 const PIT_STAGE_EQUIPMENT_RE = /挖掘机|空压机|注浆机|锚杆钻机|混凝土喷射机|喷射机|推土机/u;
 
-function extractEquipmentEntryDays(markdown: string): Array<{ equipment: string; day: number; raw: string }> {
-  const entries: Array<{ equipment: string; day: number; raw: string }> = [];
+/** 设备进场命中条目（r26d 修复端扩为 span 携带）：“第N日”表述在 markdown 中的 span
+ * （修复端替换定位——检测定位=修复定位同源，仅提取层单源） */
+interface EquipmentEntryDay {
+  equipment: string;
+  day: number;
+  raw: string;
+  /** 「第N日」表述起点（含「第」字） */
+  start: number;
+  /** 「第N日」表述终点（不含「进场/安装」等动作词后缀） */
+  end: number;
+}
+
+function extractEquipmentEntryDays(markdown: string): EquipmentEntryDay[] {
+  const entries: EquipmentEntryDay[] = [];
   for (const match of markdown.matchAll(/第(\d{2,3})日[^。；;\n|]{0,8}?(?:进场|投入使用|安装|调试)/gu)) {
-    const before = markdown.slice(Math.max(0, (match.index || 0) - 24), match.index || 0);
+    const matchIndex = match.index || 0;
+    const before = markdown.slice(Math.max(0, matchIndex - 24), matchIndex);
     const equipment = EQUIPMENT_ENTRY_WORDS.find(word => before.includes(word));
     if (!equipment) continue;
-    entries.push({ equipment, day: Number(match[1]), raw: `${before.slice(-18)}${match[0].slice(0, 20)}` });
+    entries.push({
+      equipment,
+      day: Number(match[1]),
+      raw: `${before.slice(-18)}${match[0].slice(0, 20)}`,
+      start: matchIndex,
+      end: matchIndex + match[1].length + 2,
+    });
   }
   const seen = new Set<string>();
   return entries.filter(entry => {
@@ -2698,44 +2877,111 @@ function totalScheduleDays(markdown: string, factsModel: DocumentFactsModel): nu
   return undefined;
 }
 
-export function equipmentEntryTimingIssues(markdown: string, factsModel: DocumentFactsModel): ValidationIssue[] {
+/** 设备进场时序命中（检测与修复同源 span）：late=尾期进场、inverted=基坑阶段工序倒挂 */
+export interface EquipmentEntryTimingHit {
+  equipment: string;
+  day: number;
+  /** 「第N日」表述起点（含「第」字）；修复端替换 span 起点 */
+  start: number;
+  /** 「第N日」表述终点（不含动作词后缀）；修复端替换 span 终点 */
+  end: number;
+}
+
+/** 设备进场时序扫描结果（检测/修复共用单源）：total=计划总工期；pitDone=基坑支护及土方外运
+ * 完成节点日（节点/工期未知时对应类目为空） */
+export interface EquipmentEntryTimingScan {
+  late: EquipmentEntryTimingHit[];
+  inverted: EquipmentEntryTimingHit[];
+  total?: number;
+  pitDone?: number;
+}
+
+/** 设备进场时序共享扫描（检测/修复同源单源，r26d）：①尾期进场（进场日 ≥ 总工期）；
+ * ②基坑阶段设备工序倒挂（进场日 > 基坑支护完成节点日）。总工期/节点未知时对应类目为空。 */
+export function scanEquipmentEntryTiming(markdown: string, factsModel: DocumentFactsModel): EquipmentEntryTimingScan {
+  const scan: EquipmentEntryTimingScan = { late: [], inverted: [] };
   const entries = extractEquipmentEntryDays(markdown);
-  if (entries.length === 0) return [];
-  const issues: ValidationIssue[] = [];
+  if (entries.length === 0) return scan;
   const total = totalScheduleDays(markdown, factsModel);
-  // ①尾期进场：进场日达到/超过总工期（设备未进场工程已结束，绝对矛盾）
   if (total !== undefined) {
-    const late = entries.filter(entry => entry.day >= total);
-    if (late.length > 0) {
-      issues.push({
-        level: 'error',
-        severity: 'blocker',
-        category: 'fact_consistency',
-        owner: 'llm',
-        repairability: 'llm_repairable',
-        message: `设备进场时间荒谬：${late.slice(0, 3).map(entry => `「${entry.equipment} 第${entry.day}日进场」`).join('、')} 已达/超过总工期（${total}日历天），工程结束时设备尚未进场`,
-        suggestion: `以总进度计划为准核对设备进场计划：大型施工设备必须在总工期结束前进场并完成使用，${late.map(entry => entry.equipment).join('、')} 的进场日应提前至工程开始阶段，删除矛盾的尾期进场表述。`,
-      });
-    }
+    scan.total = total;
+    scan.late = entries.filter(entry => entry.day >= total);
   }
-  // ②工序倒挂：基坑阶段设备进场日晚于基坑支护完成节点（基坑做完了设备才进场）
   const pitDoneDays = extractNodeScheduleDays(markdown).filter(sample => sample.key === 'excavation').map(sample => sample.day);
   if (pitDoneDays.length > 0) {
     const pitDone = Math.min(...pitDoneDays);
-    const inverted = entries.filter(entry => PIT_STAGE_EQUIPMENT_RE.test(entry.equipment) && entry.day > pitDone);
-    if (inverted.length > 0) {
-      issues.push({
-        level: 'error',
-        severity: 'blocker',
-        category: 'fact_consistency',
-        owner: 'llm',
-        repairability: 'llm_repairable',
-        message: `设备进场工序倒挂：${inverted.slice(0, 3).map(entry => `「${entry.equipment} 第${entry.day}日进场」`).join('、')} 晚于基坑支护及土方外运完成节点（第${pitDone}日），基坑阶段设备未在工序开始前进场`,
-        suggestion: `基坑阶段专用设备必须在基坑开挖/支护开始前完成进场与报验：将 ${inverted.map(entry => entry.equipment).join('、')} 的进场日调整为早于基坑支护完成节点（第${pitDone}日）的日期，删除工序倒挂表述。`,
-      });
-    }
+    scan.pitDone = pitDone;
+    scan.inverted = entries.filter(entry => PIT_STAGE_EQUIPMENT_RE.test(entry.equipment) && entry.day > pitDone);
+  }
+  return scan;
+}
+
+export function equipmentEntryTimingIssues(markdown: string, factsModel: DocumentFactsModel): ValidationIssue[] {
+  const scan = scanEquipmentEntryTiming(markdown, factsModel);
+  const issues: ValidationIssue[] = [];
+  // ①尾期进场：进场日达到/超过总工期（设备未进场工程已结束，绝对矛盾）
+  if (scan.total !== undefined && scan.late.length > 0) {
+    issues.push({
+      level: 'error',
+      severity: 'blocker',
+      category: 'fact_consistency',
+      owner: 'llm',
+      repairability: 'llm_repairable',
+      message: `设备进场时间荒谬：${scan.late.slice(0, 3).map(entry => `「${entry.equipment} 第${entry.day}日进场」`).join('、')} 已达/超过总工期（${scan.total}日历天），工程结束时设备尚未进场`,
+      suggestion: `以总进度计划为准核对设备进场计划：大型施工设备必须在总工期结束前进场并完成使用，${scan.late.map(entry => entry.equipment).join('、')} 的进场日应提前至工程开始阶段，删除矛盾的尾期进场表述。`,
+    });
+  }
+  // ②工序倒挂：基坑阶段设备进场日晚于基坑支护完成节点（基坑做完了设备才进场）
+  if (scan.pitDone !== undefined && scan.inverted.length > 0) {
+    issues.push({
+      level: 'error',
+      severity: 'blocker',
+      category: 'fact_consistency',
+      owner: 'llm',
+      repairability: 'llm_repairable',
+      message: `设备进场工序倒挂：${scan.inverted.slice(0, 3).map(entry => `「${entry.equipment} 第${entry.day}日进场」`).join('、')} 晚于基坑支护及土方外运完成节点（第${scan.pitDone}日），基坑阶段设备未在工序开始前进场`,
+      suggestion: `基坑阶段专用设备必须在基坑开挖/支护开始前完成进场与报验：将 ${scan.inverted.map(entry => entry.equipment).join('、')} 的进场日调整为早于基坑支护完成节点（第${scan.pitDone}日）的日期，删除工序倒挂表述。`,
+    });
   }
   return issues.slice(0, 3);
+}
+
+/** 前置「于/在」虚词并入排除词（复合词素）：虚词属词素成分时不并入替换 span
+ * （防「定于第90日」→「定按进度计划」类词素断裂；「在第90日/于第90日」为独立介词，并入） */
+const EQUIPMENT_DAY_PARTICLE_COMPOUND_RE = /关于|定于|对于|至于|由于|基于|鉴于|处于|位于|在于|置于|用于|属于|终于|便于|善于|现在|正在|存在|所在|潜在|实在$/u;
+
+/** 设备进场时序确定性改写（r26d 门禁归因）：「压路机 开工令下发后第90日进场」类尾期进场/
+ * 基坑阶段工序倒挂表述（第 90 日 = 总工期 90 日竣工日）全稿 LLM 修复轮后仍残留——终检只报不修
+ * 直坠门禁；进场日无唯一可裁决天数（须重排进度计划），按检测判据确定性删除矛盾日号改述为
+ * 「按进度计划」（不引入新事实，只删除矛盾时限）。紧邻前置虚词「于/在」并入 span（复合词素不并入）；
+ * 从后往前应用 + 重叠防护 + 复扫（提取层同 raw 去重可隐藏重复句的第二处，复扫直至无命中）；
+ * 无命中零变更静默（幂等可重放）。 */
+export function fixEquipmentEntryTimingDeterministically(markdown: string, factsModel: DocumentFactsModel): { markdown: string; fixedCount: number; details: string[] } {
+  let result = markdown;
+  const details: string[] = [];
+  for (let round = 1; round <= 3; round += 1) {
+    const scan = scanEquipmentEntryTiming(result, factsModel);
+    const hitBySpan = new Map<string, EquipmentEntryTimingHit>();
+    for (const hit of [...scan.late, ...scan.inverted]) hitBySpan.set(`${hit.start}:${hit.end}`, hit);
+    if (hitBySpan.size === 0) break;
+    let applied = 0;
+    let lastStart = Number.POSITIVE_INFINITY;
+    for (const hit of [...hitBySpan.values()].sort((left, right) => right.start - left.start)) {
+      let start = hit.start;
+      const particle = result[start - 1];
+      if ((particle === '于' || particle === '在') && !EQUIPMENT_DAY_PARTICLE_COMPOUND_RE.test(result.slice(Math.max(0, start - 2), start))) {
+        start -= 1;
+      }
+      if (hit.end > lastStart) continue;
+      const replacedText = result.slice(start, hit.end);
+      result = result.slice(0, start) + '按进度计划' + result.slice(hit.end);
+      lastStart = start;
+      applied += 1;
+      details.push(`「${replacedText}」→「按进度计划」`);
+    }
+    if (applied === 0) break;
+  }
+  return { markdown: result, fixedCount: details.length, details };
 }
 
 // ── 18. 奖项白名单（h14）：正文出现的具名奖项（XX杯/XX奖）必须来自招标文件评分项要求提取
@@ -3167,7 +3413,7 @@ export function fabricatedAwardIssues(markdown: string, factsModel: DocumentFact
     owner: 'llm',
     repairability: 'llm_repairable',
     message: `奖项表述与招标文件白名单不符：正文出现 ${[...fabricated].join('、')}，均未出现在招标文件评分项要求或绑定资料中`,
-    suggestion: '创优目标必须以招标文件原文为准逐字落位（如「确保黄山杯」），禁止自行编造或替换为其他奖项名称；白名单外的奖项表述一律删除或替换为招标原文奖项。',
+    suggestion: '创优目标必须以招标文件原文为准逐字落位，禁止自行编造或替换为其他奖项名称；白名单外的奖项表述一律删除或替换为招标原文奖项。',
   }];
 }
 
@@ -3196,6 +3442,69 @@ export function bidderQualificationSectionIssues(markdown: string): ValidationIs
     repairability: 'llm_repairable',
     message: `正文出现投标人资格内容小节：${titles.slice(0, 3).map(title => `“${title}”`).join('、')}${titles.length > 3 ? ' 等' : ''}（资格审查内容不属于施工组织设计，属资格文件/商务文件范畴）`,
     suggestion: '删除资格内容小节（标题与正文整体删除），不得以改写、合并、降级方式保留；正文如需提及安全生产许可证等证照，只能以施工管理口径表述（如“按规定持证上岗”），不得成节铺陈资格核验内容。',
+  }];
+}
+
+// ── 18c. 暗标身份禁语泄漏检测（F-T3：identityMarksForbidden 的终检通道）──
+// 招标暗标编制要求「任何部位、任何条文不得出现明示或暗示具体投标人的说明及标记（包括以往的施工业绩等）」。
+// 判定按「词面即违规标记」内容信号（不引入事实模型），四组判据：
+// ① 获奖过去式（荣获/曾获/获得过/被评为 + 奖项语义域）；
+// ② 业绩承揽过去式（承接过/承建过 + 工程/项目语义域）；
+// ③ 量化完成式业绩（完成过 + 数量词 + 工程/项目，防「完成过工程验收」类工序语误伤）；
+// ④ 证书/资质编号类自我标识（证书编号/统一社会信用代码等）。
+// 无识别性自称（如「我公司项目部自行组织实施」「由我公司负责实施」）不在拦截范围（暗标允许匿名自称）；
+// 第三方单位名（设计/勘察/监理单位）不在拦截范围。检测恒按 identityForbidden（暗标）开关，明标不启用。
+
+const IDENTITY_AWARD_VERB_RE = /(?:荣获|曾获|获得过|被评为)\s*[^。；\n]{2,24}/gu;
+/** 奖项语义域（宾语必须落在该域，防「被评为合格」类工序语误伤） */
+const IDENTITY_AWARD_DOMAIN_RE = /奖|杯|荣誉|称号|优秀|先进|示范|观摩|文明工地|优质工程/u;
+const IDENTITY_PERFORMANCE_CLAIM_RE = /(?:承接过|承建过)\s*[^。；\n]{2,24}/gu;
+/** 业绩语义域（工程/项目/标段） */
+const IDENTITY_PERFORMANCE_DOMAIN_RE = /工程|项目|标段|业绩/u;
+/** 量化完成式业绩（“完成过 3 个类似工程/项目”，无数量词不命中） */
+const IDENTITY_QUANTIFIED_COMPLETION_RE = /完成过\s*(?:[0-9０-９一二三四五六七八九十两]+|[多若干]+)\s*(?:个|项|例|座|条|余项|余个)?\s*(?:类似|同类|以上的?)?\s*(?:工程|项目)/gu;
+const IDENTITY_CREDENTIAL_ID_RE = /资质证书编号|证书编号|安全生产许可证编号|资质编号|营业执照注册号|统一社会信用代码|证号[:：]/gu;
+
+/** M29 第三方单位语境（设计/勘察/监理单位——证书编号类规则豁免用）：设计单位资质证书编号
+ * 随工程概况真实披露（招标文件自身载明设计单位名与资质），属第三方信息，不构成投标人身份标记
+ * （与本节既有口径「第三方单位名（设计/勘察/监理单位）不在拦截范围」一致）。s28k 实机：
+ * 「本工程设计单位为…设计研究总院…，工程设计甲级证书编号：A134A00302」被裸词「证书编号」误报红线。 */
+const IDENTITY_THIRD_PARTY_UNIT_RE = /(?:设计|勘察|监理)单位|设计院|勘察院|监理公司|设计研究总院|设计研究院|设计总院/u;
+
+/** 命中位置所在句（。；;\n 为边界）：M29 第三方单位豁免按句级窗口判定，防跨句误豁免 */
+function identitySentenceAt(markdown: string, index: number): string {
+  let start = index;
+  while (start > 0 && !/[。；;\n]/u.test(markdown[start - 1])) start -= 1;
+  let end = index;
+  while (end < markdown.length && !/[。；;\n]/u.test(markdown[end])) end += 1;
+  return markdown.slice(start, end);
+}
+
+export function identityLeakageIssues(markdown: string, identityForbidden?: boolean): ValidationIssue[] {
+  if (!identityForbidden) return [];
+  const hits: string[] = [];
+  for (const match of markdown.matchAll(IDENTITY_AWARD_VERB_RE)) {
+    if (IDENTITY_AWARD_DOMAIN_RE.test(match[0])) hits.push(match[0].trim());
+  }
+  for (const match of markdown.matchAll(IDENTITY_PERFORMANCE_CLAIM_RE)) {
+    if (IDENTITY_PERFORMANCE_DOMAIN_RE.test(match[0])) hits.push(match[0].trim());
+  }
+  for (const match of markdown.matchAll(IDENTITY_QUANTIFIED_COMPLETION_RE)) hits.push(match[0].trim());
+  for (const match of markdown.matchAll(IDENTITY_CREDENTIAL_ID_RE)) {
+    // M29：第三方单位（设计/勘察/监理）句内证书编号豁免（句级窗口，投标人自证句不受影响）
+    if (IDENTITY_THIRD_PARTY_UNIT_RE.test(identitySentenceAt(markdown, match.index ?? 0))) continue;
+    hits.push(match[0].trim());
+  }
+  if (hits.length === 0) return [];
+  const unique = [...new Set(hits)];
+  return [{
+    level: 'error',
+    severity: 'blocker',
+    category: 'format',
+    owner: 'llm',
+    repairability: 'llm_repairable',
+    message: `正文出现投标人身份标记 ${unique.length} 处：${unique.slice(0, 3).map(hit => `“${hit.slice(0, 30)}”`).join('、')}${unique.length > 3 ? ' 等' : ''}（招标暗标要求不得出现明示或暗示具体投标人的说明及标记，包括以往的施工业绩）`,
+    suggestion: '删除或改写身份标记句：以往业绩/获奖表述一律删除；证书资质类表述改写为不自证身份的施工管理口径（如“按规定持证上岗”），不得保留证书编号与奖项名称。',
   }];
 }
 
@@ -3501,6 +3810,19 @@ function matchPhaseAuthority(
   }
   if (!best) return null;
   if (bestSpan.length >= prefixHanLength) return { best };
+  // 并列枚举形态豁免（通用·确定性）：短语恰可拆为「阶段A + 连接词 + 阶段B」且 A、B 各自等于完整
+  // 权威阶段名（如「道路铺装工程与景观与绿化工程」= 道路铺装工程 + 与 + 景观与绿化工程）——两阶段
+  // 并行/同时在场是施工组织的常态陈述，非两阶段名连写拼接；两阶段权威值一致时数值口径唯一
+  // （同值封顶场景），按该值供后续比对（值不符照常产出 claim），值不同时无法确定性归属，
+  // 维持拼接歧义交 LLM 修复轮（保守不裁决）
+  for (let index = 1; index < stagePrefix.length - 1; index += 1) {
+    if (!/[与及和、，,]/u.test(stagePrefix[index]!)) continue;
+    const leftPhase = phaseAuthorities.find(entry => entry.phase === stagePrefix.slice(0, index).trim());
+    if (!leftPhase) continue;
+    const rightPhase = phaseAuthorities.find(entry => entry.phase === stagePrefix.slice(index + 1).trim());
+    if (!rightPhase) continue;
+    if (leftPhase.value === rightPhase.value) return { best: leftPhase };
+  }
   // 残余前/后片段另命中其他权威 → 两阶段名连写；片段不足 2 汉字不参与（防假阳性）
   const beforeRest = stagePrefix.slice(0, bestSpan.start);
   const afterRest = stagePrefix.slice(bestSpan.end);
@@ -3561,7 +3883,12 @@ export function scanPhaseLaborClaims(
       });
       return;
     }
-    if (value === match.best.value) return;
+    if (value === match.best.value) {
+      // 数值与归属阶段权威一致：本处已归属（不报）——占位防枚举通道以截断名称片段重复归属：
+      // 枚举单元引导名可从前缀中途起截（24 字上限），阶段名被截断一侧时残余片段检查会假报拼接
+      seen.add(valueIndex);
+      return;
+    }
     seen.add(valueIndex);
     claims.push({
       start: valueIndex,
@@ -3893,13 +4220,286 @@ export function scanUncoveredEngineeringHeadings(markdown: string): UncoveredEng
     const body = lines.slice(index + 1, end).join('\n');
     const bodyNorm = body.replace(/[、，,]/gu, '');
     const uncovered = parts.filter(part => {
+      // r28f B4 归因（r28e 实测）：通用分类后缀词（配套/附属/其他类）不是可核对的具体工程
+      // 类别——正文以具体构件/分项承载其内容，不出现该词面属正常表述，不作为未覆盖词段
+      if (/^(?:配套|附属|其他|其它|零星|通用)$/u.test(part)) return false;
       if (body.includes(part)) return false;
       const normalized = part.replace(/[、，,]/gu, '').replace(/(?:安装|施工|工程|作业)$/u, '');
-      return normalized.length >= 2 && !bodyNorm.includes(normalized);
+      if (normalized.length >= 2 && bodyNorm.includes(normalized)) return false;
+      // r28f B4 归因（r28e 实测）：「绿化栽植与配套工程」小节正文「绿化工程包括小型乔木、灌木、
+      // 色带栽植及铺种草皮…」把「绿化栽植」以拆分形态覆盖（绿化…栽植），连续匹配不命中误报未
+      // 覆盖——词段 ≥4 字时按非重叠 2 字组逐块核对，全部命中判覆盖；「柱面装饰」的「柱面」缺失
+      // 仍判未覆盖（原清单套名误报收口场景不放松）
+      if (normalized.length >= 4) {
+        const chunks = normalized.match(/.{2}/gu) ?? [];
+        if (chunks.length >= 2 && chunks.every(chunk => bodyNorm.includes(chunk))) return false;
+      }
+      return true;
     });
     if (uncovered.length === 0) continue;
     result.push({ lineIndex: index, level, title, parts, uncovered });
   }
   return result;
+}
+
+// ── 24. 表内算术自洽（C-T3）：含显性合计标记的表格「分项和=合计」确定性核对 ──
+// 背景（C4 归因）：资源类表格的「合计」行/列与分项明细对不上（表5-2 实测分班组列与合计列
+// 口径打架），数据不一致直击评审对数据可信度的判定，且修复链此前无检测器消费该形态。
+// 判定口径严格限定「显性合计语义」：仅表头含合计词（合计列）或行首标签含合计词（合计行）参与核对；
+// 无合计标记的表不判（如「同时在场人数」与「主要工种投入」分属不同统计维度，机械求和无依据）。
+// 保守策略（宁漏报不误报：误报代价是修复轮把正确的表改坏）：
+// - 分项格含不定词/阈值符号（部分/约/不少于/待定/±/≥）→ 该行/列跳过；
+// - 分项单位混用（人/台/㎡ 并存）或数字无单位悬空在描述文字中 → 跳过；
+// - 可求和分项值 <2 个或合计格不可解析为单值 → 跳过；
+// - 「其他/其余」类差额项无值时跳过（台账显性差额豁免），有值时照常参与求和；
+// - 「其中/占比/备注」等插注行不参与横向/纵向求和；
+// - 多合计行/多合计列（分节小计）求和域不可确定 → 整表不判；
+// - 容差 max(1, |合计|×0.5%)：四舍五入误差不报。
+// 产品级通用：判据仅凭表格结构与数值绑定，无项目/表名硬编码。
+
+/** 显性合计标签（行首/表头列名前缀命中即视为合计语义） */
+const TABLE_TOTAL_LABEL_RE = /^(?:合计|小计|总计|汇总|共计|总和|总额|总价|总数量|总量|合价)/u;
+
+/** 台账差额豁免标签（「其他/其余」类分项允许承载未列明差额；有值时照常参与求和） */
+const TABLE_REMAINDER_LABEL_RE = /^(?:其他|其它|其余|剩余|差额|补差)/u;
+
+/** 插注行标签（其中/占比/备注类行是说明性插入，不构成求和域成员） */
+const TABLE_ANNOTATION_LABEL_RE = /^(?:其中|占比|比例|备注|说明|注[:：])/u;
+
+/** 强档不定词：数量语义不完整（无需数字即可判定该格不可断言） */
+const TABLE_CELL_PENDING_RE = /待定|待补|待明确|待确认|未定|未明确|暂定|暂按|视情况|部分|若干/u;
+
+/** 弱档不定词/阈值符号：格内确有数字时触发不可断言（约数/范围/上下限/扣除口径） */
+const TABLE_CELL_VAGUE_RE = /约(?![定束])|左右|以上|以下|以内|以外|不少于|不超过|不大于|不小于|不低于|不高于|至少|最少|最多|至多|超过|超出|不足|按实|据实|根据实际|不含|含\s*\d|其中|扣除|另计|另含|除外|等(?![级于额])|±|[≥≤≧≦＞＜><]/u;
+
+/** 数值区间（150~180 / 3至5 / 40-50）：区间值不可参与求和断言 */
+const TABLE_CELL_RANGE_RE = /[\d)）]\s*[~～\-—–至到]\s*[\d(（]/u;
+
+/** 空占位格（-、—、／、无、不适用）：非数值格，忽略 */
+const TABLE_CELL_EMPTY_RE = /^(?:[-—–－/／\\]+|无|不适用|不涉及|不包含|n\/a)$/iu;
+
+/**
+ * 「数字+可选单位」提取源（长词优先）。使用处以源串构造带 g 的局部正则（避免模块级 /g 的
+ * lastIndex 状态共享）；前置守卫 (?<![A-Za-z0-9\-Φφ]) 排除 C30/HRB400/Φ100/L-05 类规格 token 尾数。
+ */
+const TABLE_MEASURE_SOURCE = '(?<![A-Za-z0-9\\-Φφ])(-?(?:\\d{1,3}(?:[,，]\\d{3})+|\\d+)(?:\\.\\d+)?)\\s*(平方米|立方米|平方|立方|万元|亿元|千元|公里|厘米|毫米|公斤|日历天|小时|分钟|台班|工日|千米|盏|棵|株|袋|桶|块|片|条|根|座|台|套|个|处|道|项|批|次|人|名|户|间|层|樘|孔|眼|栋|幢|米|吨|元|万|千|百|天|周|月|年|℃|cm|kVA|mm|km|kg|kW|m2|m3|m²|m³|㎡|MPa|kPa|ml|L|t|m|%|％|‰|A|V|W)?';
+
+/** 单位归一（书写变体等价归并；其余保持原样） */
+function normalizeTableUnit(unit: string | undefined): string {
+  const u = (unit ?? '').trim().toLowerCase();
+  if (u === '') return '';
+  if (/^(?:m2|m²|㎡|平方米|平方|平米)$/u.test(u)) return 'm2';
+  if (/^(?:m3|m³|立方米|立方|方)$/u.test(u)) return 'm3';
+  if (/^(?:人|名|员|人员)$/u.test(u)) return '人';
+  if (u === '％' || u === '%') return '%';
+  if (/^(?:千米|公里)$/u.test(u)) return 'km';
+  if (/^(?:米|m)$/u.test(u)) return 'm';
+  if (/^(?:吨|t)$/u.test(u)) return 't';
+  if (/^(?:公斤|千克|kg)$/u.test(u)) return 'kg';
+  return u;
+}
+
+/** 标签归一：剥离渲染标记/空白/阿拉伯序号前缀（「1. 合计」「（2）小计」→ 合计/小计） */
+function normalizeTableLabel(raw: string): string {
+  return raw.replace(/[*_`]/gu, '').replace(/\s+/gu, '').replace(/^[（(]?\d{1,2}(?:\.\d{1,2})?[.、)）]?/u, '');
+}
+
+/**
+ * 非数量子串剥离（安全移除：仅剥离具有明确「非可求和数量」语义的片段，
+ * 日期/序号/标准编号/引用/图号/尺寸/配比等；不确定形态交由悬空判定转保守跳过）。
+ */
+function stripNonQuantityTokens(text: string): string {
+  return text
+    // 标准/规范编号（GB 50268-2008、DB34/T 1658、GA/T 832-2014、TSG D0001）
+    .replace(/(?:GB|JGJ|CJJ|CJ|DB|DG|SL|JT|JTS|JTG|TSG|CECS|YB|SH|HG|SY|TB|AQ|JG|JB|ISO|GA|JC|MZ|WW|WH|GH|FZ|QB|YY|HY|LY|NY|SB|SN|WS|YZ|CB|EJ|HB|HS|MH|QJ|SC|SJ|TY|ZB)\s*\d*(?:\s*[A-Za-z])?(?:\s*\/\s*T)?\s*[\d.\-/·]+/giu, ' ')
+    // 完整日期（2026年9月24日 / 2026-09-24 / 2026/09/24）与年月（2026年9月 / 2026-09）
+    .replace(/\d{4}\s*[-/.年]\s*\d{1,2}\s*[-/.月]\s*\d{1,2}\s*日?/gu, ' ')
+    .replace(/\d{4}\s*[-/.年]\s*\d{1,2}\s*月?/gu, ' ')
+    // 月日（9月24日）
+    .replace(/\d{1,2}\s*月\s*\d{1,2}\s*日/gu, ' ')
+    // 四位年份（2026年/2025年版）
+    .replace(/(?:19|20)\d{2}\s*年/gu, ' ')
+    // 时间/配比（14:00、1:2.5）
+    .replace(/\d{1,2}(?:\.\d+)?\s*[:：]\s*\d{1,2}(?:\.\d+)?/gu, ' ')
+    // 序数引用（第7日、第3章、第2批、第1季度）
+    .replace(/第\s*\d+(?:\.\d+)?\s*(?:章|节|条|款|项|页|版|期|批|次|轮|步|道|层|日历天|季度|个?季度|阶段|部分|天|日|周|月|年)/gu, ' ')
+    // 「详见/参见」引用（详见3.2）
+    .replace(/(?:详见|参见)\s*(?:第\s*)?\d[\d.]*(?:节|条|章|表|图|页|款)?/gu, ' ')
+    // 「见/根据/依据/按照/依照/执行/符合」+ 带后缀引用（见第5条、依据3.2表）
+    .replace(/(?:见|根据|依据|按照|依照|执行|符合)\s*第?\s*\d[\d.]*(?:节|条|章|表|图|页|款)/gu, ' ')
+    // 图号/编号（L-05、B-12、DN-400）
+    .replace(/[A-Za-z]{1,4}\s*[-－]\s*\d+(?:\.\d+)?/gu, ' ')
+    // 多节编号（3.5.1）
+    .replace(/(?<![\d.])\d{1,2}(?:\.\d{1,2}){2,}(?!\d)/gu, ' ')
+    // 序号前缀（1. / 1、/ （1））
+    .replace(/(?:^|[\s、，,；;（(])\d{1,2}\s*[.、)）](?=\s*(?:\D|$))/gu, ' ')
+    // 尺寸（1200×800×50）
+    .replace(/\d[\d,]*(?:\.\d+)?(?:\s*[×✕xX*]\s*\d[\d,]*(?:\.\d+)?)+/gu, ' ')
+    // 斜杠数字串（1/500、3/5）
+    .replace(/\d{1,4}(?:\s*\/\s*\d{1,4})+/gu, ' ');
+}
+
+/**
+ * 表内数值格解析：返回可求和数值与一一对应的归一化单位。
+ * uncertain=true 表示数量语义不完整（不定词/阈值/区间/数字无单位悬空），该行/列整体不可断言。
+ */
+function parseTableCellNumbers(raw: string): { values: number[]; units: string[]; uncertain: boolean } {
+  const text = raw.replace(/[*_`]/gu, '').trim();
+  const result = { values: [] as number[], units: [] as string[], uncertain: false };
+  if (!text || TABLE_CELL_EMPTY_RE.test(text)) return result;
+  const cleaned = stripNonQuantityTokens(text);
+  // 强档不定词（数量语义不完整，无需数字即可判定）
+  if (TABLE_CELL_PENDING_RE.test(cleaned)) return { ...result, uncertain: true };
+  if (!/\d/u.test(cleaned)) return result;
+  // 弱档（有数字时的范围/阈值/约数语义）与区间：分项和断言不成立
+  if (TABLE_CELL_VAGUE_RE.test(cleaned) || TABLE_CELL_RANGE_RE.test(cleaned)) return { ...result, uncertain: true };
+  const measures = [...cleaned.matchAll(new RegExp(TABLE_MEASURE_SOURCE, 'gu'))];
+  if (measures.length === 0) return result;
+  // 无单位数字悬空在描述文字中（残余文字非空）：无法确认其为可求和数量 → 不可断言
+  const residue = cleaned.replace(new RegExp(TABLE_MEASURE_SOURCE, 'gu'), ' ').replace(/[^\u4e00-\u9fa5a-z]/giu, '');
+  if (residue !== '' && measures.some(match => !match[2])) return { ...result, uncertain: true };
+  for (const match of measures) {
+    const value = Number(match[1].replace(/[,，]/gu, ''));
+    if (!Number.isFinite(value)) continue;
+    result.values.push(value);
+    result.units.push(normalizeTableUnit(match[2]));
+  }
+  return result;
+}
+
+/** 合计格解析：必须为可断言的单值（多值/不定/非数值 → null 跳过） */
+function parseSingleTotalCell(raw: string): { value: number; unit: string } | null {
+  const parsed = parseTableCellNumbers(raw);
+  if (parsed.uncertain || parsed.values.length !== 1) return null;
+  return { value: parsed.values[0], unit: parsed.units[0] ?? '' };
+}
+
+/**
+ * 分项求和：返回 { sum, count, unit } 或 null（存在不可断言的格：含不定词/单位混用/其他类无值差额）。
+ * 非数值格（纯描述/空占位）忽略不计，不阻断求和。
+ */
+function collectTableSummands(cells: string[]): { sum: number; count: number; unit: string } | null {
+  let sum = 0;
+  let count = 0;
+  const units = new Set<string>();
+  for (const raw of cells) {
+    const text = raw.replace(/[*_`]/gu, '').trim();
+    if (!text) continue;
+    const parsed = parseTableCellNumbers(text);
+    if (parsed.uncertain) return null;
+    // 「其他/其余」类差额项无值：台账显性差额豁免（差额由其承载），不可断言；有值时照常参与求和
+    if (TABLE_REMAINDER_LABEL_RE.test(normalizeTableLabel(text)) && parsed.values.length === 0) return null;
+    if (parsed.values.length === 0) continue;
+    for (const value of parsed.values) { sum += value; count += 1; }
+    for (const unit of parsed.units) if (unit) units.add(unit);
+  }
+  if (units.size > 1) return null;
+  return { sum, count, unit: units.size === 1 ? [...units][0] : '' };
+}
+
+/** 数值格式化（整数/至多两位小数，修复前后差值展示用） */
+function formatTableNumber(value: number): string {
+  return String(Math.round(value * 100) / 100);
+}
+
+/** 标签清理（finding 文案展示用） */
+function cleanTableLabel(raw: string): string {
+  return raw.replace(/[*_`]/gu, '').replace(/\s+/gu, ' ').trim().slice(0, 24);
+}
+
+/** 单表算术核对：合计列逐行横向 / 合计行逐列纵向（分节小计形态整表不判） */
+function tableArithmeticFindingsOf(table: MarkdownTableBlock): string[] {
+  const header = table.header;
+  const rows = table.dataRows;
+  if (rows.length === 0 || header.length === 0) return [];
+  const totalColIndexes = header.map((_, index) => index).filter(index => TABLE_TOTAL_LABEL_RE.test(normalizeTableLabel(header[index] ?? '')));
+  const totalRowIndexes = rows.map((_, index) => index).filter(index => TABLE_TOTAL_LABEL_RE.test(normalizeTableLabel(rows[index][0] ?? '')));
+  // 分节小计（多合计行/多合计列）求和域不可确定：整表保守不判
+  if (totalColIndexes.length > 1 || totalRowIndexes.length > 1) return [];
+  const findings: string[] = [];
+  const columnCount = Math.max(header.length, ...rows.map(row => row.length));
+  const totalCol = totalColIndexes.length === 1 ? totalColIndexes[0] : -1;
+  const totalRow = totalRowIndexes.length === 1 ? totalRowIndexes[0] : -1;
+  // 合计列（唯一且非首列）→ 逐行横向核对：行内分项和 = 行合计
+  if (totalCol > 0) {
+    rows.forEach((row, rowIndex) => {
+      if (rowIndex === totalRow) return;
+      if (TABLE_ANNOTATION_LABEL_RE.test(normalizeTableLabel(row[0] ?? ''))) return;
+      const totalCell = row[totalCol];
+      if (totalCell === undefined) return;
+      const total = parseSingleTotalCell(totalCell);
+      if (!total) return;
+      const summands: string[] = [];
+      for (let col = 1; col < columnCount; col += 1) {
+        if (col === totalCol) continue;
+        summands.push(row[col] ?? '');
+      }
+      const collected = collectTableSummands(summands);
+      if (!collected || collected.count < 2) return;
+      if (total.unit && collected.unit && total.unit !== collected.unit) return;
+      const diff = Math.abs(total.value - collected.sum);
+      if (diff <= Math.max(1, Math.abs(total.value) * 0.005)) return;
+      const rowLabel = cleanTableLabel(row[0] ?? '') || `第 ${rowIndex + 1} 行`;
+      const colLabel = cleanTableLabel(header[totalCol] ?? '') || '合计';
+      findings.push(`「${rowLabel}」行：${colLabel} ${formatTableNumber(total.value)}${total.unit} ≠ 分项和 ${formatTableNumber(collected.sum)}${collected.unit}（差 ${formatTableNumber(diff)}）`);
+    });
+  }
+  // 合计行（唯一）→ 逐列纵向核对：列内分项和 = 列合计（交叉格合计行×合计列不单独核对）
+  if (totalRow >= 0) {
+    const totalRowCells = rows[totalRow];
+    for (let col = 1; col < columnCount; col += 1) {
+      if (col === totalCol) continue;
+      const totalCell = totalRowCells[col];
+      if (totalCell === undefined) continue;
+      const total = parseSingleTotalCell(totalCell);
+      if (!total) continue;
+      const summands = rows
+        .filter((row, index) => index !== totalRow && !TABLE_ANNOTATION_LABEL_RE.test(normalizeTableLabel(row[0] ?? '')))
+        .map(row => row[col] ?? '');
+      const collected = collectTableSummands(summands);
+      if (!collected || collected.count < 2) continue;
+      if (total.unit && collected.unit && total.unit !== collected.unit) continue;
+      const diff = Math.abs(total.value - collected.sum);
+      if (diff <= Math.max(1, Math.abs(total.value) * 0.005)) continue;
+      const rowLabel = cleanTableLabel(totalRowCells[0] ?? '') || '合计';
+      const colLabel = cleanTableLabel(header[col] ?? '') || `第 ${col + 1} 列`;
+      findings.push(`「${colLabel}」列：${rowLabel} ${formatTableNumber(total.value)}${total.unit} ≠ 分项和 ${formatTableNumber(collected.sum)}${collected.unit}（差 ${formatTableNumber(diff)}）`);
+    }
+  }
+  return findings;
+}
+
+/**
+ * C-T3 表内算术自洽检测器（含显性合计标记的表格：分项和=合计，多表聚合为单 issue，文档上限 5 条）。
+ * 判定=修复定位契约：修复轮 stageTableArithmeticRepair 以同源函数做章级重扫，检测定位=修复定位。
+ */
+export function tableArithmeticInconsistencyIssues(markdown: string): ValidationIssue[] {
+  const tables = extractMarkdownTables(markdown);
+  if (tables.length === 0) return [];
+  const issues: ValidationIssue[] = [];
+  for (const table of tables) {
+    const findings = tableArithmeticFindingsOf(table);
+    if (findings.length === 0) continue;
+    issues.push({
+      level: 'error',
+      severity: 'blocker',
+      category: 'evidence_coverage',
+      owner: 'llm',
+      repairability: 'llm_repairable',
+      message: `生成后事实反查失败：表格算术不自洽 ${findings.length} 处（${findings.slice(0, 3).join('；')}${findings.length > 3 ? ' 等' : ''}）`,
+      suggestion: '表内「合计」必须等于分项之和：以分项重算合计，或按权威数据修正分项；台账类保留显性「其他」差额项并给出数值；只允许修正表内数值，严禁编造无来源数据。',
+    });
+    if (issues.length >= 5) break;
+  }
+  return issues;
+}
+
+/**
+ * C-T3 表内算术不自洽 finding 总数（含合计标记表格的分项和≠合计处数；与检测器同源，
+ * 供修复轮 stageTableArithmeticRepair 收敛判定/recheck 使用——处数粒度比表数更细，
+ * 同表内修复仍需可观测下降）。
+ */
+export function countTableArithmeticFindings(markdown: string): number {
+  return extractMarkdownTables(markdown).reduce((sum, table) => sum + tableArithmeticFindingsOf(table).length, 0);
 }
 

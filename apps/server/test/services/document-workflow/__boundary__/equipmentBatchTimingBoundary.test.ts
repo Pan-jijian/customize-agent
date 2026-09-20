@@ -12,11 +12,17 @@
  * - fixPhaseLaborValues（P1-P6）——权威值硬替换（基础通道/枚举列举通道同源）、多值降序替换
  *   互不位移、值相符零动作、无权威原样返回、阶段名拼接歧义不进确定性修复、表格行不触碰；
  * - fixEquipmentBatchConflicts（Q1-Q4，r17 丰乐镇归因 #B2/B3）——分批矛盾命中删除 later 批
- *   「N 台」数字（前缀量词随删）、检测复检零残留、已修复文本幂等零变更、组合成立/无权威零动作。
+ *   「N 台」数字（前缀量词随删）、检测复检零残留、已修复文本幂等零变更、组合成立/无权威零动作；
+ * - fixEquipmentEntryTimingDeterministically（R1-R8，r26d 门禁归因）——scan 命中 span 契约
+ *   （恰为「第N日」）、表格行尾期进场改写「按进度计划」+复检零残留、幂等零变更、「于/在」
+ *   虚词并入、复合词素（定于）不并入防断裂、基坑倒挂同源修复、未命中零动作、多设备同修。
  * 全部用例为确定性判定，无语义/网络依赖。
  */
 import { describe, expect, it } from 'vitest';
-import { equipmentBatchConflicts, fixEquipmentBatchConflicts, fixPhaseLaborValues, fixPreliminaryActionTimingDeterministically, preliminaryActionTimingIssues } from '@/services/document-workflow/documentIntegrityChecks';
+import { equipmentBatchConflicts, equipmentEntryTimingIssues, fixEquipmentBatchConflicts, fixEquipmentEntryTimingDeterministically, fixPhaseLaborValues, fixPreliminaryActionTimingDeterministically, preliminaryActionTimingIssues, scanEquipmentEntryTiming } from '@/services/document-workflow/documentIntegrityChecks';
+import { factsOf } from './boundaryKit';
+
+const EMPTY_FACTS = factsOf({});
 
 const excavators = [{ name: '挖掘机', count: 5 }];
 
@@ -225,5 +231,72 @@ describe('equipmentBatchTimingBoundary · Q 组：机械分批台数确定性修
     expect(result.fixedCount).toBe(1);
     expect(result.markdown).toContain('剩余挖掘机补充进场');
     expect(result.markdown).not.toContain('约5台');
+  });
+});
+
+describe('equipmentBatchTimingBoundary · R 组：设备进场时序确定性修复（r26d 门禁归因，写时对齐同源）', () => {
+  it('R1 scan 命中 span 契约：恰为「第N日」表述（修复定位=检测同源）', () => {
+    const md = '计划工期90日历天。压路机开工令下发后第90日进场。';
+    const scan = scanEquipmentEntryTiming(md, EMPTY_FACTS);
+    expect(scan.total).toBe(90);
+    expect(scan.late).toHaveLength(1);
+    expect(md.slice(scan.late[0].start, scan.late[0].end)).toBe('第90日');
+  });
+
+  it('R2 尾期进场表格行形态：确定性改写「第90日」→「按进度计划」，检测复检零残留', () => {
+    const md = '计划工期90日历天。\n| 压路机 | 开工令下发后第90日进场，道路铺装工程完成后退场 |';
+    const fixed = fixEquipmentEntryTimingDeterministically(md, EMPTY_FACTS);
+    expect(fixed.fixedCount).toBe(1);
+    expect(fixed.markdown).toContain('开工令下发后按进度计划进场');
+    expect(fixed.markdown).not.toContain('第90日');
+    expect(equipmentEntryTimingIssues(fixed.markdown, EMPTY_FACTS)).toHaveLength(0);
+  });
+
+  it('R3 幂等：已修复文本重放零变更静默', () => {
+    const input = '计划工期90日历天。压路机开工令下发后按进度计划进场。';
+    const fixed = fixEquipmentEntryTimingDeterministically(input, EMPTY_FACTS);
+    expect(fixed.fixedCount).toBe(0);
+    expect(fixed.markdown).toBe(input);
+  });
+
+  it('R4 前置虚词并入：「于/在」随 span 吞并（无「于按进度计划」残句）', () => {
+    const yu = fixEquipmentEntryTimingDeterministically('计划工期90日历天。塔吊于第90日安装。', EMPTY_FACTS);
+    expect(yu.fixedCount).toBe(1);
+    expect(yu.markdown).toContain('塔吊按进度计划安装');
+    const zai = fixEquipmentEntryTimingDeterministically('计划工期90日历天。塔吊在第90日安装。', EMPTY_FACTS);
+    expect(zai.fixedCount).toBe(1);
+    expect(zai.markdown).toContain('塔吊按进度计划安装');
+  });
+
+  it('R5 复合词素不并入：「定于」词素完整保留（防「定按进度计划」断裂）', () => {
+    const fixed = fixEquipmentEntryTimingDeterministically('计划工期90日历天。塔吊定于第90日安装。', EMPTY_FACTS);
+    expect(fixed.fixedCount).toBe(1);
+    expect(fixed.markdown).toContain('塔吊定于按进度计划安装');
+    expect(fixed.markdown).not.toContain('定按进度计划');
+  });
+
+  it('R6 基坑阶段工序倒挂同源修复（pitDone 节点存在时）', () => {
+    const md = '第60日完成基坑支护及土方外运。挖掘机第75日进场。';
+    const fixed = fixEquipmentEntryTimingDeterministically(md, EMPTY_FACTS);
+    expect(fixed.fixedCount).toBe(1);
+    expect(fixed.markdown).toContain('挖掘机按进度计划进场');
+    expect(equipmentEntryTimingIssues(fixed.markdown, EMPTY_FACTS)).toHaveLength(0);
+  });
+
+  it('R7 未命中零动作（day<total 非 PIT / 总工期未知）', () => {
+    const early = '计划工期210日历天。压路机第30日进场。';
+    expect(fixEquipmentEntryTimingDeterministically(early, EMPTY_FACTS).markdown).toBe(early);
+    const unknown = '压路机第90日进场。';
+    const unknownFixed = fixEquipmentEntryTimingDeterministically(unknown, EMPTY_FACTS);
+    expect(unknownFixed.fixedCount).toBe(0);
+    expect(unknownFixed.markdown).toBe(unknown);
+  });
+
+  it('R8 多设备尾期同修（>24 字符隔离防前词误绑定）→ 检测复检零残留', () => {
+    const md = `计划工期210日历天。挖掘机第210日进场。${'支'.repeat(15)}空压机第210日进场。`;
+    const fixed = fixEquipmentEntryTimingDeterministically(md, EMPTY_FACTS);
+    expect(fixed.fixedCount).toBe(2);
+    expect(fixed.markdown).not.toContain('第210日进场');
+    expect(equipmentEntryTimingIssues(fixed.markdown, EMPTY_FACTS)).toHaveLength(0);
   });
 });

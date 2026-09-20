@@ -1,5 +1,5 @@
 import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplateChapter, ValidationIssue } from './types';
-import { inferConstructionOrgProjectTypes, type ConstructionOrgProjectType } from './constructionOrgProjectTypes';
+import { CONSTRUCTION_ORG_PROJECT_TYPE_PATTERNS, inferConstructionOrgProjectTypes, type ConstructionOrgProjectType } from './constructionOrgProjectTypes';
 import { DIVISION_SECTION_QUALITY, DIVISION_SECTION_RE, MAJOR_CONTENT_SECTION_RE } from './writingSpec';
 import { hasProcessSequenceExpression, workPackageContentElementFlags, workPackageContentElementsComplete } from './utils';
 import { buildSemanticGate } from './semanticGate';
@@ -63,25 +63,35 @@ async function buildGenericPhraseGate(embedDocuments?: (texts: string[]) => Prom
   });
 }
 
-const CONTROL_LOOP_RULES: Array<{ pattern: RegExp; label: string; required: string[]; prompt: string }> = [
-  { pattern: /质量|验收|隐蔽|样板|通病/u, label: '质量闭环', required: ['自检', '互检', '交接检', '整改', '复查', '归档'], prompt: '质量类内容必须形成“自检—互检—交接检—整改—复查—资料归档”闭环。' },
+/**
+ * 控制闭环规则表（D-T2 双轨判定）：
+ * - ownerRe 存在（质量/进度/工资三链，评审关注链）= 主责章全要素判定——主责章取首个标题命中
+ *   ownerRe 的章，正文须覆盖全部要素（缺任一即不成链，对齐「三类闭环链 100% 成链」验收判据），
+ *   产出带 chapterId+provenance 的 warning 由 control-loop-repair 修复轮定向补写消费；
+ *   r28f 归因：旧判定按 title+sections 宽 pattern 逐章命中，「拟投入的主要施工机械、设备计划」
+ *   含「计划」被误判为进度链载体、「确保工程质量的技术组织措施」被误判为工资链载体，
+ *   而真实主责章（确保工期的技术组织措施/劳动力安排计划）反而不报——主责章定位根治该误报族。
+ * - ownerRe 缺省（安全/环保/应急链）= 通用宽松判定（pattern 命中章、缺半数才报，warning 无修复消费）。
+ */
+const CONTROL_LOOP_RULES: Array<{ pattern: RegExp; label: string; required: string[]; prompt: string; ownerRe?: RegExp }> = [
+  { pattern: /质量|验收|隐蔽|样板|通病/u, label: '质量闭环', required: ['自检', '互检', '交接检', '整改', '复查', '归档'], prompt: '质量类内容必须形成“自检—互检—交接检—整改—复查—资料归档”闭环。', ownerRe: /质量/u },
   { pattern: /安全|风险|危大|临电|消防|吊装|高处/u, label: '安全闭环', required: ['辨识', '交底', '检查', '整改', '复查', '销项'], prompt: '安全类内容必须形成“风险辨识—专项交底—现场检查—隐患整改—复查销项”闭环。' },
-  { pattern: /进度|工期|节点|计划/u, label: '进度闭环', required: ['计划', '检查', '偏差', '纠偏', '复核'], prompt: '进度类内容必须形成“计划分解—日/周检查—偏差识别—资源纠偏—节点复核”闭环。' },
+  { pattern: /进度|工期|节点|计划/u, label: '进度闭环', required: ['计划', '检查', '偏差', '纠偏', '复核'], prompt: '进度类内容必须形成“计划分解—日/周检查—偏差识别—资源纠偏—节点复核”闭环。', ownerRe: /进度|工期/u },
   { pattern: /文明|扬尘|噪声|绿色|环保|垃圾/u, label: '环保闭环', required: ['监测', '预警', '处置', '台账'], prompt: '文明环保类内容必须形成“监测—预警—联动处置—台账记录”闭环。' },
-  { pattern: /工资|劳务|实名/u, label: '工资闭环', required: ['实名', '考勤', '核算', '公示', '代发', '归档'], prompt: '工资保障类内容必须形成“实名登记—考勤—核算—公示—银行代发—归档”闭环。' },
+  { pattern: /工资|劳务|实名/u, label: '工资闭环', required: ['实名', '考勤', '核算', '公示', '代发', '归档'], prompt: '工资保障类内容必须形成“实名登记—考勤—核算—公示—银行代发—归档”闭环。', ownerRe: /劳务|工资|劳动力|实名|用工/u },
   { pattern: /应急|预案|救援|事故/u, label: '应急闭环', required: ['发现', '警戒', '疏散', '处置', '上报', '复盘'], prompt: '应急类内容必须形成“发现险情—警戒疏散—初期处置—救援上报—复盘整改”闭环。' },
 ];
 
 const PROCESS_CHAINS: Record<Exclude<ConstructionOrgProjectType, 'general'>, { label: string; chain: string[]; forbidden: string[]; prompt: string }> = {
   building: {
     label: '房建工程',
-    chain: ['施工准备', '土方/基础', '主体结构', '二次结构', '防水', '机电安装', '装饰装修', '室外工程', '竣工验收'],
+    chain: ['施工准备', '土方/基础', '主体结构', '二次结构/砌体', '防水', '机电安装', '装饰装修', '室外工程', '竣工验收'],
     forbidden: ['管道闭水试验', '沥青摊铺', '水稳层', '交通导改'],
     prompt: '房建类章节应按“施工准备—基础—主体—二次结构—防水—机电—装饰—室外—验收”组织，不得混入市政道路工序。',
   },
   municipal: {
     label: '市政工程',
-    chain: ['测量放线', '管线探测', '围挡导行', '沟槽/路基', '管道/结构', '回填', '水稳/沥青/铺装', '标线设施', '验收移交'],
+    chain: ['测量放线', '管线探测', '围挡导行', '沟槽/路基', '管道/管涵/检查井', '回填', '水稳/沥青/铺装', '标线/标志/路灯', '验收移交'],
     forbidden: ['主体结构', '二次结构', '塔吊', '外脚手架', '屋面防水'],
     prompt: '市政类章节应按“测量放线—管线探测—围挡导行—沟槽/路基—管道/结构—回填—路面恢复—验收移交”组织，不得写成房建主体结构逻辑。',
   },
@@ -93,7 +103,7 @@ const PROCESS_CHAINS: Record<Exclude<ConstructionOrgProjectType, 'general'>, { l
   },
   decoration: {
     label: '装饰装修工程',
-    chain: ['基层处理', '防水闭水', '吊顶龙骨', '墙地面铺装', '细部收口', '成品保护', '空气质量验收'],
+    chain: ['基层处理', '防水/闭水', '吊顶/龙骨', '墙地面/铺装', '收口/收边', '成品保护', '空气质量/环境检测'],
     forbidden: ['深基坑', '路基压实', '水稳层', '沥青摊铺', '大体量土方'],
     prompt: '装饰装修类章节应按“基层处理—防水闭水—吊顶墙面—地面铺装—细部收口—成品保护—空气质量验收”组织，不得混入基坑、路基等无关内容。',
   },
@@ -111,6 +121,94 @@ const BONUS_MODULES = [
 
 function normalize(text: string) {
   return text.replace(/\s+/gu, '').toLowerCase();
+}
+
+/** 链环节匹配（D-T9 等价簇，检测/修复/复检单源）：节点按「/」分等价词，任一命中即算
+ *（「沟槽/路基」命中「沟槽」或「路基」；历史缺陷：「防水闭水」「吊顶龙骨」组合词全字面匹配为死节点，
+ * 自然写作用词「防水」「龙骨」漏判—— r28f #31 词表偏差误报根因之一） */
+function chainNodeHit(node: string, context: string): boolean {
+  return node.split('/').some(term => context.includes(normalize(term)));
+}
+
+/** 链环节展示主词（簇首词：issue 文案/修复指令/复检同源展示） */
+function chainNodeLabel(node: string): string {
+  return node.split('/')[0];
+}
+
+/** D-T9 工序链缺陷（检测 issue / 修复轮指令 / 复检三角色共用）：章级定位 */
+export interface ProfessionalChainDeficit {
+  /** 缺陷定位章（mixed=节所在章；insufficient=文档级缺口归属章） */
+  chapter: DocumentDraftChapter;
+  /** mixed=节级域错位（工序组织节写成本域禁配工序）；insufficient=文档级链覆盖缺口 */
+  kind: 'mixed' | 'insufficient';
+  /** 缺陷领域 */
+  domain: Exclude<ConstructionOrgProjectType, 'general'>;
+  /** 域展示名（PROCESS_CHAINS.label 单源：检测 message/修复指令/复检展示） */
+  label: string;
+  /** mixed=命中的禁配工序词；insufficient=已命中的链环节（主词） */
+  hits: string[];
+  /** insufficient=缺失链环节（主词）；mixed 为空 */
+  missing: string[];
+  /** 域工序链组织要求（检测 suggestion / 修复指令同源文案） */
+  prompt: string;
+  /** mixed=节标题（章内定位）；insufficient=undefined */
+  sectionTitle?: string;
+}
+
+/**
+ * D-T9 工序链单源扫描（检测/修复/复检共用）：
+ * 1. 节级 mixed（域错位）：章内容按 H3 嵌标题切节，节标题词面命中域 → 该域禁配工序词在节内命中 ≥2 即错位——
+ *    r28f #30 归因：旧全文级判定把「质保承诺主体结构（法定话术）+ 公厕房建外脚手架（混合项目合法
+ *    单位工程）」叠加成市政错位误报；节级判定把域约束绑定到具体工序组织节（「道路工程」节只按市政
+ *    禁配检查），公厕/装饰节只受各自域约束，概况节无标题域不检查；
+ * 2. 文档级 insufficient（链覆盖缺口）：全文链环节命中 < min(3, 链长) 即缺口；缺口归属到章
+ *    （章内容链命中最多且 >0，供修复轮定向补写；无归属章不产出交终门禁复核）。
+ */
+export function professionalChainScan(input: { chapters: DocumentDraftChapter[]; documentText: string }): ProfessionalChainDeficit[] {
+  const deficits: ProfessionalChainDeficit[] = [];
+  // ① 节级 mixed：域约束绑定到工序组织节（节标题词面判域，声明序检查）
+  for (const chapter of input.chapters) {
+    const blocks = String(chapter.content || '').split(/(?=^#{3}\s)/mu);
+    for (const block of blocks) {
+      if (!block.trim()) continue;
+      const headingMatch = block.match(/^#{1,6}\s*(.+)$/mu);
+      if (!headingMatch) continue;
+      const sectionTitle = headingMatch[1].trim().slice(0, 40);
+      if (!sectionTitle) continue;
+      const blockContext = normalize(block);
+      for (const { type, pattern } of CONSTRUCTION_ORG_PROJECT_TYPE_PATTERNS) {
+        if (!pattern.test(sectionTitle)) continue;
+        const rule = PROCESS_CHAINS[type];
+        const forbiddenHits = rule.forbidden.filter(token => blockContext.includes(normalize(token)));
+        if (forbiddenHits.length >= 2) {
+          deficits.push({ chapter, kind: 'mixed', domain: type, label: rule.label, sectionTitle, hits: [...forbiddenHits], missing: [], prompt: rule.prompt });
+        }
+      }
+    }
+  }
+  // ② 文档级 insufficient：全文链覆盖缺口（归属到章供修复定位；词表簇化匹配）
+  const context = normalize(input.documentText);
+  for (const type of Object.keys(PROCESS_CHAINS) as Array<Exclude<ConstructionOrgProjectType, 'general'>>) {
+    const rule = PROCESS_CHAINS[type];
+    const chainHits = rule.chain.filter(node => chainNodeHit(node, context));
+    const explicitlyMatched = new RegExp(rule.label, 'u').test(input.documentText) || chainHits.length >= 3;
+    if (!explicitlyMatched) continue;
+    if (chainHits.length >= Math.min(3, rule.chain.length)) continue;
+    const owner = [...input.chapters]
+      .map(chapter => ({ chapter, hits: rule.chain.filter(node => chainNodeHit(node, normalize(`${chapter.title} ${chapter.content || ''}`))).length }))
+      .sort((left, right) => right.hits - left.hits)[0];
+    if (!owner || owner.hits === 0) continue;
+    deficits.push({
+      chapter: owner.chapter,
+      kind: 'insufficient',
+      domain: type,
+      label: rule.label,
+      hits: chainHits.map(chainNodeLabel),
+      missing: rule.chain.filter(node => !chainNodeHit(node, context)).map(chainNodeLabel),
+      prompt: rule.prompt,
+    });
+  }
+  return deficits;
 }
 
 function isConstructionOrgContext(text: string) {
@@ -136,8 +234,17 @@ export function constructionOrgBlueprintRuleLines(chapter: DocumentTemplateChapt
   return prompt ? prompt.split('\n').map(line => `   - ${line}`) : [];
 }
 
-export function constructionOrgProjectTypePrompt(input: { templateName: string; outputTitle?: string; requirement?: string; chapters: DocumentTemplateChapter[] }) {
-  const projectTypes = inferConstructionOrgProjectTypes({ template: { id: 'runtime', name: input.templateName, outputTitle: input.outputTitle || '', description: '', category: '', chapters: input.chapters }, chapters: input.chapters, requirement: input.requirement });
+export function constructionOrgProjectTypePrompt(input: { templateName: string; outputTitle?: string; requirement?: string; chapters: DocumentTemplateChapter[]; materialText?: string }) {
+  const runtimeTemplate = { id: 'runtime', name: input.templateName, outputTitle: input.outputTitle || '', description: '', category: '', chapters: [] as DocumentTemplateChapter[] };
+  // D-T9 两级判定（章级优先）：章标题+小节标题命中即按本章域注入（混合项目中「公厕装饰装修工程」章
+  // 只受装饰约束、不得被项目级市政域约束误导）；章级无信号时回退项目级（模板/用户要求/资料文本——
+  // 资料内容驱动，不依赖项目名称）
+  const chapterScopedChapters = input.chapters.map(chapter => ({ ...chapter, title: `${chapter.title} ${(chapter.sections || []).join(' ')}`.trim() }));
+  // 章级信号须为具体类型（infer 无命中时返回 ['general']——general 不构成章级信号，照常回退项目级）
+  const chapterTypes = inferConstructionOrgProjectTypes({ template: { ...runtimeTemplate, name: '', outputTitle: '' }, chapters: chapterScopedChapters }).filter(type => type !== 'general');
+  const projectTypes = chapterTypes.length
+    ? chapterTypes
+    : inferConstructionOrgProjectTypes({ template: runtimeTemplate, chapters: [], requirement: input.requirement, materialText: input.materialText });
   const prompts = projectTypes
     .filter((type): type is Exclude<ConstructionOrgProjectType, 'general'> => type !== 'general')
     .map(type => PROCESS_CHAINS[type].prompt);
@@ -172,11 +279,55 @@ export async function constructionOrgGenericLanguageIssues(
   return issues;
 }
 
+/** 评审关注闭环链单链缺失素材（D-T2）：检测端 issue / 修复轮指令 / 复检三角色共用的链缺失描述 */
+export interface ControlLoopChainDeficit {
+  /** 链名（与检测端 issue label 同源） */
+  label: string;
+  /** 链条全要素（修复指令展示「A—B—C」成链形态） */
+  required: string[];
+  /** 当前缺失要素 */
+  missing: string[];
+  /** 链条语义描述（写作用 prompt 同源） */
+  prompt: string;
+}
+
+/** 评审关注闭环链主责章缺失扫描（D-T2 检测/修复/复检单源）：对每条 ownerRe 链定位主责章
+ *（首个标题命中 ownerRe 的章），返回主责章缺失要素；检测端（constructionOrgControlLoopIssues）
+ * 与修复轮（stageControlLoopRepair 定位/迭代/复检）共用本函数，防两处判定漂移
+ *（检测定位=修复定位=复检定位）。无主责章不返回（链无载体章时不得强加，防误报族）。 */
+export function controlLoopChainScan(chapters: DocumentDraftChapter[]): Array<{ chapter: DocumentDraftChapter; deficit: ControlLoopChainDeficit }> {
+  const results: Array<{ chapter: DocumentDraftChapter; deficit: ControlLoopChainDeficit }> = [];
+  for (const rule of CONTROL_LOOP_RULES) {
+    if (!rule.ownerRe) continue;
+    const owner = chapters.find(chapter => rule.ownerRe!.test(chapter.title));
+    if (!owner) continue;
+    const missing = rule.required.filter(token => !owner.content.includes(token));
+    if (missing.length === 0) continue;
+    results.push({ chapter: owner, deficit: { label: rule.label, required: [...rule.required], missing, prompt: rule.prompt } });
+  }
+  return results;
+}
+
 export function constructionOrgControlLoopIssues(chapters: DocumentDraftChapter[]): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
-  for (const chapter of chapters) {
-    const scope = `${chapter.title} ${(chapter.sections || []).join(' ')}`;
-    for (const rule of CONTROL_LOOP_RULES) {
+  // D-T2 评审关注三链（质量三检/进度纠偏/工资代发）：主责章（首个标题命中 ownerRe 的章）全要素判定——
+  // 缺任一要素即不成链（controlLoopChainScan 单源扫描）；无主责章不检查（防「机械设备/物资计划」误报族）
+  for (const { chapter, deficit } of controlLoopChainScan(chapters)) {
+    issues.push({
+      level: 'warning',
+      severity: 'warning',
+      category: 'control_loop',
+      message: `${chapter.title} 缺少${deficit.label}关键链条：${deficit.missing.join('、')}`,
+      suggestion: `${deficit.prompt}链条要素缺失须补写：在该章对应小节内自然融入缺失环节，保持既有内容与结构不变。`,
+      chapterId: chapter.id,
+      provenance: { detectorId: 'construction-org-control-loop', fingerprint: stableHash(`${deficit.label}\u0000${chapter.id}`) },
+    });
+  }
+  // 其余链（安全/环保/应急）：通用宽松判定保留（pattern 命中章、缺半数才报，warning 无修复消费）
+  for (const rule of CONTROL_LOOP_RULES) {
+    if (rule.ownerRe) continue;
+    for (const chapter of chapters) {
+      const scope = `${chapter.title} ${(chapter.sections || []).join(' ')}`;
       if (!rule.pattern.test(scope)) continue;
       const missing = rule.required.filter(token => !chapter.content.includes(token));
       if (missing.length >= Math.ceil(rule.required.length / 2)) {
@@ -188,10 +339,44 @@ export function constructionOrgControlLoopIssues(chapters: DocumentDraftChapter[
 }
 
 export function constructionOrgProfessionalChainIssues(input: { markdown: string; factsModel: DocumentFactsModel; chapters: DocumentDraftChapter[] }): ValidationIssue[] {
-  const context = normalize(`${input.markdown} ${input.factsModel.project.map(fact => fact.value).join(' ')} ${input.factsModel.preciseFacts.map(fact => fact.value).join(' ')}`);
+  const factsText = `${input.factsModel.project.map(fact => fact.value).join(' ')} ${input.factsModel.preciseFacts.map(fact => fact.value).join(' ')}`;
+  const documentText = `${input.markdown} ${factsText}`;
   const issues: ValidationIssue[] = [];
-  for (const rule of Object.values(PROCESS_CHAINS)) {
-    const chainHits = rule.chain.filter(token => context.includes(normalize(token)));
+  if (input.chapters.length > 0) {
+    // D-T9 生产路径：单源扫描——节级域错位（章/节定位）+ 文档级链覆盖缺口（归属章）；
+    // mixed 绑定「节标题域 × 节内禁配词≥2」（r28f #30 误报根治：质保法定话术/混合项目合法单位
+    // 工程的域词不再跨节叠加成全文错位）；insufficient 词表簇化（#31 误报根治：组合词死节点）
+    for (const deficit of professionalChainScan({ chapters: input.chapters, documentText })) {
+      const rule = PROCESS_CHAINS[deficit.domain];
+      if (deficit.kind === 'mixed') {
+        issues.push({
+          level: 'warning',
+          severity: 'warning',
+          category: 'professional_chain',
+          message: `${deficit.chapter.title}「${deficit.sectionTitle}」疑似${rule.label}内容混入不匹配工序：${deficit.hits.join('、')}`,
+          suggestion: rule.prompt,
+          chapterId: deficit.chapter.id,
+          provenance: { detectorId: 'construction-org-professional-chain', fingerprint: stableHash(`mixed\u0000${deficit.domain}\u0000${deficit.chapter.id}\u0000${deficit.sectionTitle}`) },
+        });
+      } else {
+        issues.push({
+          level: 'warning',
+          severity: 'warning',
+          category: 'professional_chain',
+          message: `${rule.label}工序链覆盖不足：仅识别到 ${deficit.hits.join('、') || '未识别到关键工序'}`,
+          suggestion: rule.prompt,
+          chapterId: deficit.chapter.id,
+          provenance: { detectorId: 'construction-org-professional-chain', fingerprint: stableHash(`insufficient\u0000${deficit.domain}\u0000${deficit.chapter.id}`) },
+        });
+      }
+    }
+    return issues;
+  }
+  // 无章结构回退（旧口径全文级判定，向后兼容：非文档管线调用/单测直调）
+  const context = normalize(documentText);
+  for (const type of Object.keys(PROCESS_CHAINS) as Array<Exclude<ConstructionOrgProjectType, 'general'>>) {
+    const rule = PROCESS_CHAINS[type];
+    const chainHits = rule.chain.filter(node => chainNodeHit(node, context));
     const explicitlyMatched = new RegExp(rule.label, 'u').test(input.markdown) || chainHits.length >= 3;
     if (!explicitlyMatched) continue;
     const forbiddenHits = rule.forbidden.filter(token => context.includes(normalize(token)));
@@ -199,7 +384,7 @@ export function constructionOrgProfessionalChainIssues(input: { markdown: string
       issues.push({ level: 'warning', message: `疑似${rule.label}内容混入不匹配工序：${forbiddenHits.join('、')}`, suggestion: rule.prompt });
     }
     if (chainHits.length < Math.min(3, rule.chain.length)) {
-      issues.push({ level: 'warning', message: `${rule.label}工序链覆盖不足：仅识别到 ${chainHits.join('、') || '未识别到关键工序'}`, suggestion: rule.prompt });
+      issues.push({ level: 'warning', message: `${rule.label}工序链覆盖不足：仅识别到 ${chainHits.map(chainNodeLabel).join('、') || '未识别到关键工序'}`, suggestion: rule.prompt });
     }
   }
   return issues;

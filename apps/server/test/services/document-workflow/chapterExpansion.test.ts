@@ -104,9 +104,10 @@ describe('buildEvidenceOnlyChapterContent', () => {
     })).toBe('');
   });
 
-  it('证据句中的图片行：文件名被证据清洗剥离，行首列表前缀使整行图片正则不命中', () => {
-    // 实现事实：cleanEvidenceText 先剥离文件名（drawing.png 被移除），句子以 "- " 前缀输出，
-    // removeUnwantedDrawingImages 的 ^!\[ 整行匹配不命中，forbid 与不 forbid 输出一致。
+  it('证据句中的图片语法：forbid=true 被剥离（F-T3 收紧覆盖行内/列表前缀图片）', () => {
+    // F-T3：removeUnwantedDrawingImages 覆盖行内图片与列表前缀整行图片（旧版仅 ^!\[ 整行图纸类）；
+    // 证据句经 cleanEvidenceText 剥离文件名后仍保留 markdown 图片语法，forbid=true 时被剥离，
+    // forbid=false 原样保留（行为分化）。
     const evidence = makeEvidence(`${VALID_SENTENCE}![基坑支护设计图](/proj/drawing.png)`);
     const forbidden = buildEvidenceOnlyChapterContent({
       chapter: { ...CHAPTER, sections: ['开挖方法'] },
@@ -120,7 +121,10 @@ describe('buildEvidenceOnlyChapterContent', () => {
       targetWords: 2000,
       forbidDrawingImages: false,
     });
-    expect(forbidden).toBe(allowed);
+    expect(forbidden).not.toBe(allowed);
+    expect(forbidden).not.toContain('![');
+    expect(forbidden).not.toContain('基坑支护设计图');
+    expect(allowed).toContain('![基坑支护设计图](/proj/)');
     expect(forbidden).not.toContain('drawing.png');
   });
 

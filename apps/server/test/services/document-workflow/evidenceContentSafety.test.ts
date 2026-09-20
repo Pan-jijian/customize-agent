@@ -11,7 +11,7 @@ vi.mock('@customize-agent/knowledge', () => {
   return { LocalTransformersEmbeddingProvider };
 });
 
-import { buildBidProcedureJudge, filterOffTopicSections, filterOffTopicSectionsForChapters, isBidderQualificationText, isHardBannedSectionTitle, isQualificationSectionTitle, partitionEvidenceByContentSafety } from '@/services/document-workflow/evidenceContentSafety';
+import { buildBidProcedureJudge, filterOffTopicSections, filterOffTopicSectionsForChapters, isBidderQualificationText, isContractProcedureClause, isHardBannedSectionTitle, isQualificationSectionTitle, partitionEvidenceByContentSafety } from '@/services/document-workflow/evidenceContentSafety';
 import type { DocumentEvidence, DocumentTemplateChapter } from '@/services/document-workflow/types';
 
 const STRONG_BID_RE = /评标|投标|澄清|评审|中标|保证金|开标|递交|廉洁|行贿|串标|围标|报价|清单计量|暂列金额|预付款|进度款|价格波动|担保|违约|发票|计税|税金|材料调差/u;
@@ -248,6 +248,53 @@ describe('isBidderQualificationText（投标人资格条件类要求条款判定
 
   it('施工技术语境安全生产许可证表述不命中（正文合法提到）', () => {
     expect(isBidderQualificationText('施工现场特种作业人员持证上岗，安全生产许可证在有效期内')).toBe(false);
+  });
+
+  it('M26 扩围：「接受分包」条项与在建工程/社保/人员组成表命中（前附表固定条项）', () => {
+    expect(isBidderQualificationText('接受分包的第三人资格要求：分包人应具备相应资质等级')).toBe(true);
+    expect(isBidderQualificationText('投标企业拟派项目经理不得有在建工程')).toBe(true);
+    expect(isBidderQualificationText('安全员（社保同项目经理的社保要求）')).toBe(true);
+    expect(isBidderQualificationText('投标人项目管理机构人员组成表')).toBe(true);
+  });
+
+  it('M26 反向守护：技术域「分包」管理表述不误伤（无「接受分包」连词与资格锚）', () => {
+    expect(isBidderQualificationText('分包工程施工前须编制专项施工方案并报审')).toBe(false);
+    expect(isBidderQualificationText('本工程不允许违法分包')).toBe(false);
+  });
+});
+
+describe('isContractProcedureClause（合同程序条款判定，r28h M10 扩围）', () => {
+  it('合同范本对偶语/发包人程序/监理人条文命中（既有口径不回归）', () => {
+    expect(isContractProcedureClause('你方在收到我方通知后7天内予以答复')).toBe(true);
+    expect(isContractProcedureClause('发包人收到承包人提交的竣工结算申请后28天内完成审批')).toBe(true);
+    expect(isContractProcedureClause('1.4 监理人应对施工过程进行巡视检查')).toBe(true);
+  });
+
+  it('M10 扩围：「…的约定：」合同专用条款格式与「通用条款」引用标记命中', () => {
+    expect(isContractProcedureClause('关于治安保卫的特别约定：发包人应与当地公安部门协商在现场建立治安管理机构')).toBe(true);
+    expect(isContractProcedureClause('关于工程保险的约定：承包人应投保建筑工程一切险')).toBe(true);
+    expect(isContractProcedureClause('1.13 工程量清单错误的修正（执行通用条款第1.13款）')).toBe(true);
+  });
+
+  it('技术条款零误伤：「按约定」类冒号外表述与施工义务句不命中', () => {
+    expect(isContractProcedureClause('施工中应严格按约定标准控制混凝土配合比')).toBe(false);
+    expect(isContractProcedureClause('承包人应按图纸及规范要求施工，确保工程质量合格')).toBe(false);
+    expect(isContractProcedureClause('')).toBe(false);
+  });
+
+  it('M26 扩围：「…的有关约定：」GF 变体命中（旧「的约定：」不覆盖「有关约定：」连续序列）', () => {
+    expect(isContractProcedureClause('现场工艺试验的有关约定：承包人应按监理人指示进行试验')).toBe(true);
+    expect(isContractProcedureClause('关于竣工验收程序的有关约定：')).toBe(true);
+  });
+
+  it('M26 扩围：合同程序双信号（合同主体词 + 程序动词）命中', () => {
+    expect(isContractProcedureClause('承包人应在更换项目负责人前7天报送发包人审批')).toBe(true);
+    expect(isContractProcedureClause('承包人应定期检查安全防护用具并教育作业人员正确穿戴')).toBe(true);
+  });
+
+  it('M26 反向守护：单信号不判（主体词或程序动作单独出现不误伤施工条款）', () => {
+    expect(isContractProcedureClause('承包人在施工现场设置标准化围挡并悬挂五牌一图')).toBe(false);
+    expect(isContractProcedureClause('施工资料应按要求报送监理机构存档')).toBe(false);
   });
 });
 

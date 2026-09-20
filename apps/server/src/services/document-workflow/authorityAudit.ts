@@ -1,8 +1,11 @@
 /**
- * V5 P5 · 无主数值审计器（M6 闭环落地）：生成后扫描正文全部数值，与 AuthorityIndex 匹配三分类。
+ * V5 P5 · 无主数值审计器（M6 闭环落地；F-T4 三源闭合 v2）：生成后扫描正文全部数值，
+ * 与 AuthorityIndex 权威核 + 会话全源数值 token（资料原文/清单事实锁/蓝图/事实主表，与
+ * numeric-verification 修复轮 buildNumericAuthority 单源）匹配三分类。
  *
  * 分类语义（M6 方案原文）：
- * - 一致：数值核心命中权威索引（条目值 / 分工程明细 groups / 规格与标签内嵌数值）；
+ * - 一致：数值核心命中权威索引（条目值 / 分工程明细 groups / 规格-数量拆分 specBreakdown /
+ *   规格与标签内嵌数值；尾零规约双侧归一）或全源 token 数值核心；
  * - 矛盾：修复+阻断——由 P4b 专项检测器承担（crossProjectValueCopyIssues / phaseLaborMixingIssues /
  *   blueprintCitationConsistencyIssues / resourceBreakdownConsistencyIssues），本审计不重复报告；
  * - 无主（权威无覆盖）按语境分流三桶：
@@ -10,16 +13,29 @@
  *   ② 工艺库缺口（工艺·构造·验收参数语境）→ 进收编清单（工艺参数登记）；
  *   ③ 其余 → 疑似编造（验收口径「0 未登记项」= 本桶为空）。
  *
+ * F-T4 三源闭合 v2（数值编造根治 P0）：
+ * - 提取修正：跳过表格行（与 C-T2 scanNumericTrace 同口径）、幽灵 token（严格边界无首现）、
+ *   零值核心噪声（E0 类符号截断形态）；
+ * - 匹配扩容：specBreakdown 值纳入权威核 + 尾零归一双侧（normalizeQuantityZeros 单源）+ 全源 token
+ *   复核（extraAuthorityTokens：来源在证据/清单而蓝图未投影时不再误报缺口）；
+ * - 豁免单源：无主 token 二次过 C-T2 分类器（classifyNumericTraceToken）——规范常数/管理数字
+ *   计入 conventionExempt 不计缺口（与修复轮豁免口径完全一致，防两链判据漂移）；
+ * - 硬门禁：三桶任一非零 → authorityAuditIssues 产出 blocker（fact_consistency + llm_repairable
+ *   直通 isHardExportBlockingIssue）——审计失败不可进交付；缺口由修复轮（numeric-verification
+ *   同源权威+分类器）与链尾 demote 确定性改定性收敛至 0。
+ *
  * 收编流程（防"以后还会遇到"的机制保证，非人肉白名单）：
  * - 无主项不被静默放过，而是每次生成系统性暴露、分类、收编；
  * - 新资源对象 → authorityIndex transform 扩容（P1 覆盖契约测试同步保护）；
- * - 新工艺参数 → 扩充 PROCESS_GAP_CONTEXT_RE（工艺库收编）；
+ * - 新工艺参数 → 扩充 PROCESS_GAP_CONTEXT_RE（工艺库收编）或 C-T2 分类器规范常数族（R 系列）；
  * - 合法非权威值的固定形态（规范编号/法规年代等）→ 登记表 AUDIT_REGISTERED_TOKEN_RES（每条附理由）；
  * - 审计为纯确定性零 LLM，修复轮每次重算校验组后重跑（报告始终基于最新 finalMarkdown）。
  */
 import { buildAuthorityIndex } from './authorityIndex';
 import type { BlueprintData } from './integratedBlueprint';
 import { extractNumericTokens } from './numericalConsistency';
+import { classifyNumericTraceToken, normalizeQuantityZeros } from './documentFactTrace';
+import type { ValidationIssue } from './types';
 
 export interface AuthorityAuditFinding {
   /** 原文数值 token（与精确提取器同口径，如「58 人」「20420.39m³」） */
@@ -41,6 +57,8 @@ export interface AuthorityAuditReport {
   matched: number;
   /** 命中登记表（合法非权威值：规范编号/法规年代等）的 token 数 */
   registered: number;
+  /** C-T2 分类器豁免数（规范常数/管理数字判定，与修复轮豁免口径单源）：合法数字，不计缺口不计未登记 */
+  conventionExempt: number;
   /** ① 推导器/投影覆盖缺口：资源·劳动力·机械·进度·物资语境未命中——进收编清单 */
   derivationGaps: AuthorityAuditFinding[];
   /** ② 工艺库缺口：工艺·构造·验收参数语境未命中——进收编清单 */
@@ -116,8 +134,9 @@ function countStrictOccurrences(text: string, token: string): number {
   return count;
 }
 
-/** 审计 token 提取：共享提取器 + 补全提取，按首现位置排序（报告可读性与测试确定性） */
-function auditNumericTokens(markdown: string): string[] {
+/** 审计 token 提取：共享提取器 + 补全提取，严格边界首现位置随行（-1=幽灵 token，主循环过滤；
+ * 提取形态与正文不一致时不得取裸 indexOf 假首现），按首现位置排序（报告可读性与测试确定性） */
+function auditNumericTokens(markdown: string): Array<{ token: string; index: number }> {
   const positions = new Map<string, number>();
   const add = (raw: string) => {
     const token = raw.trim();
@@ -126,20 +145,35 @@ function auditNumericTokens(markdown: string): string[] {
   };
   for (const token of extractNumericTokens(markdown)) add(token);
   for (const match of markdown.matchAll(AUDIT_SUPPLEMENT_TOKEN_RE)) add(match[0]);
-  return [...positions.entries()].sort((left, right) => left[1] - right[1]).map(([token]) => token);
+  return [...positions.entries()].sort((left, right) => left[1] - right[1]).map(([token, index]) => ({ token, index }));
 }
 
-/** 权威索引的数值核心集合：条目值 / 分工程明细 groups / 规格与标签内嵌数字（如 C20、100W）。
- * 匹配按数值核心（忽略单位与大小写差异），与数值提取器的比对口径一致。 */
+/** token 首现所在行是否为 Markdown 表格行（与 C-T2 scanNumericTrace 同判据：表格数值属计划分解数据） */
+function isTableLineAt(markdown: string, index: number): boolean {
+  const lineStart = markdown.lastIndexOf('\n', index - 1) + 1;
+  const lineEnd = markdown.indexOf('\n', index);
+  const line = markdown.slice(lineStart, lineEnd < 0 ? markdown.length : lineEnd);
+  return /^\s*\|/u.test(line.trim());
+}
+
+/** 权威索引的数值核心集合：条目值 / 分工程明细 groups / 规格-数量拆分 specBreakdown / 规格与
+ * 标签内嵌数字（如 C20、100W）。匹配按数值核心（忽略单位与大小写差异），尾零规约双侧归一
+ *（1.500 ↔ 1.5，与 normalizeQuantityZeros 单源）；与数值提取器的比对口径一致。 */
 function authorityNumericCores(data: BlueprintData): Set<string> {
   const cores = new Set<string>();
+  const addCore = (raw: string) => {
+    const trimmed = normalizeQuantityZeros(raw);
+    if (trimmed) cores.add(trimmed);
+  };
   for (const entry of buildAuthorityIndex(data).entries) {
-    if (typeof entry.value === 'number') cores.add(String(entry.value));
+    if (typeof entry.value === 'number') addCore(String(entry.value));
     for (const text of [String(entry.value), entry.spec, entry.label]) {
       if (!text) continue;
-      for (const core of text.match(/\d+(?:\.\d+)?/gu) ?? []) cores.add(core);
+      for (const core of text.match(/\d+(?:\.\d+)?/gu) ?? []) addCore(core);
     }
-    for (const group of entry.groups ?? []) cores.add(String(group.value));
+    for (const group of entry.groups ?? []) addCore(String(group.value));
+    // R20 规格-数量拆分（「100W 109套 + 120W 9套」小计）：写作层与权重链同源的合法值
+    for (const split of entry.specBreakdown ?? []) addCore(String(split.value));
   }
   return cores;
 }
@@ -157,27 +191,45 @@ function classifyBucket(context: string): AuthorityAuditBucket {
   return 'unattributed';
 }
 
-/** 生成后无主数值审计：扫描正文全部数值 token → 登记表豁免 → 权威核心匹配 → 无主语境分流。
+/** 生成后无主数值审计：扫描正文全部数值 token → 幽灵/表格/零值噪声过滤 → 登记表豁免 → 权威核匹配
+ *（蓝图权威核 + 全源补充核，尾零规约双侧归一）→ C-T2 分类器豁免（规范常数/管理数字）→ 无主语境分流。
  * data 缺省（蓝图不可用）时全部未命中按语境分流（推导缺口语境即暴露投影层未接管）。
- * 4.28.0 A6：首现定位与出现次数按边界严格口径（防「1.5m 落在 31.5mm 内」类子串劫持语境与计数）。 */
-export function auditAuthorityCoverage(markdown: string, data?: BlueprintData): AuthorityAuditReport {
+ * 4.28.0 A6：首现定位与出现次数按边界严格口径（防「1.5m 落在 31.5mm 内」类子串劫持语境与计数）。
+ * F-T4 v2：extraAuthorityTokens 为会话全源数值 token（证据/清单锁/蓝图/事实主表；与修复轮
+ * buildNumericAuthority 单源）——三桶任一非零即审计失败（authorityAuditIssues 硬门禁消费）。 */
+export function auditAuthorityCoverage(markdown: string, data?: BlueprintData, extraAuthorityTokens?: ReadonlySet<string>): AuthorityAuditReport {
   const cores = data ? authorityNumericCores(data) : new Set<string>();
+  // 全源补充核：token 级提取数值核心（尾零规约同口径）——防「来源在证据/清单而蓝图未投影」误报缺口
+  if (extraAuthorityTokens) {
+    for (const token of extraAuthorityTokens) {
+      const core = /\d+(?:\.\d+)?/u.exec(token);
+      if (core) cores.add(normalizeQuantityZeros(core[0]));
+    }
+  }
   const tokens = auditNumericTokens(markdown);
   const derivationGaps: AuthorityAuditFinding[] = [];
   const processGaps: AuthorityAuditFinding[] = [];
   const unattributed: AuthorityAuditFinding[] = [];
   const contextualMatches: AuthorityAuditFinding[] = [];
+  let scanned = 0;
   let matched = 0;
   let registered = 0;
-  for (const token of tokens) {
+  let conventionExempt = 0;
+  for (const { token, index } of tokens) {
+    // 幽灵 token（严格边界无首现：提取形态与正文不一致）不进审计
+    if (index < 0) continue;
+    // 表格行数值（进度计划表/机械配置表等）属计划分解数据，不做溯源反查（与 C-T2 scanNumericTrace 同口径）
+    if (isTableLineAt(markdown, index)) continue;
+    // 零值核心（E0 类符号截断形态）：0 值不承载项目事实
+    if (numericCore(token) === '0') continue;
+    scanned += 1;
     // 登记表先于匹配：规范编号/法规年代的"数字"本就不属于项目数据（如 GB 50300-2013 的首数字串）
     if (AUDIT_REGISTERED_TOKEN_RES.some(item => item.re.test(token))) {
       registered += 1;
       continue;
     }
-    const value = numericCore(token);
-    const index = strictIndexOf(markdown, token);
-    const context = (index >= 0 ? markdown.slice(Math.max(0, index - AUDIT_CONTEXT_WINDOW), index + token.length + AUDIT_CONTEXT_WINDOW) : token).replace(/\s+/gu, ' ').trim();
+    const value = normalizeQuantityZeros(numericCore(token));
+    const context = markdown.slice(Math.max(0, index - AUDIT_CONTEXT_WINDOW), index + token.length + AUDIT_CONTEXT_WINDOW).replace(/\s+/gu, ' ').trim();
     const finding: AuthorityAuditFinding = { token, value, context, occurrences: countStrictOccurrences(markdown, token) };
     if (cores.has(value)) {
       matched += 1;
@@ -186,18 +238,25 @@ export function auditAuthorityCoverage(markdown: string, data?: BlueprintData): 
       if (matchBucket !== 'unattributed') contextualMatches.push(finding);
       continue;
     }
+    // C-T2 分类器豁免（规范常数/管理数字：与修复轮同源判据，不落缺口不落未登记）
+    if (classifyNumericTraceToken({ token, context }).kind !== 'unsourced') {
+      conventionExempt += 1;
+      continue;
+    }
     const bucket = classifyBucket(context);
     if (bucket === 'derivation-gap') derivationGaps.push(finding);
     else if (bucket === 'process-gap') processGaps.push(finding);
     else unattributed.push(finding);
   }
-  return { scanned: tokens.length, matched, registered, derivationGaps, processGaps, unattributed, contextualMatches, unregisteredCount: unattributed.length };
+  return { scanned, matched, registered, conventionExempt, derivationGaps, processGaps, unattributed, contextualMatches, unregisteredCount: unattributed.length };
 }
 
 /** 审计摘要单点文案（执行阶段 message 消费）。contextualMatches 为观测字段不计入摘要（matched 口径不变） */
 export function authorityAuditSummary(report: AuthorityAuditReport): string {
-  const base = `无主数值审计：扫描数值 ${report.scanned} 个（命中权威 ${report.matched}，登记豁免 ${report.registered}，推导/投影缺口 ${report.derivationGaps.length}，工艺库缺口 ${report.processGaps.length}，未登记 ${report.unregisteredCount}）`;
-  return report.unregisteredCount > 0 ? `${base}；存在疑似编造数值，须核查` : base;
+  const base = `无主数值审计：扫描数值 ${report.scanned} 个（命中权威 ${report.matched}，登记豁免 ${report.registered}，规范/管理豁免 ${report.conventionExempt}，推导/投影缺口 ${report.derivationGaps.length}，工艺库缺口 ${report.processGaps.length}，未登记 ${report.unregisteredCount}）`;
+  if (report.unregisteredCount > 0) return `${base}；存在疑似编造数值，须核查`;
+  if (report.derivationGaps.length + report.processGaps.length > 0) return `${base}；存在收编缺口，须补齐或改定性`;
+  return base;
 }
 
 /** 审计明细行（执行阶段 details 消费；未登记优先，其次两类收编缺口） */
@@ -211,4 +270,30 @@ export function authorityAuditDetails(report: AuthorityAuditReport, limit = 24):
     ...rows('工艺库缺口（进收编清单）：', report.processGaps),
   ];
   return lines.length > 0 ? lines : ['全部数值命中权威索引或登记表，无未登记项。'];
+}
+
+/**
+ * F-T4 审计失败硬门禁检测器（AUXILIARY：由 recordAuthorityAudit 独立消费）：三桶（未登记·推导/投影
+ * 缺口·工艺库缺口）任一非零即审计失败——blocker + category=fact_consistency + llm_repairable，
+ * isHardExportBlockingIssue 直通硬阻断（审计失败不可进交付）。缺口由修复轮（numeric-verification
+ * 同源权威/分类器定向修复）与链尾 demote 确定性改定性收敛至 0 后本检测器自动静默。
+ * 消息锚「无主数值审计失败」不得与既有「生成后事实反查失败」豁免规则（不硬阻断）混同。
+ */
+export function authorityAuditIssues(report: AuthorityAuditReport): ValidationIssue[] {
+  const gapCount = report.derivationGaps.length + report.processGaps.length;
+  if (report.unregisteredCount === 0 && gapCount === 0) return [];
+  const tokenBrief = (findings: AuthorityAuditFinding[]) => findings.slice(0, 6).map(finding => finding.token.replace(/\s+/gu, '')).join('、');
+  const sections: string[] = [];
+  if (report.unregisteredCount > 0) sections.push(`疑似编造（未登记）${report.unregisteredCount} 项 ${tokenBrief(report.unattributed)}`);
+  if (report.derivationGaps.length > 0) sections.push(`推导/投影缺口 ${report.derivationGaps.length} 项 ${tokenBrief(report.derivationGaps)}`);
+  if (report.processGaps.length > 0) sections.push(`工艺库缺口 ${report.processGaps.length} 项 ${tokenBrief(report.processGaps)}`);
+  return [{
+    level: 'error',
+    severity: 'blocker',
+    category: 'fact_consistency',
+    owner: 'llm',
+    repairability: 'llm_repairable',
+    message: `无主数值审计失败：${sections.join('；')}`,
+    suggestion: '未登记数值（疑似编造）必须改为定性表述或回归资料原文；推导/投影缺口数值应补权威投影（transform/specBreakdown 扩容）或改定性；工艺库缺口数值应补规范常数/管理数字分类（C-T2 分类器）或改定性。修复后重跑生成复核清零。',
+  }];
 }

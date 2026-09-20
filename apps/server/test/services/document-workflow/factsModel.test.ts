@@ -29,6 +29,8 @@ import {
   sanitizeExtractedFacts,
   sanitizeFactPool,
   shouldRunLlmFactExtraction,
+  stripFactLabelPrefix,
+  stripTrailingNameCodeBinding,
 } from '@/services/document-workflow/factsModel';
 
 const buildSemanticSimilarityMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<(leftText: string, rightText: string) => number>>());
@@ -333,7 +335,11 @@ describe('isValidProjectBasicFactValue', () => {
 
   it('owner 与 project_code 分支', () => {
     expect(isValidProjectBasicFactValue('owner', '合肥市重点工程建设管理局')).toBe(true);
+    // C-T7（#50）：机构后缀词表补「政府」族——「XX镇人民政府」不含原词表任一字被拒收，招标人事实进不了基本信息表
+    expect(isValidProjectBasicFactValue('owner', '肥西县丰乐镇人民政府')).toBe(true);
+    expect(isValidProjectBasicFactValue('owner', '肥西县丰乐镇管委会')).toBe(true);
     expect(isValidProjectBasicFactValue('owner', '投标人')).toBe(false);
+    expect(isValidProjectBasicFactValue('owner', '将报公共资源交易监督管理部门')).toBe(false);
     expect(isValidProjectBasicFactValue('project_code', 'HF2024-001')).toBe(true);
     expect(isValidProjectBasicFactValue('project_code', '编号123')).toBe(false);
   });
@@ -939,5 +945,43 @@ describe('sanitizeFactPool（P3.2 乱码过滤+项目范围隔离）', () => {
   it('无项目名称事实时仅乱码过滤（不误杀跨项目候选）', () => {
     const foreign = factOf({ key: '项目名称候选', value: '舒城县城镇功能活力品质提升一期项目' });
     expect(sanitizeFactPool([foreign]).length).toBe(1);
+  });
+});
+
+describe('C-T7 名称+编号拆分与标签前缀剥离（#4/#50 口径单源）', () => {
+  const stats = () => ({ truncated: 0, dropped: 0, repaired: 0 });
+
+  it('stripFactLabelPrefix 剥离字段标签前缀，纯值不受影响', () => {
+    expect(stripFactLabelPrefix('招标人：肥西县丰乐镇人民政府')).toBe('肥西县丰乐镇人民政府');
+    expect(stripFactLabelPrefix('肥西县丰乐镇人民政府')).toBe('肥西县丰乐镇人民政府');
+  });
+
+  it('stripTrailingNameCodeBinding 拆分名称+编号连读值（r28f #4 实录形态）', () => {
+    const r28fValue = '2026年度丰乐镇20个美丽宜居自然村建设项目2.2招标项目编号：2026AEEGZ50048';
+    expect(stripTrailingNameCodeBinding(r28fValue)).toBe('2026年度丰乐镇20个美丽宜居自然村建设项目');
+    // 括号变体与无章节号变体同样拆分
+    expect(stripTrailingNameCodeBinding('徽光阁项目施工（招标编号：2026AFLGZ50747）')).toBe('徽光阁项目施工');
+    // 编号字段值本身与无编号尾段的普通值不受影响
+    expect(stripTrailingNameCodeBinding('2026AEEGZ50048')).toBe('2026AEEGZ50048');
+    expect(stripTrailingNameCodeBinding('徽光阁项目施工')).toBe('徽光阁项目施工');
+  });
+
+  it('净化门对非编号字段拆分名称+编号连读值，编号字段不动', () => {
+    const s = stats();
+    const result = sanitizeExtractedFacts([
+      factOf({ key: '项目名称', fieldId: 'project_name', value: '2026年度丰乐镇20个美丽宜居自然村建设项目2.2招标项目编号：2026AEEGZ50048' }),
+      factOf({ key: '项目编号', fieldId: 'project_code', value: '2026AEEGZ50048' }),
+    ], [], s);
+    expect(result[0]!.value).toBe('2026年度丰乐镇20个美丽宜居自然村建设项目');
+    expect(result[1]!.value).toBe('2026AEEGZ50048');
+    expect(s.truncated).toBe(1);
+  });
+
+  it('buildFactsModel：名称与名称+编号同源值不再报多值冲突（#4 验收口径）', async () => {
+    const model = await buildFactsModel([
+      factOf({ key: '项目名称', fieldName: '项目名称', fieldId: 'project_name', value: '2026年度丰乐镇20个美丽宜居自然村建设项目', sourceFile: '/x/招标文件.pdf' }),
+      factOf({ key: '项目名称', fieldName: '项目名称', fieldId: 'project_name', value: '2026年度丰乐镇20个美丽宜居自然村建设项目2.2招标项目编号：2026AEEGZ50048', sourceFile: '/x/工程量清单封面.xls' }),
+    ]);
+    expect(model.conflicts.filter(item => item.includes('项目名称'))).toHaveLength(0);
   });
 });

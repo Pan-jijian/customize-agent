@@ -9,6 +9,8 @@
  *    （章级定位锚点，修复轮按 provenance 精确过滤消费）；
  * 3. 行为矩阵：无 blocker 零成本通过 / 章级定位 + 定向补写落地（复检 + rebuild + recompute）/
  *    变差回滚 / 未生效 / 无法定位显性记录；
+ * 4. D-T1 专业评分补写：<8/12（warning 级）章级定向补写（薄弱维度注入指令）/ 快照过期跳过 /
+ *    预算单列（每章 1 轮）；语义分类器全 fake（判定口径由文本标记驱动，无嵌入依赖）。
  * repairChapterByQuality 全 mock（复检为确定性实现，无 LLM 网络依赖）。
  */
 import { readFileSync } from 'node:fs';
@@ -24,6 +26,7 @@ import { repairChapterByQuality } from '@/services/document-workflow/rolePipelin
 import { FINALIZE_REPAIR_ROUNDS } from '@/services/document-workflow/detectorFixerRegistry';
 import { stageContentDepthRepair } from '@/services/document-workflow/finalize/repairRounds/contentDepthRepair';
 import { criticalSectionDepthIssues, criticalSectionDeficitTotal } from '@/services/document-workflow/finalize/rebuildAndRecompute';
+import { PROFESSIONAL_SCORE_LINE, professionalDepthTotal, professionalScoreTargetLine, professionalWeakDimensions } from '@/services/document-workflow/qualityValidation';
 import { overviewRecapIssues } from '@/services/document-workflow/integrity/detectors/detectors';
 import type { FinalizeSession } from '@/services/document-workflow/finalize/finalizeSession';
 
@@ -273,5 +276,106 @@ describe('precise-fact-usage 参数分配回退（r9 #12 零归属根治）', ()
     expect(call.promptTexts).toContain('逐字保留原文形态');
     // 部分修复落地：GB 编号写入后内容保留（不再因零归属被丢弃）
     expect(session.finalChapterDrafts[0].content).toContain('GB51192-2016');
+  });
+});
+
+// ── D-T1 专业评分不足（<8/12）强制补写链（第七类消费） ──
+
+const DIMENSIONS_STRONG = { factuality: true, structure: true, depth: true, executable: true, specificity: true, consistency: true };
+/** 2/12（仅 structure 覆盖）：补写线缺口残差 6 */
+const DIMENSIONS_WEAK2 = { factuality: false, structure: true, depth: false, executable: false, specificity: false, consistency: false };
+/** 6/12（structure/executable/consistency 覆盖）：补写线缺口残差 2 */
+const DIMENSIONS_WEAK6 = { factuality: false, structure: true, depth: false, executable: true, specificity: false, consistency: true };
+
+function classifierOf(resolve: (text: string) => Record<string, boolean>) {
+  return {
+    analyze: vi.fn(async (text: string) => ({
+      dimensions: resolve(text),
+      contentNeeds: { schedule: true, quality: true, safety: true, resource: true, construction: true },
+      concrete: true,
+      closedLoop: true,
+    })),
+  };
+}
+
+function scoreWarning() {
+  return {
+    level: 'warning', severity: 'warning', category: 'professional_chain',
+    message: '机械设备使用计划 专业评分不足：6/12，薄弱维度：factuality、depth、specificity',
+    suggestion: '请按章节任务卡补齐资源依据、进场调配、进度支撑，并写出资料依据、实施流程、专业控制点和检查整改闭环。',
+    chapterId: 'ch-res',
+    provenance: { detectorId: 'professional-score', fingerprint: 'x' },
+  };
+}
+
+describe('professional-score 专业评分补写（D-T1 消费链）', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('六维评分单源：补写线 8/12、资源类章靶线 10/12、总分与薄弱维度口径（检测/复检共用）', () => {
+    expect(PROFESSIONAL_SCORE_LINE).toBe(8);
+    expect(professionalScoreTargetLine('施工部署与总体安排')).toBe(8);
+    expect(professionalScoreTargetLine('机械设备使用计划')).toBe(10);
+    expect(professionalScoreTargetLine('劳动力安排计划')).toBe(10);
+    expect(professionalDepthTotal(DIMENSIONS_STRONG)).toBe(12);
+    expect(professionalDepthTotal(DIMENSIONS_WEAK6)).toBe(6);
+    expect(professionalWeakDimensions(DIMENSIONS_WEAK6)).toEqual(['factuality', 'depth', 'specificity']);
+    expect(professionalWeakDimensions(DIMENSIONS_STRONG)).toEqual([]);
+  });
+
+  it('专业评分不足章级定向补写：薄弱维度注入指令、复检过线、rebuild+recompute、终态诊断', async () => {
+    const chapter = { id: 'ch-res', title: '机械设备使用计划', content: '本章配置塔式起重机。' };
+    const session = makeSession([chapter], {
+      validationIssues: [scoreWarning()],
+      professionalDepthClassifier: classifierOf(text => (text.includes('评分补写落地') ? DIMENSIONS_STRONG : DIMENSIONS_WEAK6)),
+    });
+    repairMock.mockResolvedValueOnce(repairResult('本章配置塔式起重机。评分补写落地：明确进场时间、调度台账与责任分工，附资料依据。'));
+    await stageContentDepthRepair(session);
+    expect(repairMock).toHaveBeenCalledTimes(1);
+    const call = repairMock.mock.calls[0][0] as unknown as { promptTexts: string; issues: string[] };
+    expect(call.promptTexts).toContain('专业深度评分薄弱维度定向补写');
+    expect(call.promptTexts).toContain('资料依据：引用绑定资料');
+    expect(call.promptTexts).toContain('专业控制点：');
+    expect(call.promptTexts).toContain('项目特异性：');
+    expect(call.issues.join('\n')).toContain('专业评分不足');
+    expect(session.finalChapterDrafts[0].content).toContain('评分补写落地');
+    expect(session.rebuildFinalMarkdown).toHaveBeenCalled();
+    expect(session.recomputeFinalValidationBundle).toHaveBeenCalled();
+    const stage = stageOf(session.progressStages, 'agent-content-depth-repair-ch-res');
+    expect(stage?.status).toBe('success');
+    expect(stage?.message).toContain('缺口清零');
+    expect(session.generationDiagnostics.llm.lastInfo).toContain('1 章专业评分不足');
+  });
+
+  it('快照过期（实时重算已达线）：跳过补写，专业评分与内容深度均通过', async () => {
+    const session = makeSession([{ id: 'ch-res', title: '机械设备使用计划', content: '本章配置塔式起重机，含进场时间、调度台账与责任分工。' }], {
+      validationIssues: [scoreWarning()],
+      professionalDepthClassifier: classifierOf(() => DIMENSIONS_STRONG),
+    });
+    await stageContentDepthRepair(session);
+    expect(repairMock).not.toHaveBeenCalled();
+    const stage = stageOf(session.progressStages, 'content-depth-repair');
+    expect(stage?.status).toBe('success');
+    expect(stage?.message).toContain('内容深度验收通过');
+  });
+
+  it('预算单列：仅专业评分类 todo 的章每章 1 轮（残差下降未清零也不追加轮次）', async () => {
+    const chapter = { id: 'ch-res', title: '机械设备使用计划', content: '本章配置塔式起重机。' };
+    const session = makeSession([chapter], {
+      validationIssues: [{
+        ...scoreWarning(),
+        message: '机械设备使用计划 专业评分不足：2/12，薄弱维度：factuality、depth、executable、specificity、consistency',
+      }],
+      professionalDepthClassifier: classifierOf(text => (text.includes('部分补写') ? DIMENSIONS_WEAK6 : DIMENSIONS_WEAK2)),
+    });
+    repairMock.mockResolvedValueOnce(repairResult('本章配置塔式起重机。部分补写：补充调度与台账。'));
+    await stageContentDepthRepair(session);
+    // 残差 8→4（靶线 10：2/12→6/12）真实下降但未清零：预算上限 1 轮，不再追加第 2 轮（与六类 blocker 的每章 2 轮相互独立）
+    expect(repairMock).toHaveBeenCalledTimes(1);
+    const stage = stageOf(session.progressStages, 'agent-content-depth-repair-ch-res');
+    expect(stage?.status).toBe('failed');
+    expect(stage?.message).toContain('部分生效');
+    expect(stage?.message).toContain('8→4');
   });
 });

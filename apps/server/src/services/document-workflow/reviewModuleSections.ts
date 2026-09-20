@@ -1,5 +1,6 @@
 /**
- * 评审模块承接小节（确定性注入/标题规范化，零 LLM）：6 强制模块与劳务保障制度在规划层显性承接。
+ * 规划层确定性承接小节（零 LLM，注入/标题规范化）：6 强制模块与劳务保障制度（评审模块）
+ * 与组织机构（B-T2 结构要求）在规划层显性承接。
  *
  * 归因（丰乐镇 R12 实测）：成稿语义评分按「块级 bge 余弦 ≥0.6」判定 6 强制模块与 13 合规项
  * （tenderBidScoring.ts MANDATORY_MODULE_QUERIES / COMPLIANCE_ITEM_QUERIES），但规划小节标题用
@@ -15,6 +16,7 @@
  */
 import type { DocumentTemplateChapter } from './types';
 import { displayChapterTitle } from './outline';
+import { normalizeChapterTitleLine, type TenderStructureAssignment } from './tenderRequirements';
 import { sectionTitleEquivalent } from './promptRuleExtraction';
 
 /** 评审模块承接表：module 为诊断标识，coreWords 判定弱承接（同域即可，改名优先于注入——防重复小节），
@@ -60,6 +62,56 @@ export function injectReviewModuleSections(chapters: DocumentTemplateChapter[]):
     } else {
       sections.push(sectionModule.section);
       record.added.push(sectionModule.section);
+    }
+  }
+  return { chapters: next, changes: changes.filter(item => item.added.length > 0 || item.renamed.length > 0) };
+}
+
+// ── B-T2 组织机构承接小节（结构要求驱动，动态触发） ──
+
+/** 组织机构要素判定（结构要求）：org_chart 形态或 element 命中机构核心词即视为组织机构类要求 */
+const ORG_STRUCTURE_ELEMENT_RE = /组织机构|项目管理机构|项目经理部|项目班子|管理机构|管理部门|管理团队|管理人员配置|人员配置|组织体系/u;
+
+/** 组织机构承接规范术语小节（与 renderChapterStructureSlice 的 org_chart 专项指令同词） */
+export const ORG_STRUCTURE_SECTION = '项目管理机构与岗位职责';
+
+/** 已有承接判定（不重复注入/不改名）：「项目管理机构」类小节已存在即视为承接；
+ * 「安全管理机构」等专业机构小节不算（其归属专业章而非项目管理机构内容） */
+const ORG_SECTION_COVERED_RE = /项目管理机构|组织机构|组织架构|项目经理部/u;
+
+/** 弱承接判定：标题含机构框架词元 → 规范化改名（改名优先于注入，防重复小节） */
+const ORG_SECTION_CORE_WORDS = /组织机构|组织架构|项目班子|项目经理部|管理团队/u;
+
+/**
+ * 组织机构承接小节注入（B-T2，规划层确定性）：招标结构要求含组织机构类（org_chart 或机构要素）时，
+ * 在语义路由目标章显性承接「项目管理机构与岗位职责」——已有承接跳过、弱承接标题规范化、完全缺失注入。
+ * 目标章取 assignment.chapterTitle（与写作指令同路由函数、同章标题归一化口径——防「小节在此章、指令挂彼章」
+ * 错位）；低置信（不挂章）不注入，防错挂。正文内容由写作链 org_chart 专项指令落实（组织架构说明 +
+ * 框图承载 + 岗位责任矩阵），零实名数据（人员实名信息属商务册职责，由提示词红线拦截）。
+ */
+export function injectStructureOrgSections(
+  chapters: DocumentTemplateChapter[],
+  assignments: TenderStructureAssignment[],
+): { chapters: DocumentTemplateChapter[]; changes: ReviewModuleSectionChange[] } {
+  const orgAssignments = assignments.filter(assignment => !assignment.lowConfidence && (assignment.requirement.form === 'org_chart' || ORG_STRUCTURE_ELEMENT_RE.test(assignment.requirement.element)));
+  if (orgAssignments.length === 0) return { chapters, changes: [] };
+  const next = chapters.map(chapter => ({ ...chapter, sections: [...(chapter.sections || [])] }));
+  const changes: ReviewModuleSectionChange[] = [];
+  const handled = new Set<string>();
+  for (const assignment of orgAssignments) {
+    const chapter = next.find(item => normalizeChapterTitleLine(item.title) === assignment.chapterTitle);
+    if (!chapter || handled.has(chapter.id)) continue;
+    handled.add(chapter.id);
+    const sections = chapter.sections || (chapter.sections = []);
+    if (sections.some(section => ORG_SECTION_COVERED_RE.test(section))) continue;
+    const record = changes.find(item => item.chapterTitle === chapter.title) || (changes.push({ chapterTitle: chapter.title, added: [], renamed: [] }), changes[changes.length - 1]!);
+    const weakIndex = sections.findIndex(section => ORG_SECTION_CORE_WORDS.test(section));
+    if (weakIndex >= 0) {
+      record.renamed.push({ from: sections[weakIndex]!, to: ORG_STRUCTURE_SECTION });
+      sections[weakIndex] = ORG_STRUCTURE_SECTION;
+    } else {
+      sections.push(ORG_STRUCTURE_SECTION);
+      record.added.push(ORG_STRUCTURE_SECTION);
     }
   }
   return { chapters: next, changes: changes.filter(item => item.added.length > 0 || item.renamed.length > 0) };

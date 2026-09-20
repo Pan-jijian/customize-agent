@@ -17,11 +17,14 @@ import { withPatchRollback } from '../../patchRollback';
 import { cleanEvidenceText } from '../../evidence';
 import { extractSpecTokens } from '../../billFactLock';
 import { stringifyFactValue } from '../../utils';
+import { classifyNumericTraceToken, CELL_NUMBER_RE, CELL_UNIT_RE } from '../../documentFactTrace';
 import type { DocumentFact } from '../../types';
 import type { FinalizeSession } from '../finalizeSession';
 
-/** 数值 token：数值+单位 / 管径 / 直径 / 强度等级 / 钢筋等级 / 龄期简写（7d 等） */
-const NUMERIC_TOKEN_RE = /(?:\d+(?:\.\d+)?\s*(?:mm|cm|m|km|㎡|m²|m3|m³|kg|g|t|K|L|ml|MPa|kPa|kN|N|℃|%|台|套|座|个|项|批|次|份|人|小时|分钟|日历天|天|周|月|年|万元|元|W|kW|kV|V|A|Hz|米|处|道|根|盏|株|标段|层|樘|孔|眼|间|户|栋|幢|d)\b|DN\s*\d+|Φ\s*\d+(?:\.\d+)?|φ\s*\d+(?:\.\d+)?|C\d{2,}|HRB\d+|HPB\d+)/giu;
+/** 数值 token：数值+单位 / 管径 / 直径 / 强度等级 / 钢筋等级 / 龄期简写（7d 等）
+ * r28m M24d D1（面积盲区根治）：单位组重排（m2/m3/m³/m²/㎡/平方米 在 m 前，防「1436.4m²」被
+ * m 分支截断）+ 尾部边界断言由 \b 改为 (?![\w\u00B2\u00B3])（㎡/%/℃ 等非词形单位后接标点时 \b 不成立而漏提）。 */
+const NUMERIC_TOKEN_RE = /(?:\d+(?:\.\d+)?\s*(?:mm|cm|m2|m3|m³|m²|㎡|平方米|m|km|kg|g|t|K|L|ml|MPa|kPa|kN|N|℃|%|台|套|座|个|项|批|次|份|人|小时|分钟|日历天|天|周|月|年|万元|元|W|kW|kV|V|A|Hz|米|处|道|根|盏|株|标段|层|樘|孔|眼|间|户|栋|幢|d)(?![\w\u00B2\u00B3])|DN\s*\d+|Φ\s*\d+(?:\.\d+)?|φ\s*\d+(?:\.\d+)?|C\d{2,}|HRB\d+|HPB\d+)/giu;
 
 /** token 归一化：去除全部空白后小写比较（全角/半角空格与大小写差异不构成数值差异） */
 function normToken(token: string): string {
@@ -56,8 +59,10 @@ function isExemptSentence(sentence: string): boolean {
   return false;
 }
 
-/** 数值权威库构建：资料原文 + 清单事实锁 + 蓝图参数桶 + 事实主表，全部归一化 token 集合 */
-function buildNumericAuthority(session: FinalizeSession): Set<string> {
+/** 数值权威库构建（与无主数值审计 authorityAudit 全源补充核单源）：资料原文 + 清单事实锁 +
+ * 蓝图参数桶 + 事实主表，全部归一化 token 集合。导出供 rebuildAndRecompute.recordAuthorityAudit
+ * 消费——audit 报「缺口」前先与本库复核，两链判据不漂移。 */
+export function buildNumericAuthority(session: FinalizeSession): Set<string> {
   const authority = new Set<string>();
   // 1. 资料原文（全部绑定证据内容）
   for (const item of session.allEvidence) {
@@ -83,6 +88,14 @@ function buildNumericAuthority(session: FinalizeSession): Set<string> {
       if (typeof quantity.value === 'number' && Number.isFinite(quantity.value)) {
         authority.add(normToken(`${quantity.value}${quantity.unit || ''}`));
       }
+      // R20 规格拆分值入池（防反向误报）：名称聚合仅含合计（如「一般路灯 118套」），
+      // 正确规格小计（100W 109套 / 120W 9套）不入池会被本核对轮误报「无来源」并被修复轮改写——
+      // 与 specQuantityBinding 轮同源（规格-数量拆分＝合法值）
+      for (const split of quantity.specBreakdown ?? []) {
+        if (typeof split.value === 'number' && Number.isFinite(split.value)) {
+          authority.add(normToken(`${split.value}${quantity.unit || ''}`));
+        }
+      }
       for (const token of extractNumericTokens(name)) authority.add(token);
     }
   }
@@ -90,6 +103,24 @@ function buildNumericAuthority(session: FinalizeSession): Set<string> {
   const factValues: DocumentFact[] = [...(session.structuredFacts || []), ...(session.factsModel?.preciseFacts || [])];
   for (const fact of factValues) {
     for (const token of extractNumericTokens(stringifyFactValue(fact.value))) authority.add(token);
+  }
+  // 5. 事实主表表格（r28m M24d D2，与 numericTraceCorpus 同法）：行文本拼接提取覆盖已连写形态；
+  // 数字格×单位格跨格组合覆盖分列形态（清单分列表「| 1436.400 | m2 |」）——仅数字格不携单位
+  // 入核会放行裸数编造，必须与单位格配对（CELL_NUMBER_RE/CELL_UNIT_RE 单源口径）
+  for (const table of session.factsModel?.tables || []) {
+    for (const row of table.rows || []) {
+      if (!Array.isArray(row) || row.length === 0) continue;
+      const cells = row.map(cell => String(cell ?? '').trim());
+      for (const token of extractNumericTokens(cells.join(' '))) authority.add(token);
+      const numbers = [...new Set(cells.filter(cell => CELL_NUMBER_RE.test(cell)))];
+      if (numbers.length === 0) continue;
+      const units = [...new Set(cells.filter(cell => CELL_UNIT_RE.test(cell)))];
+      for (const number of numbers) {
+        for (const unit of units) {
+          for (const token of extractNumericTokens(`${number}${unit}`)) authority.add(token);
+        }
+      }
+    }
   }
   return authority;
 }
@@ -109,7 +140,10 @@ export async function stageNumericVerification(session: FinalizeSession): Promis
       const tokens = extractNumericTokens(sentence);
       if (tokens.length === 0) continue;
       if (tokens.every(token => authority.has(token))) continue;
-      const missingTokens = tokens.filter(token => !authority.has(token));
+      // C-T2 三分类豁免（实测归因）：规范常数（标准编号/养护龄期/试块留置/检测频次/温度阈值/
+      // 质量指标/工艺公差）与管理数字（管理频次/组织编排/配置/合同条款/过程指标/日期表述）
+      // 不进修复轮——修复轮只处理真未溯源数字，避免「规范数字保留后 recheck 仍检出」的不收敛空转
+      const missingTokens = tokens.filter(token => !authority.has(token) && classifyNumericTraceToken({ token, context: sentence }).kind === 'unsourced');
       if (missingTokens.length > 0) suspects.push({ sentence, tokens: missingTokens });
     }
     return suspects;
@@ -154,7 +188,7 @@ export async function stageNumericVerification(session: FinalizeSession): Promis
         ...(rounds > 1 ? [`本轮为第 ${rounds} 轮（最多 ${MAX_NUMERIC_REPAIR_ROUNDS} 轮）：上一轮修复后仍有残留，无法确认来源的数值必须直接删除，禁止保留或替换为其他无来源数值。`] : []),
         '下列句子中的数值（标注「缺来源 token」）在项目绑定材料、工程量清单与蓝图中均找不到同值来源，属于疑似编造数值。请逐句核对并修复：',
         '1. 若该数值在本章绑定证据中确实存在（仅表述口径不同），保持数值原样，只修正单位或表述；',
-        '2. 若该数值是行业通用工艺参数（如养护龄期、分层厚度），可按规范惯例保留并改为规范原文表述；',
+        '2. 若该数值确属规范/标准常数（如试块留置、养护龄期、检测频次），保留数值并显性标注规范名称与编号（如「按《混凝土结构工程施工质量验收规范》GB 50204 规定，每100m³留置一组试块」）——显性标注后即视为已溯源；',
         '3. 其余情况必须删除该数值，改写为不带具体数值的过程控制表述（如「按设计要求」「分层碾压至压实度满足设计及规范要求」）；',
         '禁止把疑似数值替换为另一个同样无来源的数值；禁止改动句子的非数值部分；只做局部修改，不得新增、删除或合并小节。',
         pending.map(item => `- 疑似句：${item.sentence}（缺来源 token：${item.tokens.join('、')}）`).join('\n'),

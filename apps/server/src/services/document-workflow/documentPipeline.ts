@@ -15,12 +15,22 @@ import { stageTableRepair } from './finalize/repairRounds/tableRepair';
 
 import { stageSemanticChoice } from './finalize/repairRounds/semanticChoice';
 import { stageDeterministicStage5 } from './finalize/repairRounds/deterministicStage5';
-import { stagePostReviewSurface, runSurfaceDeterministicCleans, replayBlueprintCitationNumericFixes } from './finalize/repairRounds/postReviewSurface';
+import { stagePostReviewSurface, runSurfaceDeterministicCleans, replayBlueprintCitationNumericFixes, replayStage5FactsModelNumericFixes, replaySurfacePunctuationClosure } from './finalize/repairRounds/postReviewSurface';
 import { stageFactDistribution } from './finalize/repairRounds/factDistribution';
 import { stageNumericVerification } from './finalize/repairRounds/numericVerification';
-import { stageRequirementResponseRepair } from './finalize/repairRounds/requirementResponseRepair';
+import { replayRequirementTailClosure, stageRequirementResponseRepair } from './finalize/repairRounds/requirementResponseRepair';
 import { stageRequirementVerification } from './finalize/repairRounds/requirementVerification';
 import { stageContentDepthRepair } from './finalize/repairRounds/contentDepthRepair';
+import { stageControlLoopRepair } from './finalize/repairRounds/controlLoopRepair';
+import { stageProfessionalChainRepair } from './finalize/repairRounds/professionalChainRepair';
+import { stageLengthCompressionRepair } from './finalize/repairRounds/lengthCompressionRepair';
+import { stageTableCaptionRepair } from './finalize/repairRounds/tableCaptionRepair';
+import { stageTableArithmeticRepair } from './finalize/repairRounds/tableArithmeticRepair';
+import { stageEmptySectionSweep } from './finalize/repairRounds/emptySectionSweep';
+import { stageSectionAlignmentSweep } from './finalize/repairRounds/sectionAlignmentSweep';
+import { stageTemplatingSweep } from './finalize/repairRounds/templatingSweep';
+import { stageDuplicateThemeMerge } from './finalize/repairRounds/duplicateThemeMerge';
+import { stageDeliveryStructureClosure } from './finalize/repairRounds/deliveryStructureClosure';
 import { stageFinalGate } from './finalize/finalGate';
 import { stageHealthDiagnosis } from './finalize/healthDiagnosis';
 
@@ -50,10 +60,11 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
 
   // P6：修复轮顺序由 FINALIZE_REPAIR_ROUNDS（detectorFixerRegistry）单源声明，下方线性链按声明顺序逐一对应：
   // fact-landing-round → table-repair-round → semantic-choice-conflict → deterministic-stage5 → formal-source-clean
-  // → planned-section-final → commercial-strip → table-deterministic-repair
-  // → numeric-verification → requirement-response-repair → requirement-verification → content-depth-repair → post-review-surface →
-  // → terminology-strip → regulation-number-typo → quotation-balance-repair → basis-regulations-repair → toc-consistency
-  // → fact-distribution-round
+  // → planned-section-final → commercial-strip → table-deterministic-repair → numeric-verification
+  // → requirement-response-repair → requirement-verification → content-depth-repair → control-loop-repair → professional-chain-repair
+  // → post-review-surface → terminology-strip → regulation-number-typo → quotation-balance-repair
+  // → basis-regulations-repair → dangerous-applicability-repair → auto-spec-gate-repair → toc-consistency → length-compression-repair → fact-distribution-round
+  // → table-caption-repair → table-arithmetic-repair → empty-section-sweep → section-alignment-sweep → templating-sweep → duplicate-theme-merge → delivery-structure-closure
   //（顺序快照测试锁定；新增修复轮必须同时更新声明表）
   // 方案 2.3：全维度评审轮（qingtian-full-review）已删除——九维检出全部由注册表检测器/写作执行器覆盖
   // （含 S1 块级六类执行器），该轮历史实测检出 12 处/修复 0 处，无独有检出项
@@ -78,13 +89,62 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // 定向补写（收敛修复：每章最多 2 轮，残留数下降才继续下一轮；外层 2 收敛周期）；
   // 位置必须早于 post-review-surface（其复读剥离/格式清洗覆盖本轮补写引入的残留）
   await stageContentDepthRepair(session);
+  // D-T2 评审关注闭环链补写轮（B8 前半根治）：质量三检/进度纠偏/工资代发链“主责章全要素”判定
+  //（construction-org-control-loop warning 带 chapterId+provenance）此前无修复轮消费（r28f #27-29
+  // 残留）——章级实时重算定位 → LLM 定向补写缺失环节（标准词面落位）→ 复检缺失数；同族补写轮，
+  // 位置与 content-depth-repair 相同约束：早于 post-review-surface（其复读剥离覆盖补写残留）
+  await stageControlLoopRepair(session);
+  // D-T9 工序链与项目属性适配修复轮（r28f #30/#31 根治）：construction-org-professional-chain warning
+  //（检测端节级 mixed + 文档级 insufficient 判定，带 chapterId+provenance）此前无修复轮消费——章级
+  // 实时重算定位 → LLM 定向改写错位工序/补写缺失链环节（标准工序名落位）→ 复检缺陷数；同族补写轮，
+  // 位置与 content-depth-repair 相同约束：早于 post-review-surface（其复读剥离覆盖补写残留）
+  await stageProfessionalChainRepair(session);
   // 评审后兜底链后置（丰乐镇 doc-1788954795698 实测）：用户要求补写（LLM patch）会引入句级复读，
   // 本轮（SURFACE_FIX_STEPS round-2 链，含句级复读确定性剥离）必须在其之后执行才能覆盖补写引入的复读
   await stagePostReviewSurface(session);
+  // D-T3 成稿篇幅压缩轮（B8 后半根治）：成稿字数超出目标 20%（document-budget「明显超出」warning）
+  // 此前无修复轮消费，超产直坠交付（验收线「目标 ±20% 内」）——章级超额定位（chapterTargets 单源）
+  // + LLM 合并重复段落，信息守恒守卫（字数须降，且标题/数值不得缺失、表格行数不得减少，任一违反即回滚）；
+  // 本阶段 draft-mutating + rebuild，必须位于全部 LLM 补写轮之后（post-review-surface 尾部 toc-consistency
+  // 收口之后）、fact-distribution 扩散轮之前（扩散轮基准取压缩后正文）
+  await stageLengthCompressionRepair(session);
   // R12 事实跨章扩散（链尾收口）：全部 LLM 补写轮之后、终门禁之前——对落位 0-1 章的高价值事实值
   // （建设地点/质量标准/合同估算价/项目编号/标段/招标范围），在语义相关章正文块尾追加自然引用句，
   // 补足跨 ≥2 章分布（方案针对性 distribution 归因：丰乐镇实测 0.087→修复后显著提升）
   await stageFactDistribution(session);
+  // r24 B8 正文表格题名补全轮（实机归因）：终检 table-caption 按「表上方 8 行内可提取表名」判定，无题名
+  // 形态表格（探测 kind='none'）无可注入对象直坠终门禁——确定性补名（章内无题表 × 本章计划表表头字段
+  // 对账）+ LLM 补名（残留无题表章级定向）写回章 drafts；本阶段 draft-mutating + rebuild，必须位于
+  // stageFactDistribution 之后（其 rebuild 会回退此前 markdown-only 修改）、链尾 markdown-only 重放之前
+  await stageTableCaptionRepair(session);
+  // C-T3 表内算术自洽修复轮（C4 归因）：终检 table-arithmetic-consistency 消费含显性合计标记表格的
+  // 「分项和=合计」不自洽 —— 章级同源重扫 + LLM 定向修正表内数值（收敛修复：每章最多 2 轮，
+  // 残留处数下降才继续）；本阶段 draft-mutating + rebuild，必须位于 table-caption-repair 之后、
+  // 链尾 markdown-only 重放之前（本轮 rebuild 不得回退链尾重放成果）
+  await stageTableArithmeticRepair(session);
+  // D-T3 无依据空壳小节链尾清扫（r28f 终检「空小节」blocker 归因）：补写轮（enforcePlannedSectionCompleteness）
+  // 把空壳 H4 的正文搬往规划名小节后无规划归属的空壳标题行残留直坠终门禁——确定性整行移除
+  // （emptyUnplannedSectionSpans 与终检同判定链）+ 章内编号原子重放（renumberSectionHeadings 章片段模式）；
+  // 本阶段 draft-mutating + rebuild，必须位于 table-arithmetic-repair 之后（链尾最后 draft-mutating）、
+  // 链尾 markdown-only 重放之前（本轮 rebuild 不得回退链尾重放成果）
+  await stageEmptySectionSweep(session);
+  // D-T6 ② 小节结构对齐链尾重放（r28f 门禁 #2 归因：「漂移+补写并存」形态成稿 5 节 vs 规划
+  // 4 节直坠门禁）：postReviewSurface 内的近名合并/漂移改名位于缺节补写之前，其后各
+  // draft-mutating 轮 rebuild 与历史形态到链尾无第二次收口点——近名成对合并 + 单行漂移改名
+  // （mergeNearDuplicateSectionHeadings）+ 非近名规划外 H3 降 H4（reconcileUnplannedSectionHeadings，
+  //（与 sectionCountOverflowIssues 同源判定），确定性零 LLM；本阶段 draft-mutating + rebuild，
+  // 链尾最后 draft-mutating 位置（empty-section-sweep 之后）、链尾 markdown-only 重放之前
+  await stageSectionAlignmentSweep(session);
+  // D-T7 ① 模板化清理链尾重放（r28f #35 归因）：零信息前缀句确定性删除（templatePrefixTargets +
+  // stripZeroInfoSloganSentences，与 repairTemplatingIssues 同源判定）+ 逐章段落完全重复去重
+  //（stripDuplicateParagraphs 重放）；本阶段 draft-mutating + rebuild，位于 section-alignment-sweep
+  // 之后、duplicate-theme-merge 之前（链尾 markdown-only 重放之前）
+  await stageTemplatingSweep(session);
+  // D-T7 ② 重复主题小节合并（r28f #36/#37 归因）：同桶规划小节 ≥2 且正文均有 H3 落位时确定性
+  // 合并（保留首现、后续标题行摘除正文并入、规划数组同步、章内编号原子重放）；本阶段
+  // draft-mutating + rebuild，位于 templating-sweep 之后、delivery-structure-closure（目录按
+  // 合并后正文结构重建）之前
+  await stageDuplicateThemeMerge(session);
   // r14 链尾终局清洗重放（r13 实机归因）：stageFactDistribution 修改章 drafts 后的
   // rebuildFinalMarkdown 会从章 drafts 重拼成稿，把 postReviewSurface 第二遍重放之后的全部
   // 字符串级清洗（规格错位收口/内部术语替换/round-2 链：段落复读/骨架复读/工序形式回退）
@@ -99,6 +159,25 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // runSurfaceDeterministicCleans 重放不含 citation 块，此处补重放（同一判定+替换链，零锚/零处
   // 时零成本静默，幂等可重放；位置在最后一次净变更点之后、终门禁之前）
   await replayBlueprintCitationNumericFixes(session);
+  // M24c 链尾事实口径数值收口重放二次调用（961.42 回归定案）：stage5 scale/spec/cost 定点修复只写
+  // finalMarkdown，stageFactDistribution 等 draft-mutating 轮的 rebuildFinalMarkdown 会把替换回退——
+  // 与 citation replay 同范式在最后一次净变更点之后、终门禁之前重放（终门禁所检 = 交付所存）
+  await replayStage5FactsModelNumericFixes(session);
+  // r24 B1-B5 链尾要求响应收口重放（实机归因）：需求响应终局收口是 markdown-only 插入不写章草稿，
+  // 其后 stageFactDistribution 的 rebuildFinalMarkdown 从章 drafts 重拼成稿把插入全部回退——r23 实测
+  // 「一级建造师」等 5 条补写阶段记录 success 而终稿零踪迹、终检重新检出直坠终门禁；在最后一次净变更
+  // 点之后、终门禁之前重放（同 runSurfaceDeterministicCleans / replayBlueprintCitationNumericFixes 范式）
+  await replayRequirementTailClosure(session);
+  // D-T6 ①③ 交付结构收口（r28f 门禁 #1「目录 29 节 vs 正文 28 节」与 warningIssues 长段归因）：
+  // ①目录按正文实际 H2/H3 结构重建（fixTocFromBody——其后各 draft-mutating 轮 rebuild 均可改变
+  // 正文 H3 结构）；③>380 字符超长段落链尾切分（splitOverlengthBodyParagraphs）。两操作均为
+  // markdown-only 收口，位于最后净变更点（前序 markdown-only 重放）之后、终门禁之前——
+  // 终门禁所检 = 交付所存 = 收口后成稿
+  await stageDeliveryStructureClosure(session);
+  // r28h 链尾标点终局收口（r28h2/s28h2 实机归因）：交付结构收口（超长段落切分）与前序链尾
+  // 追加块（补写/删除类）仍可能带回标点叠用残留（「。。」句段拼接、「、、」并列删除），
+  // round-2 链无二次消费点直坠终门禁——同源修复器在终门禁前最后收口（终门禁所检 = 交付所存）
+  await replaySurfacePunctuationClosure(session);
   await stageFinalGate(session);
   // P18 自动健康诊断：finalize 末尾纯读 telemetry 产出显性告警（零 LLM 成本），
   // 告警写回 telemetry.healthAlerts 随 reviewMetadata 归档（导出时进入 exportReports 历史对比存储）

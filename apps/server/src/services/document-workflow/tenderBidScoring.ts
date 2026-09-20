@@ -40,8 +40,8 @@ export const FORBIDDEN_PROMPT_PHRASES = [...FORBIDDEN_EMPTY_PHRASES, '定期检�
 /** 闭环三要素（责任岗位＋检查频次＋整改闭环）：由 tenderBidChecks.fiveElementBlockStats
  * 的 role/frequency/acceptance 语义原型复用同一批 bge 嵌入，本文件不再保留要素正则 */
 
-/** 资料完整性强制模块语义原型：危大/扬尘/实名制/工资保障/应急/绿色施工 6 项各 1 分 */
-const MANDATORY_MODULE_QUERIES = [
+/** 资料完整性强制模块语义原型：危大/扬尘/实名制/工资保障/应急/绿色施工 6 项各 1 分（导出供 v2 评分展示口径） */
+export const MANDATORY_MODULE_QUERIES = [
   '危险性较大的分部分项工程安全管理',
   '扬尘污染防治措施',
   '建筑工人实名制管理',
@@ -50,8 +50,8 @@ const MANDATORY_MODULE_QUERIES = [
   '绿色施工与四节一环保措施',
 ] as const;
 
-/** 合规性强制项语义原型：危大闭环链 6 环节 + 三级配电两级保护 3 项 + 强制制度 4 项，各 1 分 */
-const COMPLIANCE_ITEM_QUERIES = [
+/** 合规性强制项语义原型：危大闭环链 6 环节 + 三级配电两级保护 3 项 + 强制制度 4 项，各 1 分（导出供 v2 评分展示口径与审计探针复用） */
+export const COMPLIANCE_ITEM_QUERIES = [
   '危险源辨识与风险识别评估',
   '编制专项施工方案',
   '组织专家论证并履行审批程序',
@@ -84,12 +84,13 @@ function headingTitles(markdown: string) {
     .filter(title => title.length >= 2);
 }
 
-/** 资料完整性：章节齐全度（模板章节标题命中率）+ 强制模块覆盖（6 项各 1 分，块级 bge 语义判定） */
+/** 资料完整性：章节齐全度（模板章节标题命中率）+ 强制模块覆盖（块级 bge 语义判定）。
+ * 模块覆盖率由 buildTenderBidScores 单源计算（v2 要件完整性同源消费），本函数不再重复判定。 */
 function completenessScore(
   markdown: string,
   chapters: DocumentDraftChapter[],
   template: DocumentTemplate | null | undefined,
-  anyBlockMatches: (query: string) => boolean,
+  moduleCoverageRate: number,
 ) {
   const titles = headingTitles(markdown);
   let chapterHitRate = 1;
@@ -102,9 +103,7 @@ function completenessScore(
     const hits = chapters.filter(chapter => titles.some(actual => actual.includes(normalizeHeadingTitle(chapter.title)) || normalizeHeadingTitle(chapter.title).includes(actual))).length;
     chapterHitRate = hits / chapters.length;
   }
-  const moduleHits = MANDATORY_MODULE_QUERIES.filter(anyBlockMatches).length;
-  const moduleRate = moduleHits / MANDATORY_MODULE_QUERIES.length;
-  return Math.round((chapterHitRate * 0.55 + moduleRate * 0.45) * 100);
+  return Math.round((chapterHitRate * 0.55 + moduleCoverageRate * 0.45) * 100);
 }
 
 /** 方案针对性：项目专属事实落位率 + 专属事实跨章节分布率 */
@@ -203,6 +202,8 @@ export interface TenderBidScores {
   normalization: number;
   /** 低雷同性（触发式否决项：<30 判重度雷同风险） */
   uniqueness: number;
+  /** 强制模块语义覆盖率（0..1，MANDATORY_MODULE_QUERIES 六项）：v2 要件完整性构成分量，单源判定 */
+  moduleCoverageRate: number;
 }
 
 /** 模板化套用专项检测报告（docx 第十类核心降档判定，供报告与降档决策） */
@@ -262,18 +263,23 @@ export async function buildTenderBidTemplatingReport(
   };
 }
 
-/** 评分块切分（R13 精度修正实测）：旧口径「空行分块 + ≥30 字」下，小节标题（如
- * 「#### 7.1.4 生产安全事故应急预案与应急演练」）或独立成短块被阈值丢弃、或与其后正文
- * 单换行并入跨小节大块——R13 实测 5.15 万字仅 59 块、块均 870 字，超 bge 512 token 有效
- * 窗口后标题在块中部被截断，评审查询与正文小节标题的近词面对齐被系统性稀释：
- * 19 项（6 强制模块 + 13 合规项）仅命中 7 项。修正为「标题行为边界 + 空行分块 + ≥12 字」：
- * 每个小节「标题+首段」构成独立判定单元（与评审人按小节查阅的判定粒度一致），
- * 含术语原词的短标题块保留参与嵌入（纯编号标题 <12 字仍过滤）。R13 实测命中 7 → 14 项。
- * 导出供单测验证切分粒度（行为不变，仅可见性）。 */
+/** 评分块切分（R13 精度修正 + r26 标题块独立实测）：①旧口径「空行分块 + ≥30 字」下小节
+ * 标题或独立成短块被丢弃、或并入跨小节大块（R13 实测 5.15 万字仅 59 块、块均 870 字，
+ * 超 bge 512 token 窗口后标题在块中部截断，19 项模块/合规查询仅命中 7 项）；②块内「标题+正文」
+ * 合并嵌入时标题语义被正文稀释（r26 实测 6 强制模块仅命中 4）——小节标题（如「#### 10.2 施工
+ * 总平面布置」）是模块查询的天然对准面，沉入块中部即失去对齐。现口径：标题行摘出为独立
+ * 判定单元（与评审人按小节查阅的粒度一致），余部按空行分块，标题与正文块共享「≥12 字」过滤
+ * （纯编号标题仍过滤）。导出供单测验证切分粒度（行为不变，仅可见性）。 */
 export function splitScoringBlocks(markdown: string): string[] {
   return markdown
     .split(/(?=^#{1,6}\s)/mu)
-    .flatMap(section => section.split(/\n{2,}/u))
+    .flatMap(section => {
+      const lines = section.split('\n');
+      const hasHeading = /^#{1,6}\s/u.test(lines[0] || '');
+      const heading = hasHeading ? (lines[0] || '').trim() : '';
+      const body = (hasHeading ? lines.slice(1) : lines).join('\n');
+      return [heading, ...body.split(/\n{2,}/u)];
+    })
     .map(block => block.trim())
     .filter(block => block.length >= 12);
 }
@@ -296,13 +302,15 @@ export async function buildTenderBidScores(input: {
   );
   const anyBlockMatches = (query: string) =>
     blocks.some(block => querySimilarity(block, query) >= SEMANTIC_COVERAGE_THRESHOLD);
+  const moduleCoverageRate = MANDATORY_MODULE_QUERIES.filter(anyBlockMatches).length / MANDATORY_MODULE_QUERIES.length;
   const filler = await fillerDensityReport(input.markdown, input.embedDocuments);
   return {
-    completeness: completenessScore(input.markdown, input.chapters, input.template, anyBlockMatches),
+    completeness: completenessScore(input.markdown, input.chapters, input.template, moduleCoverageRate),
     specificity: specificityScore(input.chapters, input.factTraces),
     compliance: complianceScore(input.markdown, anyBlockMatches),
     executability: await executabilityScore(input.markdown),
     normalization: normalizationScore(input.issues),
     uniqueness: uniquenessScore(input.markdown, filler),
+    moduleCoverageRate,
   };
 }

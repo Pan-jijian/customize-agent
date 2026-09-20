@@ -201,7 +201,7 @@ describe('文末附表区：appendixPlan 蓝图直出（composeTenderAppendixMar
     ];
     const section = composeTenderAppendixMarkdown(plan, blueprintData);
     expect(section).toContain('## 附表二 拟配备本标段的试验和检测仪器设备表');
-    expect(section).toContain('> 本表数据源（试验检测仪器配置）未在项目资料与一体化蓝图中确认');
+    expect(section).toContain('> 本表为试验检测仪器配置，按招标文件规定的表头格式编制。');
     expect(section).toContain('| 序号 | 仪器设备名称 | 型号规格 | 数量 | 国别产地 | 制造年份 | 已使用台时数 | 用途 | 备注 |');
     expect(section).toContain('## 附表六 临时用地表');
     expect(section).toContain('| 用途 | 面积（平方米） | 位置 | 需用时间 |');

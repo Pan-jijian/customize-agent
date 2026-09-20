@@ -7,6 +7,8 @@ import type {
   TenderRequirementExclusion,
   TenderRequirementModel,
   TenderRequirementPolicy,
+  TenderStructureForm,
+  TenderStructureRequirement,
   ValidationIssue,
 } from './types';
 import { callDocumentLlmJson, type DocumentJsonSchema } from './llmClient';
@@ -37,7 +39,8 @@ export function emptyTenderRequirements(extracted = false): TenderRequirementMod
   return {
     entries: [],
     excluded: [],
-    reconciliation: { clauseCount: 0, entryCount: 0, excludedCount: 0, undecidedCount: 0, mergedCount: 0, batchCount: 0, retriedBatches: 0 },
+    structureRequirements: [],
+    reconciliation: { clauseCount: 0, entryCount: 0, excludedCount: 0, undecidedCount: 0, mergedCount: 0, batchCount: 0, retriedBatches: 0, structureCount: 0 },
     extracted,
   };
 }
@@ -304,6 +307,8 @@ interface RawClauseJudgment {
   policy?: string;
   coreTerms?: string[];
   category?: string;
+  /** A-T1 结构/呈现信号（语义通道）：element 呈现对象 + form 形态 */
+  structures?: Array<{ element?: string; form?: string }>;
 }
 
 const CLAUSE_JUDGE_JSON_SCHEMA: DocumentJsonSchema = {
@@ -325,6 +330,16 @@ const CLAUSE_JUDGE_JSON_SCHEMA: DocumentJsonSchema = {
           policy: { type: 'string', maxLength: 16 },
           coreTerms: { type: 'array', items: { type: 'string', maxLength: 24 } },
           category: { type: 'string', maxLength: 16 },
+          structures: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                element: { type: 'string', maxLength: 24 },
+                form: { type: 'string', maxLength: 16 },
+              },
+            },
+          },
         },
       },
     },
@@ -343,6 +358,8 @@ const CLAUSE_JUDGE_PROMPT = [
   '1. isRequirement：该条是否构成对投标人的实质要求（需写入正文响应或必须遵守）？',
   '   - true：明确的目标/等级/标准/参数/义务/禁止性要求（确保、达到、不低于、不得、严禁、必须、应当等约束语义）',
   '   - false：目录、章节导语、说明性/解释性文字、空白表头、格式模板、无约束力的描述',
+  '   - 边界判例（格式模板 vs 结构呈现要求）：表格填写/签章格式/装订份数类模板说明 → false；',
+  '     「组织机构以框图方式表示」「采用文字并结合图表形式编制」「附网络图、横道图」等呈现形态要求 → true（呈现信息同时进入 structures 通道）',
   '   - 孤立碎片（无问题上下文的「回复：××」「答：××」、表格残片、无法独立理解的半截句）→ false（reason="non_requirement"）',
   '   - 问答对（「问题：×× … 回复：××」）：答复含实质要求（指标/标准/义务/禁止性内容）→ true（按答复内容给出 policy/coreTerms）；纯程序性答复（「按招标文件执行」「详见补遗」）→ false',
   '   - 条款值被明确标注「无」「☑无」「不适用」「/」时 → isRequirement=false（reason="no_value"）',
@@ -361,11 +378,17 @@ const CLAUSE_JUDGE_PROMPT = [
   '3. policy（isRequirement 且 inScope 时必填，其余省略）：',
   '   - "respond"：必须在正文显性写出的要求（创优目标/奖项、质量目标、等级指标、体系基准、技术工艺条款、人员与分包约束、验收标准）',
   '   - "comply"：不逐条抄写但全文必须遵守的约束（以开工令为准的日期约束、工期总日历天数基准、全局禁止性事项）',
-  '4. coreTerms：2-4 个用于正文核对的核心词（专有名词/等级名/体系名/关键数字参数，如「黄山杯」「二星级」「六个百分百」「300万元」）；',
+  '4. coreTerms：2-4 个用于正文核对的核心词（专有名词/等级名/体系名/关键数字参数，如「××杯」「二星级」「六个百分百」「300万元」）；',
   '   数字参数必须保留数字与单位；不要泛化词（「施工」「工程」类不能作为核心词）；',
   '   必须是正文中可自然逐字出现的完整词/短语（括号/标点保持原文形态），不得使用去标点拼接的短语碎片或合同填空语言（如「承包人自理」）',
   '5. category：按招标语义命名类别（如「质量创优」「工期进度」「安全文明」「绿色施工」「人员管理」「商务支付」「禁止性要求」），',
   '   同类要求使用同一类别名',
+  '6. structures：该条是否明文要求内容的呈现形态？命中时输出数组（element 呈现对象名 + form 形态），无呈现要求时省略该字段：',
+  '   - form 枚举：“org_chart”（框图/组织机构图/组织结构图）、“diagram”（网络图/横道图/平面布置图/进度计划图）、“table”（表格/组成表）、“chart_text”（文字结合图表/图表形式编制）',
+  '   - element：呈现对象的名词短语（如「项目管理机构」「施工总平面布置」「施工进度计划」），不得与原文无关',
+  '   - 边界判例：「组织机构以框图方式表示」→ [{element:"项目管理机构",form:"org_chart"}]；「采用文字并结合图表形式编制」→ [{element:"施工组织设计",form:"chart_text"}]；',
+  '     纯格式填写说明/签章装订要求（按给定格式填写并盖章/正副本份数）→ 不输出 structures',
+  '   - 呈现要求与 isRequirement/inScope 判定相互独立：即使本条因程序/格式原因被判排除，structures 仍须输出',
   '',
   'isRequirement=false 或 inScope=false 时须给出 reason（枚举）：',
   '- "non_requirement"：非约束性内容（目录/导语/说明/描述）',
@@ -374,8 +397,9 @@ const CLAUSE_JUDGE_PROMPT = [
   '',
   '输出 JSON 结构（覆盖全部序号，每序号必出结果）：',
   '{ "results": [',
-  '  { "index": 0, "isRequirement": true, "inScope": true, "policy": "respond", "coreTerms": ["黄山杯", "300万元"], "category": "质量创优" },',
-  '  { "index": 1, "isRequirement": false, "inScope": false, "reason": "out_of_scope" }',
+  '  { "index": 0, "isRequirement": true, "inScope": true, "policy": "respond", "coreTerms": ["××杯", "300万元"], "category": "质量创优" },',
+  '  { "index": 1, "isRequirement": false, "inScope": false, "reason": "out_of_scope" },',
+  '  { "index": 2, "isRequirement": false, "inScope": false, "reason": "out_of_scope", "structures": [{ "element": "项目管理机构", "form": "org_chart" }] }',
   '] }',
   '只返回 JSON。',
 ].join('\n');
@@ -400,6 +424,120 @@ function cleanCategory(category: string | undefined): string {
   const trimmed = (category || '').trim();
   if (!trimmed || trimmed.length > 16) return '其他要求';
   return trimmed;
+}
+
+// ═══════════════════════════════ A-T1 结构/呈现要求（第三态通道） ═══════════════════════════════
+// 病根：格式类条款（「组织机构以框图方式表示」等）被判 non_requirement/out_of_scope 后，
+// 其中的图表/结构信息永久丢失，下游写作链缺图缺组织。本通道对**每一条**条款（含被排除的）
+// 扫描结构/呈现信号，独立于响应域存入要求模型，供写作注入与终稿验收消费。
+
+/** 结构信号规则（通用词表，与项目无关）：形态词 + 要素上下文词；element 未命中时用兜底要素名 */
+const STRUCTURE_FORM_RULES: Array<{
+  form: TenderStructureForm;
+  formRe: RegExp;
+  elementRules: Array<{ re: RegExp; element: string }>;
+  fallbackElement: string;
+}> = [
+  {
+    form: 'org_chart',
+    formRe: /框图|组织机构图|组织结构图|组织架构图/u,
+    elementRules: [{ re: /项目管理机构|项目经理部|项目班子|管理机构|组织机构|管理部门/u, element: '项目管理机构' }],
+    fallbackElement: '组织机构',
+  },
+  {
+    form: 'diagram',
+    formRe: /网络图/u,
+    elementRules: [{ re: /进度|工期|计划/u, element: '施工进度计划网络图' }],
+    fallbackElement: '网络图',
+  },
+  {
+    form: 'diagram',
+    formRe: /横道图|甘特图/u,
+    elementRules: [{ re: /进度|工期|计划/u, element: '施工进度计划横道图' }],
+    fallbackElement: '横道图',
+  },
+  {
+    form: 'diagram',
+    formRe: /总平面布置图|施工总平面图|总平面图|平面布置图|临时设施图|施工总平面布置/u,
+    elementRules: [],
+    fallbackElement: '施工总平面布置图',
+  },
+  {
+    form: 'table',
+    formRe: /组成表|机构设置表|人员配备表|一览表/u,
+    elementRules: [
+      { re: /机械设备|施工机械|设备/u, element: '施工机械设备表' },
+      { re: /劳动力|用工/u, element: '劳动力安排计划表' },
+      { re: /项目管理机构|机构|人员/u, element: '项目管理机构人员组成表' },
+    ],
+    fallbackElement: '要求表格',
+  },
+  {
+    form: 'chart_text',
+    formRe: /结合图表|图表形式|图文并茂/u,
+    elementRules: [{ re: /施工组织设计/u, element: '施工组织设计' }],
+    fallbackElement: '图表呈现',
+  },
+];
+
+/** 确定性结构信号扫描（词表兑底，不依赖 LLM 波动——A-T2 稳定性加固） */
+export function detectStructureRequirements(text: string): TenderStructureRequirement[] {
+  const results: TenderStructureRequirement[] = [];
+  const trimmed = text.trim();
+  if (!trimmed) return results;
+  for (const rule of STRUCTURE_FORM_RULES) {
+    if (!rule.formRe.test(trimmed)) continue;
+    let element = rule.fallbackElement;
+    for (const candidate of rule.elementRules) {
+      if (candidate.re.test(trimmed)) {
+        element = candidate.element;
+        break;
+      }
+    }
+    results.push({ element, form: rule.form, sourceText: trimmed });
+  }
+  return results;
+}
+
+/** LLM 语义 form 归一化（仅接受枚举值；中文表述兼容映射） */
+function normalizeStructureForm(form: string | undefined): TenderStructureForm | undefined {
+  const value = (form || '').trim().toLowerCase();
+  if (value === 'org_chart' || value === 'orgchart' || value === '框图' || value === '组织机构图') return 'org_chart';
+  if (value === 'diagram' || value === '图' || value === '网络图' || value === '横道图') return 'diagram';
+  if (value === 'table' || value === '表格') return 'table';
+  if (value === 'chart_text' || value === 'charttext' || value === '图表' || value === '文字结合图表') return 'chart_text';
+  return undefined;
+}
+
+/** 单条款结构信号采集：确定性词表 + LLM 语义字段合并去重（两者任一命中即产出，信号不随排除丢失） */
+function collectClauseStructureRequirements(clause: TenderClauseUnit, judgment: RawClauseJudgment | undefined): TenderStructureRequirement[] {
+  const collected = detectStructureRequirements(clause.text);
+  for (const item of judgment?.structures || []) {
+    const form = normalizeStructureForm(item?.form);
+    const element = (item?.element || '').trim().slice(0, 24);
+    if (!form || element.length < 2) continue;
+    if (collected.some(existing => existing.form === form && existing.element === element)) continue;
+    collected.push({ element, form, sourceText: clause.text.trim() });
+  }
+  return collected;
+}
+
+/** 跨条款结构要求合并：同「形态+要素」只保留一条（首见原文；不参与响应域对账等式） */
+function mergeStructureRequirements(items: TenderStructureRequirement[]): TenderStructureRequirement[] {
+  const byKey = new Map<string, TenderStructureRequirement>();
+  for (const item of items) {
+    const key = `${item.form}|${item.element}`;
+    if (!byKey.has(key)) byKey.set(key, item);
+  }
+  return [...byKey.values()];
+}
+
+/** 表格声明套话（A-T3 池纯度）：格式表格“我公司对该表内容均属真实”类声明句——
+ * 非实质要求，确定性剔除出要求池（防假条目参与评分）。 */
+const TABLE_DECLARATION_BOILERPLATE_RE = /(?:我(?:公司|方|单位|们)[^。；;]{0,24}(?:对|就)(?:该|本|上述|所填)?(?:表|清单|资料)[^。；;]{0,32}(?:均属|均为|真实|属实|可靠|有效|无误))|(?:(?:以上|上述|该表|所填报?)[^。；;]{0,20}(?:内容|资料)[^。；;]{0,20}(?:均属|均为|真实|属实|可靠|有效|无误))/u;
+
+function isTableDeclarationBoilerplate(text: string): boolean {
+  return TABLE_DECLARATION_BOILERPLATE_RE.test(text);
 }
 
 /** 全文档性遵守约束（禁编日期/全局禁止事项）：同时进入全局写作口径区的标记口径 */
@@ -474,6 +612,8 @@ export interface TenderClauseJudgmentResult {
   entries: TenderRequirementEntry[];
   excluded: TenderRequirementExclusion[];
   undecided: TenderClauseUnit[];
+  /** A-T1 结构/呈现要求（与响应域独立：被排除条款同样扫描产出，已合并去重） */
+  structureRequirements: TenderStructureRequirement[];
   batchCount: number;
   retriedBatches: number;
 }
@@ -486,6 +626,65 @@ const CLAUSE_CONSTRAINT_WORD_RE = /(?:确保|保证|达到|满足|符合|不低�
 function clauseFragmentLike(text: string): boolean {
   const compact = text.replace(/\s+/gu, '');
   return compact.length <= 10 && !/\d/u.test(compact) && !CLAUSE_CONSTRAINT_WORD_RE.test(compact);
+}
+
+/**
+ * 要求池纯度复核（r28h M10 实机归因，单项目未响应条目分型统计后提取的形态判据）：
+ * 以下形态属投标/合同/考核程序与澄清信息，不是施组应逐条响应的施工义务——LLM 判定层漏判时本地确定性纠正
+ * （与 isContractProcedureClause 同层接线，reason=non_requirement）：
+ * ① 答疑澄清（「回复：/答复：」标记）——招标答疑文件的答复条目（含做法/量价澄清），信息经事实/参数池承接，
+ *    响应义务不成立（s28h2 实测约 1/4 未响应条目）；
+ * ② 履约考核惩奖细则（扣N分/百分制/考核评分·结果·得分·扣分·奖惩）——养护/履约考核办法条款
+ *    （s28h2 实测约 1/3；「安全技术考核」「考核合格证书」类施工语境不命中）；
+ * ③ 质量保修条款（保修范围/派人保修/保修通知）——竣工后合同义务，非施组响应域；
+ * ④ 投标程序与表单（本表填报说明/投标文件响应程序/拟派承诺/拟分包情况表）——投标文件格式要求；
+ * ⑤ 勾选表单行（条款首部带编号前缀的「☑」填报项，如「☑本工程采用商品砼」「1.2 ☑本工程采用商品砼」）
+ *    ——工程信息填报非义务条款；行首 8 字符内限编号/括号/顿点类前缀，正文中间出现的 ☑ 不命中。
+ */
+export function isRequirementPoolNoiseClause(text: string): boolean {
+  const normalized = text.trim().replace(/\s+/gu, '');
+  if (!normalized) return false;
+  if (/(?:回复|答复)[:：]/u.test(normalized)) return true;
+  if (/扣\d+(?:\.\d+)?分|总分\d+分|百分制|考核(?:办法|评分|结果|得分|扣分|奖惩)/u.test(normalized)) return true;
+  if (/质量保修|保修范围|派人保修|保修通知|保修期如下/u.test(normalized)) return true;
+  if (/本表(?:应|须|不|需|作)/u.test(normalized)) return true;
+  if (/投标文件(?:应|须|应当)[^。；]{0,40}(?:响应|作出响应|包含|包括)/u.test(normalized)) return true;
+  if (/我方拟派|无在岗项目|拟分包项目情况表/u.test(normalized)) return true;
+  if (/^[（(、.．\d]{0,8}☑/u.test(normalized)) return true;
+  return false;
+}
+
+/**
+ * M26 合同附件来源域判定（要求锚点 27/72 实机归因之根因 A）：来源小节命中合同附件域特征词时，
+ * 该条款属合同履约管理范畴（判定 prompt 已声明 out_of_scope，LLM 漏判时本地兜底）。
+ * 词表为招标文件固定条款名（GF 通用条款条款名/质量保修书/安全生产合同/管养协议/终身责任承诺书/投标文件格式），
+ * 非项目特化——r28k 45 条未满足中 21 条来自该域（质量保修期/保修责任、项目经理质量终身责任制承诺、
+ * 安全生产合同·承包人职责、GF 通用条款 1.1.3/1.4/1.6.4/3.1/3.3/4.1/5.4/7.3.1/8.6.1/21.1 等）。
+ * section 信号在条款文本被 PDF 切碎时仍可用，与 isContractProcedureClause（文本信号）互补。
+ * 「承诺」裸词不入表（「工期/质量承诺」类实质要求会误伤），用「终身责任制承诺」精确形态。
+ */
+const CONTRACT_ATTACHMENT_SECTION_RE = /(保修|安全生产合同|承包人职责|承包人的一般义务|承包人人员|监理人的一般规定|不合格工程的处理|样品的报送|开工准备|承包人文件|人员及职责|终身责任制承诺|投标文件格式|考核表|督查|管养|养护管理|景观设施维护|地被养护)/u;
+
+export function isContractAttachmentSectionClause(section?: string): boolean {
+  const normalized = (section || '').replace(/\s+/gu, '');
+  return normalized.length > 0 && CONTRACT_ATTACHMENT_SECTION_RE.test(normalized);
+}
+
+/**
+ * M26 文件引用型核心词判定（要求锚点实机归因之根因 B2）：文号（〔20XX〕N号）或行政文件名
+ * （办法/通知/规定/条例/细则结尾）是「依据引用」——正文按 M20 方向写制度应用，不逐字复现文号/全称；
+ * 条款 coreTerms 全为该类词时无正文可锚定内容 → 出池（引用性条款）。词尾限行政文件类，
+ * 「规范/标准/制度」为技术/管理词不入（防「工程质量标准」「技术规范」类实质要求误出池）。
+ */
+function isDocumentReferenceTerm(term: string): boolean {
+  const clean = term.replace(/\s+/gu, '');
+  if (clean.length < 4) return false;
+  return /〔\d{4}〕/u.test(clean) || /(?:办法|通知|规定|条例|细则)$/u.test(clean);
+}
+
+export function isDocumentReferenceOnlyClause(coreTerms: string[] | undefined): boolean {
+  const terms = (coreTerms || []).map(term => (term || '').trim()).filter(term => term.length >= 2);
+  return terms.length > 0 && terms.every(isDocumentReferenceTerm);
 }
 
 /**
@@ -503,7 +702,8 @@ export async function judgeTenderClauses(
   const entries: TenderRequirementEntry[] = [];
   const excluded: TenderRequirementExclusion[] = [];
   const undecided: TenderClauseUnit[] = [];
-  if (clauses.length === 0) return { entries, excluded, undecided, batchCount: 0, retriedBatches: 0 };
+  const structureCollected: TenderStructureRequirement[] = [];
+  if (clauses.length === 0) return { entries, excluded, undecided, structureRequirements: [], batchCount: 0, retriedBatches: 0 };
   const batches: TenderClauseUnit[][] = [];
   for (let index = 0; index < clauses.length; index += CLAUSE_BATCH_SIZE) {
     batches.push(clauses.slice(index, index + CLAUSE_BATCH_SIZE));
@@ -517,6 +717,8 @@ export async function judgeTenderClauses(
     batches[batchIndex].forEach((clause, indexInBatch) => {
       const index = batchIndex * CLAUSE_BATCH_SIZE + indexInBatch;
       const judgment = outcome.judgments.get(index);
+      // A-T1：结构信号扫描先于一切归宿分支——被排除/未判定条款同样扫描，信号不随排除丢失
+      structureCollected.push(...collectClauseStructureRequirements(clause, judgment));
       if (!judgment) {
         undecided.push(clause);
         return;
@@ -538,8 +740,30 @@ export async function judgeTenderClauses(
         excluded.push({ text: clause.text, source: formatClauseSource(clause), reason: 'non_requirement' });
         return;
       }
+      // A-T3 池纯度：表格声明套话（“我公司对该表内容均属真实”类）不进池参与评分
+      if (isTableDeclarationBoilerplate(clause.text)) {
+        excluded.push({ text: clause.text, source: formatClauseSource(clause), reason: 'non_requirement' });
+        return;
+      }
       if (isBidDisciplineSentence(clause.text) || isBidderQualificationText(clause.text) || isBidEvaluationRuleText(clause.text) || isContractProcedureClause(clause.text)) {
         excluded.push({ text: clause.text, source: formatClauseSource(clause), reason: 'out_of_scope' });
+        return;
+      }
+      // M26 合同附件来源域兜底（section 信号；r28k 45 条未满足中 21 条来自该域，文本被 PDF 切碎时 section 仍可识别）：
+      // 合同/通用条款/保修/安全生产合同/管养协议域条款属合同履约管理范畴，LLM 漏判时本地纠正
+      if (isContractAttachmentSectionClause(clause.section)) {
+        excluded.push({ text: clause.text, source: formatClauseSource(clause), reason: 'out_of_scope' });
+        return;
+      }
+      // M26 引用性条款兜底：coreTerms 全为文号/行政文件名（依据引用不可锚定），无正文可逐字响应内容 → 出池
+      if (isDocumentReferenceOnlyClause(judgment.coreTerms)) {
+        excluded.push({ text: clause.text, source: formatClauseSource(clause), reason: 'out_of_scope' });
+        return;
+      }
+      // r28h M10 池纯度扩围：答疑澄清/履约考核惩奖/质量保修/投标程序表单/勾选表单行属程序与澄清信息，
+      // 非施组响应义务（单项目未响应条目分型实测：该四类形态占未响应 2/3 以上），LLM 漏判时本地纠正
+      if (isRequirementPoolNoiseClause(clause.text)) {
+        excluded.push({ text: clause.text, source: formatClauseSource(clause), reason: 'non_requirement' });
         return;
       }
       if (isCommercialScopeClause(clause.text)) {
@@ -557,7 +781,7 @@ export async function judgeTenderClauses(
       });
     });
   });
-  return { entries, excluded, undecided, batchCount: batches.length, retriedBatches };
+  return { entries, excluded, undecided, structureRequirements: mergeStructureRequirements(structureCollected), batchCount: batches.length, retriedBatches };
 }
 
 /** 重复文本合并：归一化（去空白/标点）完全一致的条目合并 sources/coreTerms 不丢来源 */
@@ -601,7 +825,7 @@ export async function extractTenderRequirements(
   const judged = await judgeTenderClauses(clauses, { signal: options.signal, diagnostics: options.diagnostics });
   const merged = mergeDuplicateEntries(judged.entries);
   options.onPhase?.(
-    `逐条判定完成：要求 ${merged.entries.length} + 排除 ${judged.excluded.length}${merged.mergedCount > 0 ? ` + 合并 ${merged.mergedCount}` : ''} + 未判定 ${judged.undecided.length}`,
+    `逐条判定完成：要求 ${merged.entries.length} + 排除 ${judged.excluded.length}${merged.mergedCount > 0 ? ` + 合并 ${merged.mergedCount}` : ''} + 未判定 ${judged.undecided.length}${judged.structureRequirements.length > 0 ? `；结构/呈现要求 ${judged.structureRequirements.length}` : ''}`,
     judged.undecided.length === 0
       ? ['对账闭合：全部条款已判定']
       : [`未判定 ${judged.undecided.length} 条（LLM 输出缺号且重试后仍缺），对账未闭合，缓存不落盘`],
@@ -610,6 +834,7 @@ export async function extractTenderRequirements(
   return {
     entries: merged.entries,
     excluded: judged.excluded,
+    structureRequirements: judged.structureRequirements,
     reconciliation: {
       clauseCount: clauses.length,
       entryCount: merged.entries.length,
@@ -618,6 +843,7 @@ export async function extractTenderRequirements(
       mergedCount: merged.mergedCount,
       batchCount: judged.batchCount,
       retriedBatches: judged.retriedBatches,
+      structureCount: judged.structureRequirements.length,
     },
     extracted,
     sourceHash: tenderRequirementsSourceHash(evidence.map(item => `${item.filePath || ''}|${item.sectionTitle || ''}|${item.content || ''}`).join('\n')),
@@ -632,8 +858,61 @@ export async function extractTenderRequirements(
  * 哈希失效：key = 提取器版本 + 招标文件直读集合全量指纹；判定 prompt / 复核口径变更时递增版本。
  * v7：合同履约管理程序条款口径（报送审批/违约罚则/请假离场/投保程序/保修书明细/照管起止/治安保卫/
  * 分包审批/采购评标 → out_of_scope，r3 实机大量该类条目被误判 respond 致验收零命中）+ coreTerms 可命中性口径。
+ * v8（A-T1/A-T2/A-T3）：结构/呈现要求第三态通道（structures 字段 + 词表扫描，含被排除条款）+
+ * 表格声明套话不进池 + 商务域技术工艺语义救回——判定口径变更，旧池全部失效重算。
+ * v9（M14 根因修复）：池纯度复核扩围（答疑澄清/考核惩奖/质量保修/投标表单/勾选行 + 合同程序
+ * 条款格式扩围）——M10 落码时漏递增本版本号，r28i/s28i 命中 v8 旧缓存「复用上次提取结果……
+ * 跳过判定 LLM」（executionStages 实锤），出池判据从未执行致「M10 折算未兑现」。本版起缓存 key
+ * 追加密判据指纹（CACHE_JUDGE_FINGERPRINT_SOURCES）：判据函数/正则源码变更自动失效缓存，
+ * 新增判据须同步入表（守护测试扫描 judgeTenderClauses 调用清单比对，漏加即红）。
  */
-const TENDER_REQUIREMENTS_CACHE_VERSION = 'tender-requirements-extraction-v7';
+const TENDER_REQUIREMENTS_CACHE_VERSION = 'tender-requirements-extraction-v9';
+
+// 商务域条款排除词表（4.40.0 零商务句根治，取代旧「定性响应句」通道）：丰乐镇与舒城实测均出现
+// 商务条款原文/商务声明句被写入技术标正文——商务与造价条款（金额/利率/时限/计价规则）在判定层
+// 即排除出要求池，技术标正文既不定性声明也不落商务参数，响应由商务标承接。
+// M26 增补：市场询价/报价计入/中标价/赔偿（价格水平与费用责任语汇，s28k 实机漏网；「移交/扣除」
+// 类宽词不入表——「工程竣工移交期间」「工期扣除法定节假日」可属技术内容，防误伤）。
+// 词表与救回词表必须定义于 CACHE_JUDGE_FINGERPRINT_SOURCES 之前：指纹表在模块加载时对源序列化。
+const COMMERCIAL_SCOPE_RE = /履约保证金|质量保证金|保证金账户|中标金额|中标价|进度款|工程款|付款|结清|结算|违约金|贷款市场报价利率|LPR|最高投标限价|工程结算价款|预付款|支付担保|保函|暂列金额|暂估价|结算核减|造价咨询费|工程量.*异议|增值税|异地纳税人|报价明细|综合单价|清单合价|预留金|投标报价|异常低价|评标基准价|总价包干|总价合同|调差|可调整价差|市场询价|报价计入|赔偿/u;
+
+/** 技术工艺语义救回词表（A-T3 边缘误排复核）：命中商务词但同时含技术工艺/现场处置语义的条款
+ * 不判商务域（技术动词优先）——现场工艺试验、临时占地恢复类条款属技术响应内容，历史缺陷：
+ * 因命中「费用/占地」词被整条判 commercial_scope，技术内容随排除丢失。 */
+const COMMERCIAL_TECHNICAL_RESCUE_RE = /工艺试验|工艺评定|试验段|复垦|土地复垦|表土剥离|耕作层|占地恢复|场地恢复|植被恢复|绿化恢复|清表|清杂|移植|取土场|弃土场|临时占地|临时用地/u;
+
+/** M14a 判定口径指纹源（v9 起入缓存 key）：judgeTenderClauses 中参与「进池/排除/结构收集」的
+ * 本地确定性判据（函数序列化为源码文本、正则序列化为 pattern/flags）——口径任何变更自动失效缓存，
+ * 不再依赖人工递增版本纪律（M10 漏递增实锤）。
+ * M26 增补：合同附件来源域判据（isContractAttachmentSectionClause）+ 引用性条款判据
+ * （isDocumentReferenceTerm/isDocumentReferenceOnlyClause）+ 商务域两个词表常量
+ * （外部 const 词表不影响函数源码序列化，必须直接入表方能触发缓存失效）。 */
+const CACHE_JUDGE_FINGERPRINT_SOURCES: ReadonlyArray<unknown> = [
+  clauseFragmentLike,
+  EMPTY_CLAUSE_VALUE_RE,
+  clauseSentenceHasNoValue,
+  BARE_REPLY_RE,
+  isTableDeclarationBoilerplate,
+  isBidDisciplineSentence,
+  isBidderQualificationText,
+  isBidEvaluationRuleText,
+  isContractProcedureClause,
+  isContractAttachmentSectionClause,
+  isDocumentReferenceOnlyClause,
+  isDocumentReferenceTerm,
+  isRequirementPoolNoiseClause,
+  isCommercialScopeClause,
+  COMMERCIAL_SCOPE_RE,
+  COMMERCIAL_TECHNICAL_RESCUE_RE,
+  normalizeExclusionReason,
+  GLOBAL_COMPLY_RE,
+  collectClauseStructureRequirements,
+];
+
+/** 判定口径指纹（导出供测试）：判据源序列化文本的稳定哈希——判据代码任何变更 → 缓存 key 变化 */
+export function tenderRequirementsJudgeFingerprint(sources: ReadonlyArray<unknown> = CACHE_JUDGE_FINGERPRINT_SOURCES): string {
+  return stableHash(sources.map(source => String(source)).join('\n'));
+}
 
 function tenderRequirementsCacheRoot(projectRoot?: string) {
   const root = path.join(process.env.HOME || process.cwd(), '.customize-agent', 'cache', 'document-workflow', stableHash(projectRoot || 'default'));
@@ -648,10 +927,11 @@ function evidenceContentFingerprint(evidence: DocumentEvidence[]) {
     .sort((a, b) => `${a.filePath}|${a.sectionTitle}`.localeCompare(`${b.filePath}|${b.sectionTitle}`));
 }
 
-/** 提取缓存 key：提取器版本 + 招标文件直读集合指纹 */
+/** 提取缓存 key：提取器版本 + 判定口径指纹（M14a 自动防线）+ 招标文件直读集合指纹 */
 export function tenderRequirementsCacheKey(input: { collectionEvidence: DocumentEvidence[] }) {
   return stableHash({
     version: TENDER_REQUIREMENTS_CACHE_VERSION,
+    judgeFingerprint: tenderRequirementsJudgeFingerprint(),
     collection: evidenceContentFingerprint(input.collectionEvidence),
   });
 }
@@ -715,6 +995,12 @@ export function tenderRequirementsSummary(model: TenderRequirementModel | undefi
   if (commercialScopeCount > 0) {
     summary.push(`商务域排除 ${commercialScopeCount} 条（付款/保证金/结算/报价/税金等，技术标正文零商务句）`);
   }
+  // A-T1 结构/呈现要求可见性（第三态通道：含被排除格式类条款的呈现信号）
+  const structureRequirements = model.structureRequirements || [];
+  if (structureRequirements.length > 0) {
+    const formLabels: Record<TenderStructureForm, string> = { diagram: '图', org_chart: '框图', table: '表格', chart_text: '结合图表' };
+    summary.push(`结构/呈现要求 ${structureRequirements.length} 项：${structureRequirements.map(item => `${item.element}（以${formLabels[item.form]}呈现）`).join('、')}`);
+  }
   if (r.undecidedCount > 0) {
     summary.push(`未判定条款 ${r.undecidedCount} 条：对账未闭合（LLM 输出缺号且重试后仍缺），请检查 LLM 可用性`);
   }
@@ -773,6 +1059,40 @@ export function renderChapterRequirementSlice(entries: TenderRequirementEntry[])
     '【本章必须处理的招标要求（蓝图分配全量，逐条响应/遵守；零处理即评标失分）】',
     ...lines,
     systemConstraintLine('以上为系统提取的招标要求原文：实质内容（奖项名称/等级指标/数字参数）必须显性落位；本段提示词文字本身（编号、括号说明等元话语）禁止复述进正文'),
+  ].join('\n');
+}
+
+/** A-T1 结构/呈现要求分片渲染（章级写作指令）：明标=以图/表形态呈现 ××；暗标=正文不得出图表，
+ * 以完整文字承载并指向文末附表区（形态由附表区兑现）。
+ * B-T1：图/框图（diagram）补齐形态声明——内容以文字框图/时间轴承载，结束处输出规范图题行「图 X-X 图名」；
+ * B-T2：org_chart 补「项目管理机构与岗位职责」专项指令（组织架构说明 + 框图承载 + 岗位责任矩阵，零实名数据）。 */
+export function renderChapterStructureSlice(items: TenderStructureRequirement[], options: { blind?: boolean } = {}): string {
+  if (items.length === 0) return '';
+  const formLabels: Record<TenderStructureForm, string> = {
+    diagram: '图（网络图/横道图/平面布置图类）',
+    org_chart: '框图',
+    table: '表格',
+    chart_text: '文字结合图表',
+  };
+  const orgChartPlainHint = '：正文须含「项目管理机构与岗位职责」专项内容——组织架构说明（层级设置、隶属关系、部门与岗位构成）+ 文字框图承载（列出全部岗位与层级关系）+ 岗位责任矩阵（各岗位职责、分工与协作关系）；严禁出现人员姓名、证书编号、身份证号等实名数据（人员实名信息属商务册职责，正文仅写岗位与职责体系）';
+  const orgChartBlindHint = '：正文须含「项目管理机构与岗位职责」专项内容——组织架构说明（层级设置、隶属关系、部门与岗位构成）及分岗位的职责分工与协作关系；严禁出现人员姓名、证书编号、身份证号等实名数据（人员实名信息属商务册职责，正文仅写岗位与职责体系）';
+  const plainHint = (form: TenderStructureForm): string => {
+    if (form === 'diagram') return '：以文字框图或表格式时间轴承载全部内容要点，内容结束处另起一行输出规范图题行（格式「图 X-X 图名」，X-X 为章序号与本章图序号，图名即要素名），图题行独立成行、不附加任何说明文字';
+    if (form === 'org_chart') return orgChartPlainHint;
+    if (form === 'table') return '：以 Markdown 表格输出，表头字段按要素构成设置并覆盖全部构成项';
+    return '';
+  };
+  if (options.blind) {
+    return [
+      '【本章必须落实的呈现要求（招标明文规定呈现形态，暗标口径）】',
+      ...items.map(item => `- 招标要求以「${formLabels[item.form]}」呈现「${item.element}」：暗标正文不得出现任何表格/图片，须以完整文字描述${item.element}的组成与运作（图文形态由文末附表区承载，正文可自然指向附表）${item.form === 'org_chart' ? orgChartBlindHint : ''}`),
+      systemConstraintLine('以上为招标明文的呈现形态要求：正文以文字完整承载内容，禁止任何图表实体与内部话术（如“由编制人绘制”）'),
+    ].join('\n');
+  }
+  return [
+    '【本章必须落实的呈现要求（招标明文规定呈现形态，缺失即评标失分）】',
+    ...items.map(item => `- 须以「${formLabels[item.form]}」呈现「${item.element}」（呈现形态与要素均来自招标明文，不得省略）${plainHint(item.form)}`),
+    systemConstraintLine('以上为招标明文的呈现形态要求：对应图/表/框图必须在本章正文落实，内容使用资料事实，禁止编造'),
   ].join('\n');
 }
 
@@ -972,6 +1292,72 @@ export function saveRequirementAssignmentsAsset(projectRoot: string, assignments
   return assetPath;
 }
 
+// ── A-T1 结构/呈现要求章归属（存疑不挂、显性展示） ──
+
+/** 结构要求↔章节归属条目 */
+export interface TenderStructureAssignment {
+  requirement: TenderStructureRequirement;
+  /** 目标章节标题（normalizeChapterTitleLine 归一化口径） */
+  chapterTitle: string;
+  score: number;
+  /** 低于 STRUCTURE_ROUTE_SCORE_MIN 的存疑项：不挂章、仅显性展示（不注入写作，不参与验收） */
+  lowConfidence: boolean;
+}
+
+/** 结构路由相似度下限：低于该值的要素不挂章（语义不贴近任何章节，宁缺不误挂） */
+export const STRUCTURE_ROUTE_SCORE_MIN = 0.35;
+
+/**
+ * 结构要求语义查询文本（单一来源）：相似度闭包对未预嵌入文本静默返回 0，构建 requirementsSimilarity
+ * 预嵌入池与路由查询必须共用本函数同文本（口径不一致将导致全部结构要求判定 0 分、路由空转）。
+ */
+export function structureRequirementSemanticQuery(requirement: TenderStructureRequirement): string {
+  return `${requirement.element} ${requirement.sourceText}`.slice(0, 120);
+}
+
+/**
+ * 结构/呈现要求章归属：element+形态语义路由到最相似章节（存疑不挂——低于下限不注入，
+ * 显性进入 unattached 展示；宁可不挂也不挂错）。归入章后由写作注入与终稿验收消费。
+ */
+export function assignStructureRequirementsToChapters(
+  requirements: TenderStructureRequirement[],
+  chapters: Array<{ title: string }>,
+  similarity: SemanticSimilarityFn,
+): { assignments: TenderStructureAssignment[]; unattached: TenderStructureAssignment[] } {
+  const assignments: TenderStructureAssignment[] = [];
+  const unattached: TenderStructureAssignment[] = [];
+  const chapterTitles = chapters.map(chapter => normalizeChapterTitleLine(chapter.title)).filter(Boolean);
+  for (const requirement of requirements) {
+    // 查询文本以要素名为语义主键（形态词辅助：图/框图/表格语义弱，不喧宾夺主）
+    const query = structureRequirementSemanticQuery(requirement);
+    let bestTitle = '';
+    let bestScore = 0;
+    for (const title of chapterTitles) {
+      const score = similarity(query, title);
+      if (score > bestScore) {
+        bestScore = score;
+        bestTitle = title;
+      }
+    }
+    const entry: TenderStructureAssignment = { requirement, chapterTitle: bestTitle, score: bestScore, lowConfidence: bestScore < STRUCTURE_ROUTE_SCORE_MIN };
+    if (!bestTitle || entry.lowConfidence) {
+      unattached.push(entry);
+      continue;
+    }
+    assignments.push(entry);
+  }
+  return { assignments, unattached };
+}
+
+/** 结构分配落盘（审计资产：generatedDocuments/assets/structure-assignments.json） */
+export function saveStructureAssignmentsAsset(projectRoot: string, assignments: TenderStructureAssignment[], unattached: TenderStructureAssignment[]): string {
+  const assetDir = path.join(generatedRoot(projectRoot), 'assets');
+  fs.mkdirSync(assetDir, { recursive: true });
+  const assetPath = path.join(assetDir, 'structure-assignments.json');
+  fs.writeFileSync(assetPath, JSON.stringify({ createdAt: new Date().toISOString(), attached: assignments.length, unattached: unattached.length, assignments, unattachedItems: unattached }, null, 2), 'utf8');
+  return assetPath;
+}
+
 // ═══════════════════════════════ 章级验收内核（判定/补写共享单源） ═══════════════════════════════
 
 /** 锚点或选型判定 schema（一次批量调用判定部分响应条款的锚点是否为"任一即可"关系） */
@@ -1048,6 +1434,13 @@ function stripAwardLeadVerb(award: string): string {
   return result;
 }
 
+/** 全角百分号归一（M26：s28k 正文写作半角「95%/10%」，锚点提取全角「95％/10％」→ 全半角形态差假 miss）：
+ * 锚点侧与正文侧同源归一——requirementAnchorCoverage（锚）、clauseSegmentCoverage（分句）、
+ * tenderRequirementResponseGaps 与 requirementAcceptanceIssues（正文入口）四处统一，防口径分裂。 */
+function normalizePercent(text: string): string {
+  return text.replace(/％/gu, '%');
+}
+
 /**
  * 锚点等价命中判定（r8 实机 #4 复核）：「0.25-0.5m宽」类范围复合锚点，正文写作
  * 「0.25～0.5m」「0.25~0.5m」或省后缀「预留0.25-0.5m」时字面 includes 因连接符/
@@ -1071,18 +1464,22 @@ function requirementAnchorCoverage(
   normalizedMarkdown: string,
   options?: { skipNumericAnchors?: boolean },
 ): { total: number; hit: string[]; missing: string[] } {
-  const text = item.text.replace(/\s+/gu, '');
+  const text = normalizePercent(item.text.replace(/\s+/gu, ''));
   const anchors = new Set<string>();
   // 专有名词：coreTerms 全部作为锚点（长度≥2；「或/及」条款的锚点必要性由 LLM 或选型判定兜底）
   for (const term of item.coreTerms) {
-    const clean = term.replace(/\s+/gu, '');
+    const clean = normalizePercent(term.replace(/\s+/gu, ''));
     if (clean.length >= 2) anchors.add(clean);
   }
   // 数字参数：每个"数字+单位"组合都是独立锚点（纯数字不作锚点；单位词表限工程条款常用单位）。
   // 商务条款（保证金金额/付款时限/违约金利率）的数字参数不强制落位技术标正文，skipNumericAnchors 跳过
   if (!options?.skipNumericAnchors) {
     for (const match of text.matchAll(/(?:\d+(?:\.\d+)?\s*(?:%|％|天|日|万元|亿元|元|米|m|M|mm|毫米|层|年|个|月|周|小时|分钟|项|处|台|套|辆|人|家|次|遍|道|吨|kPa|MPa))/giu)) {
-      anchors.add(match[0].replace(/\s+/gu, ''));
+      const anchorText = normalizePercent(match[0].replace(/\s+/gu, ''));
+      // M26 编号切片守卫：「N.N项」为「N.N项目/N.N项次」编号前缀被截断的产物（r28k「1.1项」←「1.1项目名称」、
+      // 「2.10项」←「2.10项目类别」、「3.3项」←「第1.3.3项」实机），非真实数量参数——整数+项（3项）保留，小数+项丢弃
+      if (/^\d+\.\d+项$/u.test(anchorText)) continue;
+      anchors.add(anchorText);
     }
   }
   // 具名奖项/等级：条款原文里的「XX杯/XX奖/XX星」锚点（「级」后缀过宽不取，靠 coreTerms/数字锚点覆盖）；
@@ -1105,7 +1502,7 @@ function requirementAnchorCoverage(
  * （≥6 字符），全部分句字面落位正文 = 原文抄写 = 完全响应。防误放行：全部分句命中才放行。
  */
 function clauseSegmentCoverage(text: string, normalizedMarkdown: string): { total: number; missing: string[] } {
-  const withoutParenthetical = text.replace(/（[^）]*）|\([^)]*\)/gu, '');
+  const withoutParenthetical = normalizePercent(text).replace(/（[^）]*）|\([^)]*\)/gu, '');
   const segments = withoutParenthetical
     .split(/[，。；、,;\n]/u)
     .map(segment => segment.replace(/[「」“”"'`\s]/gu, '').trim())
@@ -1157,19 +1554,16 @@ export function tenderRequirementResponseGaps(
   entries: TenderRequirementEntry[],
   markdown: string,
 ): Array<{ entry: TenderRequirementEntry; hit: string[]; missing: string[]; satisfied: boolean }> {
-  const normalized = markdown.replace(/\s+/gu, '');
+  const normalized = normalizePercent(markdown.replace(/\s+/gu, ''));
   return entries.map(entry => {
     const coverage = requirementAnchorCoverage(entry, normalized);
     return { entry, hit: coverage.hit, missing: coverage.missing, satisfied: clauseSatisfied(entry, normalized) };
   });
 }
 
-// 商务域条款排除词表（4.40.0 零商务句根治，取代旧「定性响应句」通道）：丰乐镇与舒城实测均出现
-// 商务条款原文/商务声明句被写入技术标正文——商务与造价条款（金额/利率/时限/计价规则）在判定层
-// 即排除出要求池，技术标正文既不定性声明也不落商务参数，响应由商务标承接。
-const COMMERCIAL_SCOPE_RE = /履约保证金|质量保证金|保证金账户|中标金额|进度款|工程款|付款|结清|结算|违约金|贷款市场报价利率|LPR|最高投标限价|工程结算价款|预付款|支付担保|保函|暂列金额|暂估价|结算核减|造价咨询费|工程量.*异议|增值税|异地纳税人|报价明细|综合单价|清单合价|预留金|投标报价|异常低价|评标基准价|总价包干|总价合同|调差|可调整价差/u;
-
-function isCommercialScopeClause(text: string) {
+// 商务域条款排除词表已上移至 CACHE_JUDGE_FINGERPRINT_SOURCES 之前（M26：词表需入指纹源）
+export function isCommercialScopeClause(text: string) {
+  if (COMMERCIAL_TECHNICAL_RESCUE_RE.test(text)) return false;
   return COMMERCIAL_SCOPE_RE.test(text);
 }
 
@@ -1195,7 +1589,7 @@ export async function requirementAcceptanceIssues(input: {
   const issues: ValidationIssue[] = [];
   if (input.entries.length === 0) return issues;
   const markdown = input.markdown;
-  const normalized = markdown.replace(/\s+/gu, '');
+  const normalized = normalizePercent(markdown.replace(/\s+/gu, ''));
   // 六项词面兜底：「扬尘治理六个百分百」体系基准条款语义稀释误报——正文已逐项落位六项措施词面
   // （100%围挡/覆盖/冲洗/硬化/密闭运输）时判响应，与 sixHundredPercentCoverageIssues 词面兜底同源。
   const DUST_SIX_LEXICAL: Array<RegExp> = [

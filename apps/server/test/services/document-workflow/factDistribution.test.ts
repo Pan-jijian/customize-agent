@@ -194,4 +194,19 @@ describe('stageFactDistribution 关键事实跨章扩散', () => {
     await stageFactDistribution(session);
     expect(session.finalChapterDrafts[1].content).toContain('招标项目编号为2026AEEGZ50048');
   });
+
+  it('招标人（0 章落位）扩散到概况/项目管理类章：前缀剥离后按纯值扩散（C-T7 #50）', async () => {
+    const chapters = [
+      chapter('c1', '工程概况', `项目基本信息见章头表。${BODY_A}`),
+      chapter('c2', '项目管理机构与职责', `项目管理机构按公司体系运行。${BODY_A}`),
+      chapter('c3', '主要施工方法', `各分项按图纸组织施工。${BODY_A}`),
+    ];
+    const session = makeSession(chapters, makeFactsModel('project', [fact('招标人', '招标人：肥西县丰乐镇人民政府')]));
+    await stageFactDistribution(session);
+    const contents = session.finalChapterDrafts.map(item => item.content).join('\n');
+    expect(contents).toContain('肥西县丰乐镇人民政府');
+    // 扩散值不得带标签前缀（防「本工程招标人为招标人：…」形态写进正文）
+    expect(contents).not.toContain('招标人：肥西县丰乐镇人民政府');
+    expect(session.progressStages).toHaveLength(1);
+  });
 });

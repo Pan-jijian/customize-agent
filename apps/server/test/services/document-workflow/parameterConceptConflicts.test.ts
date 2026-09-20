@@ -231,10 +231,155 @@ describe('parameterConceptConflictIssues（h13b 过滤）', () => {
   });
 
   it('r18 B2b 反例：无总量分解关系的多口径照报（防豁免过宽）', async () => {
-    // 真冲突形态：不同句子各报口径（无总量词/无相加关系），分解句豁免不适用
-    embedMock.mockResolvedValue([[1, 0], [1, 0], [0, 1]]);
-    const markdown = '其中景观工程部位安装228m。环境整治工程部位安装105m。栏杆高度1.1m。';
+    // 真冲突形态：同对象不同句子各报口径（无总量词/无相加关系），分解句豁免不适用；
+    // r23 调整：「景观/环境整治工程部位」属对象限定词不相容豁免（不同部位各自量值），
+    // 改用同对象同概念数据锁定分解句豁免本身不过宽
+    embedMock.mockResolvedValue([[1, 0], [0, 1]]);
+    const markdown = '仿木护栏安装228m。仿木护栏安装105m。栏杆高度1.1m。';
     const issues = await parameterConceptConflictIssues(markdown);
-    expect(issues.some(issue => issue.message.includes('景观工程部位安装'))).toBe(true);
+    expect(issues.some(issue => issue.message.includes('仿木护栏安装'))).toBe(true);
+  });
+
+  it('r22 P3a 公差「±」虚词坍缩跳过：±20mm/±10mm 以内不误聚（实况复刻）', async () => {
+    // r22 实测误报：PARAM_TOKEN_RE 前缀字符类不含「±」，数字前导经 trailingDigits 并回后前缀
+    // 坍缩为空——「槽底标高偏差控制在±20mm以内」×「…±10mm以内」concept 同坍缩为「以内」必聚簇
+    // 误报口径冲突；坍缩 token 在聚类前已被纯边界虚词表过滤（不同对象公差本可并存，不参与互斥）
+    embedMock.mockResolvedValue([[1, 0], [1, 0], [0, 1]]);
+    const markdown = '沟槽开挖时槽底标高偏差控制在±20mm以内。垫层施工时管底垫层顶面标高偏差控制在±10mm以内。栏杆高度1.1m。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues).toEqual([]);
+    // 坍缩虚词 tokens 在聚类前全部过滤（仅剩「栏杆高度」单 token 不成簇）→ 嵌入通道不被调用
+    expect(embedMock).not.toHaveBeenCalled();
+  });
+
+  it('r22 P3a 枚举前窗对称化：「300断面3003m、500×600断面1797m」尾成员由前窗顿号补足（实况复刻）', async () => {
+    // r22 实测误报：枚举判定原仅查后窗——链尾成员「600断面1797m」后窗无顿号致 enumerations=1
+    // <2 未豁免，「300断面」vs「600断面」误报多口径（300×300/500×600 断面清单枚举）；
+    // 前窗 12 字对称判定后尾成员由「、500×」补足 → 双 token 均属枚举 → 整簇豁免
+    embedMock.mockResolvedValue([[1, 0], [1, 0], [0, 1]]);
+    const markdown = '然后砌筑渠道，300×300断面3003m、500×600断面1797m，最后回填良质素土并分层夯实。栏杆高度1.1m。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues).toEqual([]);
+  });
+
+  it('r22 P3a 反例：非枚举链的断面多口径仍判冲突（前窗豁免不过宽）', async () => {
+    // 前窗/后窗均无「、数字」枚举标记 → 不属规格枚举声明，同概念多口径照报（防豁免过宽）；
+    // r23 调整：原数据「渠道/支渠」两主体属对象限定词不相容豁免（不同对象各自量），改用同
+    // 主体同概念数据锁定枚举豁免本身不过宽
+    embedMock.mockResolvedValue([[1, 0], [0, 1]]);
+    const markdown = '渠道砌筑300断面3003m。渠道砌筑300断面5000m。栏杆高度1.1m。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('断面'))).toBe(true);
+  });
+
+  it('r23 P3b 对象限定词不相容豁免：不同脚手架对象各自搭设面积不误聚（跨对象误聚实况复刻）', async () => {
+    // 实测：「工具式脚手架搭设面积76.62m²」与「外脚手架搭设面积122.36m²」是不同脚手架对象各自
+    // 参量，bge 因共享核心词「脚手架搭设面积」误聚同簇（mock 同向量复刻）——扣除公共子串后
+    // 限定词「工具式」vs「外」均非空且互不包含 → 不同对象豁免；同概念多口径仍判冲突（见反例）
+    embedMock.mockResolvedValue([[1, 0], [1, 0]]);
+    const markdown = '公厕主体结构施工采用工具式脚手架与外脚手架配合组织，工具式脚手架搭设面积76.62m²，外脚手架搭设面积122.36m²，架体随砌筑与混凝土浇筑进度分层搭设。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues).toEqual([]);
+  });
+
+  it('r23 P3b 反例：同对象多口径（残留全空）不受对象限定词豁免影响 → 照报', async () => {
+    // 概念完全相同（扣除公共子串后残留全空）不属「不同对象」形态 → 对象豁免不适用，多口径照报
+    embedMock.mockResolvedValue([[1, 0], [0, 1]]);
+    const markdown = '脚手架搭设面积76.62m²。脚手架搭设面积122.36m²。栏杆高度1.1m。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('脚手架搭设面积'))).toBe(true);
+  });
+
+  it('r23 P3b 村组分组名（X组）形态 → 聚类前过滤（r22 实况复刻）', async () => {
+    // r22 实测误报：「总工程量2360m，分布于9个自然村分组，其中马老郢组800m、夏岗组250m…」——
+    // 各村组各自围栏长度被 bge 误聚同簇报多口径；「X组」结尾是对象分组名概念（村组/作业组/
+    // 班组等），各分组量值天然异构，不参与参数口径互斥；过滤后仅剩「总工程量」单 token 不足
+    // 阈值3 → 聚类通道不被调用
+    embedMock.mockResolvedValue([[1, 0], [1, 0], [1, 0]]);
+    const markdown = '小菜园工程以菜园围栏为主，总工程量2360m，分布于9个自然村分组，其中马老郢组800m、夏岗组250m、侯岗组180m、方岗组150m。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues).toEqual([]);
+    expect(embedMock).not.toHaveBeenCalled();
+  });
+
+  it('r23 P3b 反例：「组」非尾字的概念（模板组合）不误伤 → 多口径照报', async () => {
+    // 尾锚「组$」只命中分组名形态；「组合」尾字「合」不命中 → 正常参与聚类，真多口径照报
+    embedMock.mockResolvedValue([[1, 0], [0, 1]]);
+    const markdown = '模板组合500套。模板组合600套。栏杆高度1.1m。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('模板组合'))).toBe(true);
+  });
+
+  it('r28 同值对豁免：同值异述对不打断跨对象分辨（r27b 实况复刻，「其中」残留形态）', async () => {
+    // r27b 实机误报：审计原文「“其中道路硬化面积约”出现多个口径：其中道路硬化面积约2783㎡、
+    // 公厕及附属设施改造面积约1757㎡、道路硬化面积约2783㎡」——「其中道路硬化面积约2783㎡」与
+    // 「道路硬化面积约2783㎡」共享核心 LCS「道路硬化面积约」，扣除后左侧残留「其中」、右侧残留空，
+    // every 被同值对打断致跨对象豁免失效；同值对是同一数值的不同表述不构成口径冲突，取值相同的
+    // 两 token 不参与跨对象分辨（冲突判定仍由全部异值对承载，见反例）
+    embedMock.mockResolvedValue([[1, 0], [1, 0], [1, 0]]);
+    const markdown = '其中道路硬化面积约2783㎡，村内公厕及附属设施改造面积约1757㎡；道路硬化面积约2783㎡，按通行条件分段组织施工。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues).toEqual([]);
+  });
+
+  it('r28 同值豁免不越界：同对象异值对（道路硬化面积 2783 vs 2500）不受影响 → 照报', async () => {
+    // 同值豁免仅放行 left.value === right.value 的对；同对象真异值对仍走 LCS 残留判定
+    //（「其中道路硬化面积约」vs「道路硬化面积约」残留「其中」vs 空 → 非不同对象）→ 照常报出多口径
+    embedMock.mockResolvedValue([[1, 0], [1, 0], [1, 0]]);
+    const markdown = '其中道路硬化面积约2783㎡，村内公厕及附属设施改造面积约1757㎡，道路硬化面积约2500㎡。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('道路硬化面积'))).toBe(true);
+  });
+
+  it('r28f 丰乐镇 B2 后缀相邻枚举项截断：健身器材/石桌石凳不桥接聚类（实况复刻）', async () => {
+    // r28e 实机阻断：「健身器材17个与石桌石凳8个基础采用…」首 token 后缀吞入「与石桌石凳8个基」
+    // （concept=「健身器材与石桌石凳8个基」）→ bge 桥接聚类把健身器材(17)与石桌石凳(8)误聚同簇；
+    // 后缀在「与+≤12字+数字」处截断后 concepts=「健身器材/石桌石凳」两个独立概念（非同向量）→ 零冲突
+    embedMock.mockResolvedValue([[1, 0], [0, 1]]);
+    const markdown = '健身器材17个与石桌石凳8个基础采用C20混凝土浇筑。石桌石凳8个，健身器材17个，按设计点位安装到位。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues).toEqual([]);
+    // 截断生效断言：进入聚类的概念是清洁对象词（相邻枚举项不再并入首概念）
+    const concepts = embedMock.mock.calls[0]?.[0] as string[];
+    expect(concepts).toEqual(['健身器材', '石桌石凳']);
+  });
+
+  it('r28f B2 反例：连接词后无数字的语境后缀不截断（对象语境完整保留）', async () => {
+    // 截断仅针对「连接词+…+数字」的相邻枚举项形态：连接词后无数字的语境后缀照常保留，
+    // 避免误削概念信息（concepts 含完整语境「消防泵与稳压装置安装」）
+    embedMock.mockResolvedValue([[1, 0], [1, 0], [0, 1]]);
+    const markdown = '消防泵2台与稳压装置安装。消防泵2台与稳压装置调试。栏杆高度1.1m。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues).toEqual([]);
+    const concepts = embedMock.mock.calls[0]?.[0] as string[];
+    expect(concepts).toContain('消防泵与稳压装置安装');
+    expect(concepts).toContain('消防泵与稳压装置调试');
+  });
+
+  it('r28m M24a F1 单体属性黑名单：地上层数/建筑高度不同单体天然异构 → 过滤不报', async () => {
+    // s28k/s28l 实机归因：「地上2层、地上1层」「门卫建筑高度3m」——不同单体（门卫/配套用房）的
+    // 层数/高度天然不同，无清单条目可裁决，参与互斥必误报；黑名单过滤后无概念可聚类
+    const markdown = '门卫地上2层。配套用房地上1层。管理用房建筑高度3.5m。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues).toEqual([]);
+    expect(embedMock).not.toHaveBeenCalled();
+  });
+
+  it('r28m M24a F2 变体限定词退聚：局部厚度8cm 的子集口径不与整体 10cm 互斥', async () => {
+    // r28k/s28k 实机归因：「厚度10cm，局部厚度8cm」——带「局部/个别/少数/多数/大部分」限定词的
+    // 数值是子集/局部口径，与整体口径不可互斥；退聚后不足阈值 3 → 聚类通道不被调用
+    const markdown = '垫层厚度10cm。局部厚度8cm。喷锚厚度80mm。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues).toEqual([]);
+    expect(embedMock).not.toHaveBeenCalled();
+  });
+
+  it('r28m M24a F2 反例：退聚只作用于限定词 token，同概念多口径照常聚簇照报', async () => {
+    // 「局部厚度8cm」退聚后其余 3 个 token 照常聚类（concepts 去重后 2 个 → mock 2 向量）：
+    // 垫层厚度 10 vs 12 差异 >2% 仍判冲突（防豁免过宽）
+    embedMock.mockResolvedValue([[1, 0], [0, 1]]);
+    const markdown = '垫层厚度10cm。垫层厚度12cm。局部厚度8cm。喷锚厚度80mm。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('垫层厚度'))).toBe(true);
   });
 });

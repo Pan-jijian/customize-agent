@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeProjectBasicInfoTable } from '@/services/document-workflow/documentGeneratorHelpers';
+import { normalizeProjectBasicInfoTable, removeDuplicateProjectBasicInfoBlocks } from '@/services/document-workflow/documentGeneratorHelpers';
 import type { DocumentFact } from '@/services/document-workflow/types';
 
 function makeFact(key: string, value: string, sourceFile = '招标文件.docx'): DocumentFact {
@@ -222,5 +222,95 @@ describe('normalizeProjectBasicInfoTable 质量标准行创优目标补全（P5 
     const result = normalizeProjectBasicInfoTable(markdownWithAwardBody, facts);
     expect(result).toContain('| 质量标准 | 合格，确保黄山杯 |');
     expect(result).not.toContain('300万元 |');
+  });
+});
+
+describe('C-T7 招标人行恢复（#50：政府词表 + 标签前缀剥离）', () => {
+  const OWNER_MARKDOWN = `## 第一章 工程概况
+
+### 1.1 编制说明与工程概况
+
+本工程施工组织设计覆盖招标范围内全部施工内容，编制深度满足指导现场施工的要求。
+
+## 第二章 施工组织
+
+### 2.1 施工部署
+
+我公司针对本项目成立项目管理机构。`;
+
+  it('「招标人：XX镇人民政府」前缀值经剥离后合法入表', () => {
+    const facts = [
+      makeFact('project_name', '2026年度丰乐镇20个美丽宜居自然村建设项目'),
+      makeFact('owner', '招标人：肥西县丰乐镇人民政府'),
+      makeFact('project_code', '2026AEEGZ50048'),
+      makeFact('schedule_requirement', '90日历天'),
+    ];
+    const result = normalizeProjectBasicInfoTable(OWNER_MARKDOWN, facts);
+    expect(result).toContain('| 招标人 | 肥西县丰乐镇人民政府 |');
+    expect(result).not.toContain('| 招标人 | 招标人：');
+  });
+
+  it('纯镇政府值（无前缀）同样入表：词表补「政府」族后不再被拒', () => {
+    const facts = [
+      makeFact('project_name', '2026年度丰乐镇20个美丽宜居自然村建设项目'),
+      makeFact('owner', '肥西县丰乐镇人民政府'),
+    ];
+    const result = normalizeProjectBasicInfoTable(OWNER_MARKDOWN, facts);
+    expect(result).toContain('| 招标人 | 肥西县丰乐镇人民政府 |');
+  });
+
+  it('占位/引导句型招标人值仍不入表（不因词表扩充而放松）', () => {
+    const facts = [
+      makeFact('project_name', '2026年度丰乐镇20个美丽宜居自然村建设项目'),
+      makeFact('owner', '将报公共资源交易监督管理部门'),
+    ];
+    const result = normalizeProjectBasicInfoTable(OWNER_MARKDOWN, facts);
+    expect(result).not.toContain('| 招标人 |');
+  });
+});
+
+describe('removeDuplicateProjectBasicInfoBlocks 去重语义（r26 B4）', () => {
+  it('命名标题块（不含表格）不消费 seen——后续信息项表不被误删', () => {
+    const markdown = [
+      '## 第一章 工程概况',
+      '',
+      '#### 项目基本信息表',
+      '',
+      '表1-1 项目基本信息表',
+      '',
+      '| 信息项 | 内容 |',
+      '| --- | --- |',
+      '| 项目名称 | 徽光阁项目施工 |',
+      '| 计划工期 | 45日历天 |',
+      '| 质量标准 | 合格 |',
+    ].join('\n');
+    const result = removeDuplicateProjectBasicInfoBlocks(markdown);
+    expect(result).toContain('| 信息项 | 内容 |');
+    expect(result).toContain('| 项目名称 | 徽光阁项目施工 |');
+    expect(result).toContain('| 计划工期 | 45日历天 |');
+  });
+
+  it('重复的污染基本信息表（残行表头）被去重删除，首表与题注保留', () => {
+    const markdown = [
+      '| 信息项 | 内容 |',
+      '| --- | --- |',
+      '| 项目名称 | 徽光阁项目施工 |',
+      '| 计划工期 | 45日历天 |',
+      '| 质量标准 | 合格 |',
+      '',
+      '| 村庄内道路施工交通疏导 | 道路硬化与管网铺设需分段封闭作业 |',
+      '| --- | --- |',
+      '| 工程名称 | 徽光阁项目施工 |',
+      '| 工程地点 | 安徽省合肥市 |',
+      '| 招标项目编号 | 2026AFLGZ50747 |',
+      '| 建设规模 | 4646m2 |',
+      '| 计划工期 | 45日历天 |',
+      '| 质量标准 | 合格 |',
+    ].join('\n');
+    const result = removeDuplicateProjectBasicInfoBlocks(markdown);
+    expect(result).toContain('| 信息项 | 内容 |');
+    expect(result).toContain('| 项目名称 | 徽光阁项目施工 |');
+    expect(result).not.toContain('村庄内道路施工交通疏导');
+    expect(result).not.toContain('| 工程名称 |');
   });
 });

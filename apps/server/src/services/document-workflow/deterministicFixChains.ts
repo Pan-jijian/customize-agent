@@ -11,6 +11,7 @@ import {
   fixAmbiguousEitherOrCandidates,
   fixCollisionNumberedHeadings,
   fixDuplicateBasicInfoTables,
+  fixEmbeddedHeadingLines,
   fixEquipmentBatchConflicts,
   fixFallbackPlaceholderRows,
   fixFinishThickness,
@@ -27,6 +28,7 @@ import {
   fixSelfUnderminingCandidates,
   fixSlotDepthValue,
   fixTruncatedSentenceArtifacts,
+  fixZeroLengthDayRanges,
   mergeTableLineResidues,
   stripDuplicateTables,
   stripInternalDuplicateTableRows,
@@ -94,6 +96,10 @@ export const SURFACE_FIX_STEPS: readonly SurfaceFixStep[] = [
   // structure-integrity 同源单扫描（检测定位=清理定位）；blocking 类缺陷（截断/空节/表名混入表头/
   // 空表/标点断裂）不在此步处理（须重写，由修复轮/门禁负责，宁缺毋假）
   { key: 'structure-integrity', stage5: true, round2: true, fix: markdown => { const r = cleanStructureDefects(markdown); return { markdown: r.markdown, fixedCount: r.cleaned.length }; } },
+  // r28h 行内嵌标题拆行（s28h2 实机归因）：「……有缺损。## 第九章 确保文明施工的技术组织措施」
+  // 标题并进正文行致章标题不识别（「正文缺少章节标题」/小节错挂/目录缺节连锁 blockers）——
+  // 紧随结构完整性清理：先恢复行首标题结构，拆出的编号由链尾 section-renumber 原子重放
+  { key: 'embedded-heading-split', stage5: true, round2: true, fix: markdown => { const r = fixEmbeddedHeadingLines(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   // 叠词收敛在 stage5 原实现为无条件赋值不计入重建判定（命中不触发 rebuild，修复随下次重建生效），
   // 收敛为计数形式后与 round-2 链同口径：命中即参与重建判定，避免「只有叠词命中时修复丢失」。
   { key: 'repeated-words', stage5: true, round2: true, fix: markdown => { const next = collapseRepeatedWords(markdown); return { markdown: next, fixedCount: next === markdown ? 0 : 1 }; } },
@@ -138,6 +144,9 @@ export const SURFACE_FIX_STEPS: readonly SurfaceFixStep[] = [
   // 未覆盖词段从标题移除；目录由后续 tocConsistencyFix/fixTocFromBody 同步
   { key: 'heading-uncovered-items', stage5: true, round2: true, fix: markdown => { const r = fixHeadingUncoveredItems(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'inverted-date-range', stage5: true, round2: true, fix: markdown => { const r = fixInvertedDateRanges(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
+  // r28j 同日零长区间修复（M15 归因：「预留开工后第360日至第360日」——检测器同日起止区间校验只报不修，
+  // owner=llm 交修复轮但 LLM 未清）：紧随 inverted-date-range（时间区间族相邻、同一批扫描口径）
+  { key: 'zero-length-date-range', stage5: true, round2: true, fix: markdown => { const r = fixZeroLengthDayRanges(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'truncated-sentence', stage5: true, round2: true, fix: markdown => { const r = fixTruncatedSentenceArtifacts(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'meta-discourse', stage5: true, round2: true, fix: markdown => { const r = fixMetaDiscourseDeclarations(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'formula-residue', stage5: true, round2: true, fix: markdown => { const r = fixFormulaResidues(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },

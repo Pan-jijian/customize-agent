@@ -226,6 +226,18 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
     details: compositionSummary.details,
   }, { subtitle: '标书编制规格', order: session.global.progressStages.length }));
   session.global.emitProgress();
+  // F-T1 判定失败显性告警（不静默退化）：未识别标书类型时独立告警节点显性展示风险与核查动作——
+  // 防「明标口径产出暗标文件」（正文表格/图片本应禁止而未被禁止，施工组织设计部分不得分）
+  if (session.understanding.bidComposition.bidType === 'unknown') {
+    upsertProgressStage(session.global.progressStages, displayStage({
+      type: 'validation',
+      roleId: 'bid-composition-warning',
+      status: 'skipped',
+      message: '标书类型判定告警：未识别暗标/明标标记——本次按常规（明标）口径生成，正文表格与图片不受限制；若本项目实为暗标，将出现「明标口径产出暗标文件」的编制错位，请核对招标文件后重跑',
+      details: ['核查点：招标文件「施工组织设计采用」勾选项（标记字符变体与「按暗标/采用暗标评审」语义条款均已覆盖）或「暗标编制要求」条款', '判定证据链见「标书编制规格」节点'],
+    }, { subtitle: '标书编制规格·判定告警', order: session.global.progressStages.length }));
+    session.global.emitProgress();
+  }
   // 暗标口径消解（B6 门禁反转）：阶段 0 先于本判定拼装运行时提示词，已把「必须输出以下正式 Markdown 表格」
   // 规则行写入写作/事实提取/审查/修复四条消费链——判定为正文禁表后从这些文本中移除该行（字符串消解，
   // 不重建提示词），使阶段 2/4/终稿各轮消费的提示词与招标暗标口径一致；表格需求改由终稿文末附表区承接。

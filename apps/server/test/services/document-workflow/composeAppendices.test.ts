@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { appendTenderAppendixSections, composeEnhancedCoverMarkdown, composeTenderAppendixMarkdown } from '@/services/document-workflow/composeAppendices';
+import { appendixEntryCarried, appendTenderAppendixSections, composeEnhancedCoverMarkdown, composeTenderAppendixMarkdown } from '@/services/document-workflow/composeAppendices';
 import type { BidAppendixEntry } from '@/services/document-workflow/bidComposition';
 import type { BlueprintData } from '@/services/document-workflow/integratedBlueprint';
 
@@ -83,14 +83,15 @@ describe('composeTenderAppendixMarkdown（appendixPlan 蓝图直出）', () => {
     ];
     const section = composeTenderAppendixMarkdown(plan, blueprintData);
     expect(section).toContain('## 附表二 拟配备本标段的试验和检测仪器设备表');
-    expect(section).toContain('> 本表数据源（试验检测仪器配置）未在项目资料与一体化蓝图中确认，按招标文件表头生成骨架，由编制人依据实施资料补充填报。');
+    expect(section).toContain('> 本表为试验检测仪器配置，按招标文件规定的表头格式编制。');
     expect(section).toContain('| 序号 | 仪器设备名称 | 型号规格 | 数量 | 国别产地 | 制造年份 | 已使用台时数 | 用途 | 备注 |');
     expect(section).toContain('## 附表六 临时用地表');
+    expect(section).toContain('> 本表为临时用地规划，按招标文件规定的表头格式编制。');
     expect(section).toContain('| 用途 | 面积（平方米） | 位置 | 需用时间 |');
     expect(section).not.toMatch(/\| 1 \|/u);
   });
 
-  it('图类附表：图位说明；manual 表类：补充填报标注（不猜表头）', () => {
+  it('图类附表：图件说明；manual 表类：按招标格式编制标注（不猜表头）', () => {
     const plan = [
       entry({ no: '四', title: '附表四 计划开、竣工日期和施工进度网络图', kind: 'figure' }),
       entry({ no: '五', title: '附表五 施工总平面图', kind: 'figure' }),
@@ -100,15 +101,61 @@ describe('composeTenderAppendixMarkdown（appendixPlan 蓝图直出）', () => {
     expect(section).toContain('## 附表四 计划开、竣工日期和施工进度网络图');
     expect(section).toContain('图件');
     expect(section).toContain('施工总平面布置图');
-    expect(section).toContain('> 本附表数据由编制人依据招标文件格式要求补充填报。');
+    expect(section).toContain('> 本附表按招标文件规定的格式与内容要求编制。');
   });
 
   it('设备数据缺失：输出骨架 + 缺口标注，不编造数据行', () => {
     const empty = bp({ resources: { equipment: [], labor: { peak: { min: 0, max: 0 }, peakValue: 0, peakBasis: '', byPhase: [], byTrade: [], composition: [] } } });
     const section = composeTenderAppendixMarkdown([entry({ title: '附表一 拟投入本标段的主要施工设备表', dataSource: 'blueprint.equipment' })], empty);
-    expect(section).toContain('> 本表数据源（施工设备配置）未在项目资料与一体化蓝图中确认');
+    expect(section).toContain('> 本表为施工设备配置，按招标文件规定的表头格式编制。');
     expect(section).toContain('| 序号 | 设备名称 | 型号规格 | 数量 |');
     expect(section).not.toMatch(/\| 1 \|/u);
+  });
+
+  it('F-T2 话术合规：附表区说明块零内部流程话术', () => {
+    const plan = [
+      entry({ no: '一', title: '附表一 拟投入本标段的主要施工设备表', dataSource: 'blueprint.equipment' }),
+      entry({ no: '二', title: '附表二 拟配备本标段的试验和检测仪器设备表', dataSource: 'blueprint.testInstruments' }),
+      entry({ no: '三', title: '附表三 劳动力计划表', dataSource: 'blueprint.labor' }),
+      entry({ no: '四', title: '附表四 计划开、竣工日期和施工进度网络图', kind: 'figure' }),
+      entry({ no: '五', title: '附表五 施工总平面图', kind: 'figure' }),
+      entry({ no: '六', title: '附表六 临时用地表', dataSource: 'blueprint.tempLand' }),
+      entry({ no: '七', title: '附表七 拟分包项目情况表', dataSource: 'manual' }),
+    ];
+    const empty = bp({ resources: { equipment: [], labor: { peak: { min: 0, max: 0 }, peakValue: 0, peakBasis: '', byPhase: [], byTrade: [], composition: [] } } });
+    const notes = (data: BlueprintData) => composeTenderAppendixMarkdown(plan, data).split('\n').filter(line => line.startsWith('>'));
+    expect(notes(blueprintData)).toHaveLength(5);
+    expect(notes(empty)).toHaveLength(7);
+    for (const note of [...notes(blueprintData), ...notes(empty)]) {
+      expect(note).not.toMatch(/编制人|绘制后附|补充填报|一体化蓝图|数据源|骨架/u);
+    }
+  });
+
+  it('F-T2 承载判定：标题落位 + 表格/说明块内容；仅标题或未落位不承载', () => {
+    const md = [
+      '## 附表一 拟投入本标段的主要施工设备表', '',
+      '| 序号 | 设备名称 |', '| --- | --- |', '| 1 | 挖掘机 |', '',
+      '## 附表八 仅有标题的表', '',
+      '## 附表九 说明块表', '> 本附表按招标文件规定的格式与内容要求编制。',
+    ].join('\n');
+    expect(appendixEntryCarried(md, entry({ title: '附表一 拟投入本标段的主要施工设备表' }))).toBe(true);
+    expect(appendixEntryCarried(md, entry({ no: '八', title: '附表八 仅有标题的表' }))).toBe(false);
+    expect(appendixEntryCarried(md, entry({ no: '九', title: '附表九 说明块表' }))).toBe(true);
+    expect(appendixEntryCarried(md, entry({ no: '十', title: '附表十 未落位的表' }))).toBe(false);
+  });
+
+  it('F-T2 清单映射：appendixPlan 逐项承载（终稿追加后复核）', () => {
+    const plan = [
+      entry({ no: '一', title: '附表一 拟投入本标段的主要施工设备表', dataSource: 'blueprint.equipment' }),
+      entry({ no: '二', title: '附表二 拟配备本标段的试验和检测仪器设备表', dataSource: 'blueprint.testInstruments' }),
+      entry({ no: '四', title: '附表四 计划开、竣工日期和施工进度网络图', kind: 'figure' }),
+      entry({ no: '六', title: '附表六 临时用地表', dataSource: 'blueprint.tempLand' }),
+      entry({ no: '七', title: '附表七 拟分包项目情况表', dataSource: 'manual' }),
+    ];
+    const section = composeTenderAppendixMarkdown(plan, blueprintData);
+    for (const item of plan) expect(appendixEntryCarried(section, item)).toBe(true);
+    const final = appendTenderAppendixSections('## 第一章 编制说明\n\n正文段落。', { plan, blueprintData });
+    for (const item of plan) expect(appendixEntryCarried(final, item)).toBe(true);
   });
 });
 

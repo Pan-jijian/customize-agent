@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { CanonicalFact as GovernedCanonicalFact, CanonicalFactModel, DocumentEvidence, DocumentFact, NumericScopeConflict, ProjectGraph } from './types';
-import { cleanPdfHeadingNoise, normalizeOcrFactText } from './factsModel';
+import { cleanPdfHeadingNoise, normalizeOcrFactText, stripTrailingNameCodeBinding } from './factsModel';
 import { stableHash, stringifyFactValue } from './utils';
 import { recordArbitrationCases } from './workflowCaseLog';
 import { loadWorkflowRules, workflowRulesHash, type WorkflowRulesConfig } from './workflowRules';
@@ -445,7 +445,9 @@ function governedFactFromCanonical(fact: CanonicalFact): GovernedCanonicalFact {
 }
 
 function governedFactFromDocumentFact(fact: DocumentFact, key: string, label: string): GovernedCanonicalFact {
-  const value = stringifyFactValue(fact.value);
+  // C-T7（#4）：canonical 候选值清洗——「名称+2.2招标项目编号：XXXX」连读尾段剥离为纯名称，
+  // 与编号独立事实分属两个字段（多源对账不再产出「名称 vs 名称+编号」假冲突）
+  const value = stripTrailingNameCodeBinding(stringifyFactValue(fact.value));
   const sourceType = factSourceType(fact);
   return {
     key,

@@ -264,12 +264,15 @@ export function documentBudgetIssues(budget: DocumentBudget, markdown: string): 
     issues.push({ level: 'error', message: `正文篇幅超过目标字数区间：当前 ${currentChars} 字，建议不超过 ${budget.maxChars} 字`, suggestion: '请压缩重复段落、过细小节或过度展开内容后再导出。' });
   } else if (budget.maxChars && currentChars > budget.maxChars) {
     issues.push({ level: 'warning', message: `正文篇幅超过目标字数区间：当前 ${currentChars} 字，建议不超过 ${budget.maxChars} 字`, suggestion: '建议减少重复段落、过细小节或过度展开内容。' });
+  } else if (budget.mode === 'minimum' && budget.targetChars && currentChars > Math.ceil(budget.targetChars * 1.4)) {
+    // 4.40 篇幅上限硬约束（r26 阈值理性化）：minimum 语义旧实现「不少于 X 字」只设下限（4.33 仅升 warning
+    // 不阻断），实测某暗标项目 14 万目标产出 22 万字（+57%）的膨胀被静默放行。阻断线确立依据：真实膨胀设计场景
+    // (+57%) 必须落入阻断；LLM 落笔自然波动区间（15%~25%，r24b 实测 +17%、r25 实测 +24%）不阻断——
+    // 旧 +20% 阻断线落在波动区间内，正常生成随机触发硬阻断。+20%~+40% 与 +15%~+20% 分级 warning
+    // 提示收敛，仍可经修复轮与人工定位篇幅异常（宁缺毋假：超产文档有轨迹可查，但不阻断交付）。
+    issues.push({ level: 'error', message: `正文篇幅严重超出目标字数：当前 ${currentChars} 字，目标约 ${budget.targetChars} 字（超出 ${Math.round((currentChars / budget.targetChars - 1) * 100)}%，超过 40% 即阻断）`, suggestion: '按章节完成率定位超产章节，压缩重复段落与过度展开内容（保留全部事实与关键数值），使正文回到目标篇幅附近后重新验收。' });
   } else if (budget.mode === 'minimum' && budget.targetChars && currentChars > Math.ceil(budget.targetChars * 1.2)) {
-    // 4.40 篇幅上限硬约束：minimum 语义旧实现「不少于 X 字」只设下限（4.33 仅升 warning 不阻断），
-    // 舒城 14 万目标产出 22 万字的膨胀被静默放行。块级合同（1.15×块目标）之上的章级叠加
-    // （要求补写/表格回填/终稿扩写）超出目标 20% 即为实质性膨胀：置 error → severity 自动升 blocker
-    // → 进修复/门禁/复核清单链，不允许超产文档静默交付（宁缺毋假）。
-    issues.push({ level: 'error', message: `正文篇幅严重超出目标字数：当前 ${currentChars} 字，目标约 ${budget.targetChars} 字（超出 ${Math.round((currentChars / budget.targetChars - 1) * 100)}%，超过 20% 即阻断）`, suggestion: '按章节完成率定位超产章节，压缩重复段落与过度展开内容（保留全部事实与关键数值），使正文回到目标篇幅附近后重新验收。' });
+    issues.push({ level: 'warning', message: `正文篇幅明显超出目标字数：当前 ${currentChars} 字，目标约 ${budget.targetChars} 字（超出 ${Math.round((currentChars / budget.targetChars - 1) * 100)}%，超过 40% 将阻断）`, suggestion: '建议压缩重复段落与过度展开内容，使正文接近目标篇幅。' });
   } else if (budget.mode === 'minimum' && budget.targetChars && currentChars > Math.ceil(budget.targetChars * 1.15)) {
     // 超幅 15%~20%：warning 提示收敛（不阻断导出），供修复轮与人工定位篇幅异常
     issues.push({ level: 'warning', message: `正文篇幅超出目标字数：当前 ${currentChars} 字，目标约 ${budget.targetChars} 字（超出 ${Math.round((currentChars / budget.targetChars - 1) * 100)}%）`, suggestion: '建议压缩重复段落与过度展开内容，使正文接近目标篇幅。' });
@@ -287,4 +290,20 @@ export function documentBudgetStatus(budget: DocumentBudget, markdown: string) {
   const currentChars = documentTextLength(markdown);
   const estimatedPages = Math.ceil(currentChars / budget.charsPerPage);
   return { currentChars, estimatedPages };
+}
+
+/** D-T3 篇幅压缩触发单源：成稿字数超出目标 20%（任务验收线「目标 ±20% 内」）时返回压缩目标，
+ * 未超标返回 undefined。阈值与 documentBudgetIssues 的 minimum 模式 >120%「明显超出」判定严格同口径
+ *（4.40 理性化：15%~25% 属 LLM 自然波动不压缩），压缩目标 aimChars 取目标 110%——回到容差带内
+ * 并留 10% 安全余量，避免修复后贴线复发。 */
+export function documentLengthOverflow(budget: DocumentBudget, markdown: string): { currentChars: number; targetChars: number; excessRatio: number; aimChars: number } | undefined {
+  if (!budget.targetChars || budget.targetChars <= 0) return undefined;
+  const currentChars = documentTextLength(markdown);
+  if (currentChars <= Math.ceil(budget.targetChars * 1.2)) return undefined;
+  return {
+    currentChars,
+    targetChars: budget.targetChars,
+    excessRatio: currentChars / budget.targetChars - 1,
+    aimChars: Math.ceil(budget.targetChars * 1.1),
+  };
 }

@@ -83,6 +83,28 @@ describe('C headingUncoveredEngineeringItems 标题工程存在性检测（丰�
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('幕墙');
   });
+
+  it('r28f B4 回归：通用分类词豁免 + 复合词段 2 字组拆分覆盖（r28e 实况「1.1.3 绿化栽植与配套工程」）', () => {
+    // r28e 实机阻断：标题词段「绿化栽植」在正文以拆分形态覆盖（「绿化工程包括…色带栽植…」），
+    // 连续匹配不命中误报未覆盖；「配套」是通用分类后缀词（正文以具体构件承载），不作未覆盖词段
+    const markdown = [
+      '#### 1.1.3 绿化栽植与配套工程',
+      '绿化工程包括小型乔木、灌木、色带栽植及铺种草皮、喷播植草籽，养护等级为二级，养护期两年。生态池外围栽植色带90m²，金属扶手、栏杆、栏板共224m，菜园围栏2360m，入口标识38.8m。',
+      '### 1.2 主要施工内容',
+    ].join('\n');
+    expect(headingUncoveredEngineeringItems(markdown)).toHaveLength(0);
+  });
+
+  it('r28f B4 边界：2 字组拆分须全块命中（「栽植」缺失仍判未覆盖，不放松）', () => {
+    const markdown = [
+      '#### 1.1.3 绿化栽植与配套工程',
+      '绿化工程包括整理绿化用地与铺种草皮，养护等级为二级。',
+      '### 1.2 主要施工内容',
+    ].join('\n');
+    const issues = headingUncoveredEngineeringItems(markdown);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('绿化栽植');
+  });
 });
 
 describe('D 事实值编号粘连截断与规模类字段分号（丰乐镇第 3 轮）', () => {

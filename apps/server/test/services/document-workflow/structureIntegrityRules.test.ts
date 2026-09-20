@@ -183,6 +183,35 @@ describe('scanStructureDefects 截断/空节/断裂（blocking 域）', () => {
     expect(result.blocking.filter(defect => defect.kind === 'truncated-line')).toEqual([]);
   });
 
+  it('r26 B2：题注行（表N-N 前缀）后接表格不误报截断', () => {
+    const markdown = [
+      '### 10.2 材料堆场与加工区落实',
+      '施工总平面布置要素与控制标准如下表所示。',
+      '表10-1 施工总平面布置要素与控制标准',
+      '',
+      '| 布置要素 | 设置位置 | 控制标准 | 责任岗位 | 检查频次 |',
+      '| --- | --- | --- | --- | --- |',
+      '| 级配碎石堆场 | 各村施工段端头 | 堆高≤1.5m | 材料员 | 每日1次 |',
+    ].join('\n');
+    const result = scanStructureDefects(markdown);
+    expect(result.blocking.filter(defect => defect.kind === 'truncated-line')).toEqual([]);
+  });
+
+  it('r28h 扩围：引导句与表题同行（「……核对。表3-4 题名」+下接表格）不误报截断', () => {
+    // r28h2 实机 4 处误报均为该形态：行尾为表题名（题名内无句末标点）属「引导句+表题+表格」
+    // 正常结构，原豁免只覆盖行首独立题注行、同行形态被判句尾截断直坠终门禁
+    const markdown = [
+      '### 4.4 物资进场检验与存放',
+      '物资按批次逐班核对。表3-4 物资进场检验与存放管理台账',
+      '',
+      '| 物资名称 | 检验项目 | 频次 |',
+      '| --- | --- | --- |',
+      '| 碎石 | 级配 | 每批 |',
+    ].join('\n');
+    const result = scanStructureDefects(markdown);
+    expect(result.blocking.filter(defect => defect.kind === 'truncated-line')).toEqual([]);
+  });
+
   it('空小节（2.11.2 后直落同级标题）→ empty-subsection', () => {
     const markdown = [
       '### 2.11.1 施工准备措施',

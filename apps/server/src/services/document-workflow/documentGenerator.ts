@@ -29,7 +29,10 @@ export async function generateDocumentDraft(input: { templateId: string; require
       integratedBlueprint: undefined,
       blueprintActive: false,
       requirementAssignments: [],
+      structureAssignments: [],
+      structureUnattached: [],
       billFactLock: undefined,
+      drawingFactLock: undefined,
     },
     chapterLoop: { draftPhaseStartedAt: 0, chapterDraftsFinal: [], globalReviewPhaseStartedAt: 0 },
   };
@@ -137,6 +140,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     blueprintData: session.blueprint.integratedBlueprint?.validation.passed ? session.blueprint.integratedBlueprint.data : undefined,
     bidComposition: session.understanding.bidComposition,
     billFactLock: session.blueprint.billFactLock,
+    drawingFactLock: session.blueprint.drawingFactLock,
     requirementSemantics: session.prepare.requirementSemantics,
     hasExplicitOutline: session.prepare.hasExplicitOutline, missingItems: session.understanding.missingItems, retrievalCoverageReports: session.understanding.retrievalCoverageReports,
     failedChapterMessages: session.understanding.failedChapterMessages, webResearchReport: session.understanding.webResearchReport, indexHealth: session.understanding.indexHealth, promptPlan: session.prepare.promptPlan,

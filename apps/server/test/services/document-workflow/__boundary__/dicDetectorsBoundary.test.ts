@@ -106,6 +106,32 @@ describe('A1 fabricatedStartDateIssues 编造开工日期', () => {
   it('A1 非日历形态（2026-03-01）不匹配 → 不报', () => {
     expect(fabricatedStartDateIssues('开工日期2026-03-01，以开工令为准。', factsOf({}))).toEqual([]);
   });
+  it('A1 r28h 归因：法规文件印发日期引用豁免（日期+文件动词+书名号）', () => {
+    // s28h2 实测：法规真实落款日期被报「编造开工日期」误报（该日期为文件公开印发日期，非自行设定）
+    const md = '施工中严格对照2024年12月25日住房城乡建设部办公厅印发的《危险性较大的分部分项工程专项施工方案严重缺陷清单（试行）》逐项自查。';
+    expect(fabricatedStartDateIssues(md, factsOf({}))).toEqual([]);
+  });
+  it('A1 r28h 归因：自X日起施行的《…》形态豁免（「施行」与书名号间隔 1 字在窗口内）', () => {
+    const md = '依据自2025年3月1日起施行的《建设工程质量管理条例》组织施工。';
+    expect(fabricatedStartDateIssues(md, factsOf({}))).toEqual([]);
+  });
+  it('A1 r28h 归因反例：自X日起实施封闭管理（非文件引用）→ 仍报', () => {
+    // 锁定设计：第二分支「施行/实施/生效」被否决（「自X日起实施…」是自行设定日期的高频形态）
+    const issues = fabricatedStartDateIssues('本工程自2025年3月1日起实施封闭管理。', factsOf({}));
+    expectBlockIssue(issues, '编造开工日期“2025年3月1日”');
+  });
+  it('A1 r28h 归因反例：文件动词后无书名号（发布通知）→ 仍报', () => {
+    const issues = fabricatedStartDateIssues('2025年3月1日发布通知。', factsOf({}));
+    expectBlockIssue(issues, '编造开工日期“2025年3月1日”');
+  });
+  it('A1 r28h 归因边界：日期右侧首个句读截断（发布。随后依据《…》）→ 仍报', () => {
+    const issues = fabricatedStartDateIssues('2025年3月1日发布。随后依据《规范》组织施工。', factsOf({}));
+    expectBlockIssue(issues, '编造开工日期“2025年3月1日”');
+  });
+  it('A1 r28h 归因边界：文件动词与书名号间隔超 8 字不豁免', () => {
+    const issues = fabricatedStartDateIssues('2025年3月1日印发文件并转发至各项目部执行《规范》要求。', factsOf({}));
+    expectBlockIssue(issues, '编造开工日期“2025年3月1日”');
+  });
 });
 
 describe('A2 fieldValueMismatchIssues 字段-数值错配', () => {
@@ -967,32 +993,36 @@ describe('D3 sixHundredPercentCoverageIssues 六个百分百', () => {
 });
 
 describe('D4 localAdaptationKeywordIssues 属地适配', () => {
-  const anhuiFacts = (): DocumentFactsModel => factsOf({ project: [factOf({ fieldName: '建设地点', value: '安徽省合肥市肥东县' })] });
+  // 属地判定产品级通用：建设地点类字段有值即触发属地增强项，不限具体省份（省名仅为测试样例数据）
+  const locatedFacts = (): DocumentFactsModel => factsOf({ project: [factOf({ fieldName: '建设地点', value: '安徽省合肥市肥东县' })] });
   const THREE_HITS = '本工程争创市级优质工程奖。施工用水采用非传统水源，回收率指标量化管理。为全体作业人员办理工伤保险。';
-  it('D4 安徽项目三项语义命中 → 不报', async () => {
-    expect(await localAdaptationKeywordIssues(THREE_HITS, anhuiFacts())).toEqual([]);
+  it('D4 属地项目三项语义命中 → 不报', async () => {
+    expect(await localAdaptationKeywordIssues(THREE_HITS, locatedFacts())).toEqual([]);
   });
-  it('D4 安徽全缺 → 创优+工伤双报', async () => {
+  it('D4 属地项目全缺 → 创优+工伤双报', async () => {
     vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.1));
-    const issues = await localAdaptationKeywordIssues('建立劳务用工管理制度。', anhuiFacts());
+    const issues = await localAdaptationKeywordIssues('建立劳务用工管理制度。', locatedFacts());
     expect(issues).toHaveLength(2);
     expect(issues.map(issue => issue.message).join('')).toContain('属地创优目标缺失');
     expect(issues.map(issue => issue.message).join('')).toContain('工伤保险表述缺失');
   });
-  it('D4 非安徽 → 不查创优', async () => {
+  it('D4 任意省份属地项目均执行创优检测（产品通用：不限具体省份）', async () => {
     vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.1));
     const facts = factsOf({ project: [factOf({ fieldName: '建设地点', value: '江苏省南京市' })] });
-    expect(await localAdaptationKeywordIssues('施工管理规范。', facts)).toEqual([]);
+    const issues = await localAdaptationKeywordIssues('施工管理规范。', facts);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('属地创优目标缺失');
   });
-  it('D4 非安徽+劳务词 → 仅工伤报', async () => {
+  it('D4 属地项目+劳务词 → 创优与工伤双报', async () => {
     vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.1));
     const facts = factsOf({ project: [factOf({ fieldName: '建设地点', value: '江苏省南京市' })] });
     const issues = await localAdaptationKeywordIssues('建立劳务用工管理制度。', facts);
-    expect(issues).toHaveLength(1);
-    expect(issues[0].message).toContain('工伤保险表述缺失');
+    expect(issues).toHaveLength(2);
+    expect(issues.map(issue => issue.message).join('')).toContain('属地创优目标缺失');
+    expect(issues.map(issue => issue.message).join('')).toContain('工伤保险表述缺失');
   });
-  it('D4 安徽有绿色词无量化语义 → 四节一环保报', async () => {
-    const facts = anhuiFacts();
+  it('D4 属地项目有绿色词无量化语义 → 四节一环保报', async () => {
+    const facts = locatedFacts();
     const md = '本工程争创市级优质工程奖。落实绿色施工要求。为全体作业人员办理工伤保险。';
     const issues = await localAdaptationKeywordIssues(md, facts);
     expect(issues).toHaveLength(1);
@@ -1001,32 +1031,34 @@ describe('D4 localAdaptationKeywordIssues 属地适配', () => {
   it('D4 正文无绿色词 → 不报四节一环保', async () => {
     vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.1));
     const md = '本工程争创市级优质工程奖。为全体作业人员办理工伤保险。';
-    const issues = await localAdaptationKeywordIssues(md, anhuiFacts());
+    const issues = await localAdaptationKeywordIssues(md, locatedFacts());
     expect(issues.map(issue => issue.message).join('')).not.toContain('四节一环保');
   });
-  it('D4 工伤语义命中+无劳务词 → 不报工伤', async () => {
+  it('D4 属地项目工伤表述在但无劳务门词 → 仅报创优', async () => {
     vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.1));
     const facts = factsOf({ project: [factOf({ fieldName: '建设地点', value: '江苏省南京市' })] });
-    expect(await localAdaptationKeywordIssues('为全体作业人员办理工伤保险。', facts)).toEqual([]);
+    const issues = await localAdaptationKeywordIssues('为全体作业人员办理工伤保险。', facts);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('属地创优目标缺失');
   });
-  it('D4 省内城市别名（合肥）→ 判安徽', async () => {
+  it('D4 地级市单写形态（合肥市）→ 属地增强触发', async () => {
     vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.1));
     const facts = factsOf({ project: [factOf({ fieldName: '建设地点', value: '合肥市' })] });
     const issues = await localAdaptationKeywordIssues('建立劳务用工管理制度。', facts);
     expect(issues.map(issue => issue.message).join('')).toContain('属地创优目标缺失');
   });
-  it('D4 非地点字段不判属地（建设单位含安徽）', async () => {
+  it('D4 非地点类字段不触发属地增强（建设单位含省名不误判）', async () => {
     vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.1));
     const facts = factsOf({ project: [factOf({ fieldName: '建设单位', value: '安徽建工集团' })] });
     expect(await localAdaptationKeywordIssues('施工管理规范。', facts)).toEqual([]);
   });
-  it.each(['建设地点', '工程地点', '项目地点', '实施地点', '服务地点', '交付地点', '建设地址'])('D4 地点标签 %s 判安徽', async (label) => {
+  it.each(['建设地点', '工程地点', '项目地点', '实施地点', '服务地点', '交付地点', '建设地址'])('D4 地点标签 %s 触发属地增强', async (label) => {
     const facts = factsOf({ project: [factOf({ fieldName: label, value: '安徽省合肥市' })] });
     const issues = await localAdaptationKeywordIssues(THREE_HITS, facts);
     expect(issues).toEqual([]);
   });
   it('D4 四节词谱系触发（节水）', async () => {
-    const facts = anhuiFacts();
+    const facts = locatedFacts();
     const md = '本工程争创市级优质工程奖。落实节水措施。为全体作业人员办理工伤保险。';
     const issues = await localAdaptationKeywordIssues(md, facts);
     expect(issues[0].message).toContain('四节一环保量化指标缺失');
@@ -1035,18 +1067,19 @@ describe('D4 localAdaptationKeywordIssues 属地适配', () => {
     vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.1));
     const facts = factsOf({ project: [factOf({ fieldName: '建设地点', value: '江苏省南京市' })] });
     const issues = await localAdaptationKeywordIssues('农民工工资按月足额发放。', facts);
-    expect(issues[0].message).toContain('工伤保险表述缺失');
+    expect(issues.map(issue => issue.message).join('')).toContain('工伤保险表述缺失');
   });
   it('D4 书名号法规引用不构成劳资内容 → 不报工伤', async () => {
     vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.1));
     const facts = factsOf({ project: [factOf({ fieldName: '建设地点', value: '江苏省南京市' })] });
-    expect(await localAdaptationKeywordIssues('编制依据：《保障农民工工资支付条例》（国务院令第724号）、现行规范标准。', facts)).toEqual([]);
+    const issues = await localAdaptationKeywordIssues('编制依据：《保障农民工工资支付条例》（国务院令第724号）、现行规范标准。', facts);
+    expect(issues.map(issue => issue.message).join('')).not.toContain('工伤保险表述缺失');
   });
   it('D4 法规引用+正文劳资内容 → 仍报工伤', async () => {
     vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.1));
     const facts = factsOf({ project: [factOf({ fieldName: '建设地点', value: '江苏省南京市' })] });
     const issues = await localAdaptationKeywordIssues('农民工工资按月足额发放，依据《保障农民工工资支付条例》执行。', facts);
-    expect(issues[0].message).toContain('工伤保险表述缺失');
+    expect(issues.map(issue => issue.message).join('')).toContain('工伤保险表述缺失');
   });
 });
 
@@ -1349,6 +1382,70 @@ describe('E6 selfUnderminingCandidateIssues 自伤表述候选', () => {
     const md = '养护记录缺失的责任班组未按期整改。';
     expect(await selfUnderminingCandidateIssues(md)).toHaveLength(1);
   });
+  it('E6 r25 条件-调配-保障三段式豁免：未完成区段调整班组配置并确保工期不突破（恒值语义下不召回）', async () => {
+    // r24b 实机 B5：「未完成」是资源调配的触发条件、「调整/调拨」是调配动作、「确保…不突破」是
+    // 目标保障，属进度纠偏的管理措施描述，非投标短板自述——分支⑬豁免（真伤护栏见下条）
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '对连续2日未完成日计划的区段，技术负责人当日调整班组配置，从已完成区段调拨混凝土工补位，确保10天道路铺装工期不突破。';
+    expect(await selfUnderminingCandidateIssues(md)).toEqual([]);
+  });
+  it('E6 r25 三段式真伤护栏：保障尾非目标集的自述仍召回（豁免未过宽）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '对尚未落实的分包计划，加强统筹协调，确保顺利。';
+    expect(await selfUnderminingCandidateIssues(md)).toHaveLength(1);
+  });
+  it('E6 r23 P3b 条件-处置-放行管控句豁免：未闭合的由材料员补齐后方可报验（恒值语义下不召回）', async () => {
+    // r22 实况 B1：「…平台数据已完整闭合，未闭合的由材料员补齐后方可报验」被从句内「未闭合」
+    // 误推入语义召回——「未X的+由+处置+放行」是管控规则从句（触发条件+流程本体），剥离
+    // 该从句后再测负向词不召回；真伤句主干断言形态不受剥离影响（见下条反例）
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '施工员在申请隐蔽验收前，须确认该部位所用物资的平台数据已完整闭合，未闭合的由材料员补齐后方可报验。';
+    expect(await selfUnderminingCandidateIssues(md)).toEqual([]);
+  });
+  it('E6 r23 P3b 反例：主干仍有负向词的现状断言句剥离后仍召回（豁免未过宽）', async () => {
+    // 「部分专项设计尚未完成」是主干现状断言（自伤），从句「未完成的由设计组补齐后方可实施」
+    // 被剥离后主干负向词「尚未」仍命中，保持召回
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '本项目部分专项设计尚未完成，未完成的由设计组补齐后方可实施。';
+    expect(await selfUnderminingCandidateIssues(md)).toHaveLength(1);
+  });
+  it('E6 r23 P3b 工序准入管控句豁免：未完成闭水试验…不得开工（恒值语义下不召回）', async () => {
+    // r22 实况漏网：「任何一段管网未完成闭水试验或回填压实度未达标，该段道路结构层不得开工」
+    // 是工序交接准入规则（前道工序质量未确认不得进入下道工序）——⑫ 分支中距扩宽、尾部动作表
+    // 并入「开工」类工序词后豁免；真伤护栏复验见下条
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '任何一段管网未完成闭水试验或回填压实度未达标，该段道路结构层不得开工。';
+    expect(await selfUnderminingCandidateIssues(md)).toEqual([]);
+  });
+  it('E6 r23 P3b 反例：无禁止结构的未完成自述仍召回（准入豁免未过宽）', async () => {
+    // 无「不得/严禁」禁令结构 → 不属准入规则句，现状断言保持召回
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '本工程部分子单位工程的专项验收尚未完成。';
+    expect(await selfUnderminingCandidateIssues(md)).toHaveLength(1);
+  });
+  it('E6 r28j M12 无引导招标授权条款豁免：…时，发包人有权…（r28i 实机，恒值语义下不召回）', async () => {
+    // 「本工程范围内部分实施内容缺乏成文标准或规范时，发包人（或其委托的第三方）有权在
+    // 合理期限内提出书面技术要求」——无「如/若」引导的合同授权条款（分支⑦前置扩「…时，+招标主体」）
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '本工程范围内部分实施内容缺乏成文标准或规范时，发包人（或其委托的第三方）有权在合理期限内（一般不超过60日历天）提出书面技术要求，我方应据此提交具体的实施方法，报经发包人审核认可后执行。';
+    expect(await selfUnderminingCandidateIssues(md)).toEqual([]);
+  });
+  it('E6 r28j M12 管理处置句豁免：发现记录缺失当日补录并追查原因（动作表扩围，恒值语义下不召回）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '作业面巡视中发现记录缺失的，责任岗位当日补录并追查原因，项目经理每周复核处置情况。';
+    expect(await selfUnderminingCandidateIssues(md)).toEqual([]);
+  });
+  it('E6 r28j M12 法规口号句豁免：未查清/未落实不放过枚举（新增「未X不放过」分支，恒值语义下不召回）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '事故处理坚持四不放过原则，即事故原因未查清不放过、责任人员未处理不放过、整改措施未落实不放过、有关人员未受到教育不放过。';
+    expect(await selfUnderminingCandidateIssues(md)).toEqual([]);
+  });
+  it('E6 r28j M12 反例：无授权链的「缺乏成文标准」现状断言仍召回（扩围未过宽）', async () => {
+    // 无「…时，+招标主体有权」授权链、无处置动作、无「不放过」枚举 → 现状短板自述保持召回
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '本工程范围内部分实施内容缺乏成文标准或规范。';
+    expect(await selfUnderminingCandidateIssues(md)).toHaveLength(1);
+  });
 });
 
 describe('E7 叠词检测与去重（REPEATED_WORD_RE）', () => {
@@ -1626,5 +1723,41 @@ describe('E12 runDeterministicChainUntilConverged 链级收敛循环', () => {
   it('E12 前修复器输出供后修复器消费', () => {
     const result = runDeterministicChainUntilConverged([stepOne, stepTwo], '121');
     expect(result.markdown).toBe('333');
+  });
+});
+
+// ── E13. r28h M6 语境剥离链（s28h2 终门禁 16/17/18 号误报归因） ──
+// 负向词闸门测前剥离三类非现状断言语境：禁止借口框架/否定防护/条件假设。
+// 负向用例全部锁定恒值语义 0.9——剥离链是唯一决定因素（剥离失效即召回，用例转红），
+// 与 E6「恒值语义下不召回」口径同源；真伤护栏锁「剥离后主干负向词仍存活则召回」。
+
+describe('E13 selfUnderminingCandidateIssues 语境剥离链（r28h M6）', () => {
+  it('E13 禁止借口框架剥离：不得以详图缺失为由（恒值语义下不召回）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '图纸说明与详图未单独标注做法的部位，一律按说明做法计入，材料员按说明做法对应的材料规格与工艺要求组织采购，施工员按说明做法逐项交底，质检员按说明做法核验工序质量，不得以详图缺失为由擅自变更做法';
+    expect(await selfUnderminingCandidateIssues(md)).toEqual([]);
+  });
+  it('E13 否定/防护语境剥离：确认无松动、无缺失（恒值语义下不召回）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '每搭设完一步架体，由施工员会同安全员检查扣件紧固程度和连墙件设置，确认无松动、无缺失后继续向上搭设';
+    expect(await selfUnderminingCandidateIssues(md)).toEqual([]);
+  });
+  it('E13 条件假设句剥离：若各专业之间缺乏统一标准（恒值语义下不召回）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '各施工点之间距离远、作业面零散，同一时段内拆除、管线、铺装、绿化、机电安装并行展开，若各专业之间缺乏统一的接口移交标准和调试时序约束，极易出现前端设备安装完成但联网调试滞后、箱体就位但基槽未移交、回填完成但压实度检测记录缺失等界面脱节问题';
+    expect(await selfUnderminingCandidateIssues(md)).toEqual([]);
+  });
+  it('E13 假设截断护栏：「若」前主干真伤仍召回（恒值语义）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    const md = '本项目部分专项设计尚未完成，若后续图纸调整将同步修订方案。';
+    const issues = await selfUnderminingCandidateIssues(md);
+    expectBlockIssue(issues, '自伤表述候选');
+    expect(issues[0].message).toContain('尚未完成');
+  });
+  it('E13 剥离链不破坏真伤召回：待补充/缺口/分包否定式（恒值语义）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    expect(await selfUnderminingCandidateIssues('专项设计文件尚未完成，相关内容待后续补充。')).toHaveLength(1);
+    expect(await selfUnderminingCandidateIssues('评分指标存在缺口尚未明确。')).toHaveLength(1);
+    expect(await selfUnderminingCandidateIssues('本工程不进行分包，全部施工内容由我方自行组织完成。')).toHaveLength(1);
   });
 });

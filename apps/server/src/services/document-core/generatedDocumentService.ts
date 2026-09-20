@@ -799,7 +799,7 @@ function launchTask(job: {
     if (!current || current.status !== 'generating') return current ?? initial;
     const hiddenDiagnosticRe = /结构化事实读取不足|正文可能未显式覆盖|仅包含文件类型和占位符|不在本次招标范围内|知识库文件索引失败|暂无可检索内容切片|未抽取到结构化事实|兜底片段|资料抽取诊断|无法直接读取文本内容|占位符|缺乏详细的.*具体尺寸|需结合原文件进一步深化|章节生成存在兜底/u;
     const markdown = result.markdown || '';
-    const hasIllegalH2 = /^##\s+(?!目录$)(?!附录)(?!第[一二三四五六七八九十百千万\d]+章\s+)/gmu.test(markdown);
+    const hasIllegalH2 = /^##\s+(?!目录$)(?!附录)(?!附表\s*[一二三四五六七八九十\d]{1,3})(?!第[一二三四五六七八九十百千万\d]+章\s+)/gmu.test(markdown);
     const hasPageRefs = /(?:第?\d+页|P\.?\s*\d+)/iu.test(markdown);
     const hasForbiddenParty = /施工方/u.test(markdown);
     const warningIssues = result.validationIssues

@@ -3,7 +3,7 @@
  * 均为 L2 确定性结构检测，无需语义通道。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { applyDeterministicConsistencyFixesToMarkdown, basisRegulationsCoverageIssues, boqPlacementIssues, resourceBreakdownConsistencyIssues, collectSectionContentGaps, crossChapterConsistencyIssues, criticalPreciseTokens, evaluationCriteriaCoreKeywords, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, missingCriticalPreciseTokens, preciseFactUsageIssues, processSpecConflictIssues, punctuationArtifactIssues } from '@/services/document-workflow/qualityValidation';
+import { applyDeterministicConsistencyFixesToMarkdown, basisRegulationsCoverageIssues, boqPlacementIssues, resourceBreakdownConsistencyIssues, collectSectionContentGaps, crossChapterConsistencyIssues, criticalPreciseTokens, degenerateContentIssues, evaluationCriteriaCoreKeywords, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, markdownTableQualityIssues, missingCriticalPreciseTokens, preciseFactUsageIssues, processSpecConflictIssues, punctuationArtifactIssues } from '@/services/document-workflow/qualityValidation';
 import type { BlueprintData } from '@/services/document-workflow/integratedBlueprint';
 import type { DocumentDraftChapter, DocumentFactsModel } from '@/services/document-workflow/types';
 
@@ -65,6 +65,60 @@ describe('boqPlacementIssues 口径行排除（V5 P6 run1 实测）', () => {
   });
 });
 
+describe('C-T5 落位口径（90% 阈值 + 显性说明审计 + 责任章标注）', () => {
+  function tablesFactsModel(headers: string[], rows: string[][]): DocumentFactsModel {
+    return {
+      project: [], schedule: [], quality: [], safety: [], resources: [],
+      drawings: [], rules: [], bills: [], preciseFacts: [], schemaFacts: {}, factIndex: {},
+      missing: [], conflicts: [], specifications: [], canonical: { byKey: {} },
+      tables: [{ headers, rows }],
+    } as unknown as DocumentFactsModel;
+  }
+
+  const boqModel = (names: string[]) => tablesFactsModel(
+    ['项目编码', '项目名称', '单位', '工程量'],
+    names.map((name, index) => [`0309010100${String(index + 1).padStart(2, '0')}`, name, 'm3', '10']),
+  );
+
+  it('有效行处置率 85% 报不足（90% 阈值），90% 边界达标不报', async () => {
+    const names = Array.from({ length: 20 }, (_, index) => `测试条目${String(index + 1).padStart(2, '0')}`);
+    const model = boqModel(names);
+    const notEnough = await boqPlacementIssues(`本工程完成${names.slice(0, 17).join('、')}等施工。`, [], model);
+    expect(notEnough).toHaveLength(1);
+    expect(notEnough[0]!.message).toContain('/20 项');
+    expect(notEnough[0]!.message).toContain('85%');
+    const boundary = await boqPlacementIssues(`本工程完成${names.slice(0, 18).join('、')}等施工。`, [], model);
+    expect(boundary).toEqual([]);
+  });
+
+  it('显性说明与豁免行登记进落位审计（区分说明式处置与施工内容落位）', async () => {
+    const model = tablesFactsModel(['项目编码', '项目名称', '单位', '工程量'], [
+      ['030901010001', '挖一般土方', 'm3', '100'],
+      ['030901010002', '混凝土管铺设', 'm', '80'],
+      ['030901010003', '回填方', 'm3', '50'],
+      ['', '分部小计', '', ''],
+    ]);
+    const issues = await boqPlacementIssues('本工程完成挖一般土方施工。原有混凝土管铺设利旧使用，不另列施工方案。', [], model);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toContain('2/3 项');
+    expect(issues[0]!.suggestion).toContain('口径行 1 行');
+    expect(issues[0]!.suggestion).toContain('显性说明 1 行');
+  });
+
+  it('未落位项标注责任章（行级任务清单驱动修复定位）', async () => {
+    const model = tablesFactsModel(['项目编码', '项目名称', '单位', '工程量'], [
+      ['030901010001', '排水管道铺设', 'm', '80'],
+    ]);
+    const chapters: DocumentDraftChapter[] = [
+      { id: 'ch-3', title: '第三章 组织机构与资源配置', content: '', evidence: [], missingFacts: [] },
+      { id: 'ch-5', title: '第五章 排水工程施工方案', content: '', evidence: [], missingFacts: [] },
+    ];
+    const issues = await boqPlacementIssues('本工程完成其他工作。', chapters, model);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toContain('建议落位「第五章 排水工程施工方案」');
+  });
+});
+
 describe('formalContentIntegrityIssues 截断词表扩展（h13c）', () => {
   it('以「复查合格后」结尾且无句号 → 报截断句', () => {
     const issues = formalContentIntegrityIssues('材料进场检查发现不合格品立即隔离退场，复查合格后');
@@ -101,7 +155,7 @@ describe('formalContentIntegrityIssues 截断词表扩展（h13c）', () => {
   });
 });
 
-describe('formalPlaceholderIssues 占位式表达（h13c 词表扩展）', () => {
+describe('formalPlaceholderIssues 占位式表达（h13c 词表扩展 + D-T5 口径统一）', () => {
   it('「依据本项目已确认资料」占位式表达 → 报', () => {
     const issues = formalPlaceholderIssues('锚杆注浆压力依据本项目已确认资料确定。');
     expect(issues.some(issue => /占位式表达/u.test(issue.message))).toBe(true);
@@ -110,6 +164,57 @@ describe('formalPlaceholderIssues 占位式表达（h13c 词表扩展）', () =>
   it('正常事实表述 → 不报', () => {
     const issues = formalPlaceholderIssues('锚杆注浆压力按0.4MPa～0.6MPa控制。');
     expect(issues.some(issue => /占位式表达/u.test(issue.message))).toBe(false);
+  });
+
+  it('D-T5 #41：按资料/按文件/按说明 为留白 → 报（round-27 口径保留）', () => {
+    expect(formalPlaceholderIssues('回填工艺按资料确定。').some(issue => /占位式表达/u.test(issue.message))).toBe(true);
+    expect(formalPlaceholderIssues('管道基础处理按文件执行。').some(issue => /占位式表达/u.test(issue.message))).toBe(true);
+  });
+
+  it('D-T5 #41：按规范/按方案/按标准/按要求 为正常施组表述 → 不报（r28f 实测「按规范留置试块/按方案配置」误报归因）', () => {
+    expect(formalPlaceholderIssues('试验员按规范留置标养与同条件试块。').some(issue => /占位式表达/u.test(issue.message))).toBe(false);
+    expect(formalPlaceholderIssues('论证通过后按方案实施，应急物资按方案配置。').some(issue => /占位式表达/u.test(issue.message))).toBe(false);
+  });
+
+  it('D-T5 #42：表格数据格占位符豁免口径单源（豁免列「—」不报、非豁免列「待定/无」报）', () => {
+    const exempted = [
+      '| 序号 | 机械或设备名称 | 规格型号 | 数量 |',
+      '| --- | --- | --- | --- |',
+      '| 1 | 挖掘机 | — | 5台 |',
+    ].join('\n');
+    expect(formalPlaceholderIssues(exempted).some(issue => /占位式表达/u.test(issue.message))).toBe(false);
+    const pending = [
+      '| 序号 | 机械或设备名称 | 规格型号 | 数量 |',
+      '| --- | --- | --- | --- |',
+      '| 1 | 挖掘机 | — | 待定 |',
+    ].join('\n');
+    expect(formalPlaceholderIssues(pending).some(issue => /占位式表达：表格数据格占位符/u.test(issue.message))).toBe(true);
+    const bareWu = [
+      '| 序号 | 机械或设备名称 | 规格型号 | 数量 |',
+      '| --- | --- | --- | --- |',
+      '| 1 | 挖掘机 | 0.6~1.0m³ | 无 |',
+    ].join('\n');
+    expect(formalPlaceholderIssues(bareWu).some(issue => /占位式表达：表格数据格占位符/u.test(issue.message))).toBe(true);
+  });
+
+  it('D-T5 #42：合计行「—」豁免（不适用语义，警告层同源不报）', () => {
+    const md = [
+      '| 项目 | 数量 | 备注 |',
+      '| --- | --- | --- |',
+      '| 合计 | — | — |',
+    ].join('\n');
+    expect(formalPlaceholderIssues(md).some(issue => /占位式表达/u.test(issue.message))).toBe(false);
+  });
+
+  it('r28f 实测机械设备附表（9 列）逐字回归：#42 零误报（D-T5 验收形态）', () => {
+    const table = [
+      '| 序号 | 机械或设备名称 | 规格型号 | 数量 | 国别产地 | 制造年份 | 额定功率 | 生产能力 | 用于施工部位 |',
+      '| --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+      '| 1 | 挖掘机 | — | 5台 | 国产 | 2023 | — | — | 土方开挖、树穴开挖 |',
+      '| 6 | 洒水车 | — | 5台 | 国产 | 2023 | — | 8m³/车 | 绿化养护浇水、降尘 |',
+    ].join('\n');
+    expect(formalPlaceholderIssues(table).filter(issue => /占位式表达/u.test(issue.message))).toEqual([]);
+    expect(markdownTableQualityIssues(table).filter(issue => /占位符/u.test(issue.message))).toEqual([]);
   });
 });
 
@@ -199,6 +304,24 @@ describe('collectSectionContentGaps 分部章容器小节豁免（4.19.3 回归�
       { title: '工程概况', content: '### 1.1 编制依据\n编制依据正文', sections: ['项目主要施工内容'] },
     ]);
     expect(gaps.some(gap => gap.reason === 'missing_planned_section' && /项目主要施工内容/u.test(gap.sectionTitle))).toBe(true);
+  });
+});
+
+describe('collectSectionContentGaps 近形小节判定（r28g A：规划/成稿一字差不再误判缺节）', () => {
+  it('规划「安全责任体系与目标落位」 vs 成稿「…目标落实」→ 不报 missing_planned_section', () => {
+    const body = ['### 7.1 安全责任体系与目标落实', '本章逐级签订安全生产责任书，明确各岗位安全职责与考核标准。'].join('\n');
+    const gaps = collectSectionContentGaps(body, [
+      { title: '安全责任体系与目标落实', content: body, sections: ['安全责任体系与目标落位', '安全生产费用保障与使用'] },
+    ]);
+    expect(gaps.some(gap => gap.reason === 'missing_planned_section' && /落位/u.test(gap.sectionTitle))).toBe(false);
+  });
+
+  it('反例：差异 ≥2 字（8 字标题预算 1）仍判真缺节（近形判定未过宽）', () => {
+    const body = ['### 7.1 安全隐患排查制度', '每月开展隐患排查，建立台账并跟踪整改。'].join('\n');
+    const gaps = collectSectionContentGaps(body, [
+      { title: '安全隐患排查制度', content: body, sections: ['安全隐患排查治理'] },
+    ]);
+    expect(gaps.some(gap => gap.reason === 'missing_planned_section' && /排查治理/u.test(gap.sectionTitle))).toBe(true);
   });
 });
 
@@ -296,6 +419,57 @@ describe('basisRegulationsCoverageIssues 编制依据法规/规范完整性兑�
     const markdown = '## 第一章 工程概况\n#### 1.1.1 编制说明与工程概况\n本工程按国家现行法律、行政法规、地方性法规组织施工。';
     const issues = basisRegulationsCoverageIssues(markdown);
     expect(issues.some(issue => issue.message.includes('国家法律法规'))).toBe(true);
+  });
+
+  it('r28j 词锚第三轮：标题段无条目、真实清单以正文行+表格落在相邻标题段内 → 并集检查通过（消除误报）', () => {
+    // r28i 工程概况实测形态（修复前 3 类缺失误报）：二轮「编制说明」段 0 书名号，真实清单表格在无关键词标题段内（正文行「编制依据涵盖…」词锚指向）
+    const markdown = [
+      '## 第一章 工程概况',
+      '#### 1.1.1 编制说明与工程基本信息',
+      '本工程位于安徽省合肥市肥西县，新建雨污水管网及道路硬化工程。',
+      '#### 1.2 其他分部分项工程施工要点',
+      '编制依据涵盖国家法律法规、地方法规、条例及施工验收规范：',
+      '施工组织设计编制依据清单',
+      '| 依据类别 | 具体名称及文号/编号 |',
+      '| --- | --- |',
+      '| 国家法律 | 《中华人民共和国建筑法》（主席令第29号） |',
+      '| 行政法规 | 《建设工程质量管理条例》（国务院令第279号） |',
+      '| 施工验收规范 | 《给水排水管道工程施工及验收规范》（GB 50268-2008） |',
+    ].join('\n');
+    expect(basisRegulationsCoverageIssues(markdown)).toEqual([]);
+  });
+
+  it('r28j 目录词锚防御：目录条目含「编制依据」字样但正文无清单 → 静默跳过（不误报）', () => {
+    // 词锚行上方标题含「目录」→ 不参与候选；三路均无有效候选 → 静默（模板差异不误伤）
+    const markdown = ['## 目录', '  1.1 编制依据', '## 第一章 工程概况', '本工程概况描述。'].join('\n');
+    expect(basisRegulationsCoverageIssues(markdown)).toEqual([]);
+  });
+
+  it('r28j 词锚距离防护：词锚行距上方标题超过 60 行 → 不并入候选、照常报缺', () => {
+    const filler = Array.from({ length: 62 }, (_, i) => `第 ${i} 行普通正文内容。`).join('\n');
+    const markdown = [
+      '## 第一章 工程概况',
+      '#### 1.1.1 编制说明与工程概况',
+      '本工程按国家现行法律、行政法规、地方性法规组织施工。',
+      '#### 1.2 施工要点',
+      filler,
+      '编制依据涵盖如下：《中华人民共和国建筑法》、《建设工程质量管理条例》、《给水排水管道工程施工及验收规范》（GB 50268-2008）。',
+    ].join('\n');
+    const issues = basisRegulationsCoverageIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('国家法律法规'))).toBe(true);
+  });
+
+  it('r28j 词锚距离防护对偶：词锚行距上方标题 ≤60 行 → 并入候选、通过', () => {
+    const filler = Array.from({ length: 50 }, (_, i) => `第 ${i} 行普通正文内容。`).join('\n');
+    const markdown = [
+      '## 第一章 工程概况',
+      '#### 1.1.1 编制说明与工程概况',
+      '本工程按国家现行法律、行政法规、地方性法规组织施工。',
+      '#### 1.2 施工要点',
+      filler,
+      '编制依据涵盖如下：《中华人民共和国建筑法》、《建设工程质量管理条例》、《给水排水管道工程施工及验收规范》（GB 50268-2008）。',
+    ].join('\n');
+    expect(basisRegulationsCoverageIssues(markdown)).toEqual([]);
   });
 });
 
@@ -532,5 +706,90 @@ describe('crossChapterConsistencyIssues 设备台数配套比豁免（r15 丰乐
     const markdown = '主要机械台数执行全项目统一口径：挖掘机5台。沟槽开挖投入挖掘机1台。';
     const issues = await crossChapterConsistencyIssues(markdown, emptyFacts, undefined, undefined, embedDocuments);
     expect(issues.some(issue => /配置台数/u.test(issue.message))).toBe(true);
+  });
+});
+
+// ── C-T4：跨章机械矩阵泛化（固定 7 词表 → 通用机械名抽取，共享 scanEquipmentCountClaims 单源） ──
+
+describe('crossChapterConsistencyIssues 机械矩阵泛化（C-T4）', () => {
+  const emptyFactsC4 = {
+    project: [], schedule: [], quality: [], safety: [], resources: [], tables: [],
+    drawings: [], rules: [], bills: [], preciseFacts: [], schemaFacts: {}, factIndex: {},
+    missing: [], conflicts: [], specifications: [], canonical: { byKey: {} },
+  } as unknown as DocumentFactsModel;
+  const embedNone = async (texts: string[]) => texts.map(() => [0, 0]);
+
+  it('词表外机械（提升泵）跨句台数多值互斥 → 报 error（泛化检测生效）', async () => {
+    const markdown = '施工部署：土方阶段投入提升泵 2 台，主体阶段提升泵 3 台。';
+    const issues = await crossChapterConsistencyIssues(markdown, emptyFactsC4, undefined, undefined, embedNone);
+    expect(issues.some(issue => issue.message.includes('提升泵') && issue.level === 'error')).toBe(true);
+  });
+
+  it('配套比结构「每2台挖掘机配1台自卸汽车」不采为口径值（豁免在泛化后仍生效）', async () => {
+    const markdown = '全项目统一口径：自卸汽车5辆、压路机5台。沟槽开挖采用每2台挖掘机配1台自卸汽车循环装运。';
+    const issues = await crossChapterConsistencyIssues(markdown, emptyFactsC4, undefined, undefined, embedNone);
+    expect(issues.some(issue => /配置台数|分组口径/u.test(issue.message))).toBe(false);
+  });
+
+  it('否定分句（不使用/无需）不采为口径宣称，正常配置保留不互斥', async () => {
+    const markdown = '本项目不使用塔式起重机，无需另配发电机 1 台，现场配置发电机 2 台。';
+    const issues = await crossChapterConsistencyIssues(markdown, emptyFactsC4, undefined, undefined, embedNone);
+    expect(issues.filter(issue => issue.message.includes('发电机'))).toEqual([]);
+  });
+});
+
+// ── r28h M5：附表区（系统直出文末附表）不参与非法 H2 判定（s28h2 21 号误报回归） ──
+
+describe('formalHeadingHierarchyIssues 附表区 H2 豁免', () => {
+  const APPENDIX_MARKDOWN = [
+    '## 第一章 工程概况',
+    '### 1.1 编制依据',
+    '## 附表一 拟投入本标段的主要施工设备表',
+    '',
+    '| 序号 | 设备名称 |',
+    '| --- | --- |',
+    '| 1 | 挖掘机 |',
+    '## 附表二 拟配备本标段的试验和检测仪器设备表',
+    '## 附表三 劳动力计划表',
+  ].join('\n');
+
+  it('附表一~N H2 与目录/附录同豁免，非正式章二级标题零报告', () => {
+    const issues = formalHeadingHierarchyIssues(APPENDIX_MARKDOWN).filter(issue => issue.message.includes('非正式章二级标题'));
+    expect(issues).toEqual([]);
+  });
+
+  it('负向对照：真非法 H2（无第X章/附录/附表前缀）仍上报', () => {
+    const issues = formalHeadingHierarchyIssues(`${APPENDIX_MARKDOWN}\n## 悬挂小节标题\n\n正文`).filter(issue => issue.message.includes('非正式章二级标题'));
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('悬挂小节标题');
+  });
+});
+
+// ── r28h M7：重复 token 检测相邻性判定（s28h2 32/33 号误报回归） ──
+
+describe('degenerateContentIssues 重复 token 相邻性（规格枚举不误报/真退化不丢失）', () => {
+  /** s28h2 实测原文形态：DN 壁厚枚举 + 电缆规格枚举——数字与短单位在 token 表外，
+   * 旧口径下「壁厚」「规格」伪相邻（全文 maxRun=15）双报 blocker */
+  const SPEC_ENUMERATION = [
+    '## 第一章 工程概况',
+    '### 1.1 安装辅材与管材管件准备',
+    '电缆保护管按规格分批组织，其中Φ110管（根）、DN32壁厚110mm管、DN50壁厚3.8mm管、DN150壁厚6mm管、DN80壁厚5mm管、DN25管、DN50壁厚3.0mm管100m、DN20壁厚2.75mm管36.07m，其余规格管材数量按各敷设区段设计长度与工程量清单锁定值分批核定。材料员在每批管材进场当日核对出厂合格证与规格标识，质检员按每批不少于1次抽测壁厚与外观，发现锈蚀、变形或壁厚偏差超标的整批退场。',
+    '电力电缆总量14249.23m，其中3×10规格5260.98m、5×6规格3600m、5×10规格2204.02m、3×16规格575.14m、4×50规格360.21m、4×240规格320m、5×16规格300.58m、3×6规格269.45m、3×25规格267.17m、4×95规格210m、4×150规格155m、4×185规格90m、4×6规格80m、4×16规格70m、4×120规格10m，材料员按单体建立辅材台账同步核对。',
+  ].join('\n');
+
+  it('规格枚举行零报告（数字/短单位分隔的同名 token 不构成连续 run）', () => {
+    expect(degenerateContentIssues(SPEC_ENUMERATION, [])).toEqual([]);
+  });
+
+  it('章节作用域：枚举形态在章/小节级同样零报告', () => {
+    const chapters = [{ title: '工程概况', content: SPEC_ENUMERATION, sections: ['安装辅材与管材管件准备'] }] as unknown as DocumentDraftChapter[];
+    expect(degenerateContentIssues(SPEC_ENUMERATION, chapters)).toEqual([]);
+  });
+
+  it('真退化护栏：空白分隔的紧邻重复 run≥12 仍报（召回不丢失）', () => {
+    const filler = '施工准备、测量放线、材料进场、人员到场、设备调试、安全交底、技术交底、质量验收。'.repeat(4);
+    const markdown = `## 第一章 测试章\n\n${filler}规格 规格 规格 规格 规格 规格 规格 规格 规格 规格 规格 规格 规格 规格全部按清单执行。`;
+    const issues = degenerateContentIssues(markdown, []);
+    expect(issues.some(issue => issue.message.includes('重复 token'))).toBe(true);
   });
 });

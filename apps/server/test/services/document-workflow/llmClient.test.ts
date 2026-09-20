@@ -4,16 +4,28 @@
  * 二次仍失败才放弃并透传失败原因；成功路径与网络失败路径不重试。
  * 底层 LLM 调用通过 invokeLlm 注入桩（模块内部词法绑定无法被 vi.mock 拦截）。
  */
-import { describe, expect, it, vi } from 'vitest';
-import { amplifiedTruncationMaxTokens, callDocumentLlm, callDocumentLlmJsonWithRetry, contextLayerChars, flushScheduledLaunches, isContextOverflowLlmError, isTransientLlmError, llmPrefixFingerprint, prefixScheduleWindowFor, repairTruncatedJson, retryDelayMs, sortScheduledLaunches, validateJsonAgainstSchema, type DocumentJsonSchema, type DocumentJsonSchemaTruncation } from '@/services/document-workflow/llmClient';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { amplifiedTruncationMaxTokens, callDocumentLlm, callDocumentLlmJsonWithRetry, contextLayerChars, currentEmptyStormStreak, emptyStormBackoffMs, flushScheduledLaunches, isContextOverflowLlmError, isTransientLlmError, llmPrefixFingerprint, prefixScheduleWindowFor, repairTruncatedJson, resetEmptyStormStreak, retryDelayMs, sortScheduledLaunches, validateJsonAgainstSchema, type DocumentJsonSchema, type DocumentJsonSchemaTruncation } from '@/services/document-workflow/llmClient';
 import type { DocumentGenerationDiagnostics } from '@/services/document-workflow/types';
+
+// r26 空响应风暴接线测试需要到达 provider 层：hoisted 状态控制「无活跃模型»默认路径）与「风暴模型」路径切换
+const llmState = vi.hoisted(() => ({ activeModel: false }));
+const stormChat = vi.hoisted(() => vi.fn());
 
 // 无活跃模型配置：callDocumentLlm 观测累计发生在 provider 调用之前，
 // mock 掉 configService 让 getActiveModelWithProvider 返回 undefined，避免触碰真实配置存储
 vi.mock('@/services/common/configService', () => ({
   getConfigStore: () => ({
-    load: () => ({ models: { reasoning: { active: '', list: [] }, action: { active: '', list: [] }, reader: { active: '', list: [] } }, providers: {} }),
+    load: () => llmState.activeModel
+      ? { models: { reasoning: { active: 'storm-model', list: [{ name: 'storm-model', provider: 'storm-model' }] }, action: { active: '', list: [] }, reader: { active: '', list: [] } }, providers: { 'storm-model': { baseUrl: 'http://localhost:9', apiKey: 'test' } } }
+      : { models: { reasoning: { active: '', list: [] }, action: { active: '', list: [] }, reader: { active: '', list: [] } }, providers: {} },
   }),
+}));
+
+// 风暴路径的 provider 桩：chat 行为由用例控制（空内容=故障窗口，正文=恢复）
+vi.mock('@customize-agent/llm', () => ({
+  createProvider: () => ({ chat: stormChat, capabilities: { maxOutputTokens: 8192 } }),
+  thinkingCapabilityForModel: () => undefined,
 }));
 
 const bareDiagnostics = () => ({ llm: { calls: 0, failures: 0, maxActive: 0, retries: 0, inputChars: 0 } }) as unknown as DocumentGenerationDiagnostics;
@@ -462,6 +474,80 @@ describe('retryDelayMs（2.7 503 过载指数退避）', () => {
   });
 });
 
+describe('emptyStormBackoffMs（r26 空响应风暴长退避）', () => {
+  it('连续空响应 <3 次不惩罚（健康期偶发单点空响应）', () => {
+    expect(emptyStormBackoffMs(0)).toBe(0);
+    expect(emptyStormBackoffMs(1)).toBe(0);
+    expect(emptyStormBackoffMs(2)).toBe(0);
+  });
+
+  it('3~5 次 → 20s；6~9 次 → 45s；≥10 次 → 60s 封顶', () => {
+    expect(emptyStormBackoffMs(3)).toBe(20000);
+    expect(emptyStormBackoffMs(5)).toBe(20000);
+    expect(emptyStormBackoffMs(6)).toBe(45000);
+    expect(emptyStormBackoffMs(9)).toBe(45000);
+    expect(emptyStormBackoffMs(10)).toBe(60000);
+    expect(emptyStormBackoffMs(99)).toBe(60000);
+  });
+
+  it('复位接口存在且幂等（供单测隔离与生成任务间复用）', () => {
+    expect(() => { resetEmptyStormStreak(); resetEmptyStormStreak(); }).not.toThrow();
+  });
+});
+
+describe('空响应风暴计数与长退避接线（r26）', () => {
+  afterEach(() => {
+    resetEmptyStormStreak();
+    llmState.activeModel = false;
+    stormChat.mockReset();
+    vi.restoreAllMocks();
+  });
+
+  it('连续空响应按每次尝试计数；任一成功即清零（阈值内不受长退避干扰，真实计时器）', async () => {
+    llmState.activeModel = true;
+    stormChat.mockResolvedValue({ content: '' });
+    const diag = bareDiagnostics();
+    // 单次失败调用 = 客户端 2 次尝试 = 2 次空响应计入（<3 未触发长退避）
+    expect(await callDocumentLlm('s', 'p', false, { diagnostics: diag })).toBeUndefined();
+    expect(currentEmptyStormStreak()).toBe(2);
+    // 成功即清零（故障窗口结束后恢复满速）
+    stormChat.mockResolvedValue({ content: '正常正文' });
+    expect(await callDocumentLlm('s', 'p', false, { diagnostics: diag })).toBe('正常正文');
+    expect(currentEmptyStormStreak()).toBe(0);
+  });
+
+  it('连续空响应 ≥3 后调用前长退避 20s 级（fake timers 全程验证）且计入观测', async () => {
+    llmState.activeModel = true;
+    vi.spyOn(Math, 'random').mockReturnValue(0); // 去 jitter：退避恰为 20s 基数、重试延迟恰为 1.2s
+    vi.useFakeTimers();
+    try {
+      stormChat.mockResolvedValue({ content: '' });
+      const diag = bareDiagnostics();
+      // 第 1 次失败：attempt0/attempt1 均无退避（streak 0→2）
+      const p1 = callDocumentLlm('s', 'p', false, { diagnostics: diag });
+      await vi.advanceTimersByTimeAsync(1500);
+      await p1;
+      expect(currentEmptyStormStreak()).toBe(2);
+      // 第 2 次失败：attempt1 前 streak=3 → 触发 20s 长退避（streak→4）
+      const p2 = callDocumentLlm('s', 'p', false, { diagnostics: diag });
+      await vi.advanceTimersByTimeAsync(23000);
+      await p2;
+      expect(currentEmptyStormStreak()).toBe(4);
+      expect(diag.llm.emptyStormWaits).toBe(1);
+      // 第 3 次成功：调用前 streak=4 → 再触发 20s 长退避，成功即清零
+      stormChat.mockResolvedValue({ content: '故障窗口已过' });
+      const p3 = callDocumentLlm('s', 'p', false, { diagnostics: diag });
+      await vi.advanceTimersByTimeAsync(21000); // 20s 退避 + 120ms 调度窗口
+      expect(await p3).toBe('故障窗口已过');
+      expect(diag.llm.emptyStormWaits).toBe(2);
+      expect(String(diag.llm.lastInfo)).toContain('空响应风暴长退避');
+      expect(currentEmptyStormStreak()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('prefixScheduleWindowFor（3.3 调度窗口自适应）', () => {
   it('低并发保持 120ms 默认窗口', () => {
     expect(prefixScheduleWindowFor(0)).toBe(120);
@@ -554,5 +640,70 @@ describe('flushScheduledLaunches（4.17.1 前缀预热调度）', () => {
     ]);
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(events).toEqual(['warmup:f1', 'launch:f1', 'launch:f2']);
+  });
+
+  it('预热永不 settle：超时兜底后组内请求仍发射（预热不阻塞正确性）', async () => {
+    vi.useFakeTimers();
+    try {
+      const events: string[] = [];
+      flushScheduledLaunches([
+        {
+          fingerprint: 'fam-h',
+          launch: () => { events.push('launch:h1'); },
+          warmup: () => { events.push('warmup:h1'); return new Promise<void>(() => { /* 永不 settle（网络黑洞形态） */ }); },
+          warmupKey: 'fam-h:h1',
+        },
+        {
+          fingerprint: 'fam-h',
+          launch: () => { events.push('launch:h2'); },
+          warmup: () => Promise.resolve(),
+          warmupKey: 'fam-h:h1',
+        },
+      ]);
+      expect(events).toEqual(['warmup:h1']);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(events).toEqual(['warmup:h1', 'launch:h1', 'launch:h2']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('预热超时兜底后移除 warmed 标记：后续窗口可再次触发预热', async () => {
+    vi.useFakeTimers();
+    try {
+      const events: string[] = [];
+      const hang = (tag: string) => ({
+        fingerprint: 'fam-i',
+        launch: () => { events.push(`launch:${tag}`); },
+        warmup: () => { events.push(`warmup:${tag}`); return new Promise<void>(() => { /* 永不 settle */ }); },
+        warmupKey: 'fam-i:key',
+      });
+      flushScheduledLaunches([hang('i1'), hang('i2')]);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(events).toEqual(['warmup:i1', 'launch:i1', 'launch:i2']);
+      events.length = 0;
+      // 标记已移除 → 新窗口同 key 组再次预热（再次超时后兜底发射）
+      flushScheduledLaunches([hang('i3'), hang('i4')]);
+      expect(events).toEqual(['warmup:i3']);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(events).toEqual(['warmup:i3', 'launch:i3', 'launch:i4']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('组内某条 launch 抛异常：不阻断同组其余与后续组发射', () => {
+    const events: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      flushScheduledLaunches([
+        { fingerprint: 'fam-x', launch: () => { throw new Error('boom'); } },
+        { fingerprint: 'fam-x', launch: () => { events.push('launch:x2'); } },
+        { fingerprint: 'fam-y', launch: () => { events.push('launch:y1'); } },
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(events).toEqual(['launch:x2', 'launch:y1']);
   });
 });

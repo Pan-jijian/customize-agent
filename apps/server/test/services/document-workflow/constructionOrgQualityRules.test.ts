@@ -116,7 +116,7 @@ describe('constructionOrgGenericLanguageIssues（空话套话检测，词面召�
 });
 
 describe('constructionOrgControlLoopIssues（控制闭环检测）', () => {
-  it('质量章缺半数以上闭环词报 warning', () => {
+  it('质量章缺闭环要素报 warning（D-T2 主责章全要素判定）', () => {
     const issues = constructionOrgControlLoopIssues([chapter('质量管理措施', '现场进行自检。')]);
     expect(issues.length).toBe(1);
     expect(issues[0].message).toContain('质量闭环');
@@ -156,6 +156,24 @@ describe('constructionOrgProfessionalChainIssues（专业工序链校验）', ()
   it('无专业类型命中不检查', () => {
     const model = factsModel([fact('内容', '普通说明')]);
     expect(constructionOrgProfessionalChainIssues({ markdown: '普通文档。', factsModel: model, chapters: [] })).toHaveLength(0);
+  });
+
+  it('D-T9 章结构路径：节级域错位产 warning 带 chapterId+provenance（修复轮可消费）', () => {
+    const mixed = chapter('道路工程施工组织', '### 道路工程\n本项目道路工程采用外脚手架配合塔吊完成主体结构施工。');
+    const issues = constructionOrgProfessionalChainIssues({ markdown: `## ${mixed.title}\n${mixed.content}`, factsModel: factsModel(), chapters: [mixed] });
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('疑似市政工程内容混入不匹配工序');
+    expect(issues[0].chapterId).toBe('道路工程施工组织');
+    expect(issues[0].provenance?.detectorId).toBe('construction-org-professional-chain');
+  });
+
+  it('D-T9 章结构路径：文档级链覆盖缺口归属到章（insufficient）', () => {
+    const chain = chapter('道路工程概况及施工部署', '本章为市政工程的总体部署。施工采用测量放线定位，回填采用分层压实。');
+    const issues = constructionOrgProfessionalChainIssues({ markdown: `## ${chain.title}\n${chain.content}`, factsModel: factsModel(), chapters: [chain] });
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('市政工程工序链覆盖不足');
+    expect(issues[0].chapterId).toBe('道路工程概况及施工部署');
+    expect(issues[0].provenance?.detectorId).toBe('construction-org-professional-chain');
   });
 });
 

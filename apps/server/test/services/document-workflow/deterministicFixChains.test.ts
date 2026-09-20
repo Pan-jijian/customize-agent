@@ -23,6 +23,8 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'templated-labels',
       // V2 批1 结构完整性确定性清理（与检测器 structure-integrity 同源单扫描）
       'structure-integrity',
+      // r28h 行内嵌标题拆行（s28h2 实测：正文行尾粘连章/节标题致结构误判；拆出编号由链尾 section-renumber 重放）
+      'embedded-heading-split',
       'repeated-words',
       'finish-thickness',
       // 4.31 显式快照变更（丰乐镇 v6 #3/#70/#86-87/#90/#71 五类误报修复器接入链，
@@ -46,6 +48,8 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'collision-numbered-heading',
       'heading-uncovered-items',
       'inverted-date-range',
+      // r28j 同日零长区间修复（M15：锚定 cross-chapter-consistency「同日起止区间校验」，紧随区间族）
+      'zero-length-date-range',
       'truncated-sentence',
       'meta-discourse',
       'formula-residue',
@@ -72,6 +76,8 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'templated-labels',
       // V2 批1 结构完整性确定性清理（与检测器 structure-integrity 同源单扫描）
       'structure-integrity',
+      // r28h 行内嵌标题拆行（s28h2 实测：正文行尾粘连章/节标题致结构误判；拆出编号由链尾 section-renumber 重放）
+      'embedded-heading-split',
       'repeated-words',
       'duplicate-tables',
       'finish-thickness',
@@ -94,6 +100,8 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'collision-numbered-heading',
       'heading-uncovered-items',
       'inverted-date-range',
+      // r28j 同日零长区间修复（M15：锚定 cross-chapter-consistency「同日起止区间校验」，紧随区间族）
+      'zero-length-date-range',
       'truncated-sentence',
       'meta-discourse',
       'formula-residue',

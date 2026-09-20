@@ -2,7 +2,7 @@ import type { DocumentDraftChapter, ValidationIssue } from './types';
 import { stripTableCellInvisibleChars } from './helpers/markdownCleanup';
 import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
 import { buildSemanticGate } from './semanticGate';
-import { isFillerPoolExcludedLine, isZeroInfoSloganSentence, judgeFillerSentences } from './tenderBidChecks';
+import { isFillerPoolExcludedLine, isTemplatePrefixSentence, isZeroInfoSloganSentence, judgeFillerSentences } from './tenderBidChecks';
 import { workPackageContentElementsComplete } from './utils';
 
 export { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
@@ -91,7 +91,8 @@ function extractSectionBlocks(content: string): Array<{ heading: string; body: s
   let currentHeading = '';
   let currentBody: string[] = [];
   for (const line of lines) {
-    const heading = /^#{3,4}\s+(.+)$/u.exec(line.trim());
+    // 零宽剥离后再识别标题（r28f 全文穿插 U+200B 类字符，裸 line.trim() 对零宽标题行失配）
+    const heading = /^#{3,4}\s+(.+)$/u.exec(line.replace(/[\u200b-\u200f\u2060\ufeff]/gu, '').trim());
     if (heading) {
       if (currentHeading || currentBody.length > 0) blocks.push({ heading: currentHeading, body: currentBody.join('\n') });
       currentHeading = heading[1].trim();
@@ -171,7 +172,16 @@ export async function fillerParagraphIssues(
     const blocks = extractSectionBlocks(chapter.content);
     const chapterHits: string[] = [];
     for (const block of blocks) {
-      const sentences = block.body.split(/[。；;]/u).map(sentence => sentence.trim()).filter(sentence => sentence.length >= 12);
+      // D-T7：行过滤与修复锚点端（isFillerPoolExcludedLine）同源——r28f 实测章标题行
+      // （「## 第六章 确保工程质量的技术组织措施」）此前直入句池被词面「确保工程质量」+
+      // 语义复核命中，误报「模板化空话：目标口号」（#53：检测端 17 原型无行过滤 = 修复端
+      // 有行过滤的口径分叉）；标题/表格/列表/目录条目行不入池。
+      const sentences = block.body
+        .split(/\n/u)
+        .filter(line => !isFillerPoolExcludedLine(line))
+        .flatMap(line => line.split(/[。；;]/u))
+        .map(sentence => sentence.trim())
+        .filter(sentence => sentence.length >= 12);
       if (sentences.length === 0) continue;
       const flags = await judge(sentences);
       sentences.forEach((sentence, index) => {
@@ -207,8 +217,9 @@ export interface FillerSentenceTarget {
   chapterTitle: string;
   section: string;
   sentence: string;
-  /** semantic=套话语义原型命中（0.80 校准阈值）；vague=模糊应答语义复核命中 */
-  channel: 'semantic' | 'vague';
+  /** semantic=套话语义原型命中（0.80 校准阈值）；vague=模糊应答语义复核命中；
+   * prefix=模板化前缀句词首确定性命中（D-T7 ①）；paragraph=废话段模式语义复核命中（D-T7 ③） */
+  channel: 'semantic' | 'vague' | 'prefix' | 'paragraph';
 }
 
 /**
@@ -230,7 +241,7 @@ export async function fillerSentenceTargets(
     const candidates: Array<{ sentence: string; section: string }> = [];
     let currentSection = chapter.title;
     for (const line of chapter.content.split('\n')) {
-      const heading = /^#{3,4}\s+(.+)$/u.exec(line.trim());
+      const heading = /^#{3,4}\s+(.+)$/u.exec(line.replace(/[\u200b-\u200f\u2060\ufeff]/gu, '').trim());
       if (heading) { currentSection = heading[1].trim(); continue; }
       if (isFillerPoolExcludedLine(line)) continue;
       for (const raw of line.split(/[。；;]/u)) {
@@ -240,18 +251,56 @@ export async function fillerSentenceTargets(
     }
     if (candidates.length === 0) continue;
     const judgements = await judgeFillerSentences(candidates.map(item => item.sentence), embedDocuments);
+    // D-T7 ③ 通道扩围：废话段模式语义 gate（与检测端 fillerParagraphIssues 同源原型与词面
+    // 召回 buildFillerParagraphGate）命中的句子并入修复目标——检测（17 原型）与修复（14 原型）
+    // 此前口径分叉，检测报出的「本小节围绕…展开」类模板句不在修复锚点集内（检测恒报、无人修）。
+    const paragraphGate = await buildFillerParagraphGate(embedDocuments);
+    const paragraphFlags = await paragraphGate(candidates.map(item => item.sentence));
     let chapterCount = 0;
     const seen = new Set<string>();
     for (let index = 0; index < judgements.length; index += 1) {
       const judgement = judgements[index];
-      if (!judgement.filler || seen.has(judgement.sentence) || chapterCount >= 12) continue;
+      if ((!judgement.filler && !paragraphFlags[index]) || seen.has(judgement.sentence) || chapterCount >= 12) continue;
       seen.add(judgement.sentence);
       chapterCount += 1;
-      targets.push({ chapterId: chapter.id, chapterTitle: chapter.title, section: candidates[index].section, sentence: judgement.sentence, channel: judgement.semantic ? 'semantic' : 'vague' });
+      const channel = judgement.semantic ? 'semantic' : judgement.vague ? 'vague' : 'paragraph';
+      targets.push({ chapterId: chapter.id, chapterTitle: chapter.title, section: candidates[index].section, sentence: judgement.sentence, channel });
     }
     if (targets.length >= 60) break;
   }
   return targets.slice(0, 60);
+}
+
+/**
+ * 模板化前缀句修复锚点提取（D-T7 ①，r28f #35 归因）：与 fillerSentenceTargets 同池范式
+ * （逐行过滤 + H3/H4 小节定位 + ≥12 字句池），判定走 isTemplatePrefixSentence 词首确定性
+ * 单源（检测端 formalStyleIssues 同源引用，检测定位 = 修复定位）。标题行跳过含零宽前缀形态
+ * （行首剥零宽后仍以 # 开头即标题；防「1.2 主要施工内容」类标题残片被判前缀句误删）。
+ * 限幅同 filler：每章 12 句、全文 60 条。
+ */
+export function templatePrefixTargets(chapters: DocumentDraftChapter[]): FillerSentenceTarget[] {
+  const targets: FillerSentenceTarget[] = [];
+  for (const chapter of chapters) {
+    let currentSection = chapter.title;
+    let chapterCount = 0;
+    for (const line of chapter.content.split('\n')) {
+      const heading = /^#{3,4}\s+(.+)$/u.exec(line.replace(/[\u200b-\u200f\u2060\ufeff]/gu, '').trim());
+      if (heading) { currentSection = heading[1].trim(); continue; }
+      const compactLine = line.replace(/[\u200b-\u200f\u2060\ufeff]/gu, '');
+      if (/^\s*#{1,6}\s/u.test(compactLine)) continue;
+      if (isFillerPoolExcludedLine(line)) continue;
+      for (const raw of line.split(/[。；;]/u)) {
+        const sentence = raw.trim();
+        if (sentence.length < 12 || !isTemplatePrefixSentence(sentence)) continue;
+        if (chapterCount >= 12 || targets.length >= 60) break;
+        chapterCount += 1;
+        targets.push({ chapterId: chapter.id, chapterTitle: chapter.title, section: currentSection, sentence, channel: 'prefix' });
+      }
+      if (chapterCount >= 12 || targets.length >= 60) break;
+    }
+    if (targets.length >= 60) break;
+  }
+  return targets;
 }
 
 /** 确定性删除句在正文中的全部出现处：去尾标点 → 行内「前导空白+句+尾标点」全局替换，
@@ -282,6 +331,8 @@ function removeSentenceOccurrences(lines: string[], sentence: string): number {
  * 无损净化，不经过 LLM（历史负效果：LLM 批量改写误报句引入同义新空话）；
  * 其余命中句（vague 通道 / 含信息或合规承诺的 semantic 句）原样保留在 remaining，交 LLM 锚点具体化。
  * 幂等安全：句已不存在时删除数为 0，target 回填 remaining（不丢修复锚点）。
+ * D-T7 通道扩展：semantic（套话原型）/prefix（模板化前缀句）/paragraph（废话段模式）
+ * 三确定性通道 + 零信息硬闸即删；vague（模糊应答，语境依赖型）一律交 LLM 具体化。
  */
 export function stripZeroInfoSloganSentences(
   chapters: DocumentDraftChapter[],
@@ -293,7 +344,8 @@ export function stripZeroInfoSloganSentences(
   for (const target of targets) {
     const key = target.chapterId || target.chapterTitle;
     const chapter = chapters.find(item => (item.id || item.title) === key);
-    if (!chapter || target.channel !== 'semantic' || !isZeroInfoSloganSentence(target.sentence)) {
+    const deletableChannel = target.channel === 'semantic' || target.channel === 'prefix' || target.channel === 'paragraph';
+    if (!chapter || !deletableChannel || !isZeroInfoSloganSentence(target.sentence)) {
       remaining.push(target);
       continue;
     }

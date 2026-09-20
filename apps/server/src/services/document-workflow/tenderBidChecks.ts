@@ -88,7 +88,9 @@ const FILLER_TOC_LINE_RE = /^\s*(?:第[一二三四五六七八九十百\d]+[章
 
 /** 句池排除行判定（检测端与修复锚点端同源口径）：空行/标题/表格/列表/引用/目录条目行不进句池 */
 export function isFillerPoolExcludedLine(line: string): boolean {
-  const trimmed = line.trim();
+  // 零宽字符剥离后再判（r28f 实测标题行穿插 U+200B 类字符致 `^\s*#` 失配，
+  // 章标题行「## 第六章 …」直入句池被判模板化空话——#53 根因；检测/修复/生成期三端同源受益）
+  const trimmed = line.replace(/[\u200b-\u200f\u2060\ufeff]/gu, '').trim();
   if (!trimmed) return true;
   if (/^\s*(#{1,6}\s+|\||[-*+]\s|>)/u.test(trimmed)) return true;
   return FILLER_TOC_LINE_RE.test(trimmed);
@@ -148,6 +150,38 @@ export function isZeroInfoSloganSentence(sentence: string): boolean {
   if (/每日|每周|每月|每季|每年|每\d+|定期|不定期|不少于|不低于|至少/u.test(compact)) return false;
   if (/合同|约定|承诺|保证金|履约|招标|投标|中标|资质|奖项|证书|备案|报审|报验|审批|签证|变更/u.test(compact)) return false;
   return true;
+}
+
+// ── 2b. 模板化前缀句（元话语导语，D-T7 ①）──
+/** 句首前缀剥离：标题符号/小节编号/条目编号/列表符（判定前先去前缀再测导语词首） */
+export const TEMPLATE_PREFIX_STRIP_RE = /^(?:#{1,6}\s*)?(?:(?:\d+(?:\.\d+)*)(?:[.、)）]|\s)+|（\d+）|[（(][一二三四五六七八九十]+[）)]|[-*•]\s+)?\s*/u;
+
+/** 模板化前缀句句首词表（确定性）：句子主语为文档自身（「本节/本章将…」）或叙述方位
+ * （「以下从/综上所述」）即命中——元话语导语不含工程信息，是模板化前缀的等价形态。
+ * 与 formalStyleIssues（终检检测）同源引用：4.28 前语义原型 0.6 阈值口径下施工描述句
+ * 被 bge 噪声误判为前缀套话（r28f 实测命中样本 3/3 全误报：小节标题残片与砌筑/铺贴工艺句），
+ * 现改为词面前置确定性判定＋修复侧确定性删除（检测定位＝修复定位）。 */
+export const TEMPLATE_PREFIX_HEAD_RE = /^(?:(?:本节|本章|本小节|本部分|本(?:文|篇章))(?:将|拟|主要|重点|首先|从|围绕|按|结合|针对|以|通过|对|就|分|共|内容|的|内)|(?:以下|下述|下面)(?:从|将|为|是|内容|主要|就|围绕|介绍|说明)|综上所述|通过以上|由此可见|总的来说|总体而言)/u;
+
+/** 模板化前缀句判定（检测端与修复锚点端同源单入口）：先剥零宽字符（r28f 实测正文穿插
+ * U+200B 类字符致行首过滤失配）与条目编号，再测词首——不命中词表的句子零判定成本放行。 */
+export function isTemplatePrefixSentence(sentence: string): boolean {
+  const compact = sentence.replace(/[\u200b-\u200f\u2060\ufeff]/gu, '').trim();
+  if (!compact) return false;
+  return TEMPLATE_PREFIX_HEAD_RE.test(compact.replace(TEMPLATE_PREFIX_STRIP_RE, ''));
+}
+
+/** 模板化前缀句全文扫描（markdown 级句池单源）：零宽剥离 → 排除行过滤（isFillerPoolExcludedLine，
+ * 含目录条目行）→ 按。；; 切句 → ≥12 字 → 词首判定。检测端 formalStyleIssues 与修复回滚复检
+ * （repairTemplatingIssues recheck）共用；修复锚点端 templatePrefixTargets 逐章同口径（额外带定位）。 */
+export function scanTemplatePrefixSentences(markdown: string): string[] {
+  return markdown
+    .split('\n')
+    .map(line => line.replace(/[\u200b-\u200f\u2060\ufeff]/gu, '').trim())
+    .filter(line => line && !isFillerPoolExcludedLine(line))
+    .flatMap(line => line.split(/[。；;]/u))
+    .map(sentence => sentence.trim())
+    .filter(sentence => sentence.length >= 12 && isTemplatePrefixSentence(sentence));
 }
 
 /**
@@ -314,15 +348,23 @@ export interface DifficultyCountermeasureReport {
  * 无独立标题小节时回退定位「重难点识别表」表格段（丰乐镇第五轮实测：重难点以表格形式
  * 承载于工程特点小节，标题正则永远匹配不到 → 检测恒 0 条目、双达标 0% 假阴性） */
 export function extractKeyDifficultySection(markdown: string): string {
-  const match = markdown.match(/#{2,3}\s*[^\n]*(?:重难点|重点难点|工程难点|难点分析)[^\n]*\n/u);
+  // D-T7：行首锚定 + 逐级边界——r28f 实测「#### 1.1.3 重点难点」（H4 小节）被旧正则 `#{2,3}`
+  // 偏置匹配（从第 2 个 # 起按 `##`+`[^\n]*` 命中）且边界 `^#{2,3}` 不认 H4 边界 → 提取范围
+  // 吞掉后续全部内容（实测 8 条目中 6 条为 1.1.4/后续章无关正文）→ 双达标率被稀释
+  // （0.125 假重度模板化）。现口径：`^#{2,4}` 行首锚定匹配标题，边界按命中标题的实际级别
+  // 动态构建（H4 小节截到下一 H2-H4、H3 小节截到下一 H2/H3——H3 内含 H4 子标题不提前截断）。
+  const match = markdown.match(/^#{2,4}\s*[^\n]*(?:重难点|重点难点|工程难点|难点分析)[^\n]*\n/mu);
   if (match && match.index !== undefined) {
     const start = match.index + match[0].length;
     const rest = markdown.slice(start);
-    const nextHeading = rest.search(/^#{2,3}\s+/mu);
+    const level = match[0].match(/^#+/u)?.[0].length ?? 3;
+    const boundary = new RegExp(`^#{2,${Math.max(2, level)}}\\s+`, 'mu');
+    const nextHeading = rest.search(boundary);
     return nextHeading >= 0 ? rest.slice(0, nextHeading) : rest;
   }
-  // 回退：表头含「重难点」列的识别表（表头行 → 至首个非表格行结束）
-  const tableHead = markdown.match(/^\|?\s*[^\n]*重难点[^\n]*\|\s*$/mu);
+  // 回退：表头含「重难点/重点难点」列的识别表（表头行 → 至首个非表格行结束；词表与标题路径同源：
+  // r28f 表头为「重点难点」，旧回退正则只认「重难点」漏配）
+  const tableHead = markdown.match(/^\|?\s*[^\n]*(?:重难点|重点难点|工程难点|难点分析)[^\n]*\|\s*$/mu);
   if (!tableHead || tableHead.index === undefined) return '';
   const rest = markdown.slice(tableHead.index);
   const lines = rest.split(/\n/u);
@@ -404,8 +446,8 @@ export async function difficultyCountermeasureReport(
 }
 
 // ── 5. 四新技术有效性三标尺（可对标官方推广目录 / 替代落后工艺 / 升级价值，满足任意两项） ──
-/** 官方推广目录引用（docx L77） */
-export const FOUR_NEW_CATALOG_RE = /建筑业10项新技术|10项新技术|安徽省住房城乡建设领域新技术推广目录|新技术推广目录|建设领域推广/u;
+/** 官方推广目录引用（docx L77）：目录名形态通用（国家/省/市级推广目录均命中「新技术推广目录」子串） */
+export const FOUR_NEW_CATALOG_RE = /建筑业10项新技术|10项新技术|新技术推广目录|建设领域推广/u;
 /** 替代落后工艺表述 */
 export const FOUR_NEW_REPLACE_RE = /替代|取代|淘汰.{0,10}(?:工艺|技术|做法)|(?:较|比).{0,10}(?:传统|常规|普通)/u;
 /** 升级价值表述（提升/节省/降低等） */

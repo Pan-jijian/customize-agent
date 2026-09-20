@@ -3,7 +3,7 @@
  * 依赖 markdownCleanup（表格工具）。
  */
 import type { DocumentFact } from '../types';
-import { normalizeOcrFactText, isValidProjectBasicFactValue } from '../factsModel';
+import { normalizeOcrFactText, isValidProjectBasicFactValue, stripFactLabelPrefix } from '../factsModel';
 import { buildCanonicalFacts } from '../factGovernance';
 import { stringifyFactValue } from '../utils';
 import { isMarkdownTableSeparatorLine, looksLikeMarkdownTableLine, splitMarkdownTableLine, normalizeBareMarkdownTables, stripProvenanceTableColumns } from './markdownCleanup';
@@ -37,16 +37,18 @@ export function projectBasicFactCandidates(facts: DocumentFact[]) {
 }
 
 export function projectBasicValueFor(facts: DocumentFact[], patterns: RegExp[]) {
-  return projectBasicFactCandidates(facts)
+  // C-T7（#50）：值先剥标签前缀再校验/排序（「招标人：XX」前缀混入值不再被误判非法丢弃）；
+  // 与 cleanProjectBasicCell 同口径——占位修复取值、基本信息表行、落位检测三处一致
+  const candidates = projectBasicFactCandidates(facts)
     .filter(fact => patterns.some(pattern => pattern.test(`${fact.key || ''}${fact.fieldName || ''}${fact.fieldId || ''}`)))
-    .filter(fact => isValidProjectBasicFactValue(fact.fieldId, fact.value))
-    .sort((a, b) => {
-      const aText = stringifyFactValue(a.value);
-      const bText = stringifyFactValue(b.value);
-      const aScore = (a.sourceFile?.includes('招标文件') ? 3 : 0) + (a.sourceRef?.sectionTitle && /项目概况|招标公告|前附表|招标范围/u.test(a.sourceRef.sectionTitle) ? 2 : 0) - Math.floor(aText.length / 80);
-      const bScore = (b.sourceFile?.includes('招标文件') ? 3 : 0) + (b.sourceRef?.sectionTitle && /项目概况|招标公告|前附表|招标范围/u.test(b.sourceRef.sectionTitle) ? 2 : 0) - Math.floor(bText.length / 80);
-      return bScore - aScore;
-    })[0]?.value;
+    .map(fact => ({ fact, value: stripFactLabelPrefix(cleanInlineFactValue(stringifyFactValue(fact.value))) }))
+    .filter(item => Boolean(item.value) && isValidProjectBasicFactValue(item.fact.fieldId, item.value));
+  candidates.sort((a, b) => {
+    const aScore = (a.fact.sourceFile?.includes('招标文件') ? 3 : 0) + (a.fact.sourceRef?.sectionTitle && /项目概况|招标公告|前附表|招标范围/u.test(a.fact.sourceRef.sectionTitle) ? 2 : 0) - Math.floor(a.value.length / 80);
+    const bScore = (b.fact.sourceFile?.includes('招标文件') ? 3 : 0) + (b.fact.sourceRef?.sectionTitle && /项目概况|招标公告|前附表|招标范围/u.test(b.fact.sourceRef.sectionTitle) ? 2 : 0) - Math.floor(b.value.length / 80);
+    return bScore - aScore;
+  });
+  return candidates[0]?.value;
 }
 
 export function repairKnownProjectBasicPlaceholders(content: string, facts: DocumentFact[]) {
@@ -120,7 +122,9 @@ export function markdownRowValue(parsedRows: Map<string, [string, string]>, patt
  * 丰乐镇第 3 轮实测：字符类必须排斥“、”——否则“确保创优目标不流于形式、奖惩承诺可追溯可执行”
  * 被截成残句“确保创优目标不流于形式、奖”（“奖惩”首字）写入质量标准单元格。 */
 
-const AWARD_OBJECTIVE_IN_TEXT_RE = /(?:黄山杯|鲁班奖|白玉兰杯|钱江杯|扬子杯|安济杯|长安杯|汾水杯|省优|市优|国优|优质工程|确保[^。；;|，、,\n]{0,10}(?:杯|奖))/u;
+// 奖项名形态通用化：任意「XX杯/XX奖」具名奖项（负向前瞻排除奖惩/奖金/奖励/奖项语素续接，
+// 与 integrity 奖项杜撰检测 AWARD_NAME_RE 同口径）——不绑定具体省份/项目奖项名单
+const AWARD_OBJECTIVE_IN_TEXT_RE = /(?:[\u4e00-\u9fa5]{2,6}(?:杯|奖)(?![励金惩罚项])|省优|市优|国优|优质工程|文明工地|标准化工地|确保[^。；;|，、,\n]{0,10}(?:杯|奖))/u;
 
 function awardObjectivePhrase(facts: DocumentFact[], fullMarkdown: string): string | undefined {
   // 权威否定校验（丰乐镇第五轮）：招标文件「创优目标☑无」时不得杜撰创优短语——
@@ -149,7 +153,9 @@ function awardObjectivePhrase(facts: DocumentFact[], fullMarkdown: string): stri
 export function projectBasicInfoRows(facts: DocumentFact[], existingMarkdown = '', fullMarkdown = existingMarkdown) {
   const parsedRows = parseProjectBasicRowsFromMarkdown(existingMarkdown);
   const canonical = buildCanonicalFacts({ facts, markdown: fullMarkdown });
-  const cleanProjectBasicCell = (value: unknown) => cleanInlineFactValue(stringifyFactValue(value || ''))
+  // C-T7（#50）：canonical 值进入基本信息表前剥标签前缀（「招标人：XX」→「XX」），
+  // 与 projectBasicValueFor/落位检测同口径
+  const cleanProjectBasicCell = (value: unknown) => stripFactLabelPrefix(cleanInlineFactValue(stringifyFactValue(value || '')))
     .replace(/\|/gu, '')
     .replace(/\bCOL\d+\b/gu, '')
     .replace(/\s{2,}/gu, ' ')
@@ -232,7 +238,9 @@ export function removeDuplicateProjectBasicInfoBlocks(markdown: string) {
         block.push(lines[index] || '');
         index += 1;
       }
+      let blockHasTable = false;
       if (index < lines.length && looksLikeMarkdownTableLine(lines[index] || '') && isMarkdownTableSeparatorLine(lines[index + 1] || '')) {
+        blockHasTable = true;
         block.push(lines[index] || '', lines[index + 1] || '');
         index += 2;
         while (index < lines.length && looksLikeMarkdownTableLine(lines[index] || '')) {
@@ -240,10 +248,12 @@ export function removeDuplicateProjectBasicInfoBlocks(markdown: string) {
           index += 1;
         }
       }
-      if (!seenProjectBasicTable) {
-        seenProjectBasicTable = true;
-        output.push(...block);
-      }
+      // r26 B4 去重语义修正：命名标题块仅在「实际收集到表格」时消费 seen；仅「已消费 seen 且本块含表」
+      // 才判为重复丢弃——旧实现在「标题+空行」块就置 seen=true，使后续真正的信息项表被误判重复删除
+      //（链尾补跑去重时正表被删的缺陷源）；无表格的标题/空行块不是表格实体，不构成重复
+      const duplicateTableBlock = blockHasTable && seenProjectBasicTable;
+      if (blockHasTable) seenProjectBasicTable = true;
+      if (!duplicateTableBlock) output.push(...block);
       continue;
     }
     if (/^###\s+(?:\d+\.\d+\s+)?(?:项目基本信息|工程概况|项目概况)\s*$/u.test(line)) {

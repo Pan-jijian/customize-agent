@@ -322,6 +322,49 @@ export async function applyRequirementTailClosure(input: {
   return { markdown, insertedCount: records.length, details };
 }
 
+/** r11 链尾收口循环上限（r10 实机 #3 机制归因：单次收口插入补写文本后句集变化引发语义采样重洗，
+ * 边缘条款 0.60x→0.57 新浮出残留无轮消费——循环收口每轮消费「插入后新浮现」的残留，
+ * 插入文本按构造满足条款判定（insertedCount>0 即残留已实降），正常 1-2 轮收敛，上限防振荡） */
+export const MAX_TAIL_CLOSURE_ROUNDS = 3;
+
+/**
+ * r10 链尾要求响应终局收口（可重放形态，r15 封装范式）：在调用点以检测端完全同源口径现场重跑
+ * requirements-coverage，对残留 blocker 用条款原文投标人口吻转换确定性补写至主责章末；随后
+ * recompute 保证「终门禁所检 = 修复所写」。已满足条目天然不在残留中（现场重跑判定），重放幂等零成本。
+ * 调用点：stagePostReviewSurface 尾部内联（原位置：toc-consistency / 蓝图数值重放之后）+ documentPipeline
+ * 链尾重放（r24 B1-B5 实机归因：本收口为 markdown-only 插入不写章草稿，其后 stageFactDistribution 的
+ * rebuildFinalMarkdown 从章 drafts 重拼成稿把插入全部回退——r23 实测「一级建造师」等 5 条补写阶段记录
+ * success 而终稿零踪迹、终检重新检出直坠终门禁；由 pipeline 在最后一次净变更点之后、终门禁之前再调用，
+ * 与 runSurfaceDeterministicCleans / replayBlueprintCitationNumericFixes 同范式）。
+ */
+export async function replayRequirementTailClosure(session: FinalizeSession): Promise<void> {
+  if (!session.tenderRequirements?.extracted) return;
+  let totalInserted = 0;
+  const tailDetails: string[] = [];
+  let residualCount = 0;
+  for (let closureRound = 1; closureRound <= MAX_TAIL_CLOSURE_ROUNDS; closureRound += 1) {
+    const tailClosure = await applyRequirementTailClosure({
+      markdown: session.finalMarkdown,
+      tenderRequirements: session.tenderRequirements,
+      requirementAssignments: session.requirementAssignments,
+      signal: session.signal,
+      diagnostics: session.generationDiagnostics,
+    });
+    if (tailClosure.insertedCount === 0) break;
+    session.finalMarkdown = tailClosure.markdown;
+    await session.recomputeFinalValidationBundle();
+    totalInserted += tailClosure.insertedCount;
+    tailDetails.push(...tailClosure.details);
+    residualCount = requirementResponseBlockers(session).length;
+    if (residualCount === 0) break;
+  }
+  if (totalInserted > 0) {
+    const tailClosureStage = displayStage({ type: 'validation', roleId: 'requirement-tail-closure', status: residualCount === 0 ? 'success' : 'failed', message: `招标要求响应链尾终局收口：${totalInserted} 条残留要求以投标人口吻确定性补写落位${residualCount > 0 ? `（残留 ${residualCount} 条由终门禁照常复核）` : ''}`, details: tailDetails }, { subtitle: '评审后兜底' });
+    upsertProgressStage(session.progressStages, tailClosureStage);
+    upsertProgressStage(session.finalGateRepairStages, tailClosureStage);
+  }
+}
+
 /** 章末段落插入（章定位：H2 标题归一化匹配，与修复轮章定位同源；未定位回退文末） */
 function insertParagraphsAtChapterEnd(markdown: string, chapterTitle: string, paragraphs: string[]): string {
   const lines = markdown.split('\n');

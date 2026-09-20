@@ -350,13 +350,14 @@ export function splitOverlongParagraphs(markdown: string) {
 export function demoteNonFormalH2(markdown: string) {
   return markdown.replace(/^##\s+(.+)$/gmu, (full, title: string) => {
     const clean = String(title || '').trim();
-    if (clean === '目录' || /^附录/u.test(clean) || /^第[一二三四五六七八九十百千万\d]+章\s+/u.test(clean)) return full;
+    // 附表区（附表一~N，composeAppendices 直出）与附录区同为非章节结构，不得降级为 ###
+    if (clean === '目录' || /^附录/u.test(clean) || /^附表\s*[一二三四五六七八九十\d]{1,3}/u.test(clean) || /^第[一二三四五六七八九十百千万\d]+章\s+/u.test(clean)) return full;
     return `### ${clean}`;
   });
 }
 
 export function filterResolvedFinalIssues(markdown: string, issues: ValidationIssue[]) {
-  const hasIllegalH2 = /^##\s+(?!目录$)(?!附录)(?!第[一二三四五六七八九十百千万\d]+章\s+)/gmu.test(markdown);
+  const hasIllegalH2 = /^##\s+(?!目录$)(?!附录)(?!附表\s*[一二三四五六七八九十\d]{1,3})(?!第[一二三四五六七八九十百千万\d]+章\s+)/gmu.test(markdown);
   const hasPageRefs = /(?:第?\d+页|P\.?\s*\d+)/iu.test(markdown);
   const hasForbiddenParty = /施工方/u.test(markdown);
   return issues.filter(issue => {
@@ -367,34 +368,81 @@ export function filterResolvedFinalIssues(markdown: string, issues: ValidationIs
   });
 }
 
-export function splitLongParagraphs(content: string) {
-  // 验证侧 formalContentIntegrityIssues 对正文行 >380 字符报 warning；
-  // 生成侧以 360 字符为段落上限并留出 Markdown 加粗/链接语法字符余量，避免稳定触发该 warning
-  const MAX_PARAGRAPH = 360;
-  return content.split(/\n{2,}/u).map(block => {
-    if (/^\s*(#{1,6}\s+|[-*+]\s+|\|)/u.test(block) || block.length <= MAX_PARAGRAPH + 20) return block;
-    // 先按句号/分号拆句，单句仍超上限时再按逗号拆，避免段落被保留为超长单段
-    const sentences = block
-      .split(/(?<=[。；])/u)
-      .flatMap(item => {
-        const sentence = item.trim();
-        if (!sentence) return [];
-        if (sentence.length > MAX_PARAGRAPH) return sentence.split(/(?<=[，,])/u).map(part => part.trim()).filter(Boolean);
-        return [sentence];
-      });
-    const chunks: string[] = [];
-    let current = '';
-    for (const sentence of sentences) {
-      if (current && current.length + sentence.length > MAX_PARAGRAPH) {
-        chunks.push(current);
-        current = sentence;
-      } else {
-        current += sentence;
-      }
+/** M11 行级切分共用基准：终检 formalContentIntegrityIssues 对正文行（已排除标题/表格/HTML 行）
+ * >380 字符报 warning；切分目标 360 并为 Markdown 加粗/链接语法字符留余量。r28i 实证旧实现
+ * 按 \n{2,} 分块后整块切句重组，块内所有单换行被吞并（「正文。\n#### 标题」粘连为行内标题，
+ * 终检按 ^ 行首匹配标题失效 → 缺章节标题/章内编号错位连锁 blocker，探针复现 14 处）——
+ * 行级化后仅处理超长单行，块内单换行零触碰。 */
+const OVERLONG_LINE_CHARS = 380;
+const PARAGRAPH_TARGET_CHARS = 360;
+
+/** 单行超长切分：仅切「>380 且非结构行（标题/列表/表格）」的行；短行与结构行原样返回。
+ * 切句口径与原实现一致：句号/分号拆句，单句超限再按逗号拆，按 360 上限重排为多段（空行相接）。 */
+function splitOverlongLine(line: string): string {
+  if (line.length <= OVERLONG_LINE_CHARS) return line;
+  if (/^\s*(#{1,6}\s+|[-*+]\s+|\|)/u.test(line)) return line;
+  const sentences = line
+    .split(/(?<=[。；])/u)
+    .flatMap(item => {
+      const sentence = item.trim();
+      if (!sentence) return [];
+      if (sentence.length > PARAGRAPH_TARGET_CHARS) return sentence.split(/(?<=[，,])/u).map(part => part.trim()).filter(Boolean);
+      return [sentence];
+    });
+  const chunks: string[] = [];
+  let current = '';
+  for (const sentence of sentences) {
+    if (current && current.length + sentence.length > PARAGRAPH_TARGET_CHARS) {
+      chunks.push(current);
+      current = sentence;
+    } else {
+      current += sentence;
     }
-    if (current) chunks.push(current);
-    return chunks.join('\n\n');
-  }).join('\n\n');
+  }
+  if (current) chunks.push(current);
+  return chunks.join('\n\n');
+}
+
+export function splitLongParagraphs(content: string) {
+  // 写作期版（M11 行级化：与链尾 splitOverlengthBodyParagraphs 同阈值同口径，块内换行零触碰）
+  return content.split('\n').map(splitOverlongLine).join('\n');
+}
+
+/**
+ * D-T6 ③ 链尾超长段落切分（formalContentIntegrityIssues 长段 warning 归因）：终检按
+ * 「正文行 >380 字符」判定过长段落（标题/表格/HTML 行已排除），写作期 splitLongParagraphs
+ * 只在 finalizeChapterContentQuality 运行——链尾各 draft-mutating 轮 rebuild 与 LLM 补写句
+ * 拼接引入的超长行无收口点（r28f 实测 4 行 >380，其中 1 行 = 写作期切分上限 360 + 五要素
+ * 补强句拼接 30）。本函数对成稿 markdown 重放切分（与 splitLongParagraphs 同阈值同口径）。
+ * M11 行级化（r28i 行内标题粘连根因）：旧实现按 \n{2,} 分块后整块切句重组——块内所有单换行
+ * 被吞并（「正文。\n#### 4.1.1 标题」「依据。\n## 第九章」粘连为行内文本 → 缺章节标题/
+ * 章内编号错位连锁 blocker，r28i 探针复现 14 处），现改为逐行独立处理：仅切「>380 且非
+ * 结构行（标题/列表/表格）」的行，块内单换行/短行/结构行零触碰。目录区行范围（`## 目录`
+ * 行 → 下一 H1/H2 前）整区保留（目录条目非段落，不参与切分）。幂等：切分后各行 ≤360 < 380，
+ * 重放零变化；五要素补强已保证补句行 ≤370，本函数不触碰其成果块。
+ * 入口预检：无 >380 行时零成本直接返回（无 churn）。
+ */
+export function splitOverlengthBodyParagraphs(markdown: string): { markdown: string; splitCount: number } {
+  const countLongLines = (text: string) => text.split('\n').filter(line => line.length > OVERLONG_LINE_CHARS).length;
+  const before = countLongLines(markdown);
+  if (before === 0) return { markdown, splitCount: 0 };
+  const lines = markdown.split('\n');
+  const tocStart = lines.findIndex(line => /^#{1,2}\s*目录\s*$/u.test(line.trim()));
+  let next: string;
+  if (tocStart < 0) {
+    next = lines.map(splitOverlongLine).join('\n');
+  } else {
+    let tocEnd = lines.length;
+    for (let index = tocStart + 1; index < lines.length; index += 1) {
+      if (/^#{1,2}\s+\S/u.test((lines[index] ?? '').trim())) { tocEnd = index; break; }
+    }
+    next = [
+      ...lines.slice(0, tocStart).map(splitOverlongLine),
+      ...lines.slice(tocStart, tocEnd),
+      ...lines.slice(tocEnd).map(splitOverlongLine),
+    ].join('\n');
+  }
+  return { markdown: next, splitCount: before - countLongLines(next) };
 }
 
 /** 空壳小节标题清理：标题后直到下一个标题行之间没有任何非空内容，且下一标题不是更深层级的子小节
@@ -539,14 +587,16 @@ export function stripTenderClauseFragmentHeadings(content: string) {
 
 /**
  * 数据一致性自查/约束文字泄漏段落判定（段落级整段删除）：
- * 1. 以「上表/本表」开头且含「一致/修正为」的自查推算段——写手把表格口径推算过程写进正文
- *    （如「与 180 人不一致，故将合计行…修正为 130 人」，历史缺陷：自查注释与表格数值矛盾直接进正文）；
+ * 1. 以「上表/本表」开头且含推算/修正特征词（不一致/修正为/应改为/更正为）的自查推算段——写手把表格口径
+ *    推算过程写进正文（如「与 180 人不一致，故将合计行…修正为 130 人」，历史缺陷：自查注释与表格数值矛盾
+ *    直接进正文）；M21 判据收窄（r28j 实机归因）：原「一致」子串误匹配正常业务句「核对台账…一致性…」，
+ *    且该段与后续标题单换行连接时整段连坐删除（见 stripDataConsistencyLeakSentences 结构行守卫）；
  * 2. 约束指令文字被写手复述进正文（评分报告 N2 实测：「全文不再出现 180 人」「正文不得出现跨章冲突」）——
  *    「全文/正文/文中 + 不再出现/不得出现」句式与「跨章冲突不得出现」类表述在正式正文中无合法用途。
  */
 function isDataConsistencyLeakParagraph(singleLine: string): boolean {
   const text = singleLine.trim();
-  if (/^(?:上表|本表)/u.test(text) && /(?:一致|修正为)/u.test(text)) return true;
+  if (/^(?:上表|本表)/u.test(text) && /(?:不一致|修正为|应改为|更正为)/u.test(text)) return true;
   if (/(?:全文|正文|文中)(?:不再出现|不得出现|不得再出现|不应出现|不会再出现)/u.test(text)) return true;
   if (/不得出现跨章冲突|跨章冲突不得出现|不得与其他章节(?:矛盾|冲突)/u.test(text)) return true;
   return false;
@@ -566,6 +616,29 @@ export function stripDataConsistencyLeakSentences(content: string) {
   const kept: string[] = [];
   let changed = false;
   for (const paragraph of paragraphs) {
+    // M21 结构行守卫（r28j 实机归因）：段落按 \n\s*\n 切分，正文行常与后续「## 第N章」「### x.y」标题
+    // 以单换行连接成同一段落，整段删除会造成标题连坐（r28j 第六章 2903 字被误删）。
+    // 含结构行时降级为逐行处理：标题行永不删，命中段落断言的纯文本行删除，其余保留（宁漏删不误删）。
+    if (paragraph.split('\n').some(line => /^#{1,6}\s/u.test(line.trim()))) {
+      const survivedLines: string[] = [];
+      for (const line of paragraph.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || /^#{1,6}\s/u.test(trimmed)) {
+          survivedLines.push(line);
+          continue;
+        }
+        if (isDataConsistencyLeakParagraph(trimmed)) {
+          changed = true;
+          continue;
+        }
+        const sentences = line.split(/(?<=[。！？!?；;])/u);
+        const survived = sentences.filter(sentence => !isDataConsistencyLeakSentence(sentence.trim()));
+        if (survived.length !== sentences.length) changed = true;
+        survivedLines.push(survived.join(''));
+      }
+      kept.push(survivedLines.join('\n'));
+      continue;
+    }
     const singleLine = paragraph.replace(/\n/gu, '');
     if (isDataConsistencyLeakParagraph(singleLine)) {
       changed = true;

@@ -229,6 +229,12 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   { id: 'chapter-dependency', scope: 'chapter', category: 'professional_chain' },
   { id: 'document-delivery-score', scope: 'full-document', category: 'professional_chain' },
   { id: 'generated-fact-verification', scope: 'full-document', category: 'fact_consistency' },
+  // C-T2 未溯源数值验收（documentFactTrace.numericTraceabilityIssues）：三分类豁免后的真未溯源
+  // 数字聚合 error，扫描口径与修复器（demoteUnsourcedNumericTokens）同源单源
+  { id: 'numeric-traceability', scope: 'full-document', category: 'evidence_coverage' },
+  // C-T3 表内算术自洽（detectors.tableArithmeticInconsistencyIssues）：含显性合计标记（合计行/合计列）
+  // 的表格「分项和=合计」确定性核对，不自洽进修复链（stageTableArithmeticRepair 同源重扫）
+  { id: 'table-arithmetic-consistency', scope: 'full-document', category: 'evidence_coverage' },
   { id: 'duplicate-basic-info', scope: 'full-document', category: 'structure' },
   { id: 'formal-style', scope: 'full-document', category: 'style' },
   { id: 'tertiary-heading', scope: 'full-document', category: 'structure', deterministicSafe: true },
@@ -247,7 +253,16 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   // 暗标正文禁表反向门禁（markdownComposer.bodyCompositionTableIssues，标书编制规格 bodyTablePolicy=forbidden）：
   // 正文残留 Markdown 表格即 blocker（招标暗标要求正文纯文字，结构化数据由文末附表区承载）
   { id: 'bid-composition-body-table', scope: 'full-document', category: 'structure' },
+  // F-T3 暗标正文禁图反向门禁（markdownComposer.bodyCompositionFigureIssues，标书编制规格 bodyFigurePolicy=forbidden）：
+  // 正文残留图片/图件占位即 blocker（正文纯文字，图表仅限文末附表区；确定性剥离链的终检兜底）
+  { id: 'bid-composition-body-figure', scope: 'full-document', category: 'structure' },
+  // F-T3 暗标身份禁语零容忍终检（detectors.identityLeakageIssues，identityMarksForbidden）：
+  // 正文出现以往业绩/获奖表述或证书资质编号类自我标识即 blocker
+  { id: 'identity-marks-forbidden', scope: 'full-document', category: 'format' },
   { id: 'planned-structure', scope: 'full-document', category: 'structure' },
+  // R20 C3 表题注终检（markdownComposer.tableCaptionIssues）：正文区表格逐张核验「表X-Y」题注
+  //（题注由成稿归一阶段确定性注入器写入，本检测为安全网；暗标正文禁表模式豁免）
+  { id: 'table-caption', scope: 'full-document', category: 'format' },
   { id: 'prompt-document-rule', scope: 'full-document', category: 'format' },
   { id: 'local-adaptation-keyword', scope: 'full-document', category: 'evidence_coverage' },
   { id: 'boq-division-coverage', scope: 'full-document', category: 'evidence_coverage' },
@@ -260,6 +275,10 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
  * 不参与 full-validation/standard-final 组哑火检查（写作时阻断与终检复核双职，注册单源于此）。
  */
 export const AUXILIARY_DETECTORS: readonly DetectorEntry[] = [
+  // F-T4 无主数值审计失败硬门禁（authorityAudit.authorityAuditIssues）：三桶（未登记·推导/投影缺口·
+  // 工艺库缺口）任一非零即 blocker——由 recordAuthorityAudit（rebuildAndRecompute）独立消费，
+  // 不参与两组哑火检查；审计失败不可进交付（fact_consistency + llm_repairable 直通硬阻断）
+  { id: 'authority-audit-gap', scope: 'full-document', category: 'fact_consistency' },
   { id: 'important-unplaced-facts', scope: 'chapter', category: 'evidence_coverage' },
   { id: 'table-plan-execution', scope: 'chapter', category: 'table' },
   { id: 'templating-filler', scope: 'full-document', category: 'style' },
@@ -296,6 +315,8 @@ export const DETERMINISTIC_FIXER_ANCHORS: readonly FixerEntry[] = [
   { id: 'templated-labels', kind: 'deterministic', anchoredTo: 'templated-label', giveUpOnFailure: true },
   // V2 批1 结构完整性确定性清理（与检测器 structure-integrity 同源单扫描：检测定位=清理定位）
   { id: 'structure-integrity', kind: 'deterministic', anchoredTo: 'structure-integrity', giveUpOnFailure: true },
+    // r28h 行内嵌标题拆行（s28h2 实测）：「……有缺损。## 第九章 确保文明施工的技术组织措施」章标题并进正文行致「正文缺少章节标题」（planned-structure）——拆行恢复行首标题结构
+    { id: 'embedded-heading-split', kind: 'deterministic', anchoredTo: 'planned-structure', giveUpOnFailure: true },
   { id: 'repeated-words', kind: 'deterministic', anchoredTo: 'repeated-word', giveUpOnFailure: true },
   { id: 'duplicate-tables', kind: 'deterministic', anchoredTo: 'duplicate-table', giveUpOnFailure: true },
   { id: 'finish-thickness', kind: 'deterministic', anchoredTo: 'finish-thickness', giveUpOnFailure: true },
@@ -324,6 +345,8 @@ export const DETERMINISTIC_FIXER_ANCHORS: readonly FixerEntry[] = [
   // 4.31 小节标题工程类别未覆盖改名（丰乐镇 v6 #90）：与检测器 heading-uncovered-engineering-items 同源单扫描
   { id: 'heading-uncovered-items', kind: 'deterministic', anchoredTo: 'heading-uncovered-engineering-items', giveUpOnFailure: true },
   { id: 'inverted-date-range', kind: 'deterministic', anchoredTo: 'inverted-date-range', giveUpOnFailure: true },
+  // r28j 同日零长区间修复（M15）：锚定检测器 cross-chapter-consistency 的「同日起止区间校验」（只报不修、owner=llm 交修复轮未清）
+  { id: 'zero-length-date-range', kind: 'deterministic', anchoredTo: 'cross-chapter-consistency', giveUpOnFailure: true },
   { id: 'truncated-sentence', kind: 'deterministic', anchoredTo: 'truncated-sentence', giveUpOnFailure: true },
   { id: 'meta-discourse', kind: 'deterministic', anchoredTo: 'meta-discourse-declaration', giveUpOnFailure: true },
   { id: 'formula-residue', kind: 'deterministic', anchoredTo: 'formula-residue', giveUpOnFailure: true },
@@ -377,6 +400,10 @@ export const NUMERIC_ARBITER_FIXERS: readonly FixerEntry[] = [
  */
 export const CHAPTER_DETERMINISTIC_FIXERS: readonly FixerEntry[] = [
   { id: 'near-duplicate-section-merge', kind: 'deterministic', anchoredTo: 'section-count-overflow', giveUpOnFailure: true },
+  // D-T3 无依据空壳小节链尾清扫（补写轮搬走 H4 正文后空壳标题行残留直坠终检「空小节」）：
+  // 与检测端同源（emptyUnplannedSectionSpans 与 collectSectionContentGaps 同判定链）——
+  // 整行移除无规划归属严格空壳 + 章内编号原子重放；执行点：table-arithmetic-repair 之后链尾最后 draft-mutating
+  { id: 'empty-section-strip', kind: 'deterministic', anchoredTo: 'section-content-integrity', giveUpOnFailure: true },
 ];
 
 /**
@@ -418,12 +445,44 @@ export const LLM_PATCH_REPAIR_ROUNDS: readonly FixerEntry[] = [
   // critical/emergency-section-depth、construction-org-major-content/division-section、precise-fact-usage、
   // overview-recap 六类「内容欠产」blocker 此前无任何修复轮消费，裸奔直坠终门禁——本轮统一收口：
   // 按 provenance + chapterId 章级分组，定向补写（每章 2 轮 + 外层 2 周期收敛 + 变差回滚）。
-  { id: 'content-depth-repair', kind: 'llm-patch', anchoredTo: 'critical-section-depth', alsoAnchoredTo: ['emergency-section-depth', 'construction-org-major-content', 'construction-org-division-section', 'precise-fact-usage', 'overview-recap'], patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
+  // D-T1 扩展锚定：professional-score（报出线统一 8/12 后，<8/12 的章为 warning 级缺口，同轮消费
+  // 定向补写，预算单列：每章 1 轮/单周期最多 4 章）。
+  { id: 'content-depth-repair', kind: 'llm-patch', anchoredTo: 'critical-section-depth', alsoAnchoredTo: ['emergency-section-depth', 'construction-org-major-content', 'construction-org-division-section', 'precise-fact-usage', 'overview-recap', 'professional-score'], patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
+  // D-T2 评审关注闭环链补写轮（r28f B8 前半归因）：质量三检/进度纠偏/工资代发链「主责章全要素」
+  // 判定（construction-org-control-loop warning）此前无修复轮消费——本轮章级实时重算定位 +
+  // LLM 定向补写缺失环节（标准词面落位）+ 复检缺失数（变差回滚），与 content-depth-repair 同族链尾补写轮
+  { id: 'control-loop-repair', kind: 'llm-patch', anchoredTo: 'construction-org-control-loop', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
+  // D-T9 工序链与项目属性适配修复轮（r28f #30/#31 归因）：construction-org-professional-chain warning
+  //（检测端已升级节级 mixed + 文档级 insufficient 判定，词表簇化）此前无修复轮消费——本轮章级
+  // 实时重算定位 + LLM 定向改写错位工序/补写缺失链环节（标准工序名落位）+ 复检缺陷数（变差回滚）
+  { id: 'professional-chain-repair', kind: 'llm-patch', anchoredTo: 'construction-org-professional-chain', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
   // 丰乐镇实机终门禁归因 #8（编制依据法规漏列）：编制依据小节此前漏写具体法规/规范条目（法律法规/
   // 地方性法规齐全但零施工验收规范编号）只有终检 basis-regulations-coverage 报出、无修复轮消费——
   // 链尾 LLM 定向补列缺失类目（照抄招标文件引用法规 + 按本工程分部分项选列现行施工验收规范名称
   // 及编号），复检缺失类目数 + 变差回滚。authorities 与锚定检测器同声明（消费蓝图法规清单权威）
   { id: 'basis-regulations-repair', kind: 'llm-patch', anchoredTo: 'basis-regulations-coverage', authorities: ['blueprint'], patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
+  // r28j 实机归因（s28i 连续两轮）：危大工程辨识清单适用项漏列（正文拆改清运「拆除工程」适用前提
+  // 真实存在而辨识叙述区缺别名精确词）此前只有终检 dangerous-applicability 报出、修复链无轮消费
+  //（4.41 删除确定性补写器后裸奔）——链尾定位含危大辨识区的章 + LLM 定向补列遗漏适用项（补列
+  // 紧邻既有辨识叙述、落回辨识区覆盖范围），复检遗漏项覆盖数 + 变差回滚
+  { id: 'dangerous-applicability-repair', kind: 'llm-patch', anchoredTo: 'dangerous-applicability', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
+  // D-T8 配置必要内容缺失链尾收口（r28f 实测 7 项术语缺失）：模板命中的 autoSpecGates 配置术语清单
+  //（国家法律法规/地方法规/项目特征/图纸设计说明/劳动力计划/主要施工材料/安全文明等）此前只有终检
+  // planned-auto-spec-gate 报出、无修复轮消费——缺失术语 bigram 归属到章 + LLM 定向补写（自然融入），
+  // 复检归属术语缺失数 + 变差回滚
+  { id: 'auto-spec-gate-repair', kind: 'llm-patch', anchoredTo: 'planned-auto-spec-gate', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
+  // D-T3 成稿篇幅压缩轮（B8 后半归因）：成稿字数超出目标 20%（document-budget「明显超出」warning）
+  // 此前无修复轮消费，超产直坠交付（验收线「目标 ±20% 内」）——章级超额定位 + LLM 合并重复段落，
+  // 信息守恒守卫（字数须降，且标题/数值不得缺失、表格行数不得减少，任一违反即回滚）
+  { id: 'length-compression-repair', kind: 'llm-patch', anchoredTo: 'document-budget', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
+  // r24 B8 实机归因：正文无题名形态表格（表上方 8 行内无可提取表名）在题注注入器/逐表对账双盲区，
+  // 终检 table-caption 报出后无修复轮消费直坠终门禁——本轮消费该 blocker 章级定向补名（补写独立
+  // 表题行纯增量；确定性补名先行，无计划表匹配的残留表走本 LLM 轮；回滚保护：无题表数须严格下降）
+  { id: 'table-caption-repair', kind: 'llm-patch', anchoredTo: 'table-caption', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
+  // C-T3 表内算术自洽修复轮（C4 归因）：含显性合计标记（合计行/合计列）的表格「分项和=合计」
+  // 不自洽此前只有终检 table-arithmetic-consistency 报出、无修复轮消费——本轮消费该 blocker 章级
+  // 定向重算表内数值（回滚保护：不自洽处数须严格下降；与 table-caption-repair 同族链尾 draft-mutating 轮）
+  { id: 'table-arithmetic-repair', kind: 'llm-patch', anchoredTo: 'table-arithmetic-consistency', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
 ];
 
 /**
@@ -447,8 +506,17 @@ export const FINALIZE_REPAIR_ROUNDS = [
   // r8 实机终门禁归因（第二类系统性缺陷：修复链覆盖检测器集合 < 终检检测器集合）：内容深度类
   // blocker（critical/emergency-section-depth、construction-org-major-content/division-section、
   // precise-fact-usage、overview-recap）此前无修复轮消费裸奔到终门禁——本轮统一消费定向补写；
+  // D-T1 扩展：专业评分不足（professional-score <8/12）同轮消费（预算单列）；
   // 位置必须早于 post-review-surface（其复读剥离/格式清洗覆盖本轮补写引入的残留）
   'content-depth-repair',        // 内容深度补写轮（stageContentDepthRepair）
+  // D-T2 评审关注闭环链补写轮（B8 前半根治）：construction-org-control-loop warning 消费定向补写；
+  // 同族补写轮，位置与 content-depth-repair 相同约束：早于 post-review-surface（其复读剥离
+  // /格式清洗覆盖本轮补写引入的残留）
+  'control-loop-repair',         // 评审关注闭环链补写轮（stageControlLoopRepair）
+  // D-T9 工序链与项目属性适配修复轮（r28f #30/#31 归因）：construction-org-professional-chain warning
+  // 消费定向修复（错位节改写/缺失链补写）；同族补写轮，位置与 content-depth-repair 相同约束：
+  // 早于 post-review-surface（其复读剥离/格式清洗覆盖本轮补写引入的残留）
+  'professional-chain-repair',   // 工序链与项目属性适配修复轮（stageProfessionalChainRepair）
   // 顺序调整理由（丰乐镇 doc-1788954795698 实测）：requirement-verification 的 LLM 补写会引入句级复读，
   // post-review-surface 若在其之前执行，补写引入的复读（17 处）无人清理 → 后置到补写轮之后兜底
   'post-review-surface',         // 评审轮后表面修复兜底（SURFACE_FIX_STEPS round-2 链，含句级复读剥离）
@@ -464,11 +532,57 @@ export const FINALIZE_REPAIR_ROUNDS = [
   //（法律法规/地方性法规齐全但零施工验收规范编号直坠终门禁）——链尾 LLM 定向补列缺失类目（照抄
   // 招标文件引用法规 + 按本工程分部分项选列现行规范名称及编号），复检缺失类目数 + 变差回滚
   'basis-regulations-repair',    // 编制依据法规漏列链尾修复（stageBasisRegulationsRepair）
+  // r28j 危大辨识清单漏项链尾收口（s28i 连续两轮实测）：正文拆改清运「拆除工程」适用前提真实存在
+  // 而辨识叙述区缺别名精确词，终检 dangerous-applicability 报出后无修复轮消费——链尾定位含危大
+  // 辨识区的章 + LLM 定向补列遗漏适用项（补列紧邻既有辨识叙述），复检遗漏项覆盖数 + 变差回滚
+  'dangerous-applicability-repair', // 危大辨识清单漏项链尾修复（stageDangerousApplicabilityRepair）
+  // D-T8 配置必要内容缺失链尾收口（r28f 实测 7 项术语缺失）：模板命中的 autoSpecGates 配置术语清单
+  //（国家法律法规/地方法规/项目特征/图纸设计说明/劳动力计划/主要施工材料/安全文明等）此前只有终检
+  // planned-auto-spec-gate 报出、无修复轮消费——缺失术语 bigram 归属到章 + LLM 定向补写（自然融入），
+  // 复检归属术语缺失数 + 变差回滚
+  'auto-spec-gate-repair',       // 配置必要内容缺失链尾修复（stageAutoSpecGateRepair）
   'toc-consistency',             // 目录与正文一致性兜底（fixTocFromBody）
+  // D-T3 成稿篇幅压缩轮（B8 后半归因）：成稿字数超出目标 20% 时章级超额定位 + LLM 合并重复段落
+  //（信息守恒守卫：字数须降，且标题/数值不得缺失、表格行数不得减少）；draft-mutating + rebuild，
+  // 位于全部 LLM 补写轮之后（post-review-surface 尾部 toc-consistency 之后）、扩散轮之前
+  'length-compression-repair',   // 成稿篇幅压缩轮（stageLengthCompressionRepair）
   // R12 方案针对性分布归因（丰乐镇实测 distribution≈0.09）：高价值事实值仅在单一章节落位——链尾确定性
   // 扩散轮（stageFactDistribution），在语义相关章正文块尾追加自然引用句；必须在全部 LLM 补写轮之后
   // （前置轮改写正文会稀释/回退已生效的分布），stageFinalGate 之前收口（评分与门禁按扩散后正文判定）
   'fact-distribution-round',     // 关键事实跨章扩散轮（stageFactDistribution）
+  // r24 B8 实机归因：正文无题名表格（探测 kind='none'）无可注入对象直坠终门禁——确定性补名（章内
+  // 无题表 × 本章计划表表头字段对账）+ LLM 补名（残留表章级定向）写回章 drafts；draft-mutating +
+  // rebuild，必须位于 stageFactDistribution 之后（其 rebuild 回退此前 markdown-only 修改）、链尾
+  // markdown-only 重放（runSurfaceDeterministicCleans 等）之前
+  'table-caption-repair',        // 正文表格题名补全轮（stageTableCaptionRepair）
+  // C-T3 表内算术自洽修复轮（C4 归因：含显性合计标记的表格分项和≠合计直坠评审数据可信度判定）：
+  // 章级同源重扫（tableArithmeticInconsistencyIssues）+ LLM 定向重算表内数值；draft-mutating +
+  // rebuild，必须位于 table-caption-repair 之后、链尾 markdown-only 重放之前（本轮 rebuild 不得
+  // 回退链尾重放成果）
+  'table-arithmetic-repair',     // 表内算术自洽修复轮（stageTableArithmeticRepair）
+  // D-T3 无依据空壳小节链尾清扫（r28f 终检「空小节」blocker 归因）：补写轮搬走 H4 正文后无规划
+  // 归属的空壳标题行残留——确定性整行移除 + 章内编号原子重放；链尾最后 draft-mutating 位置
+  //（table-arithmetic-repair 之后、链尾 markdown-only 重放之前）
+  'empty-section-sweep',         // 无依据空壳小节链尾清扫（stageEmptySectionSweep）
+  // D-T6 ② 小节结构对齐链尾重放（r28f 门禁 #2 归因：第 7 章成稿 5 节 vs 规划 4 节）：近名合并/漂移
+  // 改名位于缺节补写之前，补写后「漂移+补写并存」历史形态与落单漂移行到链尾再无收口点——链尾重放
+  // mergeNearDuplicateSectionHeadings（近名成对合并 + 单行漂移改名）+ reconcileUnplannedSectionHeadings
+  //（非近名规划外 H3 降 H4，与 sectionCountOverflowIssues 同源判定）；链尾最后 draft-mutating 位置
+  'section-alignment-sweep',     // 小节结构对齐链尾重放（stageSectionAlignmentSweep）
+  // D-T7 ① 模板化清理链尾重放（r28f #35 归因：终检 formalStyleIssues 与修复链口径分叉，修复轮后各
+  // draft-mutating 轮 rebuild 可再引入前缀导语句）：零信息前缀句确定性删除（templatePrefixTargets +
+  // stripZeroInfoSloganSentences）+ 逐章段落完全重复去重（stripDuplicateParagraphs 重放）；
+  // 链尾 draft-mutating，位于 section-alignment-sweep 之后
+  'templating-sweep',            // 模板化清理链尾重放（stageTemplatingSweep）
+  // D-T7 ② 重复主题小节合并（r28f #36/#37 归因：minChapterSectionIssues 检测恒报、修复链零消费）：
+  // 同桶规划小节 ≥2（classifyThematicSectionKey 单源）且正文均有 H3 落位时确定性合并——保留首现、
+  // 后续标题行摘除正文并入、规划数组同步、章内编号原子重放；位于 templating-sweep 之后、
+  // delivery-structure-closure（链尾 markdown-only 收口）之前
+  'duplicate-theme-merge',       // 重复主题小节链尾合并（stageDuplicateThemeMerge）
+  // D-T6 ①③ 交付结构收口（r28f 门禁 #1 目录 29 vs 28 + 终检长段归因）：长段切分（>380 行切句重组，
+  // 与写作期 splitLongParagraphs 同阈值）+ 目录重建（fixTocFromBody 按正文实际结构重建）——
+  // 链尾 markdown-only 收口，位于全部 draft-mutating 轮之后、stageFinalGate 之前
+  'delivery-structure-closure',  // 交付结构收口轮（stageDeliveryStructureClosure）
 ] as const;
 
 export type FinalizeRepairRound = (typeof FINALIZE_REPAIR_ROUNDS)[number];

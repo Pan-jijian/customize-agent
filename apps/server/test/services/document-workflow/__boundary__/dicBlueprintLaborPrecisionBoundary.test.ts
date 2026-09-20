@@ -8,6 +8,7 @@
  * 原则：每条用例独立断言意义；真实实现行为一律锁定，不迎合用例改实现。
  */
 import { describe, expect, it } from 'vitest';
+import { scanPhaseLaborClaims } from '@/services/document-workflow/integrity/detectors/detectors';
 import {
   buildBlueprintData,
   buildBlueprintOutline,
@@ -254,5 +255,28 @@ describe('Q10 blueprintLaborPeakAuthority 权威源回填', () => {
     const { data } = buildBlueprintData({ boq, basicFacts, projectName: '测试村建设项目', strategy: villageMunicipalStrategy });
     expect(data.resources.labor.peakValue).toBe(36);
     expect(blueprintLaborPeakAuthority(data)).toBe(36);
+  });
+});
+
+describe('r25 阶段并列枚举豁免（r24b B4 归因：A与B并列被误判为两阶段名连写）', () => {
+  it('并列枚举且两阶段权威同值 → 无 claim 无拼接歧义', () => {
+    const authorities = [
+      { phase: '道路铺装工程', value: 262 },
+      { phase: '景观与绿化工程', value: 262 },
+    ];
+    const markdown = '其中道路铺装工程与景观与绿化工程阶段同时在场人数达到峰值262人。';
+    const { claims, ambiguities } = scanPhaseLaborClaims(markdown, authorities);
+    expect(claims).toHaveLength(0);
+    expect(ambiguities).toHaveLength(0);
+  });
+  it('并列枚举值不符 → 拼接歧义保守暴露（豁免不过宽，交修复轮裁决）', () => {
+    const authorities = [
+      { phase: '道路铺装工程', value: 262 },
+      { phase: '景观与绿化工程', value: 261 },
+    ];
+    const markdown = '其中道路铺装工程与景观与绿化工程阶段同时在场人数达到峰值262人。';
+    const { claims, ambiguities } = scanPhaseLaborClaims(markdown, authorities);
+    expect(ambiguities).toHaveLength(1);
+    expect(claims).toHaveLength(0);
   });
 });

@@ -158,6 +158,19 @@ describe('后台流程话术检测', () => {
     expect(validateDraftWithAutoSpec({ markdown: '本工程施工组织安排合理。', spec: makeSpec([]), summary: makeSummary() })).toEqual([]);
   });
 
+  it('r26 B1：「标准规范包括」合法拼写不误报（规范包右邻守卫）', () => {
+    expect(validateDraftWithAutoSpec({ markdown: '1.4.1适用于工程的标准规范包括：招标文件及其附件、设计文件要求。', spec: makeSpec([]), summary: makeSummary() })).toEqual([]);
+  });
+
+  it('r26 B1：「规范包含」合法拼写不误报（规范包右邻守卫）', () => {
+    expect(validateDraftWithAutoSpec({ markdown: '施工规范包含路基与路面两部分内容。', spec: makeSpec([]), summary: makeSummary() })).toEqual([]);
+  });
+
+  it('r26 B1：「规范包」非括/含续接仍判话术（守卫不放行真命中）', () => {
+    const issues = validateDraftWithAutoSpec({ markdown: '正文引用文档规范包内容。', spec: makeSpec([]), summary: makeSummary() });
+    expect(issues.some(issue => issue.level === 'error' && issue.message.includes('规范包'))).toBe(true);
+  });
+
   it('空正文安全', () => {
     const issues = validateDraftWithAutoSpec({ markdown: '', spec: makeSpec([{ name: '总建筑面积' }]), summary: makeSummary() });
     expect(issues.length).toBeGreaterThanOrEqual(1);

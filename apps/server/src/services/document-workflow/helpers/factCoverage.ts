@@ -3,7 +3,7 @@
  * 依赖 projectBasicInfo（cleanInlineFactValue）。
  */
 import type { DocumentFact } from '../types';
-import { normalizeOcrFactText } from '../factsModel';
+import { normalizeOcrFactText, stripFactLabelPrefix } from '../factsModel';
 import { stringifyFactValue } from '../utils';
 import { cleanInlineFactValue } from './projectBasicInfo';
 
@@ -29,12 +29,6 @@ export function significantFactValue(value: unknown) {
   if (isCommercialSensitiveFactText(text)) return '';
   if (text.length > 160) return '';
   return text;
-}
-
-/** 4.27.0 A5：字段标签前缀混入清洗（基线实测「招标人：肥西县丰乐镇人民政府」因前缀致归一化失配误报未落位；
- *  清洗后为合法候选，落位指令与回滚复检口径一致）。 */
-export function stripFactLabelPrefix(value: string) {
-  return value.replace(/^(?:招标人|招标单位|建设单位|发包人|项目名称|工程名称|项目编号|招标项目编号|标段名称|建设地点|建设规模|招标范围|计划工期|合同工期|质量标准|质量目标)[：:]\s*/u, '');
 }
 
 /** V5 P6 run1 实测垃圾候选过滤：清单表行/图纸签章 OCR 乱串/表单残片混入「项目名称」「招标人」

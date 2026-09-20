@@ -44,6 +44,20 @@ function nearlyEqual(a: number, b: number): boolean {
   return Math.abs(a - b) <= 0.01 + 1e-6 * Math.max(Math.abs(a), Math.abs(b));
 }
 
+/** 转写宽容相等（r26 实测：正文整数为权威小数值的截断/舍入转写，如权威 1757.12 → 正文 1757）：
+ * 在 nearlyEqual 基础上额外接受「正文整数值 = 权威值截断或四舍五入」。仅用于绑定值 vs 条目数量/
+ * 同名值集的吻合判定——不得用于 foreign 归属判定（防把无关条目的小数值错认为本值归属）。 */
+function transcribedEqual(textValue: number, authorityValue: number): boolean {
+  if (nearlyEqual(textValue, authorityValue)) return true;
+  return Number.isInteger(textValue)
+    && (Math.trunc(authorityValue) === textValue || Math.round(authorityValue) === textValue);
+}
+
+/** 规格归一键（去空白 + 小写）：specValues/aggregateSpecs 与正文抽取共用口径 */
+function normalizeSpecKey(spec: string): string {
+  return spec.replace(/\s+/gu, '').toLowerCase();
+}
+
 /** 有序数值池近似查找（二分定位 + 邻位复核：容差带内的权威值命中判定） */
 function poolHasApprox(sorted: number[], value: number): boolean {
   let lo = 0;
@@ -95,8 +109,9 @@ function numberVariants(value: number): string[] {
   return [...variants];
 }
 
-/** 槽位/性能/频次词豁免：数字属工艺参数或物理属性（非工程量），不做绑定比对 */
-const SLOT_WORD_RE = /(?:每|厚度|宽度|高度|深度|长度|直径|间距|净距|坡度|标高|偏差|误差|系数|等级|龄期|温度|含水率|压实度|密度|功率|电压|照度|色温|耐火|强度|抗渗|配合比|搭接|错缝|含水|埋深|覆土|预留|预埋|伸缩|沉降|变形|垂直度|平整度|倾角|坡度|模数|螺距|壁厚|净空|层高|埋设|位置|距离|半径|周长|坡度)/u;
+/** 槽位/性能/频次词豁免：数字属工艺参数或物理属性（非工程量），不做绑定比对
+ * （M24b 导出：arbiter A3 名称-数值绑定扫描与 D4.6a 同源共用） */
+export const SLOT_WORD_RE = /(?:每|厚度|宽度|高度|深度|长度|直径|间距|净距|坡度|标高|偏差|误差|系数|等级|龄期|温度|含水率|压实度|密度|功率|电压|照度|色温|耐火|强度|抗渗|配合比|搭接|错缝|含水|埋深|覆土|预留|预埋|伸缩|沉降|变形|垂直度|平整度|倾角|坡度|模数|螺距|壁厚|净空|层高|埋设|位置|距离|半径|周长|坡度)/u;
 
 // ═══════════════════════════ 权威视图 ═══════════════════════════
 
@@ -108,12 +123,33 @@ interface ReconciliationEntry {
   source: 'bill' | 'blueprint';
 }
 
+/** 名称合计索引条目（R20 根因治理·通用机制）：同名跨规格条目的名称聚合值 + 规格小计映射。
+ * 全部字段由清单特征描述的规格 token 聚合自动推导（extractSpecTokens/deriveQuantitiesFromBoq），
+ * 零项目常量——任意工程任意专业（灯具/管材/设备/构件）凡名称聚合出 ≥2 规格即自动生效 */
+interface AggregateSpecInfo {
+  value: number;
+  unit: string;
+  /** 规格归一键 → 该规格小计（specBreakdown） */
+  specs: Map<string, number>;
+  /** 规格拆分原文（消息与修复建议展示用） */
+  breakdown: Array<{ spec: string; value: number }>;
+  /** 干净切分门（通用·数据驱动）：规格小计之和 ≈ 名称合计 → 单维完整拆分（各条目按互斥规格分组），
+   * 「合计挂单项」判定与确定性修复启用；跨维度交叉聚合（强度×厚度等同条目多 token 重复计入，
+   * 和≠合计）不构成「名称合计 = Σ规格小计」口径，正文/表格引用其组合值属正常，全部退出。
+   * R20 r19 干跑实测：塑料管 7488.02≠7525.01 / 水泥混凝土 42675.64≠20872.82 / 管道垫层
+   * 62.74≠1211.96 三项交叉聚合被挡，一般路灯 109+9=118 等九项单维拆分启用 */
+  partitioned: boolean;
+}
+
 interface ReconciliationAuthority {
   entries: ReconciliationEntry[];
   /** 数字池：全部权威数值（条目值 + 分村明细 + 规格-数量拆分 + 蓝图 + 事实主表），近似口径推导用 */
   numberPool: number[];
   /** 规格 → 权威值与来源条目（D4.2 绑定校验；spec=原书写形，键为归一形） */
   specValues: Map<string, Array<{ value: number; unit: string; entryName: string; spec: string }>>;
+  /** 名称合计索引（R20）：条目名 → 名称聚合 + 规格小计（仅 specBreakdown ≥2 的条目）——
+   * 「合计挂单项」（跨规格名称合计被挂给单一规格）判定与规格小计豁免的权威，双模式通用 */
+  aggregateSpecs: Map<string, AggregateSpecInfo>;
 }
 
 /** 事实主表数值收集（字符串内数字 token 化提取：maximal match 防子串误配） */
@@ -144,6 +180,7 @@ function buildReconciliationAuthority(input: FactReconciliationInput): Reconcili
   const entries: ReconciliationEntry[] = [];
   const numberPool: number[] = [];
   const specValues = new Map<string, Array<{ value: number; unit: string; entryName: string; spec: string }>>();
+  const aggregateSpecs = new Map<string, AggregateSpecInfo>();
   const lock = input.billFactLock;
   if (lock) {
     for (const entry of lock.entries) {
@@ -170,9 +207,24 @@ function buildReconciliationAuthority(input: FactReconciliationInput): Reconcili
     entries.push({ name: name.trim(), value: quantity.value, unit: (quantity.unit || '').trim(), description: '', source: 'blueprint' });
     numberPool.push(quantity.value);
     for (const group of quantity.groups ?? []) numberPool.push(group.value);
+    // R20 规格拆分承接（通用）：名称合计（如 一般路灯 118套）+ 规格小计（100W→109 / 120W→9）
+    // 规格小计入 numberPool（防「正确小计被判无源」反向误报，与 numericVerification 同口径）
+    const breakdown = quantity.specBreakdown ?? [];
+    if (breakdown.length >= 2) {
+      const splitSum = breakdown.reduce((sum, item) => sum + item.value, 0);
+      aggregateSpecs.set(name.trim(), {
+        value: quantity.value,
+        unit: (quantity.unit || '').trim(),
+        specs: new Map(breakdown.map(item => [normalizeSpecKey(item.spec), item.value])),
+        breakdown: breakdown.map(item => ({ spec: item.spec, value: item.value })),
+        // 干净切分门（通用·数据驱动）：小计之和 ≈ 名称合计才认定单维完整拆分，零项目常量
+        partitioned: nearlyEqual(splitSum, quantity.value),
+      });
+      for (const split of breakdown) numberPool.push(split.value);
+    }
   }
   collectFactModelNumbers(input.factsModel, numberPool);
-  return { entries, numberPool, specValues };
+  return { entries, numberPool, specValues, aggregateSpecs };
 }
 
 export interface FactReconciliationInput {
@@ -483,10 +535,55 @@ export function fixUnsupportedTotalClaims(
   return { markdown: result, fixedCount: details.length, details };
 }
 
+// ═══════════ 交付前兜底：无源名称绑定确定性删除（r26 实测归因） ═══════════
+// 终检只报不修（blocker 直坠门禁）：清单条目名称与紧邻数值绑定但全部权威豁免链（同名值集/组和/
+// 子集和/foreign/数字池）均不命中（如「新建水泥混凝土面层面积1757㎡」——1757 实为他处口径挪用），
+// 又无唯一可裁决替值（同名条目数十条、无一条同值）——全稿 LLM 修复轮后仍残留，按子句边界确定性
+// 删除绑定子句（边界口径与无源合计删除同源：匹配点左界分句符连删、右随符保留；窗口 60 字/子句
+// 上限 40 字，超限放弃；从后往前应用 + 重叠防护；4 轮复扫防同句多处残留；重放无命中零变更幂等）。
+
+export interface UnsourcedNameBindingFixResult {
+  markdown: string;
+  fixedCount: number;
+  details: string[];
+}
+
+export function fixUnsourcedNameBindings(
+  markdown: string,
+  input: Pick<FactReconciliationInput, 'billFactLock' | 'blueprintData' | 'factsModel'>,
+): UnsourcedNameBindingFixResult {
+  const authority = buildReconciliationAuthority({ markdown, ...input });
+  if (authority.entries.length === 0) return { markdown, fixedCount: 0, details: [] };
+  let result = markdown;
+  const details: string[] = [];
+  for (let round = 1; round <= 4; round += 1) {
+    const spans: Array<{ start: number; end: number; excerpt: string }> = [];
+    for (const finding of scanNameBindingFindings(result, authority, input.billFactLock)) {
+      if (!finding.issue.message.startsWith('名称-数值绑定无源')) continue;
+      const span = unsupportedTotalClaimRemovalSpan(result, finding.matchStart, finding.matchEnd);
+      if (span) spans.push(span);
+    }
+    if (spans.length === 0) break;
+    let applied = 0;
+    let lastStart = Number.POSITIVE_INFINITY;
+    for (const span of [...spans].sort((left, right) => right.start - left.start)) {
+      if (span.end > lastStart) continue;
+      result = result.slice(0, span.start) + result.slice(span.end);
+      lastStart = span.start;
+      applied += 1;
+      details.push(`删除无源绑定「${span.excerpt.slice(0, 40)}」`);
+    }
+    if (applied === 0) break;
+  }
+  return { markdown: result, fixedCount: details.length, details };
+}
+
 // ═══════════════════════════ D4.2：规格-数值绑定 ═══════════════════════════
 
-/** 规格候选 token（强规格形态，宁少勿误：管径/标号/钢筋牌号/尺寸年号）：正文侧抽取 */
-const SPEC_CANDIDATE_RE = /(?:DN|De|Φ|φ|Ø|dn|de)\s*\d+(?:\.\d+)?|(?<![A-Za-z0-9])[CM]\d{2,3}(?![0-9])|HRB\d+|HPB\d+|(?<![A-Za-z0-9])\d{2,4}\s*[×xX*]\s*\d{2,4}(?![0-9])/gu;
+/** 规格候选 token（强规格形态，宁少勿误：管径/标号/钢筋牌号/尺寸年号/功率）：正文侧抽取。
+ * R20 增补功率形态（100W/120W/5.5kW 等）——名称合计（specBreakdown）绑定校验依赖该形态，
+ * 与 billFactLock.SPEC_TOKEN_RE 的功率提取口径一致（清单侧抽取为准，正文侧对称识别） */
+const SPEC_CANDIDATE_RE = /(?:DN|De|Φ|φ|Ø|dn|de)\s*\d+(?:\.\d+)?|(?<![A-Za-z0-9])[CM]\d{2,3}(?![0-9])|HRB\d+|HPB\d+|(?<![A-Za-z0-9])\d{2,4}\s*[×xX*]\s*\d{2,4}(?![0-9])|(?<![A-Za-z0-9])\d+(?:\.\d+)?\s*[kK]?[Ww](?![A-Za-z0-9])/gu;
 
 /** 规格-数值绑定命中（结构化）：issue 供检测端照常报告；specToken/value/unit/valueStart/valueEnd/
  * groupSumCandidates 供修复端原位替换（检测定位=修复定位严格同源）。 */
@@ -497,29 +594,54 @@ export interface SpecBindingHit {
   unit: string;
   valueStart: number;
   valueEnd: number;
-  /** 修复候选：该规格同条目名分组之和（降序去重、排除与正文值近等者）——替换后通过组和/权威值豁免。
+  /** 修复候选：该规格同条目名分组之和（降序；候选带单位——替换端单位兼容校验用：
+   * 数值替换不得跨量纲搬运（如 C30 混凝土的 m3 值不得替换「台」数），C-T1 根因治理）。
    * r17 丰乐镇归因 #B1：DN110 的 15m 无源恰撞无关条目「人行道混凝土垫层 15m³」；组和 7435m
    * （15 个村同名条目 DN110 拆分量之和）为该规格唯一聚合权威口径，替换后检测组和豁免必然通过。 */
-  groupSumCandidates: number[];
+  groupSumCandidates: Array<{ value: number; unit: string }>;
+}
+
+/** 设备主体词（C-T1：设备配置台数的语义锚——「搅拌运输车 2台」的 2 是设备数非规格清单量；
+ * 检测端间隙豁免与数值后窗豁免共用同一词表） */
+const DEVICE_BODY_RE = /运输车|搅拌车|罐车|挖掘机|挖机|装载机|压路机|摊铺机|打夯机|夯实机|洒水车|浇水车|吊车|起重机|泵车|地泵|发电机组|发电机|电焊机|空压机|水泵|提升泵|潜水泵|雾炮机|机械|设备|机具|车辆|机组/u;
+
+/** 规格 → 所属名称合计条目（R20）：同一规格至多归属首个体现在 aggregateSpecs 的条目 */
+function findAggregateSpecInfo(authority: ReconciliationAuthority, specKey: string): { entryName: string; info: AggregateSpecInfo } | undefined {
+  for (const [entryName, info] of authority.aggregateSpecs) {
+    if (info.specs.has(specKey)) return { entryName, info };
+  }
+  return undefined;
 }
 
 function scanSpecBindingHits(markdown: string, authority: ReconciliationAuthority): SpecBindingHit[] {
   const hits: SpecBindingHit[] = [];
-  if (authority.specValues.size === 0) return hits;
+  if (authority.specValues.size === 0 && authority.aggregateSpecs.size === 0) return hits;
   const seen = new Set<string>();
   for (const match of markdown.matchAll(SPEC_CANDIDATE_RE)) {
-    const specKey = match[0].replace(/\s+/gu, '').toLowerCase();
-    const bound = authority.specValues.get(specKey);
-    if (!bound) continue;
+    const specKey = normalizeSpecKey(match[0]);
+    const bound = authority.specValues.get(specKey) ?? [];
+    // R20：规格可仅由名称合计的 specBreakdown 承载（特征描述未含该 token 或清单缺失时仍可绑定）
+    const aggregateOwner = findAggregateSpecInfo(authority, specKey);
+    if (bound.length === 0 && !aggregateOwner) continue;
     const matchEnd = (match.index ?? 0) + match[0].length;
     const after = markdown.slice(matchEnd, matchEnd + 36);
-    const valueMatch = /^([^。；;\n|]{0,16}?)([\d,，]+(?:\.\d+)?)\s*(座|个|套|米|m|km|公里|平方米|m2|㎡|m²|立方米|m3|m³|吨|t|kg)(?![a-zA-Z0-9²³])/u.exec(after);
+    const valueMatch = /^([^。；;\n|]{0,16}?)([\d,，]+(?:\.\d+)?)\s*(座|个|套|盏|台|根|块|樘|扇|片|组|件|孔|米|m|km|公里|平方米|m2|㎡|m²|立方米|m3|m³|吨|t|kg)(?![a-zA-Z0-9²³])/u.exec(after);
     if (!valueMatch) continue;
     // 槽位词豁免：规格与数值之间出现埋深/厚度等属性词 → 数值是工艺参数而非该规格工程量
     if (SLOT_WORD_RE.test(valueMatch[1])) continue;
     // 工艺参数约束豁免（4.31 丰乐镇 v6 #2）：「DN25 管不大于 1.0m」的 1.0m 是支架间距的工艺
     // 约束上限（不大于/不超过类），非该规格的清单数量，不得与其他规格数量互比张冠李戴
     if (/不大于|不超过|不得大于|不得超过/.test(valueMatch[1])) continue;
+    // 设备配置豁免（r28g B3 归因·r28f 实测）：间隙词点名设备主体（运输车/搅拌车/泵车…类）且数值
+    // 单位为「台」时，数值是该设备的配置台数——「C30 商品混凝土由混凝土搅拌运输车2台按浇筑计划
+    // 配送」的 2 台是搅拌车配置数，不是 C30 的清单量；旧口径下间隙 ≤16 字的数值无条件绑定给规格，
+    // 恰撞其他规格条目值（清单条目「涵头」2 台）即误报张冠李戴。间隙无设备主体词时仍全检
+    // （如「C30 混凝土 300m³」照常绑定），保真阳性不漏。
+    // C-T1 补后窗形态：「C30 混凝土 2台搅拌运输车」数值后紧跟设备主体词同样属设备配置数（数值在设备词前）
+    if (valueMatch[3] === '台') {
+      const suffixStart = matchEnd + valueMatch[1].length + valueMatch[2].length + valueMatch[3].length;
+      if (DEVICE_BODY_RE.test(valueMatch[1]) || DEVICE_BODY_RE.test(markdown.slice(suffixStart, suffixStart + 12))) continue;
+    }
     // 长度量词豁免（r14 丰乐镇 E6 归因）：「DN110 UPVC排水管总长15m」的 15m 是 DN110 管自身的
     // 长度量（生态池段局部量），间隙词含「总长」类长度量词且数值单位为长度类——数值语义上
     // 绑定该规格自身，与其清单总量（7525.01m）天然可不同值；15 恰与无关条目「人行道混凝土
@@ -530,11 +652,50 @@ function scanSpecBindingHits(markdown: string, authority: ReconciliationAuthorit
     const value = parseNumeric(valueMatch[2]);
     if (value === undefined) continue;
     if (bound.some(item => nearlyEqual(item.value, value))) continue;
-    // 规格组和豁免：值 = 该规格下同条目名的子组之和（案例：DN400 90m = 混凝土管道铺设条目 DN400 全量之和）
-    const entryGroupTotals = new Map<string, number>();
-    for (const item of bound) entryGroupTotals.set(item.entryName, (entryGroupTotals.get(item.entryName) || 0) + item.value);
-    const groupSums = [...new Set([...entryGroupTotals.values()])].sort((left, right) => right - left);
-    if (bound.length >= 2 && groupSums.some(sum => nearlyEqual(sum, value))) continue;
+    // R20 规格小计豁免（A2-③ 反向保护·通用）：值 = 该规格在名称合计下的 specBreakdown 小计
+    // → 合法放行，防正确值被误报「无源」并被修复轮改写
+    const specSum = aggregateOwner?.info.specs.get(specKey);
+    if (specSum !== undefined && nearlyEqual(specSum, value)) continue;
+    // 规格组和豁免：值 = 该规格下同条目名的子组之和（案例：DN400 90m = 混凝土管道铺设条目 DN400 全量之和）；
+    // 组和候选带单位（C-T1）：替换时单位必须兼容——数值替换不得跨量纲搬运
+    const entryGroupTotals = new Map<string, { value: number; unit: string }>();
+    for (const item of bound) {
+      const existing = entryGroupTotals.get(item.entryName);
+      if (existing) existing.value += item.value;
+      else entryGroupTotals.set(item.entryName, { value: item.value, unit: item.unit });
+    }
+    const groupSums = [...entryGroupTotals.values()].sort((left, right) => right.value - left.value);
+    if (bound.length >= 2 && groupSums.some(sum => nearlyEqual(sum.value, value))) continue;
+    // R20 合计挂单项（A2-② 红线·通用机制）：值 = 跨规格名称合计（specBreakdown 之和）而非该规格小计
+    // → 违规（如「100W 共118套」中 118 = 100W 109套 + 120W 9套 的名称合计）。间隙内含该条目其他
+    // 拆分规格 token 的组合表述不在此判——归属交 LLM 轮显式分解，防误改合法组合句。
+    // 干净切分门：仅小计和≈合计的单维拆分启用；跨维度交叉聚合退出（落既有 foreign 检查，与 R20 前口径一致）
+    if (aggregateOwner?.info.partitioned && specSum !== undefined && nearlyEqual(aggregateOwner.info.value, value)) {
+      const gapKey = normalizeSpecKey(valueMatch[1]);
+      const otherSpecInGap = [...aggregateOwner.info.specs.keys()].some(key => key !== specKey && gapKey.includes(key));
+      if (!otherSpecInGap) {
+        const decomposition = aggregateOwner.info.breakdown.map(item => `${item.spec} ${item.value}${aggregateOwner.info.unit}`).join(' + ');
+        const message = `规格-数值绑定错位：「${match[0]}」处数值 ${value}${valueMatch[3]} 是「${aggregateOwner.entryName}」的跨规格名称合计（${decomposition}），不属于单一规格「${match[0]}」——名称合计不得挂给单一规格，须写该规格小计 ${specSum}${valueMatch[3]}（确需写合计须显式分解）`;
+        if (!seen.has(message)) {
+          seen.add(message);
+          const valueStart = matchEnd + valueMatch[1].length;
+          hits.push({
+            issue: {
+              level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
+              message,
+              suggestion: `「${match[0]}」的数量须写该规格小计 ${specSum}${valueMatch[3]}；名称合计须显式分解为 ${decomposition}（合计 ${aggregateOwner.info.value}${aggregateOwner.info.unit}），不得把合计值挂在单一规格名下。`,
+            },
+            specToken: match[0],
+            value,
+            unit: valueMatch[3],
+            valueStart,
+            valueEnd: valueStart + valueMatch[2].length,
+            groupSumCandidates: [{ value: specSum, unit: aggregateOwner.info.unit }, ...groupSums.filter(sum => !nearlyEqual(sum.value, value))],
+          });
+        }
+      }
+      continue;
+    }
     // 命中其他规格的权威数量 → 张冠李戴（确定性 blocker）
     let foreign: { spec: string; entryName: string } | undefined;
     for (const [otherSpec, items] of authority.specValues) {
@@ -560,8 +721,112 @@ function scanSpecBindingHits(markdown: string, authority: ReconciliationAuthorit
       unit: valueMatch[3],
       valueStart,
       valueEnd: valueStart + valueMatch[2].length,
-      groupSumCandidates: groupSums.filter(sum => !nearlyEqual(sum, value)),
+      groupSumCandidates: groupSums.filter(sum => !nearlyEqual(sum.value, value)),
     });
+  }
+  // ── R20 值前置形态（通用机制）：「一般路灯118套（100W LED…）」「…118套，灯型为100W LED」——
+  // 数量为名称合计、其后紧跟单一拆分规格 token，易被读作全部为该规格 → 报告 blocker 交 LLM 改述为
+  // 显式分解；此形态数值本身正确（名称合计口径），不进入确定性数字替换（groupSumCandidates 置空）──
+  for (const match of markdown.matchAll(SPEC_CANDIDATE_RE)) {
+    const specKey = normalizeSpecKey(match[0]);
+    const owner = findAggregateSpecInfo(authority, specKey);
+    // 干净切分门（同前进分支）：仅单维完整拆分启用值前置判定；跨维度交叉聚合退出
+    if (!owner?.info.partitioned) continue;
+    const specSum = owner.info.specs.get(specKey);
+    if (specSum === undefined) continue;
+    const idx = match.index ?? 0;
+    const before = markdown.slice(Math.max(0, idx - 24), idx);
+    // 间隙禁含数字（防把前一句的数值与规格回配）；仅「（」直连或含绑定词（为/系/采用/型号/规格/灯型/类型）的短间隙成立
+    const valueMatch = /([\d,，]+(?:\.\d+)?)\s*(座|个|套|盏|台|根|块|樘|扇|片|组|件|孔|米|m|km|公里|平方米|m2|㎡|m²|立方米|m3|m³|吨|t|kg)\s*([^。；;\n|0-9²³]{0,12})$/u.exec(before);
+    if (!valueMatch) continue;
+    const gap = valueMatch[3];
+    if (!/[（(]|为|系|采用|型号|规格|灯型|类型/u.test(gap)) continue;
+    if (SLOT_WORD_RE.test(gap)) continue;
+    const value = parseNumeric(valueMatch[1]);
+    if (value === undefined) continue;
+    if (!nearlyEqual(owner.info.value, value) || nearlyEqual(specSum, value)) continue;
+    // 条目名在场断言（防数值与规格分属不同条目对象时误配）
+    if (!nameOverlapsText(owner.entryName, before)) continue;
+    // 已显式分解豁免：规格邻近窗口出现该条目 ≥2 个拆分规格 token → 视为已分解（合计+分解并存合法）
+    const windowText = normalizeSpecKey(markdown.slice(Math.max(0, idx - 60), idx + 60));
+    if ([...owner.info.specs.keys()].filter(key => windowText.includes(key)).length >= 2) continue;
+    const valueStart = idx - gap.length - valueMatch[2].length - valueMatch[1].length;
+    const dedupeKey = `${specKey}@${valueStart}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    const decomposition = owner.info.breakdown.map(item => `${item.spec} ${item.value}${owner.info.unit}`).join(' + ');
+    hits.push({
+      issue: {
+        level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
+        message: `规格-数值绑定错位：正文「…${value}${valueMatch[2]}${gap}${match[0]}…」中 ${value}${valueMatch[2]} 为「${owner.entryName}」的跨规格名称合计（${decomposition}），其后紧随单一规格「${match[0]}」易被读作全部为该规格；名称合计须显式分解`,
+        suggestion: `数量 ${value}${valueMatch[2]} 保留不动；把规格表述改为显式分解，如「${value}${valueMatch[2]}（${decomposition}）」或逐规格列写「${decomposition}」；不得以名称合计搭配单一规格描述。`,
+      },
+      specToken: match[0],
+      value,
+      unit: valueMatch[2],
+      valueStart,
+      valueEnd: valueStart + valueMatch[1].length,
+      groupSumCandidates: [],
+    });
+  }
+  // ── R20 表格行形态（通用机制）：「| 一般路灯（100W LED…） | 118 | 套 |」——行内仅出现该条目
+  // 单一拆分规格、数量单元格却为名称合计 → 该行应按规格小计填写；单元格数值确定性原位替换 ──
+  if (authority.aggregateSpecs.size > 0) {
+    let lineStart = 0;
+    for (const line of markdown.split('\n')) {
+      const startOfLine = lineStart;
+      lineStart += line.length + 1;
+      if (!line.includes('|')) continue;
+      if (/^\s*\|?[\s:|-]*\|?\s*$/u.test(line)) continue;
+      const byEntry = new Map<string, Array<{ key: string; raw: string; specSum: number }>>();
+      for (const item of line.matchAll(SPEC_CANDIDATE_RE)) {
+        const key = normalizeSpecKey(item[0]);
+        const owner = findAggregateSpecInfo(authority, key);
+        // 干净切分门（同前进/值前置）：仅单维完整拆分启用表格行判定；跨维度交叉聚合退出
+        if (!owner?.info.partitioned) continue;
+        const specSum = owner.info.specs.get(key);
+        if (specSum === undefined) continue;
+        const list = byEntry.get(owner.entryName) || [];
+        if (!list.some(existing => existing.key === key)) list.push({ key, raw: item[0].trim(), specSum });
+        byEntry.set(owner.entryName, list);
+      }
+      // 仅判「单一条目、单一拆分规格」行：多条目/多规格并存 = 已分解或复合行，不在此判
+      if (byEntry.size !== 1) continue;
+      const [entryName, specs] = [...byEntry.entries()][0]!;
+      if (specs.length !== 1) continue;
+      const info = authority.aggregateSpecs.get(entryName);
+      if (!info) continue;
+      const { key: specKey, raw: specRaw, specSum } = specs[0]!;
+      // 条目名在场断言（防无关表格中规格 token 与同值数字偶合误配）
+      if (!nameOverlapsText(entryName, line)) continue;
+      for (const cell of line.matchAll(/\|([^|\n]*)/gu)) {
+        const cellText = cell[1].trim();
+        const numberMatch = /^([\d,，]+(?:\.\d+)?)\s*(?:座|个|套|盏|台|根|块|樘|扇|片|组|件|孔|米|m|km|公里|平方米|m2|㎡|m²|立方米|m3|m³|吨|t|kg)?$/u.exec(cellText);
+        if (!numberMatch) continue;
+        const value = parseNumeric(numberMatch[1]);
+        if (value === undefined) continue;
+        if (!nearlyEqual(info.value, value) || nearlyEqual(specSum, value)) continue;
+        if ((authority.specValues.get(specKey) ?? []).some(item => nearlyEqual(item.value, value))) continue;
+        const valueStart = startOfLine + (cell.index ?? 0) + 1 + cell[1].indexOf(numberMatch[1]);
+        const dedupeKey = `${specKey}@${valueStart}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+        const decomposition = info.breakdown.map(item => `${item.spec} ${item.value}${info.unit}`).join(' + ');
+        hits.push({
+          issue: {
+            level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
+            message: `规格-数值绑定错位：表格行「${specRaw}…」的数量 ${value}${info.unit} 是「${entryName}」的跨规格名称合计（${decomposition}），该行规格为「${specRaw}」应填其小计 ${specSum}${info.unit}`,
+            suggestion: `该行数量改为 ${specSum}${info.unit}；名称合计请另立「合计」行或显式分解为 ${decomposition}。`,
+          },
+          specToken: specRaw,
+          value,
+          unit: info.unit,
+          valueStart,
+          valueEnd: valueStart + numberMatch[1].length,
+          groupSumCandidates: [{ value: specSum, unit: info.unit }],
+        });
+      }
+    }
   }
   return hits;
 }
@@ -576,12 +841,21 @@ export interface SpecQuantityBindingFixResult {
   details: string[];
 }
 
+/** 单位书写变体归一（C-T1 替换兼容判定）：同一量纲的不同书写形（米/m、㎡/m2/平方米、m³/m3/立方米、吨/t）
+ * 不得因书写差异阻断合法替换；未映射单位原样比较（m2/m3/kg 等符号形直接相等） */
+const UNIT_ALIAS: Record<string, string> = { '米': 'm', '公里': 'km', '平方米': 'm2', '㎡': 'm2', 'm²': 'm2', '立方米': 'm3', 'm³': 'm3', '吨': 't' };
+function normalizeUnitText(unit: string): string {
+  return Object.prototype.hasOwnProperty.call(UNIT_ALIAS, unit) ? UNIT_ALIAS[unit] : unit;
+}
+
 /**
- * 规格-数值绑定错位确定性修复（r17 丰乐镇归因 #B1）：命中处把正文数值原位替换为该规格的组和值
- * （同条目名分组之和降序第一候选；bound 单条目时组和即其唯一权威值——替换后检测端「权威值相等」
- * 或「组和豁免」必然通过）。逐处应用 + 逐处位置复检（同位置 ±4 字容差重扫无残留才保留：同形句
- * 在扫描层 message 去重只报首处，替换后下一处浮出，故不得用「消息集合包含」判定残留；替换只改
- * 数字部分、同位置 valueStart 不变）；上位循环上限 8 轮（同形句多处分布时逐处收敛）。
+ * 规格-数值绑定错位确定性修复（r17 丰乐镇归因 #B1；C-T1 单位兼容加固）：命中处把正文数值原位替换为该规格
+ * 的组和值（同条目名分组之和降序第一个单位兼容候选——替换后检测端「权威值相等」或「组和豁免」必然通过）。
+ * C-T1 根因治理：候选带单位，仅同量纲（归一后相等）才数字替换——旧口径机械替换会把「C30 混凝土 2台」
+ * 的 2台 替换为 C30 的 m3 组和值 500（「500台」跨量纲错误）；候选单位全不兼容时改为移除数量串
+ * （数值+单位，含紧邻前置空白）——张冠李戴数值属无源错误数据，移除是确定性安全动作，残留交 LLM 修复轮。
+ * 逐处应用 + 逐处位置复检（同位置 ±4 字容差重扫无残留才保留：同形句在扫描层 message 去重只报首处，
+ * 替换后下一处浮出，故不得用「消息集合包含」判定残留）；上位循环上限 8 轮。
  * 权威构建不依赖 markdown（billFactLock/blueprintData/factsModel 单源），一次构建全轮复用。
  * 替换后新值又撞其他规格值类外态由复检自动回滚（保守跳过，交 LLM 修复轮）。
  */
@@ -590,7 +864,7 @@ export function fixSpecQuantityBindings(
   input: Pick<FactReconciliationInput, 'billFactLock' | 'blueprintData' | 'factsModel'>,
 ): SpecQuantityBindingFixResult {
   const authority = buildReconciliationAuthority({ markdown, ...input });
-  if (authority.specValues.size === 0) return { markdown, fixedCount: 0, details: [] };
+  if (authority.specValues.size === 0 && authority.aggregateSpecs.size === 0) return { markdown, fixedCount: 0, details: [] };
   let result = markdown;
   const details: string[] = [];
   for (let round = 1; round <= 8; round += 1) {
@@ -598,8 +872,22 @@ export function fixSpecQuantityBindings(
     if (hits.length === 0) break;
     let applied = 0;
     for (const hit of [...hits].sort((left, right) => right.valueStart - left.valueStart)) {
-      const replacement = `${hit.groupSumCandidates[0]}`;
-      const next = result.slice(0, hit.valueStart) + replacement + result.slice(hit.valueEnd);
+      // C-T1 单位兼容替换：候选与命中单位同量纲 → 数字替换（组和/规格小计权威值）；
+      // 候选单位全不兼容（如「台」数的 2 撞 C30 混凝土的 m3 组和）→ 移除数量串（数值+单位）
+      const compatible = hit.groupSumCandidates.find(candidate => normalizeUnitText(candidate.unit) === normalizeUnitText(hit.unit));
+      let next: string;
+      let actionDetail: string;
+      if (compatible) {
+        next = result.slice(0, hit.valueStart) + `${compatible.value}` + result.slice(hit.valueEnd);
+        actionDetail = `「${hit.specToken}」绑定数值 ${hit.value}${hit.unit} → 组和值 ${compatible.value}${hit.unit}`;
+      } else {
+        // 移除范围含紧邻前置空白（「混凝土 2台」→「混凝土」而非「混凝土 」）
+        let removeStart = hit.valueStart;
+        while (removeStart > 0 && /\s/u.test(result[removeStart - 1])) removeStart -= 1;
+        const unitEnd = hit.valueEnd + hit.unit.length;
+        next = result.slice(0, removeStart) + result.slice(unitEnd);
+        actionDetail = `「${hit.specToken}」移除张冠李戴数值 ${hit.value}${hit.unit}（无同单位替换候选，值不属该规格）`;
+      }
       // 复检：同位置（±4 字容差）重扫不得再命中（替换只改数字部分，同位置 valueStart 不变）
       const residual = scanSpecBindingHits(next, authority).some(item => {
         const offset = item.valueStart - hit.valueStart;
@@ -608,7 +896,7 @@ export function fixSpecQuantityBindings(
       if (residual) continue;
       result = next;
       applied += 1;
-      details.push(`「${hit.specToken}」绑定数值 ${hit.value}${hit.unit} → 组和值 ${replacement}${hit.unit}`);
+      details.push(actionDetail);
     }
     if (applied === 0) break;
   }
@@ -689,8 +977,9 @@ function scanApproximateClaims(markdown: string, authority: ReconciliationAuthor
 
 // ═══════════════════════════ D4.6：名称口径 ═══════════════════════════
 
-/** 泛类词黑名单：绑定锚误报面过大，不作为名称-数值绑定锚（宁漏勿错） */
-const GENERIC_NAME_RE = /^(?:管道|工程|材料|项目|施工|工作|设备|设施|系统|区域|场地|道路|建筑|结构|基础|主体|管网|土建|安装|装饰|装修|土方|绿化|照明|给水|排水|电气|挖方|填方|回填|弃方|外运|运输|检测|试验|测量|清理|拆除|清淤|维护|养护|管理|服务|其他|以上|以下|其中|包括|采用|使用|型号|规格|数量|单位|合计|总计|长度|面积|体积|重量)$/u;
+/** 泛类词黑名单：绑定锚误报面过大，不作为名称-数值绑定锚（宁漏勿错）
+ * （M24b 导出：arbiter A3 名称-数值绑定扫描与 D4.6a 同源共用） */
+export const GENERIC_NAME_RE = /^(?:管道|工程|材料|项目|施工|工作|设备|设施|系统|区域|场地|道路|建筑|结构|基础|主体|管网|土建|安装|装饰|装修|土方|绿化|照明|给水|排水|电气|挖方|填方|回填|弃方|外运|运输|检测|试验|测量|清理|拆除|清淤|维护|养护|管理|服务|其他|以上|以下|其中|包括|采用|使用|型号|规格|数量|单位|合计|总计|长度|面积|体积|重量)$/u;
 
 /** 材质-对象复合词（D4.6 名称替换检测：木门 vs 金属门） */
 const MATERIAL_OBJECT_RE = /(木质|木|铝合金|铝|不锈钢|塑钢|塑料|塑|钢|铁|砼|混凝土|铸铁|铜|复合)(门|窗|井|灯|护栏|围栏|盖板|雨水口)/gu;
@@ -792,9 +1081,37 @@ function subsetSumCentsHit(poolCents: number[], targetCents: number): boolean {
   return false;
 }
 
-function scanNameBindings(markdown: string, authority: ReconciliationAuthority, lock?: BillFactLock): ValidationIssue[] {
-  const issues: ValidationIssue[] = [];
+/** 名称-数值绑定命中（结构化）：issue 供检测端照常报告；matchStart/matchEnd 供交付前确定性删除
+ * 定位（检测定位=修复定位同源：matchStart=名称出现位、matchEnd=值+单位终点）。 */
+export interface NameBindingFinding {
+  issue: ValidationIssue;
+  matchStart: number;
+  matchEnd: number;
+}
+
+function scanNameBindingFindings(markdown: string, authority: ReconciliationAuthority, lock?: BillFactLock): NameBindingFinding[] {
+  const findings: NameBindingFinding[] = [];
   const seen = new Set<string>();
+  // 绑定级去重（r26 实测：49 个同名清单条目对同一处正文绑定逐条复报同一处「无源」→ 灌水 49 条）：
+  // 一处绑定（位置+值+单位）只报一条——同名条目对该绑定的豁免判定完全同源（同名值集/组和/子集和
+  // 均按名称或位置聚合，foreign/数字池按值），首个抵达报点的条目即代表全部同名条目口径。
+  const reportedBindings = new Set<string>();
+  // 同名条目样本表（消息聚合用）：同名+同单位的条目数与去重「值+单位」样本（至多 3 个）——
+  // 同名多条目时消息不再内嵌单一 entry.quantity（各条目数量不同令消息级去重失效），改报聚合口径；
+  // 同名仅 1 条时保持原文案（零回归）。
+  const sameNameSamples = new Map<string, { count: number; samples: string[] }>();
+  if (lock) {
+    for (const entry of lock.entries) {
+      const sampleName = (entry.name || '').trim();
+      if (sampleName.length < 2 || !Number.isFinite(entry.quantity)) continue;
+      const sampleKey = `${sampleName}\u0000${normalizeUnit(entry.unit)}`;
+      const bucket = sameNameSamples.get(sampleKey) || { count: 0, samples: [] };
+      bucket.count += 1;
+      const sample = `${entry.quantity}${entry.unit}`;
+      if (bucket.samples.length < 3 && !bucket.samples.includes(sample)) bucket.samples.push(sample);
+      sameNameSamples.set(sampleKey, bucket);
+    }
+  }
   const authorityText = authority.entries.map(entry => `${entry.name} ${entry.description}`).join('\n');
   // 名称组和表：按来源分桶求和（D4.6a 同名多村组聚合 / 相关组引用豁免）
   const groupTotals = new Map<string, number[]>();
@@ -875,12 +1192,13 @@ function scanNameBindings(markdown: string, authority: ReconciliationAuthority, 
         if (SLOT_WORD_RE.test(valueMatch[1])) continue;
         const value = parseNumeric(valueMatch[2]);
         if (value === undefined) continue;
-        if (nearlyEqual(value, entry.quantity)) continue;
+        if (transcribedEqual(value, entry.quantity)) continue;
         const unit = normalizeUnit(valueMatch[3]);
         if (unit !== normalizeUnit(entry.unit)) continue;
-        // 同名条目值集豁免：同名条目（多村组同名不同值，如 29 村「回填方」）值集中恰有本值 →
-        // 正文绑定值命中同名条目的合法数量（自身 quantity 已由上方 nearlyEqual 分支排除），属名称一致的非错位引用
-        if (authority.entries.some(other => other.name === name && nearlyEqual(other.value, value) && normalizeUnit(other.unit) === unit)) continue;
+        // 同名条目值集豁免：同名条目（多村组同名不同值，如 29 村「回填方」）值集中恰有本值（含
+        // 整数转写宽容：权威 1757.12 → 正文 1757）→ 正文绑定值命中同名条目的合法数量（自身
+        // quantity 已由上方 transcribedEqual 分支排除），属名称一致的非错位引用
+        if (authority.entries.some(other => other.name === name && transcribedEqual(value, other.value) && normalizeUnit(other.unit) === unit)) continue;
         // 同名组和豁免：多村组聚合口径（案例：石桌石凳 8个 = 同名清单条目 1×8 村组之和）
         if ((groupTotals.get(name) || []).some(sum => nearlyEqual(sum, value))) continue;
         // 同名条目子集和豁免（4.31 丰乐镇 v6 #4-61）：正文绑定值恰为一组同名清单条目的子集之和
@@ -897,13 +1215,25 @@ function scanNameBindings(markdown: string, authority: ReconciliationAuthority, 
           other.name !== name && nearlyEqual(other.value, value) && normalizeUnit(other.unit) === unit);
         if (foreign && nameOverlapsText(foreign.name, localContext)) continue;
         if (foreign) {
-          const message = `名称-数值绑定错位：「${name}」处数值 ${value}${valueMatch[3]} 属清单条目「${foreign.name}」（${foreign.value}${foreign.unit}），与「${name}」清单数量 ${entry.quantity}${entry.unit} 不符`;
+          const bindingKey = `${at}\u0000${value}\u0000${unit}`;
+          if (reportedBindings.has(bindingKey)) continue;
+          reportedBindings.add(bindingKey);
+          const samples = sameNameSamples.get(`${name}\u0000${unit}`);
+          const message = samples && samples.count > 1
+            ? `名称-数值绑定错位：「${name}」处数值 ${value}${valueMatch[3]} 属清单条目「${foreign.name}」（${foreign.value}${foreign.unit}），与同名清单条目（共 ${samples.count} 条，如 ${samples.samples.join('、')} 等）的权威数量均不符`
+            : `名称-数值绑定错位：「${name}」处数值 ${value}${valueMatch[3]} 属清单条目「${foreign.name}」（${foreign.value}${foreign.unit}），与「${name}」清单数量 ${entry.quantity}${entry.unit} 不符`;
           if (seen.has(message)) continue;
           seen.add(message);
-          issues.push({
-            level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
-            message,
-            suggestion: `核对「${name}」的数量口径：清单权威值为 ${entry.quantity}${entry.unit}；引用「${foreign.name}」数量时须明确对象名称，不得张冠李戴。`,
+          findings.push({
+            issue: {
+              level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
+              message,
+              suggestion: samples && samples.count > 1
+                ? `核对「${name}」的数量口径：同名清单条目共 ${samples.count} 条（如 ${samples.samples.join('、')} 等），逐一核对后引用对应条目数量；引用「${foreign.name}」数量时须明确对象名称，不得张冠李戴。`
+                : `核对「${name}」的数量口径：清单权威值为 ${entry.quantity}${entry.unit}；引用「${foreign.name}」数量时须明确对象名称，不得张冠李戴。`,
+            },
+            matchStart: at,
+            matchEnd: at + name.length + valueMatch[0].length,
           });
           continue;
         }
@@ -912,13 +1242,25 @@ function scanNameBindings(markdown: string, authority: ReconciliationAuthority, 
         // 数值不在任何权威条目：与清单条目绑定的名称口径不符且无源 → 疑似笔误/编造
         const poolHit = authority.numberPool.some(candidate => nearlyEqual(candidate, value));
         if (poolHit) continue;
-        const message = `名称-数值绑定无源：「${name}」处数值 ${value}${valueMatch[3]} 与清单权威 ${entry.quantity}${entry.unit} 不符，且在全部权威数据中找不到同值来源`;
+        const bindingKey = `${at}\u0000${value}\u0000${unit}`;
+        if (reportedBindings.has(bindingKey)) continue;
+        reportedBindings.add(bindingKey);
+        const samples = sameNameSamples.get(`${name}\u0000${unit}`);
+        const message = samples && samples.count > 1
+          ? `名称-数值绑定无源：「${name}」处数值 ${value}${valueMatch[3]} 与同名清单条目（共 ${samples.count} 条，如 ${samples.samples.join('、')} 等）的权威数量均不符，且在全部权威数据中找不到同值来源`
+          : `名称-数值绑定无源：「${name}」处数值 ${value}${valueMatch[3]} 与清单权威 ${entry.quantity}${entry.unit} 不符，且在全部权威数据中找不到同值来源`;
         if (seen.has(message)) continue;
         seen.add(message);
-        issues.push({
-          level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
-          message,
-          suggestion: `将「${name}」的数量改为清单权威值 ${entry.quantity}${entry.unit}；无权威来源的数值不得与清单条目名称绑定出现。`,
+        findings.push({
+          issue: {
+            level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
+            message,
+            suggestion: samples && samples.count > 1
+              ? `核对「${name}」的数量口径：同名清单条目共 ${samples.count} 条（如 ${samples.samples.join('、')} 等），逐一核对后引用对应条目的权威数量；无权威来源的数值不得与清单条目名称绑定出现。`
+              : `将「${name}」的数量改为清单权威值 ${entry.quantity}${entry.unit}；无权威来源的数值不得与清单条目名称绑定出现。`,
+          },
+          matchStart: at,
+          matchEnd: at + name.length + valueMatch[0].length,
         });
       }
     }
@@ -938,13 +1280,23 @@ function scanNameBindings(markdown: string, authority: ReconciliationAuthority, 
     const message = `名称口径不符：正文「${compound} ${value}${valueMatch[3]}」——${value}${valueMatch[3]} 对应清单「${sameObject.name}」条目，清单中不存在「${compound}」，名称与清单权威不符`;
     if (seen.has(message)) continue;
     seen.add(message);
-    issues.push({
-      level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
-      message,
-      suggestion: `名称必须与清单条目口径一致：将「${compound}」改为「${sameObject.name}」（或清单原文名称）；名称与数量绑定不得自行替换材质/类型限定词。`,
+    const compoundStart = match.index ?? 0;
+    findings.push({
+      issue: {
+        level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable',
+        message,
+        suggestion: `名称必须与清单条目口径一致：将「${compound}」改为「${sameObject.name}」（或清单原文名称）；名称与数量绑定不得自行替换材质/类型限定词。`,
+      },
+      matchStart: compoundStart,
+      matchEnd: compoundStart + compound.length + valueMatch[0].length,
     });
   }
-  return issues;
+  return findings;
+}
+
+/** 检测端入口（行为保持）：扫描命中只取 issue */
+function scanNameBindings(markdown: string, authority: ReconciliationAuthority, lock?: BillFactLock): ValidationIssue[] {
+  return scanNameBindingFindings(markdown, authority, lock).map(finding => finding.issue);
 }
 
 // ═══════════════════════════ 汇总出口 ═══════════════════════════

@@ -8,7 +8,8 @@ import { buildIntegratedBlueprint, estimateChapterMinFeasibleWords, findBlueprin
 import { reanchorChapterTargetsByFeasibility } from '../budget';
 import type { DocumentTemplateChapter } from '../types';
 import { buildBillFactLock } from '../billFactLock';
-import { routeTenderRequirementsToChapters, saveRequirementAssignmentsAsset } from '../tenderRequirements';
+import { buildDrawingFactLock } from '../drawingFactLock';
+import { routeTenderRequirementsToChapters, saveRequirementAssignmentsAsset, assignStructureRequirementsToChapters, saveStructureAssignmentsAsset, STRUCTURE_ROUTE_SCORE_MIN } from '../tenderRequirements';
 import { displayStage, upsertProgressStage } from '../progress';
 import { Semaphore, runWithAdaptiveConcurrency } from '../utils';
 import { PROJECT_BASIC_FACT_QUERIES } from '../documentGeneratorHelpers';
@@ -101,6 +102,32 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
       session.blueprint.billFactLock = undefined;
     }
   }
+  // ── B-T3 图纸事实锁构建：图纸类证据 → 「设计说明/构造做法/材料规格/设备参数」行级事实锁 ──
+  // 背景（B4 诊断：图纸引用 0%）：图纸切片在检索召回竞争与注入硬顶下从未进入正文；本锁把图纸
+  // 解析产物固化为行级事实并直读注入（与清单事实锁同范式），验收侧按「可用图纸引用率」判定
+  try {
+    session.blueprint.drawingFactLock = buildDrawingFactLock({
+      evidence: session.understanding.allEvidence,
+      fileProcessingByPath: session.understanding.fileProcessingByPath,
+    });
+    const drawingLock = session.blueprint.drawingFactLock;
+    if (drawingLock && drawingLock.usableDrawings > 0) {
+      upsertProgressStage(session.global.progressStages, displayStage({
+        type: 'validation',
+        roleId: 'drawing-fact-lock',
+        status: 'success',
+        message: `图纸事实锁：可用图纸 ${drawingLock.usableDrawings} 份，锁定事实行 ${drawingLock.totalFacts} 行${drawingLock.unusableDrawings > 0 ? `（${drawingLock.unusableDrawings} 份无可用事实行）` : ''}，写作直读与引用率验收生效`,
+        details: [
+          ...drawingLock.groups.slice(0, 10).map(group => `${group.sourceFile.split('/').pop() || group.sourceFile}：${group.factLines.length} 行 / ${group.tokens.length} 个判定锚点`),
+          ...(drawingLock.unusableDrawings > 0 ? [`无可用事实行 ${drawingLock.unusableDrawings} 份（不纳入引用率验收分母）`] : []),
+        ],
+      }, { subtitle: '图纸事实锁', order: session.global.progressStages.length }));
+      session.global.emitProgress();
+    }
+  } catch (error) {
+    console.error(`[blueprint] 图纸事实锁构建失败（章节按证据独立成稿）：${error instanceof Error ? error.message : String(error)}`);
+    session.blueprint.drawingFactLock = undefined;
+  }
   // ── 招标要求分配（唯一权威分配：每条要求唯一主责章；章级注入/章级验收/终局对账共用同一份分配） ──
   // 低置信条目经 LLM 按实际章节列表裁决主责章；LLM 明确拒选（none）即移出要求池（excluded 审计，
   // 回写模型保证提取对账守恒）；LLM 不可用/缺号时保留 argmax 分配（不丢条目）。
@@ -145,6 +172,31 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
           ...routingResult.assignments.filter(assignment => assignment.lowConfidence).slice(0, 8).map(assignment => `低置信：${assignment.entry.text} → ${assignment.chapterTitle}（相似度 ${assignment.score.toFixed(2)}）`),
         ],
       }, { subtitle: '招标要求分配', order: session.global.progressStages.length }));
+      session.global.emitProgress();
+    }
+  }
+  // ── A-T1 结构/呈现要求章归属（存疑不挂、显性展示）：招标明文的呈现形态（框图/图/表格/结合图表）
+  // 按要素语义归属到章，注入该章写作指令（renderChapterStructureSlice）；不贴近任何章的存疑项
+  // 不挂章——只显性展示（不注入不误挂）。被排除的格式类条款信号已由提取层保存（不随排除丢失）。
+  {
+    const structureRequirements = session.planning.tenderRequirements.structureRequirements || [];
+    if (structureRequirements.length > 0) {
+      const { assignments: structureAssignments, unattached: structureUnattached } = assignStructureRequirementsToChapters(structureRequirements, session.planning.effectiveChapters, session.planning.requirementsSimilarity);
+      session.blueprint.structureAssignments = structureAssignments;
+      session.blueprint.structureUnattached = structureUnattached;
+      const assetPath = saveStructureAssignmentsAsset(session.prepare.projectRoot, structureAssignments, structureUnattached);
+      upsertProgressStage(session.global.progressStages, displayStage({
+        type: 'validation',
+        roleId: 'tender-structure-assignment',
+        status: 'success',
+        message: `结构/呈现要求归属：${structureAssignments.length} 项挂章${structureUnattached.length > 0 ? `，${structureUnattached.length} 项存疑未挂（仅展示）` : ''}`,
+        details: [
+          `归属 ${structureAssignments.length} / 存疑 ${structureUnattached.length} / 共 ${structureRequirements.length} 项`,
+          `落盘：${assetPath}`,
+          ...structureAssignments.map(item => `${item.requirement.element}（以${item.requirement.form}呈现）→ ${item.chapterTitle}（相似度 ${item.score.toFixed(2)}）`),
+          ...structureUnattached.map(item => `存疑未挂：${item.requirement.element}（以${item.requirement.form}呈现，最高相似度 ${item.score.toFixed(2)} < ${STRUCTURE_ROUTE_SCORE_MIN}）`),
+        ],
+      }, { subtitle: '结构/呈现要求归属', order: session.global.progressStages.length }));
       session.global.emitProgress();
     }
   }

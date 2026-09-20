@@ -17,22 +17,31 @@ vi.mock('@/services/document-workflow/semanticSimilarity', () => ({ buildSemanti
 import type * as LlmClientModule from '@/services/document-workflow/llmClient';
 import { callDocumentLlmJson } from '@/services/document-workflow/llmClient';
 import {
+  assignStructureRequirementsToChapters,
   assignTenderRequirementsToChapters,
+  detectStructureRequirements,
   emptyTenderRequirements,
   extractTenderRequirements,
   fixTenderMetaLanguage,
   hasTenderRequirements,
+  isContractAttachmentSectionClause,
+  isDocumentReferenceOnlyClause,
+  isRequirementPoolNoiseClause,
   judgeTenderClauses,
   readCachedTenderRequirements,
   renderChapterRequirementSlice,
+  renderChapterStructureSlice,
   requirementAcceptanceIssues,
   routeTenderRequirementsToChapters,
   saveRequirementAssignmentsAsset,
+  saveStructureAssignmentsAsset,
   splitTenderClauses,
   stripDuplicateResponseLines,
   tenderRequirementCheckItems,
+  tenderRequirementResponseGaps,
   tenderRequirementSemanticQuery,
   tenderRequirementsCacheKey,
+  tenderRequirementsJudgeFingerprint,
   tenderRequirementsSummary,
   tenderRequirementsWritingRules,
   writeCachedTenderRequirements,
@@ -412,6 +421,120 @@ describe('judgeTenderClauses 逐条判定（序号严格对齐 + 确定性复核
     expect(result.excluded[0].reason).toBe('non_requirement');
     expect(result.excluded[0].text).toBe('认使用时限。');
   });
+
+  // ── A-T1 结构/呈现要求（第三态通道） ──
+
+  it('A-T1：格式类条款被判排除后仍产出结构信号（信号不随排除丢失）', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValue({
+      results: [{ index: 0, isRequirement: false, inScope: false, reason: 'out_of_scope' }],
+    });
+    const result = await judgeTenderClauses([
+      { file: '招标文件.pdf', text: '拟为承包本标段工程设立的组织机构以框图方式表示。' },
+    ], {});
+    expect(result.excluded.length).toBe(1);
+    expect(result.structureRequirements).toEqual([
+      { element: '项目管理机构', form: 'org_chart', sourceText: '拟为承包本标段工程设立的组织机构以框图方式表示。' },
+    ]);
+  });
+
+  it('A-T1：词表命中各形态产出（网络图/横道图/平面布置图/组成表/结合图表）；无信号条款不误报', async () => {
+    const clauses: TenderClauseUnit[] = [
+      { file: '招标文件.pdf', text: '施工进度计划采用网络图表示。' },
+      { file: '招标文件.pdf', text: '施工进度计划附横道图。' },
+      { file: '招标文件.pdf', text: '提供施工总平面布置图。' },
+      { file: '招标文件.pdf', text: '提供项目管理机构人员组成表。' },
+      { file: '招标文件.pdf', text: '施工组织设计采用文字并结合图表形式编制。' },
+      { file: '招标文件.pdf', text: '质量目标：确保合格。' },
+    ];
+    vi.mocked(callDocumentLlmJson).mockResolvedValue({
+      results: clauses.map((_, index) => ({ index, isRequirement: true, inScope: true, policy: 'respond', coreTerms: [], category: '其他要求' })),
+    });
+    const result = await judgeTenderClauses(clauses, {});
+    expect(result.structureRequirements.map(item => `${item.form}|${item.element}`)).toEqual([
+      'diagram|施工进度计划网络图',
+      'diagram|施工进度计划横道图',
+      'diagram|施工总平面布置图',
+      'table|项目管理机构人员组成表',
+      'chart_text|施工组织设计',
+    ]);
+  });
+
+  it('A-T1：LLM 语义 structures 字段与词表合并去重（form 归一化；无效值忽略）', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValue({
+      results: [{
+        index: 0,
+        isRequirement: true,
+        inScope: true,
+        policy: 'respond',
+        coreTerms: [],
+        category: '其他要求',
+        structures: [
+          { element: '项目管理机构', form: 'org_chart' },
+          { element: '重要工序影像资料', form: 'diagram' },
+          { element: '某要素', form: 'unknown_form' },
+          { element: '', form: 'table' },
+        ],
+      }],
+    });
+    const result = await judgeTenderClauses([
+      { file: '招标文件.pdf', text: '组织机构以框图方式表示。' },
+    ], {});
+    expect(result.structureRequirements.map(item => `${item.form}|${item.element}`)).toEqual([
+      'org_chart|项目管理机构',
+      'diagram|重要工序影像资料',
+    ]);
+  });
+
+  it('A-T2：同输入连跑 3 次，结构信号完全一致（确定性词表与 LLM 波动无关）', async () => {
+    const clauses: TenderClauseUnit[] = [
+      { file: '招标文件.pdf', text: '施工进度计划采用网络图表示，并附横道图。' },
+      { file: '招标文件.pdf', text: '拟为承包本标段工程设立的组织机构以框图方式表示。' },
+    ];
+    const runOnce = async () => {
+      vi.mocked(callDocumentLlmJson).mockResolvedValue({
+        results: clauses.map((_, index) => ({ index, isRequirement: true, inScope: true, policy: 'respond', coreTerms: [], category: '其他要求' })),
+      });
+      const result = await judgeTenderClauses(clauses, {});
+      return JSON.stringify(result.structureRequirements);
+    };
+    const first = await runOnce();
+    expect(await runOnce()).toBe(first);
+    expect(await runOnce()).toBe(first);
+    expect(JSON.parse(first).length).toBe(3);
+  });
+
+  it('A-T3：表格声明套话（“我公司对该表…均属真实”类）不进池（non_requirement）', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValue({
+      results: [{ index: 0, isRequirement: true, inScope: true, policy: 'respond', coreTerms: [], category: '其他要求' }],
+    });
+    const result = await judgeTenderClauses([
+      { file: '招标文件.pdf', text: '我公司对该表提供的内容及相关资料均属真实、可靠。' },
+    ], {});
+    expect(result.entries).toEqual([]);
+    expect(result.excluded.length).toBe(1);
+    expect(result.excluded[0].reason).toBe('non_requirement');
+  });
+
+  it('A-T3：商务域技术工艺语义救回（工艺试验/临时占地类条款不以商业域剔除）', async () => {
+    vi.mocked(callDocumentLlmJson).mockResolvedValue({
+      results: [
+        { index: 0, isRequirement: true, inScope: true, policy: 'respond', coreTerms: [], category: '其他要求' },
+        { index: 1, isRequirement: true, inScope: true, policy: 'respond', coreTerms: [], category: '其他要求' },
+        { index: 2, isRequirement: true, inScope: true, policy: 'respond', coreTerms: [], category: '商务支付' },
+      ],
+    });
+    const result = await judgeTenderClauses([
+      { file: '招标文件.pdf', text: '现场工艺试验及检测费用由我方承担。' },
+      { file: '招标文件.pdf', text: '红线外临时占地的复垦与植被恢复费用由我方承担。' },
+      { file: '招标文件.pdf', text: '履约保证金金额：中标金额的2%。' },
+    ], {});
+    expect(result.entries.map(item => item.text)).toEqual([
+      '现场工艺试验及检测费用由我方承担。',
+      '红线外临时占地的复垦与植被恢复费用由我方承担。',
+    ]);
+    expect(result.excluded.length).toBe(1);
+    expect(result.excluded[0].reason).toBe('commercial_scope');
+  });
 });
 
 // ═══════════════════════════ L1 提取编排（条款化→判定→合并→对账） ═══════════════════════════
@@ -437,7 +560,7 @@ describe('extractTenderRequirements 编排（对账闭合）', () => {
     const phases: string[] = [];
     const model = await extractTenderRequirements(evidence, { onPhase: message => phases.push(message) });
     expect(model.extracted).toBe(true);
-    expect(model.reconciliation).toEqual({ clauseCount: 2, entryCount: 2, excludedCount: 0, undecidedCount: 0, mergedCount: 0, batchCount: 1, retriedBatches: 0 });
+    expect(model.reconciliation).toEqual({ clauseCount: 2, entryCount: 2, excludedCount: 0, undecidedCount: 0, mergedCount: 0, batchCount: 1, retriedBatches: 0, structureCount: 0 });
     expect(model.sourceHash).toBeTruthy();
     expect(phases.length).toBe(2);
     expect(phases[0]).toContain('条款化完成：2 条单元');
@@ -456,7 +579,7 @@ describe('extractTenderRequirements 编排（对账闭合）', () => {
       ],
     });
     const model = await extractTenderRequirements(duplicated, {});
-    expect(model.reconciliation).toEqual({ clauseCount: 2, entryCount: 1, excludedCount: 0, undecidedCount: 0, mergedCount: 1, batchCount: 1, retriedBatches: 0 });
+    expect(model.reconciliation).toEqual({ clauseCount: 2, entryCount: 1, excludedCount: 0, undecidedCount: 0, mergedCount: 1, batchCount: 1, retriedBatches: 0, structureCount: 0 });
     expect(model.entries.length).toBe(1);
     expect(model.entries[0].sources.map(source => source.file)).toEqual(['招标文件.pdf', '补疑文件.pdf']);
     expect(model.entries[0].coreTerms).toEqual(['黄山杯', '300万元']);
@@ -488,7 +611,7 @@ describe('extractTenderRequirements 编排（对账闭合）', () => {
     expect(model.extracted).toBe(false);
     expect(model.entries).toEqual([]);
     expect(model.excluded).toEqual([]);
-    expect(model.reconciliation).toEqual({ clauseCount: 2, entryCount: 0, excludedCount: 0, undecidedCount: 2, mergedCount: 0, batchCount: 1, retriedBatches: 1 });
+    expect(model.reconciliation).toEqual({ clauseCount: 2, entryCount: 0, excludedCount: 0, undecidedCount: 2, mergedCount: 0, batchCount: 1, retriedBatches: 1, structureCount: 0 });
   });
 });
 
@@ -660,6 +783,37 @@ describe('消费侧（摘要/检查项/语义查询/写作规则/章分片）', 
     expect(slice).toContain('【系统约束——仅指导写作，禁止写入正文，禁止复述本句】');
     expect(renderChapterRequirementSlice([])).toBe('');
   });
+
+  it('renderChapterStructureSlice：明标口径提示以图/表形态落实；暗标口径禁图表实体并以文字+附表区承载（B-T1/B-T2 专项）', () => {
+    const items = [
+      { element: '项目管理机构', form: 'org_chart' as const, sourceText: '组织机构以框图方式表示。' },
+      { element: '施工总平面布置图', form: 'diagram' as const, sourceText: '提供施工总平面布置图。' },
+    ];
+    const open = renderChapterStructureSlice(items);
+    expect(open).toContain('【本章必须落实的呈现要求（招标明文规定呈现形态，缺失即评标失分）】');
+    expect(open).toContain('须以「框图」呈现「项目管理机构」');
+    expect(open).toContain('须以「图（网络图/横道图/平面布置图类）」呈现「施工总平面布置图」');
+    // B-T1：图类形态声明（规范图题行「图 X-X 图名」）；B-T2：组织机构专项（岗位责任矩阵，零实名数据）
+    expect(open).toContain('规范图题行');
+    expect(open).toContain('项目管理机构与岗位职责');
+    expect(open).toContain('岗位责任矩阵');
+    expect(open).toContain('严禁出现人员姓名');
+    const blind = renderChapterStructureSlice(items, { blind: true });
+    expect(blind).toContain('暗标正文不得出现任何表格/图片');
+    expect(blind).toContain('文末附表区');
+    expect(blind).toContain('严禁出现人员姓名');
+    expect(blind).not.toContain('规范图题行');
+    expect(blind).toContain('分岗位的职责分工与协作关系');
+    expect(renderChapterStructureSlice([])).toBe('');
+  });
+
+  it('detectStructureRequirements：词表扫描各形态；无信号文本不误报', () => {
+    expect(detectStructureRequirements('组织机构以框图方式表示。')).toEqual([
+      { element: '项目管理机构', form: 'org_chart', sourceText: '组织机构以框图方式表示。' },
+    ]);
+    expect(detectStructureRequirements('质量目标：确保合格。')).toEqual([]);
+    expect(detectStructureRequirements('')).toEqual([]);
+  });
 });
 
 // ═══════════════════════════ L2 蓝图分配（每条要求唯一主责章） ═══════════════════════════
@@ -706,6 +860,11 @@ describe('assignTenderRequirementsToChapters 蓝图分配', () => {
   it('空输入（无条目/无章节）返回空分配', () => {
     expect(assignTenderRequirementsToChapters([], [{ title: '## 第五章' }], () => 1).assignments).toEqual([]);
     expect(assignTenderRequirementsToChapters([entry('a。', ['aa'])], [], () => 1).assignments).toEqual([]);
+    // A-T1：结构分配空输入（无要求/无章节）双轨返回空
+    expect(assignStructureRequirementsToChapters([], [{ title: '## 第五章' }], () => 1)).toEqual({ assignments: [], unattached: [] });
+    const noChapters = assignStructureRequirementsToChapters([{ element: '项目管理机构', form: 'org_chart', sourceText: '组织机构以框图方式表示。' }], [], () => 1);
+    expect(noChapters.assignments).toEqual([]);
+    expect(noChapters.unattached.length).toBe(1);
   });
 
   it('分配落盘：审计资产写入 generatedDocuments/assets/requirement-assignments.json', () => {
@@ -714,6 +873,24 @@ describe('assignTenderRequirementsToChapters 蓝图分配', () => {
     expect(assetPath).toContain(path.join('assets', 'requirement-assignments.json'));
     const parsed = JSON.parse(fs.readFileSync(assetPath, 'utf8')) as { total: number; assignments: Array<{ chapterTitle: string }> };
     expect(parsed.total).toBe(1);
+
+    // A-T1：结构要求分配（挂章+存疑不挂双轨，资产落盘）
+    const structureItems = [
+      { element: '项目管理机构', form: 'org_chart' as const, sourceText: '组织机构以框图方式表示。' },
+      { element: '施工总平面布置图', form: 'diagram' as const, sourceText: '提供施工总平面布置图。' },
+    ];
+    const similarity = (query: string, title: string) => (query.includes('项目管理机构') && title.includes('施工组织') ? 0.66 : 0.12);
+    const structureResult = assignStructureRequirementsToChapters(structureItems, [{ title: '## 第五章 施工组织管理' }], similarity);
+    expect(structureResult.assignments.length).toBe(1);
+    expect(structureResult.assignments[0].chapterTitle).toBe('第五章 施工组织管理');
+    expect(structureResult.assignments[0].lowConfidence).toBe(false);
+    expect(structureResult.unattached.length).toBe(1);
+    expect(structureResult.unattached[0].requirement.element).toBe('施工总平面布置图');
+    const structureAssetPath = saveStructureAssignmentsAsset(tempRoot, structureResult.assignments, structureResult.unattached);
+    expect(structureAssetPath).toContain(path.join('assets', 'structure-assignments.json'));
+    const structureParsed = JSON.parse(fs.readFileSync(structureAssetPath, 'utf8')) as { attached: number; unattached: number };
+    expect(structureParsed.attached).toBe(1);
+    expect(structureParsed.unattached).toBe(1);
     expect(parsed.assignments[0].chapterTitle).toBe('第五章 施工组织管理');
     // 清理生成目录（generatedRoot 落在用户目录按 projectRoot 哈希隔离）
     fs.rmSync(path.dirname(path.dirname(path.dirname(assetPath))), { recursive: true, force: true });
@@ -957,5 +1134,206 @@ describe('stripDuplicateResponseLines 条款响应重复行去重', () => {
     const result = stripDuplicateResponseLines(input);
     expect(result.fixedCount).toBe(1);
     expect(result.markdown.split('\n').filter(line => line.includes('确保工程一次成优')).length).toBe(1);
+  });
+});
+
+// ═══════════════════════════ M10 池纯度复核（r28h 实机归因分型） ═══════════════════════════
+
+describe('isRequirementPoolNoiseClause / judgeTenderClauses M10 池纯度复核（程序与澄清形态出池）', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('形态判据：答疑回复/考核惩奖/质量保修/投标表单/勾选填报行命中', () => {
+    expect(isRequirementPoolNoiseClause('回复：C25混凝土浇筑，具体详见图纸')).toBe(true);
+    expect(isRequirementPoolNoiseClause('考核评分：采取百分制，总分100分，低于80分每项扣2分')).toBe(true);
+    expect(isRequirementPoolNoiseClause('质量保修范围包括：地基基础工程、主体结构工程、屋面防水工程')).toBe(true);
+    expect(isRequirementPoolNoiseClause('本表应填写项目经理相关情况，并附资格证书')).toBe(true);
+    expect(isRequirementPoolNoiseClause('1.2 ☑本工程采用商品砼，泵送浇筑')).toBe(true);
+  });
+
+  it('形态判据反例：施工义务/技术标准语境不误伤（考核/保修词表收窄、☑限行首）', () => {
+    expect(isRequirementPoolNoiseClause('定期开展安全技术考核，考核不合格者不得上岗')).toBe(false);
+    expect(isRequirementPoolNoiseClause('本工程采用预拌混凝土泵送施工工艺')).toBe(false);
+    expect(isRequirementPoolNoiseClause('夜间施工噪音控制措施：采用低噪音设备，禁止鸣笛')).toBe(false);
+    expect(isRequirementPoolNoiseClause('投标人须确保黄山杯')).toBe(false);
+    expect(isRequirementPoolNoiseClause('')).toBe(false);
+  });
+
+  it('集成：投标表单与勾选填报行 LLM 判为要求仍强制剔除（non_requirement）', async () => {
+    const clauses: TenderClauseUnit[] = [
+      { file: '招标文件.pdf', section: '前附表', clauseNo: '1.1', text: '1.1 本表应填写项目经理相关情况，并附身份证复印件及联系方式' },
+      { file: '招标文件.pdf', section: '前附表', clauseNo: '1.2', text: '1.2 ☑本工程采用商品砼，泵送浇筑，运距及泵车配置由承包方现场踏勘后确认' },
+      { file: '招标文件.pdf', section: '第三章', text: '定期开展安全技术考核，考核不合格者不得上岗' },
+    ];
+    vi.mocked(callDocumentLlmJson).mockResolvedValue({
+      results: clauses.map((_, index) => ({ index, isRequirement: true, inScope: true, policy: 'respond' as const, coreTerms: [], category: '其他要求' })),
+    });
+    const result = await judgeTenderClauses(clauses, {});
+    expect(result.entries.length).toBe(1);
+    expect(result.entries[0].text).toBe('定期开展安全技术考核，考核不合格者不得上岗');
+    expect(result.excluded.length).toBe(2);
+    expect(result.excluded.map(item => item.reason)).toEqual(['non_requirement', 'non_requirement']);
+  });
+
+  it('集成：答疑回复/考核惩奖/质量保修条款强制剔除，施工义务条款保留进池', async () => {
+    const clauses: TenderClauseUnit[] = [
+      { file: '答疑纪要.pdf', section: '答疑', text: '回复：C25混凝土浇筑，具体做法详见图纸' },
+      { file: '招标文件.pdf', section: '养护考核办法', clauseNo: '4.1', text: '4.1 考核评分：采取百分制，总分100分，低于80分每项扣2分' },
+      { file: '招标文件.pdf', section: '合同专用条款', text: '质量保修范围包括：地基基础工程、主体结构工程、屋面防水工程' },
+      { file: '招标文件.pdf', section: '第三章', text: '定期开展安全技术考核，考核不合格者不得上岗' },
+    ];
+    vi.mocked(callDocumentLlmJson).mockResolvedValue({
+      results: clauses.map((_, index) => ({ index, isRequirement: true, inScope: true, policy: 'respond' as const, coreTerms: [], category: '其他要求' })),
+    });
+    const result = await judgeTenderClauses(clauses, {});
+    expect(result.entries.length).toBe(1);
+    expect(result.entries[0].text).toBe('定期开展安全技术考核，考核不合格者不得上岗');
+    expect(result.excluded.length).toBe(3);
+    expect(result.excluded.map(item => item.reason)).toEqual(['non_requirement', 'non_requirement', 'non_requirement']);
+  });
+});
+
+// ═══════════════════════════ M26 判定层域兜底 + 锚点提取修复（r28k/s28k 要求锚点实机归因） ═══════════════════════════
+
+describe('M26 判定层域兜底（合同附件来源域 + 引用性条款出池）', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('isContractAttachmentSectionClause 形态：合同附件域来源小节命中（GF 通用条款条款名/保修/安全生产合同/管养考核/投标文件格式）', () => {
+    expect(isContractAttachmentSectionClause('第三部分 专用合同条款·附件3 工程质量保修书')).toBe(true);
+    expect(isContractAttachmentSectionClause('第二章 合同条款 承包人职责')).toBe(true);
+    expect(isContractAttachmentSectionClause('1.1 承包人的一般义务')).toBe(true);
+    expect(isContractAttachmentSectionClause('安全生产合同')).toBe(true);
+    expect(isContractAttachmentSectionClause('监理人的一般规定')).toBe(true);
+    expect(isContractAttachmentSectionClause('样品的报送与封存')).toBe(true);
+    expect(isContractAttachmentSectionClause('项目经理质量终身责任制承诺')).toBe(true);
+    expect(isContractAttachmentSectionClause('投标文件格式 五、施工组织设计')).toBe(true);
+    expect(isContractAttachmentSectionClause('绿化养护管理质量标准（一级养护质量标准）')).toBe(true);
+    expect(isContractAttachmentSectionClause('景观设施维护 考核表')).toBe(true);
+  });
+
+  it('零误伤反向守护：施组/技术域来源小节不命中（「承诺」裸词不入表——工期承诺类实质要求保留）', () => {
+    expect(isContractAttachmentSectionClause('第三章 评标办法')).toBe(false);
+    expect(isContractAttachmentSectionClause('第二章 工程概况')).toBe(false);
+    expect(isContractAttachmentSectionClause('施工组织设计')).toBe(false);
+    expect(isContractAttachmentSectionClause('工期承诺与保证措施')).toBe(false);
+    expect(isContractAttachmentSectionClause('质量管理体系与措施')).toBe(false);
+    expect(isContractAttachmentSectionClause('')).toBe(false);
+    expect(isContractAttachmentSectionClause(undefined)).toBe(false);
+  });
+
+  it('isDocumentReferenceOnlyClause：coreTerms 全为文号/行政文件名 → 引用性出池；含实质词 → 保留', () => {
+    expect(isDocumentReferenceOnlyClause(['建市〔2021〕71号', '建筑工人实名制管理办法'])).toBe(true);
+    expect(isDocumentReferenceOnlyClause(['危险性较大的分部分项工程安全管理规定'])).toBe(true);
+    // 词尾限行政文件类：「工程质量标准」「技术规范」为技术/管理词，不判引用性（防实质要求误出池）
+    expect(isDocumentReferenceOnlyClause(['工程质量标准'])).toBe(false);
+    expect(isDocumentReferenceOnlyClause(['施工技术规范'])).toBe(false);
+    // 混合：文号 + 实质要求词 → 保留
+    expect(isDocumentReferenceOnlyClause(['建市〔2021〕71号', '实名制考勤'])).toBe(false);
+    expect(isDocumentReferenceOnlyClause([])).toBe(false);
+    expect(isDocumentReferenceOnlyClause(undefined)).toBe(false);
+  });
+
+  it('集成：合同附件来源域条款 LLM 判为要求仍出池（out_of_scope）；技术域条款保留（反向守护）', async () => {
+    const clauses: TenderClauseUnit[] = [
+      { file: '招标文件.pdf', section: '专用合同条款·附件3 工程质量保修书', text: '缺陷责任期内出现质量缺陷的，应及时组织修复并做好记录' },
+      { file: '招标文件.pdf', section: '第二章 工程概况', text: '本工程应做好施工期间的绿色施工与环境保护管理' },
+    ];
+    vi.mocked(callDocumentLlmJson).mockResolvedValue({
+      results: clauses.map((_, index) => ({ index, isRequirement: true, inScope: true, policy: 'respond' as const, coreTerms: index === 0 ? ['缺陷责任期', '组织修复'] : ['绿色施工', '环境保护'], category: '其他要求' })),
+    });
+    const result = await judgeTenderClauses(clauses, {});
+    expect(result.entries.length).toBe(1);
+    expect(result.entries[0].text).toContain('绿色施工');
+    expect(result.excluded.length).toBe(1);
+    expect(result.excluded[0].reason).toBe('out_of_scope');
+  });
+
+  it('集成：引用性条款（coreTerms 全为文号/行政文件名）出池；实质条款保留（反向守护）', async () => {
+    const clauses: TenderClauseUnit[] = [
+      { file: '招标文件.pdf', section: '第三章 评标办法', text: '按照建市〔2021〕71号《建筑工人实名制管理办法》相关规定执行' },
+      { file: '招标文件.pdf', section: '第三章 施工方案', text: '施工现场临时用电应符合三级配电两级保护要求' },
+    ];
+    vi.mocked(callDocumentLlmJson).mockResolvedValue({
+      results: clauses.map((_, index) => ({ index, isRequirement: true, inScope: true, policy: 'respond' as const, coreTerms: index === 0 ? ['建市〔2021〕71号', '建筑工人实名制管理办法'] : ['三级配电', '两级保护'], category: '其他要求' })),
+    });
+    const result = await judgeTenderClauses(clauses, {});
+    expect(result.entries.length).toBe(1);
+    expect(result.entries[0].text).toContain('三级配电');
+    expect(result.excluded.length).toBe(1);
+    expect(result.excluded[0].reason).toBe('out_of_scope');
+  });
+});
+
+describe('M26 锚点提取修复（全角％归一 + 「N.N项」编号切片守卫）', () => {
+  it('全角％/半角% 同源归一：锚点与正文形态差不再假 miss（双向）', () => {
+    const [gap] = tenderRequirementResponseGaps(
+      [entry('混凝土强度优良率应达到95％', ['优良率'])],
+      '本工程混凝土强度优良率达到95%。',
+    );
+    expect(gap.satisfied).toBe(true);
+    expect(gap.missing).toEqual([]);
+    const [gap2] = tenderRequirementResponseGaps(
+      [entry('混凝土强度优良率应达到95%', ['优良率'])],
+      '本工程混凝土强度优良率达到95％。',
+    );
+    expect(gap2.satisfied).toBe(true);
+  });
+
+  it('「N.N项」编号切片假锚丢弃（「1.1项目名称」截断产物）；「3项」整数+项真实数量锚保留', () => {
+    const [missingGap] = tenderRequirementResponseGaps(
+      [entry('施工方案应包含1.1项目名称及3项保证措施', [])],
+      '施工方案已包含项目名称及保证措施。',
+    );
+    expect(missingGap.satisfied).toBe(false);
+    expect(missingGap.missing).toEqual(['3项']);
+    const [hitGap] = tenderRequirementResponseGaps(
+      [entry('施工方案应包含1.1项目名称及3项保证措施', [])],
+      '施工方案已包含项目名称及3项保证措施。',
+    );
+    expect(hitGap.satisfied).toBe(true);
+  });
+});
+
+describe('M14a 判定口径指纹（缓存失效自动防线：口径变更不再依赖人工递增版本）', () => {
+  const SRC = path.join(__dirname, '../../../src/services/document-workflow/tenderRequirements.ts');
+
+  it('指纹稳定非空：sha1 形态、重复调用一致', () => {
+    const fingerprint = tenderRequirementsJudgeFingerprint();
+    expect(fingerprint).toMatch(/^[0-9a-f]{40}$/u);
+    expect(tenderRequirementsJudgeFingerprint()).toBe(fingerprint);
+  });
+
+  it('指纹对判据源敏感：源集不同 → 指纹不同（判据代码变更即失效缓存）', () => {
+    expect(tenderRequirementsJudgeFingerprint([() => 'alpha'])).not.toBe(tenderRequirementsJudgeFingerprint([() => 'beta']));
+    expect(tenderRequirementsJudgeFingerprint([/a/u])).not.toBe(tenderRequirementsJudgeFingerprint([/b/u]));
+  });
+
+  it('缓存 key 接线（源码守护）：v9 版本 + judgeFingerprint 入 key（防版本漏递增/指纹漏接线回归）', () => {
+    const source = fs.readFileSync(SRC, 'utf8');
+    expect(source).toContain("const TENDER_REQUIREMENTS_CACHE_VERSION = 'tender-requirements-extraction-v9'");
+    expect(source).toContain('judgeFingerprint: tenderRequirementsJudgeFingerprint()');
+  });
+
+  it('判据调用守护：judgeTenderClauses 内判据调用全部入指纹源清单（新增判据漏加即红）', () => {
+    const source = fs.readFileSync(SRC, 'utf8');
+    const start = source.indexOf('export async function judgeTenderClauses');
+    const end = source.indexOf('L1 提取缓存', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const body = source.slice(start, end);
+    // 函数形态判据（负向后行断言排除 `.test(` 等方法调用）+ 正则形态判据（`XXX_RE.test(` 的正则变量名）
+    const called = new Set([
+      ...[...body.matchAll(/(?<![.\w$])([a-zA-Z_$][\w$]*)\((?:clause\.text|judgment|clause, judgment)\)/gu)].map(match => match[1]),
+      ...[...body.matchAll(/\b([A-Z][A-Z0-9_]*_RE)\.test\(/gu)].map(match => match[1]),
+    ]);
+    expect(called.size).toBeGreaterThan(8);
+    const listStart = source.indexOf('const CACHE_JUDGE_FINGERPRINT_SOURCES');
+    const listText = source.slice(listStart, source.indexOf('];', listStart));
+    for (const name of called) {
+      expect(listText, `判据 ${name} 未入 CACHE_JUDGE_FINGERPRINT_SOURCES（口径变更将不失效缓存）`).toContain(name);
+    }
   });
 });

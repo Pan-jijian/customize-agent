@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { boqDivisionCoverageIssues, boqRowTraceIssues, buildBoqRowTraces, buildDocumentFactTraces, cleanFactValue, enforceBoqDivisionCoverageInMethodChapters, extractBoqDivisionCoverage, factTraceIssues, formatBoqDivisionCoverage, isActionableFactValue, isActionableTraceFact } from '@/services/document-workflow/documentFactTrace';
+import { boqDivisionCoverageIssues, boqRowTraceIssues, buildBoqRowTraces, buildDocumentFactTraces, buildNumericTraceFindings, classifyNumericTraceToken, cleanFactValue, demoteUnsourcedNumericTokens, enforceBoqDivisionCoverageInMethodChapters, extractBoqDivisionCoverage, factTraceIssues, formatBoqDivisionCoverage, isActionableFactValue, isActionableTraceFact, numericTraceabilityIssues, scanNumericTrace } from '@/services/document-workflow/documentFactTrace';
 import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel } from '@/services/document-workflow/types';
 
 function factsModel(project: DocumentFact[] = [], preciseFacts: DocumentFact[] = [], tables: DocumentFactsModel['tables'] = []): DocumentFactsModel {
@@ -193,6 +193,93 @@ describe('buildBoqRowTraces / boqRowTraceIssues（BOQ 行级落位）', () => {
   });
 });
 
+describe('C-T5 落位口径（豁免登记 + 有效行分母）', () => {
+  const boq = (rows: string[][]) => factsModel([], [], [{ tableType: '清单', headers: ['序号', '项目编码', '项目名称', '工程量', '单位'], rows, sourceFile: '清单.xlsx' }]);
+
+  it('汇总口径行标记 exempt 且不计入分母（有效行全落位不报）', () => {
+    const model = boq([
+      ['1', '010101001001', '平整场地', '1200', 'm2'],
+      ['', '', '分部小计', '', ''],
+      ['', '', '合计', '', ''],
+    ]);
+    const traces = buildBoqRowTraces('主要工序包括平整场地。', model);
+    expect(traces).toHaveLength(3);
+    expect(traces.filter(t => t.exempt)).toHaveLength(2);
+    // 历史缺陷：口径行未排除 → 1/3=33% 报「严重不足」；修复后有效行 1 行全落位 → 无告警
+    expect(boqRowTraceIssues(traces)).toHaveLength(0);
+  });
+
+  it('分母只计有效行，豁免行登记进告警消息（可审计）', () => {
+    const model = boq([
+      ['1', '010101001001', '平整场地', '1200', 'm2'],
+      ['2', '010101003001', '挖一般土方', '5600', 'm3'],
+      ['', '', '分部小计', '', ''],
+    ]);
+    const traces = buildBoqRowTraces('主要工序包括平整场地。', model);
+    const issues = boqRowTraceIssues(traces);
+    expect(issues).toHaveLength(1);
+    // 有效行 2（豁免 1 行）：1/2=50% → 0.3~0.6 报「落位不足」；历史口径 1/3=33% 会报「严重不足」
+    expect(issues[0]!.message).toContain('落位不足');
+    expect(issues[0]!.message).not.toContain('严重不足');
+    expect(issues[0]!.message).toContain('/2 行');
+    expect(issues[0]!.message).toContain('口径行 1 行已豁免');
+  });
+});
+
+describe('M9 落位判定扩围（首段实体主名 + 短名救回 + 豁免扩围）', () => {
+  const boq = (rows: string[][]) => factsModel([], [], [{ tableType: '清单', headers: ['序号', '项目编码', '项目名称', '工程量', '单位'], rows, sourceFile: '清单.xlsx' }]);
+
+  it('括号/顿号枚举名取首段主名判定（「矩形柱（含梯柱）」正文含「矩形柱」即落位）', () => {
+    const model = boq([['1', '010502001001', '矩形柱（含梯柱）', '320', 'm3']]);
+    const traces = buildBoqRowTraces('本工程矩形柱采用组合钢模板施工。', model);
+    expect(traces[0]!.placed).toBe(true);
+  });
+
+  it('2 字短名救回（「圈梁」「垫层」实体词照常判定）', () => {
+    const model = boq([
+      ['1', '010503002001', '圈梁', '120', 'm3'],
+      ['2', '010501003001', '垫层', '240', 'm3'],
+    ]);
+    const traces = buildBoqRowTraces('圈梁与垫层均按设计图纸施工。', model);
+    expect(traces.filter(t => t.placed)).toHaveLength(2);
+  });
+
+  it('2 字泛词不救回（「其他」「材料」在正文必然出现，不构成落位证据）', () => {
+    const model = boq([
+      ['1', '010101001001', '其他', '5', '项'],
+      ['2', '010101001002', '材料', '10', '批'],
+    ]);
+    const traces = buildBoqRowTraces('其他材料由总包统一采购，其他事项另行约定。', model);
+    expect(traces.filter(t => t.placed)).toHaveLength(0);
+  });
+
+  it('豁免扩围：噪声行/费用行/分部标题行登记 exempt 不进分母', () => {
+    const model = boq([
+      ['1', '010101001001', '平整场地', '1200', 'm2'],
+      ['', '', '分部分项工程量清单', '', ''],
+      ['', '', '夜间施工增加费', '', ''],
+      ['', '', '道路工程', '', ''],
+    ]);
+    const traces = buildBoqRowTraces('主要工序包括平整场地。', model);
+    expect(traces).toHaveLength(4);
+    expect(traces.filter(t => t.exempt)).toHaveLength(3);
+    // 有效行 1 行全落位 → 无告警（扩围前 1/4=25% 报「严重不足」）
+    expect(boqRowTraceIssues(traces)).toHaveLength(0);
+  });
+
+  it('豁免行登记进告警消息（扩围类别可审计）', () => {
+    const model = boq([
+      ['1', '010101001001', '平整场地', '1200', 'm2'],
+      ['2', '010101003001', '挖一般土方', '5600', 'm3'],
+      ['', '', '措施项目', '', ''],
+    ]);
+    const traces = buildBoqRowTraces('主要工序包括平整场地。', model);
+    const issues = boqRowTraceIssues(traces);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toContain('口径行 1 行已豁免');
+  });
+});
+
 describe('isActionableTraceFact（可执行落位义务判定）', () => {
   it('label+value 无关域且非数字 → 排除', () => {
     expect(isActionableTraceFact({ label: '备注', value: '资料待复核', status: 'unplaced', confidence: 1 })).toBe(false);
@@ -215,6 +302,20 @@ describe('isActionableTraceFact（可执行落位义务判定）', () => {
       status: 'unplaced',
       confidence: 1,
     })).toBe(false);
+  });
+  it('r27 要求条款类知识排除：义务主体开头 / 纯法规名 / 「本招标项目…须」 / 圆括号序号', () => {
+    expect(isActionableTraceFact({ label: '安全合规要求', value: '承包人应实现安全生产无事故目标。', status: 'unplaced', confidence: 1 })).toBe(false);
+    expect(isActionableTraceFact({ label: '国家法律法规', value: '《中华人民共和国招标投标法》《中华人民共和国安全生产法》', status: 'unplaced', confidence: 1 })).toBe(false);
+    expect(isActionableTraceFact({ label: '地方法规规章', value: '《建设工程质量管理条例》', status: 'unplaced', confidence: 1 })).toBe(false);
+    expect(isActionableTraceFact({ label: '国家行业地方规范标准', value: '本招标项目施工、验收须达到设计文件的要求。', status: 'unplaced', confidence: 1 })).toBe(false);
+    expect(isActionableTraceFact({ label: '施工范围', value: '（二）污水管网、生态处理等污水工程；', status: 'unplaced', confidence: 1 })).toBe(false);
+  });
+  it('r27 要求条款排除护栏：非义务句式 / 含实质内容法规引用 / 真项目名 / 含具体数据义务句均保留', () => {
+    expect(isActionableTraceFact({ label: '安全文明', value: '承包人办公区与生活区分设并落实消防措施', status: 'unplaced', confidence: 1 })).toBe(true);
+    expect(isActionableTraceFact({ label: '质量标准', value: '执行《建筑工程施工质量验收统一标准》GB50300合格标准', status: 'unplaced', confidence: 1 })).toBe(true);
+    expect(isActionableTraceFact({ label: '项目名称', value: '2026年度某某镇美丽宜居自然村建设项目', status: 'used', confidence: 1 })).toBe(true);
+    // 含数值/期限的具体安排句可被正文直接引用扩散，不列入要求条款排除（R14 实机行为）
+    expect(isActionableTraceFact({ label: '资源配置要求', value: '承包人应在工程开工前7日内，完成包括临时水电报装、临时设施搭建及施工便道修筑在内的全部开工准备工作。', status: 'unplaced', confidence: 1 })).toBe(true);
   });
 });
 
@@ -400,6 +501,55 @@ describe('extractBoqDivisionCoverage（r14 E16 清单分部全景：规划/写�
     expect(entries.find(entry => entry.name === '公厕')?.items).toEqual(['平整场地 24.7m2']);
   });
 
+  it('中文序数一级分部 + GB 编码分部 + 村组段落归属（r20：二 排水工程/0112 装饰分部/生态池类专有分项入全景）', () => {
+    const model = factsModel([], [], [{
+      tableType: '清单',
+      headers: [],
+      rows: [
+        // 中文序数一级分部（历史缺陷：只认带点编号致上下文丢失）
+        ['', '二', '', '排水工程', ''],
+        // 村组名（工程名称行建有地名集合）→ 保持上层上下文（历史缺陷：清空致条目丢失）
+        ['工程名称：马老郢、马圩', '', '', '', '', '', '', ''],
+        ['', '2.1', '', '马老郢', ''],
+        // 字母前缀编码条目（WB/ZB 形态，历史缺陷：只认纯数字致条目掉落）
+        ['51', 'WB041111006001', '', '1#生态池（3T/D)', '1、结构做法详见图纸', 'm3', '', '9.600'],
+        ['52', '050102007001', '', '栽植色带（生态池外围一圈）', 'x', 'm2', '', '9.600'],
+        // GB 清单编码分部（0112 墙柱面装饰）
+        ['', '0112', '', '墙、柱面装饰与隔断、幕墙工程', ''],
+        ['118', '011406001001', '', '公厕外墙真石漆', 'x', 'm2', '', '102.250'],
+      ],
+      sourceFile: '清单.xls',
+    }]);
+    const entries = extractBoqDivisionCoverage(model);
+    const names = entries.map(entry => entry.name);
+    expect(names).toContain('排水工程');
+    expect(names).toContain('墙、柱面装饰与隔断、幕墙工程');
+    expect(names).not.toContain('马老郢');
+    // 村组段落条目归属上层专业分部（「二 排水工程 → 2.1 马老郢 → 生态池」）
+    expect(entries.find(entry => entry.name === '排水工程')?.items).toEqual(['1#生态池（3T/D) 9.6m3', '栽植色带（生态池外围一圈） 9.6m2']);
+    // GB 编码分部条目归属（公厕外墙真石漆 → 墙柱面装饰分部）
+    expect(entries.find(entry => entry.name === '墙、柱面装饰与隔断、幕墙工程')?.items).toEqual(['公厕外墙真石漆 102.25m2']);
+  });
+
+  it('行中后段数字/中文序数不误判为分部（位置约束：编号限行首 ≤ 2 列）', () => {
+    const model = factsModel([], [], [{
+      tableType: '清单',
+      headers: [],
+      rows: [
+        ['', '1.1', '', '新建混凝土道路', ''],
+        ['1', '040101001001', '', '挖一般土方', 'x', 'm3', '', '1436.000'],
+        // 尾部 4 位数字 + 中文单位 / 尾部中文序数：不得产生伪分部
+        ['', '', '', '零星说明', '1000', '平方米', '', ''],
+        ['', '', '', '合计说明', '二', '三', '', ''],
+      ],
+      sourceFile: '清单.xls',
+    }]);
+    const names = extractBoqDivisionCoverage(model).map(entry => entry.name);
+    expect(names).toContain('新建混凝土道路');
+    expect(names).not.toContain('平方米');
+    expect(names).not.toContain('二');
+  });
+
   it('跨表分页聚合（同名分部跨表合并 + 无实体词分部靠直属条目保留）', () => {
     const page = (rows: string[][]): DocumentFactsModel['tables'][number] => ({ tableType: '清单', headers: [], rows, sourceFile: '清单.xls' });
     const model = factsModel([], [], [
@@ -474,5 +624,193 @@ describe('enforceBoqDivisionCoverageInMethodChapters（r14 E16 链尾确定性�
     expect(enforceBoqDivisionCoverageInMethodChapters({ markdown: covered, chapters: coveredDrafts(), factsModel: coverageModel })).toBeNull();
     expect(enforceBoqDivisionCoverageInMethodChapters({ markdown, chapters: [{ id: 'c1', title: '工程概况', content: '概况。', evidence: [], missingFacts: [] }], factsModel: coverageModel })).toBeNull();
     expect(enforceBoqDivisionCoverageInMethodChapters({ markdown, chapters: drafts(), factsModel: factsModel([], [], []) })).toBeNull();
+  });
+});
+
+// ── C-T2. 数字溯源闭环（三分类矩阵 / 扫描过滤 / 反查聚合 / 链尾改定性） ──
+
+describe('C-T2 classifyNumericTraceToken 三分类（r28f 实测合法数字全豁免）', () => {
+  const samples: Array<{ token: string; context: string; kind: string; basis: string }> = [
+    { token: '50268', context: '按《给水排水管道工程施工及验收规范》GB 50268 的规定执行', kind: 'regulatory', basis: '标准编号' },
+    { token: '2019', context: '依据 GB 50268-2019 验收规范执行', kind: 'regulatory', basis: '标准编号年份' },
+    { token: '2019年', context: '该规范于 2019 年发布实施', kind: 'regulatory', basis: '年份表述' },
+    { token: '14天', context: '混凝土养护龄期不少于 14 天，同条件养护试块强度达设计值', kind: 'regulatory', basis: '养护龄期' },
+    { token: '100m³', context: '每 100m³ 混凝土留置一组试块', kind: 'regulatory', basis: '试块留置/检验批' },
+    { token: '400m³', context: '砌筑砂浆每 400m³ 检验批留置一组试块', kind: 'regulatory', basis: '试块留置/检验批' },
+    { token: '3组', context: '每层留置 3 组试块送检', kind: 'regulatory', basis: '试块留置' },
+    { token: '200m²', context: '压实度检测每层每 200m² 不少于 1 点', kind: 'regulatory', basis: '检测频次' },
+    { token: '1点', context: '压实度检测每层不少于 1 点', kind: 'regulatory', basis: '检测频次' },
+    { token: '5℃', context: '混凝土入模温度不低于 5℃', kind: 'regulatory', basis: '温度阈值' },
+    { token: '95%', context: '路基压实度不低于 95%', kind: 'regulatory', basis: '质量指标' },
+    { token: '5mm', context: '面层厚度偏差不超过 ±5mm', kind: 'regulatory', basis: '工艺公差' },
+    { token: '1次', context: '每日不少于 1 次安全巡查', kind: 'management', basis: '管理频次' },
+    { token: '9个', context: '将 9 个自然村分组平行施工', kind: 'management', basis: '施工组织编排' },
+    { token: '2名', context: '项目部配备专职安全员 2 名', kind: 'management', basis: '组织配置' },
+    { token: '60天', context: '缺陷责任期内的修复合理期限一般不超过 60 天', kind: 'management', basis: '合同程序条款' },
+    { token: '8月', context: '计划 2026 年 8 月开工', kind: 'management', basis: '日期表述' },
+    { token: '100%', context: '焊缝一次验收合格率 100%', kind: 'management', basis: '过程指标' },
+    { token: '60万元', context: '暂列金额 60 万元由招标人掌握使用', kind: 'management', basis: '商务金额' },
+    // M24d D4 R9 扩词：稳压/压降语境（r28l 实机 0.05MPa）
+    { token: '0.05MPa', context: '试验压力0.6MPa，稳压1h压降不超过0.05MPa且无渗漏为合格', kind: 'regulatory', basis: '工艺压力参数' },
+    // M24d D4 R13 材料/设备规格型号（s28l 实机 INT125-3P-50 / Q345-B）
+    { token: 'INT125-3P-50', context: '配电系统执行NSX100N/3P INT125-3P-50主开关配置', kind: 'regulatory', basis: '材料/设备规格型号' },
+    { token: 'Q345-B', context: '支撑架体钢管材质采用Q345-B，进场时逐批核对材质证明', kind: 'regulatory', basis: '材料/设备规格型号' },
+    // M24d D4 R14 图纸编号（r28l D258 / s28k M1222）
+    { token: 'D258', context: '坡度按设计图纸控制，如D258×16.5管段坡度i=0.3', kind: 'regulatory', basis: '图纸编号' },
+    { token: 'M1222', context: '复核洞口尺寸与门窗表，M1222洞口尺寸与大样不一致处按补疑确认', kind: 'regulatory', basis: '图纸编号' },
+    // M24d D4 R15 规范条件阈值（s28k 实机 630mm）
+    { token: '630mm', context: '风管边长大于630mm时按规范设置加固框', kind: 'regulatory', basis: '规范阈值' },
+    // M24d D3 M7 工期合计编排（r28l 89天 / s28k 344天）
+    { token: '89天', context: '预留机动工期1天，各节点用时合计89天，控制在90日历天总工期以内', kind: 'management', basis: '工期合计编排' },
+    { token: '344天', context: '30天、168天、107天，合计344天，预留16天机动工期用于工序衔接', kind: 'management', basis: '工期合计编排' },
+  ];
+  it.each(samples)('$token → $kind/$basis', ({ token, context, kind, basis }) => {
+    const result = classifyNumericTraceToken({ token, context });
+    expect(result.kind).toBe(kind);
+    expect(result.basis).toBe(basis);
+  });
+
+  const unsourcedSamples: Array<{ token: string; context: string }> = [
+    { token: '90m²', context: '栽植色带 90m²，按设计标高整地' },
+    { token: '8个月', context: '总工期 8 个月，按月排布资源投入' },
+    { token: '75kW', context: '现场配备 75kW 柴油发电机' },
+    { token: '1.2m', context: '沟槽开挖深度 1.2m' },
+    // M24d D4 反向守护：无合计词/无工期语境的纯天数不豁免（真锚定值需溯源）
+    { token: '360天', context: '合同工期360天' },
+    { token: '500天', context: '合计500天' },
+    // M24d D4 反向守护：DN 管径前缀不借型号族豁免；直径语境不借图纸编号族豁免
+    { token: 'DN50', context: '配电箱引出DN50管' },
+    { token: 'D300', context: '管段直径D300mm' },
+  ];
+  it.each(unsourcedSamples)('未溯源样本 $token 不豁免', ({ token, context }) => {
+    const result = classifyNumericTraceToken({ token, context });
+    expect(result.kind).toBe('unsourced');
+    expect(result.basis).toBe('');
+  });
+});
+
+describe('C-T2 scanNumericTrace 扫描口径（表格行/章节号/裸数过滤）', () => {
+  it('表格行内数值不产出（计划排期分解数据不反查）', () => {
+    expect(scanNumericTrace('| 7 | 栽植色带 | 90 | m2 |')).toEqual([]);
+  });
+
+  it('章节编号与长编码不产出', () => {
+    expect(scanNumericTrace('### 2.3 栽植工程（项目编码 040202009001）')).toEqual([]);
+  });
+
+  it('无单位裸数不产出（序号/图号噪声，未命中标准号与年份口径）', () => {
+    expect(scanNumericTrace('按图号 300 施工，详见第 500 号变更单')).toEqual([]);
+  });
+
+  it('标准编号与年份裸数豁免产出（regulatory）', () => {
+    const hits = scanNumericTrace('依据 GB 50268-2019 及 2020 年修正版执行');
+    expect(hits.some(hit => hit.normalizedToken === '50268' && hit.kind === 'regulatory')).toBe(true);
+    expect(hits.some(hit => hit.normalizedToken === '2019' && hit.kind === 'regulatory')).toBe(true);
+  });
+});
+
+describe('C-T2 buildNumericTraceFindings / numericTraceabilityIssues（反查与终检聚合）', () => {
+  const boqModel = () => factsModel([], [], [{
+    tableType: '清单',
+    headers: ['序号', '项目编码', '项目名称', '工程量', '单位'],
+    rows: [
+      ['1', '040202009001', '栽植色带', '9.600', 'm2'],
+      ['2', '040204003001', '青砖步道', '150', 'm2'],
+      ['3', '040205004001', '过路涵', '50', 'm'],
+    ],
+    sourceFile: '清单.xlsx',
+  }]);
+
+  it('清单数量溯源命中（跨格组合+尾零规约：9.6 与 9.600 等价）', () => {
+    expect(buildNumericTraceFindings('栽植色带9.6m²，青砖步道150m²，过路涵50m。', boqModel())).toEqual([]);
+  });
+
+  it('真未溯源数字报出并经终检聚合 error（消息锚同既有反查链）', () => {
+    const md = '栽植色带90m²，按设计标高整地。';
+    const findings = buildNumericTraceFindings(md, boqModel());
+    expect(findings.map(finding => finding.normalizedToken)).toContain('90m2');
+    const issues = numericTraceabilityIssues(md, boqModel());
+    expect(issues).toHaveLength(1);
+    const issue = issues[0]!;
+    expect(issue.message).toContain('生成后事实反查失败');
+    expect(issue.message).toContain('90m²');
+    expect(issue.level).toBe('error');
+    expect(issue.severity).toBe('blocker');
+    expect(issue.category).toBe('evidence_coverage');
+    expect(issue.repairability).toBe('llm_repairable');
+  });
+
+  it('规范常数豁免与表格行过滤（合法数字不进反查）', () => {
+    const md = '每100m³混凝土留置一组试块，养护龄期不少于14天。\n| 7 | 040204003001 | 青砖步道 | 150 | m2 |';
+    expect(buildNumericTraceFindings(md, boqModel())).toEqual([]);
+  });
+
+  it('语料规模不足（空模型）→ 反查短路', () => {
+    expect(buildNumericTraceFindings('栽植色带90m²。', factsModel())).toEqual([]);
+    expect(numericTraceabilityIssues('栽植色带90m²。', factsModel())).toEqual([]);
+  });
+});
+
+describe('C-T2 demoteUnsourcedNumericTokens 链尾改定性（可删类删除+保护+幂等）', () => {
+  const boqModel = () => factsModel([], [], [{
+    tableType: '清单',
+    headers: ['序号', '项目编码', '项目名称', '工程量', '单位'],
+    rows: [['1', '040202009001', '栽植色带', '9.600', 'm2']],
+    sourceFile: '清单.xlsx',
+  }]);
+
+  it('真未溯源可删项删除改定性 + details + 幂等', () => {
+    const fix = demoteUnsourcedNumericTokens({ markdown: '栽植色带90m²，按设计标高整地。铺种草皮80m²。', factsModel: boqModel() });
+    expect(fix).toBeTruthy();
+    expect(fix!.fixedCount).toBe(2);
+    expect(fix!.markdown).toContain('栽植色带，按设计标高整地。');
+    expect(fix!.markdown).toContain('铺种草皮。');
+    expect(fix!.details).toHaveLength(2);
+    expect(demoteUnsourcedNumericTokens({ markdown: fix!.markdown, factsModel: boqModel() })).toBeNull();
+  });
+
+  it('r28h 归因：并列数值删除后连续顿号与悬接「等」清理（「按3m、4m、5m 等」→「按3m等」）', () => {
+    // r28h2 实测：「3m」受「按」字尾保护，并列项「4m」「5m」删除后残留「、、」+「、等」
+    // 直坠终门禁（punctuationArtifactIssues）；tidyRemovalArtifacts 扩围后收敛（幂等可重放）
+    const fix = demoteUnsourcedNumericTokens({ markdown: '宽度按3m、4m、5m 等设计路幅控制。', factsModel: boqModel() });
+    expect(fix).toBeTruthy();
+    expect(fix!.fixedCount).toBe(2);
+    expect(fix!.markdown).toContain('宽度按3m等设计路幅控制。');
+    expect(fix!.markdown).not.toContain('、、');
+    expect(fix!.markdown).not.toContain('、等');
+    expect(demoteUnsourcedNumericTokens({ markdown: fix!.markdown, factsModel: boqModel() })).toBeNull();
+  });
+
+  it('删除前保护：量词/比较/维度/符号字尾与时间温度类不删除', () => {
+    const md = '每座90m²，壁厚5mm，间距1.2m，不少于3台，整改3天，升温5℃。';
+    expect(demoteUnsourcedNumericTokens({ markdown: md, factsModel: boqModel() })).toBeNull();
+  });
+
+  it('r28h 归因：题注编号前导豁免（「表3-4 道路结构层…」的「4 道」是表序段不删除）', () => {
+    // r28h2 实测：「表3-4 道路…」的「4 道」被判未溯源数值+单位（道）删除 →「表3-路…」残缺编号
+    // 直坠终检 table-caption blocker；M4a 题注前缀豁免后不删，正文「安排4道工序」类数值照删（行为不扩大）
+    const caption = '表3-4 道路结构层主要物资投入计划表\n\n| 物资名称 | 规格型号 | 单位 |';
+    expect(demoteUnsourcedNumericTokens({ markdown: caption, factsModel: boqModel() })).toBeNull();
+    const body = demoteUnsourcedNumericTokens({ markdown: '安排4道工序流水施工。', factsModel: boqModel() });
+    expect(body).toBeTruthy();
+    expect(body!.markdown).toBe('安排工序流水施工。');
+  });
+
+  it('语料已溯源的数值不被删除（保护合法引用）', () => {
+    expect(demoteUnsourcedNumericTokens({ markdown: '栽植色带9.6m²。', factsModel: boqModel() })).toBeNull();
+  });
+
+  it('r28j M22：小节编号尾「.」保护（「#### 7.1.1 道路…」「### 3.1 道路…」的「1 道」不删除）', () => {
+    // r28j 终稿实锤：「#### 7.1.1 道路作业面安全防护」→「#### 7.1.路…」、「### 3.1 道路结构层物资」
+    // →「### 3.路…」——左窗口尾「.」不在保护表，编号末段+标题首字「1 道」被误删
+    const md = '#### 7.1.1 道路作业面安全防护\n本节针对道路作业面落实安全防护措施。\n### 3.1 道路结构层物资\n| 物资名称 | 单位 |';
+    expect(demoteUnsourcedNumericTokens({ markdown: md, factsModel: boqModel() })).toBeNull();
+  });
+
+  it('r28j M22：「图9-2」类题注编号保护 + 正文真删不误保护', () => {
+    expect(demoteUnsourcedNumericTokens({ markdown: '详见图9-2 项目效果图与节点大样。', factsModel: boqModel() })).toBeNull();
+    const body = demoteUnsourcedNumericTokens({ markdown: '铺装4道工序流水施工。', factsModel: boqModel() });
+    expect(body).toBeTruthy();
+    expect(body!.markdown).toBe('铺装工序流水施工。');
   });
 });
