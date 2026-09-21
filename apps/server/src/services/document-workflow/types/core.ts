@@ -114,7 +114,7 @@ export interface DocumentTemplateChapter {
   tableSections?: string[];
   tableRequirements?: string[];
   tablePlans?: PlannedTablePlan[];
-  /** 图类呈现要求（R20 C1 明标：招标要求的图类元件——横道图/网络图/布置图——语义归属后转写的文字框图/时间轴承载指令；暗标正文禁图表时为空） */
+  /** 图类呈现要求（招标要求的图类元件——横道图/网络图/布置图——语义归属后转写的文字框图/时间轴承载指令；正文禁表口径（显式禁表句）时为空，图类归文末附表区） */
   diagramRequirements?: string[];
   /** 定格证据文件（包内相对路径，如 "招标文件.pdf"；跨资料包在词法上无法表达） */
   pinnedEvidenceFilePaths?: string[];
@@ -425,11 +425,12 @@ export interface TenderRequirementEntry {
 
 /** 被排除条款记录（reason：non_requirement=目录/导语/说明；out_of_scope=投标程序/资格/评标规则/纪律；
  * no_value=条款值为「无」；duplicate=重复文本合并；commercial_scope=商务与造价条款（付款/保证金/结算/
- * 报价/税金等，技术标正文零商务句，响应由商务标承接））——仅对账与审计用，不注入写作 */
+ * 报价/税金等，技术标正文零商务句，响应由商务标承接）；noise=解析产物表格噪声（图签/坐标/目录点串行/
+ * OCR 残片/编号粘连，见 poolNoise；D6 池净化出池，可审计））——仅对账与审计用，不注入写作 */
 export interface TenderRequirementExclusion {
   text: string;
   source?: string;
-  reason: 'non_requirement' | 'out_of_scope' | 'no_value' | 'duplicate' | 'commercial_scope';
+  reason: 'non_requirement' | 'out_of_scope' | 'no_value' | 'duplicate' | 'commercial_scope' | 'noise';
 }
 
 /** 提取对账：条款总数 = entries 覆盖 + excluded + 重复合并 + undecidedCount（必须为 0 才对账闭合） */
@@ -557,4 +558,6 @@ export interface BoqRowTrace {
   placedInSection?: string;
   /** C-T5 落位口径豁免：汇总口径行（分部小计/合计/规费/税金等）非清单明细项，不计入落位率分母（登记可审计） */
   exempt?: boolean;
+  /** C3-5 单源化：行内全文（项目特征描述等）——责任章映射 token 命中的描述文本 + 修复轮补写指令上下文 */
+  description?: string;
 }

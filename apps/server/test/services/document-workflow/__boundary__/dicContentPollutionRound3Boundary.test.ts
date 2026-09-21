@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest';
 import type { DocumentEvidence, DocumentFact, DocumentTemplate } from '@/services/document-workflow/types';
 
 import { headingUncoveredEngineeringItems } from '@/services/document-workflow/qualityValidation';
-import { projectBasicInfoTableMarkdown, stripAtlasReferencePhrases } from '@/services/document-workflow/documentGeneratorHelpers';
+import { atlasReferencePhraseHits, projectBasicInfoTableMarkdown, stripAtlasReferencePhrases } from '@/services/document-workflow/documentGeneratorHelpers';
 import { buildCanonicalFacts } from '@/services/document-workflow/factGovernance';
 import { extractStructuredFacts, fieldExtractionPattern } from '@/services/document-workflow/factsModel';
 
@@ -41,6 +41,33 @@ describe('B stripAtlasReferencePhrases 图集/国标编号引用清洗（丰乐�
     const { markdown: result, fixedCount } = stripAtlasReferencePhrases(markdown);
     expect(result).toBe(markdown);
     expect(fixedCount).toBe(0);
+  });
+
+  // ── C3-6-4 检测端同源校准（atlas-reference-phrase：检测定位=修复定位）──
+
+  it('C3-6-4 正样本：命中短语与删除链同源（hits 数 = strip fixedCount）', () => {
+    const markdown = '接闪带每隔1m以支撑卡固定，做法执行15D501图集。内墙做法参照国标11J900内墙18/H7。';
+    const hits = atlasReferencePhraseHits(markdown);
+    expect(hits).toHaveLength(2);
+    expect(hits[0]).toContain('做法执行15D501图集');
+    expect(hits[1]).toContain('做法参照国标11J900');
+    const { fixedCount } = stripAtlasReferencePhrases(markdown);
+    expect(hits.length).toBe(fixedCount);
+  });
+
+  it('C3-6-4 反样本：合法表述不误伤（设计图纸/施工方案/规定章节类引用零命中）', () => {
+    const markdown = [
+      '本工程做法参照设计图纸与批准施工方案执行。',
+      '防水做法依据设计文件明确的构造层次施工。',
+      '节点做法详见第五章施工工艺。',
+      '做法按施工验收规范执行，验收合格后方可进入下道工序。',
+    ].join('\n');
+    expect(atlasReferencePhraseHits(markdown)).toEqual([]);
+  });
+
+  it('C3-6-4 豁免同口径：标题行/表格行命中不计入检测（与删除链一致）', () => {
+    const markdown = '### 做法执行15D501图集\n| 列 | 做法执行15D501图集 |';
+    expect(atlasReferencePhraseHits(markdown)).toEqual([]);
   });
 });
 

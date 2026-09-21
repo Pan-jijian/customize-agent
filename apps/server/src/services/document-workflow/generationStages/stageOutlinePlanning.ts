@@ -236,7 +236,7 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
   // R20 C4 规划污染过滤（明标）：LLM 小节规划可能把资料中非本标段范围的内容（其他专业工程领域实体，
   // 如图纸通用说明条款）规划成表格——单次 LLM 范围核对（判据 = 招标要求摘要 + 清单分部全景），
   // 超范围表从规划中剔除（防虚假缺失对账扣分 + 防补表轮写入超范围内容）；剔除超 1/3 或调用失败
-  // 保留原规划不阻断。暗标（正文禁表）下规划表为空自动跳过；无清单知识库时判据退化为招标摘要仍可用。
+  // 保留原规划不阻断。正文禁表（显式禁表句）下规划表为空自动跳过；无清单知识库时判据退化为招标摘要仍可用。
   let filteredPlannedTables = plannedTablesByChapter;
   if (!isBodyTableForbidden(session.understanding.bidComposition) && plannedTablesByChapter.size > 0) {
     const chapterTitleOf = (chapterId: string) => displayChapterTitle(session.planning.finalBidStructureAudit.enrichedChapters.find(chapter => chapter.id === chapterId)?.title || chapterId);
@@ -263,13 +263,15 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
   // 规划表格计划构建（组件 9）：表格来源 = 提示词声明的必需表格（用户声明层，必写）+ LLM 章节规划的
   // 表格需求（规划产物，应写）；无静态目录匹配、无系统创作——规划没有的表不出现。必需表格逐表全章
   // 评分归属；无归属的显性提示，交由文档合成终验的必需表格兜底链（insertRequiredTable）插入。
-  // 标书编制规格为 forbidden（暗标正文禁表）时短路：正文不生成任何表格计划（含提示词必需表格——
-  // 已由阶段 1 编制规格逐一裁决：能对应招标附表的收敛入终稿附表区，其余取消表格形式转文字表述）
+  // 标书编制规格为 forbidden（招标显式禁表句）时短路：正文不生成任何表格计划（含提示词必需表格——
+  // 已由阶段 1 编制规格逐一裁决：能对应招标附表的收敛入终稿附表区，其余取消表格形式转文字表述）；
+  // 允许口径（暗标/明标/未识别且无禁表证据）正常构建（C1 证据驱动三态判定）。
   // 防御：判定缺失（非常规 session）时 bodyTablePolicy 为空，buildPlannedTablePlans 按常规口径放开
   const plannedTableBuild = buildPlannedTablePlans({ chapters: session.planning.finalBidStructureAudit.enrichedChapters, plannedTables: filteredPlannedTables, requiredTables: session.prepare.runtimePromptRules.requiredTables, bodyTablePolicy: session.understanding.bidComposition?.bodyTablePolicy });
   // R20 C1 图类呈现元件（明标）：招标要求条目识别出的图类元件（横道图/网络图/布置图等）语义归属后注入
   // 章级文字框图/时间轴承载指令（diagramRequirements）；相似度低于阈值不注入（防错挂），未归属显性展示。
-  // 暗标正文禁图表（招标编制要求）：图类由终稿附表区（appendixPlan）承载，正文不注入
+  // 正文禁表（显式禁表句）：图类由终稿附表区（appendixPlan）承载，正文不注入；允许口径正常注入
+  // （写作侧禁图由 bodyFigurePolicy 独立驱动——图类以表格化数据/文字框图表达，不插入图片）
   let chaptersWithDiagramPlans = plannedTableBuild.chapters;
   if (!isBodyTableForbidden(session.understanding.bidComposition) && hasTenderRequirements(session.planning.tenderRequirements)) {
     // B-T1：图类元件数据源 = 要求池 entries（R20 C1）∪ A-T1 结构/呈现要求（含被排除条款的图类信号，不随排除丢失），
@@ -293,7 +295,13 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
   session.planning.effectiveChapters = chaptersWithDiagramPlans;
   if (isBodyTableForbidden(session.understanding.bidComposition)) {
     const composition = session.understanding.bidComposition;
-    upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'bid-composition-table-policy', status: 'success', message: `暗标编制规格消费：正文禁用表格与框图——小节规划 ${plannedTableRequestCount} 项表格需求与提示词必需表格 ${session.prepare.runtimePromptRules.requiredTables.length} 张均不进入正文，图表由终稿附表区 ${composition.appendixPlan.length} 项附表承接`, details: [...composition.conflicts.map(conflict => `${conflict.rule} → ${conflict.resolution}`), ...composition.appendixPlan.map(entry => `附表${entry.no}：${entry.title}${entry.kind === 'figure' ? '（图类，编制人补图）' : `（数据源：${entry.dataSource}）`}`)] }, { subtitle: '表格计划' }));
+    upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'bid-composition-table-policy', status: 'success', message: `编制规格消费：正文禁表（显式禁表句）——小节规划 ${plannedTableRequestCount} 项表格需求与提示词必需表格 ${session.prepare.runtimePromptRules.requiredTables.length} 张均不进入正文，图表由终稿附表区 ${composition.appendixPlan.length} 项附表承接`, details: [...composition.conflicts.map(conflict => `${conflict.rule} → ${conflict.resolution}`), ...composition.appendixPlan.map(entry => `附表${entry.no}：${entry.title}${entry.kind === 'figure' ? '（图类，图件说明承载）' : `（数据源：${entry.dataSource}）`}`)] }, { subtitle: '表格计划' }));
+    session.global.emitProgress();
+  } else if (session.understanding.bidComposition?.bidType === 'blind') {
+    // C1 显性展示：暗标但正文表格口径按证据判定为允许（不得按标书类型硬推禁表——真实招标存在
+    // 暗标明确允许正文表格/图表的实例：「采用文字并结合图表形式」「图表编制软件自行确定」）
+    const plannedTableCount = plannedTableBuild.chapters.reduce((count, chapter) => count + (chapter.tablePlans?.length || 0), 0);
+    upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'bid-composition-table-policy', status: 'success', message: `暗标编制规格消费：招标正文表格口径按证据判定为允许——表格计划 ${plannedTableCount} 项正常构建进入正文（原「暗标一律禁表」硬推已删除）；正文图片仍禁（图类以表格化数据/文字框图表达）${plannedTableBuild.unattachedRequiredTables.length > 0 ? `；提示词必需表格 ${plannedTableBuild.unattachedRequiredTables.length} 张未归属，交由终验兜底插入` : ''}`, details: [...session.understanding.bidComposition.conflicts.map(conflict => `${conflict.rule} → ${conflict.resolution}`), ...session.understanding.bidComposition.appendixPlan.map(entry => `附表${entry.no}：${entry.title}${entry.kind === 'figure' ? '（图类，图件说明承载）' : `（数据源：${entry.dataSource}）`}`)] }, { subtitle: '表格计划' }));
     session.global.emitProgress();
   } else if (plannedTableBuild.unattachedRequiredTables.length > 0) {
     upsertProgressStage(session.global.progressStages, displayStage({ type: 'validation', roleId: 'required-tables-unattached', status: 'success', message: `提示词必需表格归属：${plannedTableBuild.unattachedRequiredTables.length} 张未匹配到明确章节（${plannedTableBuild.unattachedRequiredTables.join('、')}），交由文档合成终验兜底插入`, details: ['未归属必需表格不做语义错挂——防止表格落到不相关章节'] }, { subtitle: '表格计划' }));

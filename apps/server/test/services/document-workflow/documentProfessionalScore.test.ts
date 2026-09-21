@@ -66,6 +66,7 @@ const templating = (level: 'heavy' | 'medium' | 'light'): TenderBidTemplatingRep
   difficultyBothCount: 3,
   difficultyCountermeasures: 5,
   difficultyHeavyTemplated: false,
+  sentencePatternHits: [],
 });
 
 describe('buildProfessionalScoreReport 维度结构', () => {

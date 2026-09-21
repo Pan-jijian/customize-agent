@@ -3,13 +3,13 @@
  *
  * S6 零行为拆分自 integratedBlueprint.ts（门面 re-export，对外导出不变）：仅机械搬迁，未改动任何语句与常量。
  */
-import { climateForZone, resolveClimateByLocation, type BlueprintDerivationStrategy, type LaborQuotaRow } from '../blueprintDerivationStrategies';
+import { climateForZone, DEFAULT_INSTRUMENT_TABLE, DEFAULT_SITE_FACILITY_TABLE, resolveClimateByLocation, type BlueprintDerivationStrategy, type LaborQuotaRow } from '../blueprintDerivationStrategies';
 import type { BillOfQuantitiesResult, BoqEntry } from '../billOfQuantitiesParser';
 import type { DocumentEvidence, DocumentFact } from '../types';
 import { buildBlueprintDecisionLock } from './decisionLock';
 import { deriveQuantitiesFromBoq, deriveSpecAuthoritiesFromBoq, extractBasisRegulations, extractContractFromFacts, extractLocationFromFacts, extractRedLineFacts, extractVillageCount } from './parse';
 import { BLUEPRINT_AMOUNT_RULE } from './types';
-import type { BlueprintBuildDiagnostics, BlueprintData, BlueprintDeployment, BlueprintDifficulty, BlueprintEarthworkBalance, BlueprintEquipmentItem, BlueprintInspectionBatch, BlueprintLabor, BlueprintMaterialPlanItem, BlueprintMilestone, BlueprintTempUtilities } from './types';
+import type { BlueprintBuildDiagnostics, BlueprintData, BlueprintDeployment, BlueprintDifficulty, BlueprintEarthworkBalance, BlueprintEquipmentItem, BlueprintInspectionBatch, BlueprintInstrumentItem, BlueprintLabor, BlueprintMaterialPlanItem, BlueprintMilestone, BlueprintScheduleItem, BlueprintTempLandItem, BlueprintTempUtilities } from './types';
 
 /** L2 推导参数已迁出至 blueprintDerivationStrategies 策略表（工程类型注册制）：
  * 工种映射/工效系数/条目归类/里程碑分组/机械映射/功率表/检验批规则/重难点模板
@@ -346,6 +346,57 @@ export function deriveKeyDifficulties(boq: BillOfQuantitiesResult, strategy: Blu
   return difficulties;
 }
 
+/** C2 附表二：试验检测仪器配置（策略组配置或通用默认集）——「拟配备」口径的行业常规仪器，
+ * 型号/数量按策略组配置照抄；投产信息列（产地/年份/台时数）由渲染层留空，不得编造。
+ * basis 为中性表述（检定/配置口径），内部推导话术不进投标文档附表。 */
+export function deriveTestInstruments(strategy: BlueprintDerivationStrategy): BlueprintInstrumentItem[] {
+  const rows = strategy.instrumentTable || DEFAULT_INSTRUMENT_TABLE;
+  return rows.map(row => ({
+    name: row.name,
+    spec: row.spec,
+    quantity: row.quantity,
+    purpose: row.purpose,
+    basis: '检定合格后投入使用',
+  }));
+}
+
+/** C2 附表四：进度计划工序表（里程碑顺序累加推导起止天序）。
+ * prep（准备与清杂）为前导工作不计入关键线路；其余工序按里程碑顺序衔接构成关键线路。 */
+export function deriveSchedule(milestones: BlueprintMilestone[]): BlueprintScheduleItem[] {
+  const items: BlueprintScheduleItem[] = [];
+  let cursor = 1;
+  for (const [index, item] of milestones.entries()) {
+    const duration = Math.max(1, item.duration || 1);
+    const startDay = cursor;
+    const endDay = cursor + duration - 1;
+    items.push({
+      seq: index + 1,
+      label: item.label,
+      duration,
+      startDay,
+      endDay,
+      critical: item.key !== 'prep',
+      basis: item.key === 'prep' ? '前导工作，与主体施工穿插进行' : '按里程碑顺序衔接',
+    });
+    cursor = endDay + 1;
+  }
+  return items;
+}
+
+/** C2 附表五/六：临时设施与用地规划（面积为固定配置或按劳动力峰值人均指标推导；
+ * 位置为功能区位口径，不指定具体方位、不编造现场事实） */
+export function deriveTempLand(strategy: BlueprintDerivationStrategy, labor: BlueprintLabor): BlueprintTempLandItem[] {
+  const rows = strategy.siteFacilityTable || DEFAULT_SITE_FACILITY_TABLE;
+  return rows.map(row => ({
+    purpose: row.name,
+    area: row.area || (row.areaPerCapita ? Math.max(10, Math.round(labor.peakValue * row.areaPerCapita)) : undefined),
+    location: row.locationHint,
+    duration: row.durationHint,
+    note: row.note,
+    basis: '施工总平面布置规划',
+  }));
+}
+
 export function buildBlueprintData(input: {
   boq: BillOfQuantitiesResult;
   basicFacts?: string;
@@ -411,6 +462,9 @@ export function buildBlueprintData(input: {
     materialsPlan,
     fundPlan: { wageRule: '工资性工程款按工程所在地造价管理规定执行', usagePlan: '按进度分阶段使用' },
     testPlan: [],
+    testInstruments: deriveTestInstruments(strategy),
+    tempLand: deriveTempLand(strategy, labor),
+    schedule: deriveSchedule(milestones),
     earthworkBalance,
     tempUtilities,
     redLineFacts,

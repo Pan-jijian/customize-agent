@@ -48,6 +48,12 @@ const EXECUTION_STAGE_ORDER = [
   'stageDuplicateThemeMerge',
   // D-T6 交付结构收口（markdown-only；最后净变更点之后、stageFinalGate 之前）
   'stageDeliveryStructureClosure',
+  // C8 S3 句模复读链尾收口（markdown-only；delivery-structure-closure 之后、链尾标点兜底之前）
+  'stageSentencePatternSweep',
+  // C8 S5 句级复读坍塌链尾收口（markdown-only；sentence-pattern-sweep 之后、链尾标点兜底之前）
+  'stageDuplicateSentenceCollapse',
+  // C8 S6 A' 对象错位（markdown 版 templating 重放；duplicate-sentence-collapse 之后、链尾标点兜底之前）
+  'stageTemplatingTailReplay',
   'stageFinalGate',
   // P18 自动健康诊断：finalize 末尾零 LLM 成本告警（纯读 telemetry，不参与修复轮）
   'stageHealthDiagnosis',
@@ -73,6 +79,8 @@ const REPAIR_ROUND_FILES = {
   'finalize/repairRounds/quotationBalanceRepair.ts': ['quotation-balance-repair'],
   // 丰乐镇实机终门禁归因 #8 新增：编制依据法规漏列链尾修复轮（独立文件，postReviewSurface 链尾调用）
   'finalize/repairRounds/basisRegulationsRepair.ts': ['basis-regulations-repair'],
+  // C5 一致性类 P6 新增：编制依据↔正文双向对账链尾收口轮（独立文件，postReviewSurface 链尾调用：basis 之后、dangerous 之前）
+  'finalize/repairRounds/basisRegulationsCrossRepair.ts': ['basis-regulations-cross-repair'],
   // r28j 归因新增：危大辨识清单漏项链尾修复轮（独立文件，postReviewSurface 链尾调用：basis 之后、autoSpec 之前）
   'finalize/repairRounds/dangerousApplicabilityRepair.ts': ['dangerous-applicability-repair'],
   // D-T8 归因新增：配置必要内容缺失链尾修复轮（独立文件，basis-regulations-repair 之后、链尾 markdown-only 重放之前调用）
@@ -95,6 +103,12 @@ const REPAIR_ROUND_FILES = {
   'finalize/repairRounds/duplicateThemeMerge.ts': ['duplicate-theme-merge'],
   // D-T6 归因新增：交付结构收口轮（独立文件，最后净变更点之后、stageFinalGate 之前调用）
   'finalize/repairRounds/deliveryStructureClosure.ts': ['delivery-structure-closure'],
+  // C8 S3 归因新增：句模复读链尾收口轮（独立文件，delivery-structure-closure 之后、链尾标点兜底之前调用）
+  'finalize/repairRounds/sentencePatternSweep.ts': ['sentence-pattern-sweep'],
+  // C8 S5 归因新增：句级复读坍塌链尾收口轮（独立文件，sentence-pattern-sweep 之后、链尾标点兜底之前调用）
+  'finalize/repairRounds/duplicateSentenceCollapse.ts': ['duplicate-sentence-collapse'],
+  // C8 S6 归因新增：模板化清理链尾重放轮（markdown 版，独立文件，duplicate-sentence-collapse 之后、链尾标点兜底之前调用）
+  'finalize/repairRounds/templatingTailReplay.ts': ['templating-tail-replay'],
 } as const;
 
 /** 纯检测轮（无修复落地，不需要 recompute 触发） */
@@ -113,11 +127,11 @@ describe('finalize 修复轮调度（P6 单源声明防回归）', () => {
     expect(stages).toEqual(EXECUTION_STAGE_ORDER.filter(stage => stage !== 'stageComposeFinal'));
   });
 
-  it('FINALIZE_REPAIR_ROUNDS 31 轮顺序与执行侧注释映射逐一对应（顺序无漂移）', () => {
+  it('FINALIZE_REPAIR_ROUNDS 35 轮顺序与执行侧注释映射逐一对应（顺序无漂移）', () => {
     const source = readFileSync(path.join(SRC_DIR, 'documentPipeline.ts'), 'utf8');
     // 提取执行侧注释块（P6 注释按声明顺序逐一罗列轮 id）
     const commentBlock = source.match(/P6：修复轮顺序.*$(?:\s*\/\/.*$){0,6}/um)?.[0] ?? '';
-    expect(FINALIZE_REPAIR_ROUNDS).toHaveLength(31);
+    expect(FINALIZE_REPAIR_ROUNDS).toHaveLength(35);
     let lastIndex = -1;
     for (const round of FINALIZE_REPAIR_ROUNDS) {
       const index = commentBlock.indexOf(round);
@@ -140,7 +154,7 @@ describe('finalize 修复轮调度（P6 单源声明防回归）', () => {
     }
   });
 
-  it('修复轮文件与声明表轮 id 完整覆盖（31 轮均有落点，无哑火轮）', () => {
+  it('修复轮文件与声明表轮 id 完整覆盖（35 轮均有落点，无哑火轮）', () => {
     const mapped = Object.values(REPAIR_ROUND_FILES).flat();
     expect(mapped.sort()).toEqual([...FINALIZE_REPAIR_ROUNDS].sort());
   });

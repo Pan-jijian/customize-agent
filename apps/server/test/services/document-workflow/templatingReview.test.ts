@@ -17,6 +17,7 @@ function makeReport(overrides: Partial<TenderBidTemplatingReport> = {}): TenderB
     vagueHitCount: 0, vaguePhrases: [], duplicateSentenceRate: 0.02, crossProjectResidue: [],
     difficultyCountermeasureRatio: 0.8, difficultyBothCount: 8, difficultyCountermeasures: 10,
     difficultyHeavyTemplated: false,
+    sentencePatternHits: [],
     ...overrides,
   };
 }

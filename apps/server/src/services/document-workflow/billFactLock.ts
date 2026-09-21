@@ -186,7 +186,33 @@ export const BILL_PLACEMENT_EXEMPT_NOISE_RE = /分部分项工程量清单|^工�
 export const BILL_PLACEMENT_EXEMPT_FEE_RE = /(?:费|税|暂估价|暂列金额)$/u;
 const BILL_PLACEMENT_EXEMPT_FEE_MAX_LEN = 24;
 
-export type BillPlacementExemptionKind = 'summary-row' | 'noise-row' | 'fee-row' | 'section-title-row';
+/** C3-5 豁免扩围（s28l 实机形态实证）：五类结构/版式/泛词行——
+ * ① 空名行（费用组成表「人工费小计/说明：…」串入名/码格，s28l 实测 52 行；无名行无法构成落位义务）；
+ * ② 版式说明行（「说明：此表项目名称、数量由招标人填写…」其他项目表填写说明）；
+ * ③ 编号结构行（点分编号 code + 无工程量：4.7.1 分部标题/2.16.4 子分部，s28l 实测 15 行）；
+ * ④ 序号分类行（中文数字/短序号 + 费用分类名：「一 人工」「二 材料」「三 施工机械」「5 其他」）；
+ * ⑤ 泛词短名行（C3-5-8 归零实证扩围：名称归一后为泛词名单词——字面三通道全不可达，见名单注释）。 */
+/** 点分编号形态（分部/子分部编号：4.7.1/2.16.4——非清单编码，清单编码为 10-12 位纯数字或字母前缀） */
+const BILL_DOTTED_NUMBER_RE = /^\d{1,3}(?:[.．]\d{1,3}){1,4}$/u;
+/** 序号形态（费用组成表分类行序号：中文数字「一二三」或短阿拉伯数字「5」） */
+const BILL_ORDINAL_CODE_RE = /^(?:[一二三四五六七八九十]{1,3}|\d{1,2})$/u;
+/** 费用组成分类名（人材机/其他）：序号格 + 分类名 = 报价构成行（非施工内容项） */
+const BILL_FEE_CATEGORY_NAME_RE = /^(?:人工|材料|机械|施工机械|设备|人工费|材料费|机械费|施工机械费|其他|其它)$/u;
+/** 版式说明行开头（填写说明/计量说明——非清单明细项） */
+export const BILL_PLACEMENT_EXEMPT_NOTE_RE = /^说明[：:]/u;
+
+/** 泛词短名共源名单（C3-5-8 由 documentFactTrace 迁移共源）：r28h M9 实机复核——s28h2「材料」
+ * 「人工」「软件」等费用子行/占位行与「其他」类汇总行，泛词在正文必然出现但不构成清单项的落位
+ * 证据（2 字工程实义词如「圈梁」「垫层」「压膜」不在表内，照常判定）；2 字泛词名的字面三通道
+ * （首段主名/整名 12 字符 + 编码 8 字符）因长度门槛全不可达，计入分母即永不可达的隐形分母
+ * （s28l 实测「软件」4 行含真实编码/工程量仍永不落位）——boqItemCarriedInText 首段保护与
+ * classifyBillPlacementExemption 泛词行豁免复用同一名单 */
+export const BOQ_GENERIC_NAME_STOPWORDS: ReadonlySet<string> = new Set([
+  '其他', '材料', '人工', '软件', '硬件', '机械', '设备', '建筑', '安装', '拆除',
+  '服务', '费用', '项目', '工程', '施工', '内容', '其中', '以上', '以下', '临时', '措施', '合计', '小计',
+]);
+
+export type BillPlacementExemptionKind = 'summary-row' | 'noise-row' | 'fee-row' | 'section-title-row' | 'no-name-row' | 'note-row' | 'numbered-heading-row' | 'ordinal-category-row' | 'generic-name-row';
 
 /** 判定清单行名是否为落位口径豁免（非落位必要行）；返回豁免类别供审计登记。
  * 行上下文（code/quantity）用于分部标题行判据（无编码且无工程量 + 「XX工程」结尾，
@@ -194,15 +220,33 @@ export type BillPlacementExemptionKind = 'summary-row' | 'noise-row' | 'fee-row'
 export function classifyBillPlacementExemption(name: string, context?: { code?: string; quantity?: string }): BillPlacementExemptionKind | undefined {
   const normalized = String(name || '').replace(/\s+/gu, '');
   const normalizedCode = String(context?.code || '').replace(/\s+/gu, '');
+  const hasQuantity = Boolean(String(context?.quantity || '').trim());
+  // ① 空名行（C3-5 扩围）：名槽为空——费用组成表等版式行（「人工费小计/说明：…」串入码格）；
+  // 无名行无法构成落位义务（名称是判定基准），一律豁免（汇总/噪声/说明形态保留既有细分归类）
   if (!normalized) {
     if (/^合\s*计$/u.test(normalizedCode)) return 'summary-row';
-    return BILL_PLACEMENT_EXEMPT_NOISE_RE.test(normalizedCode) ? 'noise-row' : undefined;
+    if (BILL_PLACEMENT_EXEMPT_NOISE_RE.test(normalizedCode)) return 'noise-row';
+    if (BILL_PLACEMENT_EXEMPT_NOTE_RE.test(normalizedCode)) return 'note-row';
+    return 'no-name-row';
   }
   // 整名锚定词表优先（规费/税金/暂列金额同时形似费用尾缀，归 summary-row 保持既有 C-T5 归类稳定）
   if (BILL_PLACEMENT_EXEMPT_NAME_RE.test(normalized)) return 'summary-row';
   if (BILL_PLACEMENT_EXEMPT_NOISE_RE.test(normalized)) return 'noise-row';
-  if (normalized.length <= BILL_PLACEMENT_EXEMPT_FEE_MAX_LEN && BILL_PLACEMENT_EXEMPT_FEE_RE.test(normalized)) return 'fee-row';
-  if (/工程$/u.test(normalized) && !normalizedCode && !String(context?.quantity || '').trim()) return 'section-title-row';
+  // ② 版式说明行（C3-5 扩围）：其他项目表/费用组成表填写说明（「说明：此表项目名称、数量由招标人填写…」）
+  if (BILL_PLACEMENT_EXEMPT_NOTE_RE.test(normalized) || BILL_PLACEMENT_EXEMPT_NOTE_RE.test(normalizedCode)) return 'note-row';
+  // 费用组成行判 fee-row：费用尾缀 + 「费小计/费合计」形态（「人工费小计/材料费小计/施工机械费小计」）
+  if (normalized.length <= BILL_PLACEMENT_EXEMPT_FEE_MAX_LEN
+    && (BILL_PLACEMENT_EXEMPT_FEE_RE.test(normalized) || /(?:费|税)(?:小计|合计)$/u.test(normalized))) return 'fee-row';
+  // ③ 编号结构行（C3-5 扩围）：点分编号 code（4.7.1/2.16.4）+ 无工程量——分部/子分部结构标题行
+  if (!hasQuantity && BILL_DOTTED_NUMBER_RE.test(normalizedCode)) return 'numbered-heading-row';
+  // ④ 序号分类行（C3-5 扩围）：中文数字/短序号 + 费用分类名（「一 人工」「二 材料」「三 施工机械」「5 其他」）
+  if (BILL_ORDINAL_CODE_RE.test(normalizedCode) && BILL_FEE_CATEGORY_NAME_RE.test(normalized)) return 'ordinal-category-row';
+  if (/工程$/u.test(normalized) && !normalizedCode && !hasQuantity) return 'section-title-row';
+  // ⑤ 泛词短名行（C3-5-8 归零实证）：名称归一后为泛词名单词（「软件」类 2 字泛词行，s28l 实测
+  // 4 行含真实编码/工程量仍永不落位）——泛词不构成落位证据（r28h M9 判定设计），字面三通道
+  // 全不可达，计入分母即永不可达的隐形分母；判据纯名称锚定（与编码/工程量形态无关），
+  // 排序在既有类别之后保证审计归类稳定（「一 人工」仍归 ordinal-category-row）
+  if (BOQ_GENERIC_NAME_STOPWORDS.has(normalized)) return 'generic-name-row';
   return undefined;
 }
 
@@ -238,6 +282,49 @@ export function expandRelevanceToken(token: string): string[] {
   return [...expanded];
 }
 
+/** C3-5-4 清单特征标准尾句（招标清单通用样板段）：指向图纸/图集/招标文件等资料的兜底句，
+ * 责任章评分前剥离——否则「验收」「资料」等通用词污染章归属（s28l 实测 963 条绿化种植/养护
+ * 条目的「满足验收要求」命中小节「验收闭环与资料同步」而错归「工程施工的重点和难点及保证措施」章） */
+export const BILL_DESC_BOILERPLATE_RE = /(?:详见|参见)[^。；;]{0,24}?(?:图纸|图集|答疑|招标文件|政府相关文件|规范)[^。；;]{0,160}/gu;
+
+/** C3-5-4 子词评分停用词（仅作用于双字扩展子词，切片原词保留）：通用功能语素/高频泛化词
+ * 在任何章小节都可能命中（s28l「施工」出现于方法章 18 个小节），不构成章归属证据；
+ * 「钢筋/材料/管理」为清单描述高频复现词（「钢筋混凝土」「材料品种」「管理系统」），
+ * 命中小节属字面碰撞（钢筋→加工场、材料→堆场、管理→搭接管理），同样不构成归属证据 */
+const BILL_SUBWORD_STOPWORDS = new Set([
+  '施工', '现场', '工程', '其他', '其它', '内容', '主要', '相关', '要求', '方法', '措施',
+  '工作', '进行', '采用', '包括', '以及', '根据', '按照', '满足', '符合', '达到', '组织', '安排', '计划', '实施', '说明', '事项', '情况',
+  '钢筋', '材料', '管理',
+]);
+
+/** 剥离清单特征标准尾句（多段并列时逐段剥离）；责任章映射与单测共用 */
+export function stripBillDescriptionBoilerplate(text: string): string {
+  if (!text) return text;
+  let result = text;
+  for (let round = 0; round < 4; round += 1) {
+    const next = result.replace(BILL_DESC_BOILERPLATE_RE, ' ');
+    if (next === result) break;
+    result = next;
+  }
+  return result.replace(/\s+/gu, ' ').trim();
+}
+
+/** C3-5-4 词面命中判定（责任章/建议小节评分单源）：切片原词直接命中；双字子词仅当位于切片
+ * 首/尾（词边界概率高）且不在停用词表时命中——中段子词多为跨词碰撞碎片（「三级配电两级保护」
+ * 中段切出「级配」误命中「级配碎石」；「验收闭环与资料同步」中段「资料」） */
+function relevanceTokenMatches(token: string, text: string): boolean {
+  if (!text || !token) return false;
+  if (token.length < 3 || !/[\p{Script=Han}]{2,}/u.test(token)) return text.includes(token);
+  if (text.includes(token)) return true;
+  for (let index = 0; index + 2 <= token.length; index += 1) {
+    if (index !== 0 && index + 2 !== token.length) continue;
+    const sub = token.slice(index, index + 2);
+    if (BILL_SUBWORD_STOPWORDS.has(sub)) continue;
+    if (text.includes(sub)) return true;
+  }
+  return false;
+}
+
 /** 清单条目在章内的建议落位小节（写作证据位）：规划小节中与条目文本词面最相关者 */
 function pickBillSection(text: string, sections: string[]): string | undefined {
   let best: string | undefined;
@@ -247,7 +334,7 @@ function pickBillSection(text: string, sections: string[]): string | undefined {
     if (section.length < 2) continue;
     let score = 0;
     for (const token of chapterRelevanceTokens(section)) {
-      if (expandRelevanceToken(token).some(expanded => text.includes(expanded))) score += 1;
+      if (relevanceTokenMatches(token, text)) score += 1;
     }
     if (score > bestScore) {
       bestScore = score;
@@ -268,15 +355,18 @@ const BILL_METHOD_CHAPTER_RE = /施工方法|施工方案|施工工艺|主要施
 
 /**
  * 行级任务清单驱动（每行→责任章→写作证据位，方案 C-T5②）：为清单条目分配责任章。
- * 判定：各章 token（标题+规划小节切词，含双字子词扩展）与条目（名称/特征/分部/子分部）词面相关分取最高正分章；
+ * 判定：各章 token（标题+规划小节切词）与条目（名称/特征/分部/子分部）词面相关分取最高正分章；
  * 同分取大纲顺序靠前章。全部零分回退施工方法类章（此类章承载分项施工叙述）；无章上下文时返回 undefined。
+ * C3-5-4 加固：评分前剥离清单特征标准尾句（boilerplate 通用词不构成归属证据）；双字子词命中限
+ * 切片首/尾且非停用词（中段碎片不命中）——修历史缺陷：s28l 963 条绿化条目因尾句「验收」「资料」
+ * 被错归「工程施工的重点和难点及保证措施」章。
  */
 export function assignBillRowChapter(
   entry: { name?: string; description?: string; section?: string; subsection?: string },
   chapters: Array<{ title: string; sections?: string[] }> = [],
 ): BillChapterAssignment | undefined {
   if (chapters.length === 0) return undefined;
-  const text = [entry.name, entry.description, entry.section, entry.subsection].filter(Boolean).join(' ');
+  const text = stripBillDescriptionBoilerplate([entry.name, entry.description, entry.section, entry.subsection].filter(Boolean).join(' '));
   if (!text) return undefined;
   let bestTitle = '';
   let bestScore = 0;
@@ -284,7 +374,7 @@ export function assignBillRowChapter(
   for (const chapter of chapters) {
     let score = 0;
     for (const token of chapterRelevanceTokens(chapter.title, chapter.sections || [])) {
-      if (expandRelevanceToken(token).some(expanded => text.includes(expanded))) score += 1;
+      if (relevanceTokenMatches(token, text)) score += 1;
     }
     if (score > bestScore) {
       bestScore = score;

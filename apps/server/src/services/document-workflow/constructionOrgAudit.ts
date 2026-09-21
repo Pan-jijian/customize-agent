@@ -448,7 +448,7 @@ export function sectionCardStructureIssues(chapters: DocumentDraftChapter[]): Va
           level: 'error',
           severity: 'blocker',
           message: `${chapter.title} / ${line.replace(/^#{3}\s+(?:\d+(?:\.\d+)*\s+)?/u, '')} 有 ${incomplete.length}/${subPackages.length} 个分部分项内容要素不全（作业对象与工程量/工序顺序/施工方法至少缺一）`,
-          suggestion: '每个分项方案需覆盖作业对象与工程量、工序安排、施工方法三方面要素，融入连贯段落叙述（禁止以“施工概况/工艺流程/施工方法”等结构标签充当标题或段落开头引导）；工序顺序表达形式按分项序号轮换使用（顺序词叙述、编号步骤、有序列表、箭头链），禁止相邻分项同一形式。',
+          suggestion: '每个分项方案需覆盖作业对象与工程量、工序安排、施工方法三方面要素，融入连贯段落叙述（禁止以“施工概况/工艺流程/施工方法”等结构标签充当标题或段落开头引导）；工序顺序表达须先后清晰（相邻小节不得同句式开头，同一句式全文不得反复使用，禁止以固定句模复读）。',
         });
       }
     }

@@ -6,7 +6,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   assignMissingParameterChapters, buildParameterUsageAudit, classifyParameterUsage,
-  missingRelevantParameterTokens, renderChapterParameterLines, selectChapterParameterFacts,
+  missingRelevantParameterTokens, PARAMETER_OBLIGATION_MIN_RATE, PARAMETER_OBLIGATION_MIN_TOTAL,
+  parameterObligationUsageIssues, renderChapterParameterLines, selectChapterParameterFacts,
 } from '@/services/document-workflow/chapterParameterFacts';
 import type { ParameterFactsSource } from '@/services/document-workflow/chapterParameterFacts';
 import type { DocumentFact } from '@/services/document-workflow/types';
@@ -129,6 +130,8 @@ describe('classifyParameterUsage / buildParameterUsageAudit（使用归因 + 义
       relevantMissedCount: 1,
       relevantMissed: ['道路工程：1.2km'],
       irrelevantMissedCount: 1,
+      noiseExcludedCount: 0,
+      noiseExcluded: [],
       rate: 0.5,
     });
   });
@@ -193,5 +196,73 @@ describe('missingRelevantParameterTokens / assignMissingParameterChapters（修�
     ]);
     const limited = assignMissingParameterChapters('本工程无相关参数。', many, CHAPTERS, { maxPerChapter: 2 });
     expect(limited.get(1)).toHaveLength(2);
+  });
+});
+
+describe('parameterObligationUsageIssues（可靠参数义务满足率门禁）', () => {
+  // 8 条相关且全部字面落位（义务满足率 1.0）的基线池
+  const eight = ['DN400', 'DN500', 'Q1', 'Q2', 'Q3', 'Q4', 'Q5', 'Q6'];
+  const eightMarkdown = `本工程排水管道采用 ${eight.join('、')} 混凝土管。`;
+  const eightPool = eight.map((value, index) => fact({ key: `排水管道端点${index + 1}`, value }));
+
+  it('正样本：义务满足率低于门槛 → 单条 error（category/owner/repairability/provenance 打点齐全）', () => {
+    const pool = [
+      fact({ key: '排水管道起点', value: 'DN400' }),
+      fact({ key: '排水管道终点', value: 'DN500' }),
+      ...['Q1', 'Q2', 'Q3', 'Q4', 'Q5', 'Q6', 'Q7'].map((value, index) => fact({ key: `排水工程参数${index + 1}`, value })),
+    ];
+    const issues = parameterObligationUsageIssues('本工程排水管道采用 DN400 与 DN500 混凝土管。', modelOf(pool), CHAPTERS);
+    expect(issues).toHaveLength(1);
+    const [issue] = issues;
+    expect(issue.level).toBe('error');
+    expect(issue.category).toBe('fact_consistency');
+    expect(issue.owner).toBe('llm');
+    expect(issue.repairability).toBe('llm_repairable');
+    expect(issue.message).toContain('可靠参数义务落位不足：2/9');
+    expect(issue.message).toContain('相关而遗漏 7 项');
+    expect(issue.message).toContain('缺失如 Q1');
+    expect(issue.provenance?.detectorId).toBe('parameter-obligation-usage');
+  });
+
+  it('反样本：满足率达门槛边界（9/10=0.9）静默；义务集 < 最小值不判；章节缺失不判', () => {
+    // 9 used + 1 missed = 9/10 = 0.9 → 静默（>= 门槛）
+    const boundary = [
+      ...['DN400', 'DN500', 'Q1', 'Q2', 'Q3', 'Q4', 'Q5', 'Q6', 'Q7'].map((value, index) => fact({ key: `排水管道端点${index + 1}`, value })),
+      fact({ key: '排水工程参数末位', value: 'Q9' }),
+    ];
+    expect(parameterObligationUsageIssues(eightMarkdown.replace('Q6', 'Q6、Q7'), modelOf(boundary), CHAPTERS)).toEqual([]);
+    // 义务集 5 < 8：全遗漏也不判（防小样本抖动）
+    const small = modelOf(['Q1', 'Q2', 'Q3', 'Q4', 'Q5'].map((value, index) => fact({ key: `排水工程小样本${index + 1}`, value })));
+    expect(parameterObligationUsageIssues('本工程无相关内容。', small, CHAPTERS)).toEqual([]);
+    // 章节缺失：相关口径不可判定
+    expect(parameterObligationUsageIssues('', small, [])).toEqual([]);
+  });
+
+  it('噪声/商务出池不计义务分母（D6 同源净化单源）：混入噪声与商务事实仍静默', () => {
+    const pool = [
+      ...eightPool,
+      // 若入池则计入分母（8/13 触发）——出池不动分母即证明池净化单源（含 3 字符残片「12月」）
+      fact({ key: '排水工程噪声1', value: 'R6C4项目特征描述' }),
+      fact({ key: '排水工程噪声2', value: '2225111舒城县' }),
+      fact({ key: '排水工程噪声3', value: '12月' }),
+      fact({ key: '排水工程噪声4', value: '000L' }),
+      fact({ key: '排水工程暂列金额', value: '50万元' }),
+    ];
+    expect(parameterObligationUsageIssues(eightMarkdown, modelOf(pool), CHAPTERS)).toEqual([]);
+  });
+
+  it('防误伤：与全部章无词面相关的遗漏只登记不计义务（8 相关全落位 + 3 条无关遗漏静默）', () => {
+    const pool = [
+      ...eightPool,
+      fact({ key: '苗木养护规则', value: 'XZ-77' }),
+      fact({ key: '路灯控制型号', value: 'LD-01' }),
+      fact({ key: '绿化种植品种', value: 'LV-02' }),
+    ];
+    expect(parameterObligationUsageIssues(eightMarkdown, modelOf(pool), CHAPTERS)).toEqual([]);
+  });
+
+  it('门槛常量口径（检测端 export 单源）：0.9 / 8', () => {
+    expect(PARAMETER_OBLIGATION_MIN_RATE).toBe(0.9);
+    expect(PARAMETER_OBLIGATION_MIN_TOTAL).toBe(8);
   });
 });

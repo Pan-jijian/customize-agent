@@ -39,7 +39,7 @@ describe('withPatchRollback 全链接入防回归（P12）', () => {
   it('8 个修复轮全部接入 withPatchRollback（全链接入，无声明保留轮）', () => {
     const allBlocks = ROLLBACK_FILES.flatMap(file => rollbackCallBlocks(readFileSync(path.join(SRC_DIR, file), 'utf8')));
     // 8 个调用点：fact-landing / table-repair（finalize/repairRounds）+ 6 处（globalQualityGates：
-    // 补表/拆表同域 table-execution-repair 双闭环——补表（非暗标缺表）与暗标拆表（bodyTablePolicy=forbidden）互斥）
+    // 补表/拆表同域 table-execution-repair 双闭环——补表（允许口径缺表）与正文禁表拆表（bodyTablePolicy=forbidden）互斥）
     expect(allBlocks).toHaveLength(8);
     allBlocks.forEach((block, index) => {
       expect(block, `第 ${index + 1} 个 withPatchRollback 调用点缺少 recheck 同源复检`).toMatch(/recheck\s*:/u);

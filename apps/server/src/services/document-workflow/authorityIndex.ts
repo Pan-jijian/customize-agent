@@ -30,6 +30,7 @@ export type AuthorityDomain =
   | 'quantity'
   | 'spec'
   | 'earthwork'
+  | 'site'
   | 'test'
   | 'redline';
 
@@ -145,6 +146,17 @@ const scheduleTransform: AuthorityTransform = data => {
       source: '工期推导', trace: `总工期 ${data.contract.totalDays} 天 − 里程碑合计 ${milestoneSum} 天`, paths: [],
     });
   }
+  // C2 附表四数据源：进度工序表（里程碑顺序展开）——起止天序进 spec（正文引用「第X~Y天」的权威核；
+  // spec 内嵌数字经 authorityNumericCores 纳入匹配，防无主数值审计误报推导缺口）
+  (data.schedule ?? []).forEach((item, index) => {
+    entries.push({
+      id: '', kind: 'derived', domain: 'schedule', label: `工序:${item.label}`,
+      anchors: [item.label],
+      value: item.duration, unit: '天', spec: `第${item.startDay}~${item.endDay}天`,
+      source: '进度工序推导', trace: item.basis,
+      paths: [`schedule[${index}].seq`, `schedule[${index}].duration`, `schedule[${index}].startDay`, `schedule[${index}].endDay`],
+    });
+  });
   return entries;
 };
 
@@ -264,13 +276,41 @@ const earthworkTransform: AuthorityTransform = data => {
 };
 
 const testPlanTransform: AuthorityTransform = data => {
-  return (data.testPlan ?? []).map((item, index) => ({
+  const entries: AuthorityEntry[] = (data.testPlan ?? []).map((item, index) => ({
     id: '', kind: 'derived' as const, domain: 'test' as const, label: `试验计划:${item.scope}`,
     anchors: [item.scope],
     value: item.count ?? item.scope, unit: item.count !== undefined ? '次' : '',
     source: '试验计划推导', trace: item.basis,
     paths: [`testPlan[${index}].count`],
   }));
+  // C2 附表二数据源：试验检测仪器配置（数量口径；无数量行无数值风险不入索引）
+  (data.testInstruments ?? []).forEach((item, index) => {
+    if (item.quantity === undefined) return;
+    entries.push({
+      id: '', kind: 'derived', domain: 'test', label: `试验仪器:${item.name}`,
+      anchors: [item.name],
+      value: item.quantity, unit: '台', spec: item.spec,
+      source: '仪器配置推导', trace: item.basis,
+      paths: [`testInstruments[${index}].quantity`],
+    });
+  });
+  return entries;
+};
+
+/** C2 附表五/六数据源：临时设施与用地规划（面积口径；无面积行无数值风险不入索引） */
+const siteTransform: AuthorityTransform = data => {
+  const entries: AuthorityEntry[] = [];
+  (data.tempLand ?? []).forEach((item, index) => {
+    if (item.area === undefined || item.area <= 0) return;
+    entries.push({
+      id: '', kind: 'derived', domain: 'site', label: `临时设施:${item.purpose}`,
+      anchors: [item.purpose],
+      value: item.area, unit: '㎡',
+      source: '总平面布置推导', trace: item.basis,
+      paths: [`tempLand[${index}].area`],
+    });
+  });
+  return entries;
 };
 
 const redLineTransform: AuthorityTransform = data => {
@@ -304,6 +344,7 @@ const AUTHORITY_TRANSFORMS: AuthorityTransform[] = [
   quantityTransform,
   specTransform,
   earthworkTransform,
+  siteTransform,
   testPlanTransform,
   redLineTransform,
 ];
@@ -370,7 +411,7 @@ export function authorityCoverageGaps(data: BlueprintData): string[] {
 // “数据有而桶无”由类型系统 + 渲染覆盖率测试双保险。
 
 /** domain 渲染次序（全局桶/章域卡共用的稳定输出序） */
-const AUTHORITY_DOMAIN_RENDER_ORDER: AuthorityDomain[] = ['contract', 'schedule', 'labor', 'equipment', 'material', 'quantity', 'spec', 'earthwork', 'test', 'redline'];
+const AUTHORITY_DOMAIN_RENDER_ORDER: AuthorityDomain[] = ['contract', 'schedule', 'labor', 'equipment', 'material', 'quantity', 'spec', 'earthwork', 'site', 'test', 'redline'];
 
 /** 标签前缀剥离（`阶段劳动力:主体施工` → `主体施工`；无前缀原样返回） */
 function stripLabelPrefix(label: string, prefix: string): string {
@@ -389,6 +430,9 @@ const DOMAIN_RENDERERS: Record<AuthorityDomain, (entries: AuthorityEntry[]) => s
     const rows: string[] = [];
     const milestones = entries.filter(entry => entry.label.startsWith('里程碑:'));
     if (milestones.length > 0) rows.push(`- 里程碑（各节点用时，总和 ≤ 总工期）：${milestones.map(entry => `${stripLabelPrefix(entry.label, '里程碑:')} ${entry.value} 天`).join('、')}`);
+    // C2：进度工序表（里程碑顺序展开）——起止天序系统推导口径
+    const processes = entries.filter(entry => entry.label.startsWith('工序:'));
+    if (processes.length > 0) rows.push(`- 进度工序（里程碑展开，起止天序系统推导，不得自设）：${processes.map(entry => `${stripLabelPrefix(entry.label, '工序:')} ${entry.spec || `${entry.value} 天`}`).join('、')}`);
     const buffer = entries.find(entry => entry.label === '机动工期');
     if (buffer) rows.push(`- 机动工期：${buffer.value} 天`);
     return rows;
@@ -451,9 +495,18 @@ const DOMAIN_RENDERERS: Record<AuthorityDomain, (entries: AuthorityEntry[]) => s
     if (entries.length === 0) return [];
     return [`- 土方平衡（清单汇总口径）：${entries.map(entry => `${stripLabelPrefix(entry.label, '土方平衡:')} ${entry.value}${entry.unit}`).join('、')}`];
   },
-  test: entries => {
+  site: entries => {
     if (entries.length === 0) return [];
-    return [`- 试验计划（推导口径，不得自设）：${entries.map(entry => `${stripLabelPrefix(entry.label, '试验计划:')} ${entry.value}${entry.unit}`).join('、')}`];
+    return [`- 临时设施与用地（面积/位置规划，不得自设）：${entries.map(entry => `${stripLabelPrefix(entry.label, '临时设施:')} ${entry.value}${entry.unit}`).join('、')}`];
+  },
+  test: entries => {
+    const rows: string[] = [];
+    const plans = entries.filter(entry => entry.label.startsWith('试验计划:'));
+    if (plans.length > 0) rows.push(`- 试验计划（推导口径，不得自设）：${plans.map(entry => `${stripLabelPrefix(entry.label, '试验计划:')} ${entry.value}${entry.unit}`).join('、')}`);
+    // C2：试验检测仪器配置（附表二数据源）
+    const instruments = entries.filter(entry => entry.label.startsWith('试验仪器:'));
+    if (instruments.length > 0) rows.push(`- 试验检测仪器（配置清单，不得自设）：${instruments.map(entry => `${stripLabelPrefix(entry.label, '试验仪器:')}${entry.spec ? `（${entry.spec}）` : ''} ${entry.value} 台`).join('、')}`);
+    return rows;
   },
   redline: entries => {
     // 同 label 去重保首条（红线事实与“自然村数量”派生条目并存时只留事实原文）

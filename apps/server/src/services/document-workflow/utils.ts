@@ -148,6 +148,12 @@ export function looseTitleFamilyMatch(left: string, right: string): boolean {
  * 当成「雨期施工保证措施」（货不对板）；「季候→气候」式同义微调的差异字（季/气）不在表内，正常容忍。 */
 const HEADING_DIFF_SENSITIVE_RE = /[0-9０-９冬夏春秋汛台寒冻暑热旱涝雨雪]/u;
 
+/** 标题修饰字表（C8 S4-② 修饰词插入放行）：单向字符集包含 + 差集字全在此表且 ≤2 时视为同一
+ * 小节——「交通专项工程」⊂「交通设施专项工程」（差＝设施）在短标题编辑距离预算 1 下判缺失
+ * 误报（s28m' 终检「缺少规划小节：交通专项工程」实锤）。修饰字只改变标题正式度/细化度，
+ * 不改变小节所指对象；数字/季节敏感字不在表内（含敏感字差异仍先经拒绝防线）。 */
+const HEADING_MODIFIER_CHARS_RE = /[设施系统工程系统项目技术管理措施方案服务配套专项建设]/u;
+
 /** 带预算的编辑距离判定（两行滚动 DP；行最小值超预算即剪枝——行 min 单调非减，剪枝安全） */
 function editDistanceWithin(left: string, right: string, budget: number): boolean {
   if (left === right) return true;
@@ -168,16 +174,31 @@ function editDistanceWithin(left: string, right: string, budget: number): boolea
   return previous[right.length] <= budget;
 }
 
+/** 修饰词插入判定（C8 S4-②）：small 全部字符被 large 包含、large 多出的字符（unique，≤2）
+ * 全为标题修饰字，且 small ≥4 字（短标题信息量不足不放行，仍走编辑距离）。 */
+function subclassModifierMatch(small: string, large: string): boolean {
+  if (small.length < 4 || small.length >= large.length) return false;
+  const largeChars = new Set(large.split(''));
+  const smallChars = new Set(small.split(''));
+  for (const ch of smallChars) {
+    if (!largeChars.has(ch)) return false;
+  }
+  const diff = [...largeChars].filter(ch => !smallChars.has(ch));
+  if (diff.length === 0 || diff.length > 2) return false;
+  return diff.every(ch => HEADING_MODIFIER_CHARS_RE.test(ch));
+}
+
 /** 标题单字/双字级近似判定（供 alignSimilarHeadingsToPlan 使用）：在归一化标题（剥编号/括号/
  * 标点/工程尾缀）之上按编辑距离阈值容忍模型对生僻规划标题的同义微调——≥12 字容忍 2 处差异、
  * ≥8 字容忍 1 处，更短标题不容忍；差异字符命中敏感字表（数字/季节气象字）直接拒绝。
+ * C8 S4-② 增补修饰词插入通道（见 subclassModifierMatch，s28m'「交通专项工程」实锤）。
  * 根因实测（r7 工期章阻断）:规划层产出书面词标题「季候条件影响与工期应对」，写层模型 4 次都
  * 改写为「气候条件影响与工期应对」（单字差异），行级精确包含匹配 4 连败 → 块重试 + 隔离重写
  * 全部耗尽 → 整章阻断；该差异语义完全同指，判缺失属误杀。 */
 export function nearSubsectionTitleMatch(left: string, right: string): boolean {
   const maxLen = Math.max(left.length, right.length);
   const diffBudget = maxLen >= 12 ? 2 : maxLen >= 8 ? 1 : 0;
-  if (diffBudget === 0) return false;
+  if (diffBudget === 0 && !subclassModifierMatch(left, right) && !subclassModifierMatch(right, left)) return false;
   const leftChars = new Set(left.split(''));
   const rightChars = new Set(right.split(''));
   for (const ch of leftChars) {
@@ -186,6 +207,7 @@ export function nearSubsectionTitleMatch(left: string, right: string): boolean {
   for (const ch of rightChars) {
     if (!leftChars.has(ch) && HEADING_DIFF_SENSITIVE_RE.test(ch)) return false;
   }
+  if (subclassModifierMatch(left, right) || subclassModifierMatch(right, left)) return true;
   return editDistanceWithin(left, right, diffBudget);
 }
 

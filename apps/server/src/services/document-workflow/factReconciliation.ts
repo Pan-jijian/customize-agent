@@ -602,8 +602,10 @@ export interface SpecBindingHit {
 }
 
 /** 设备主体词（C-T1：设备配置台数的语义锚——「搅拌运输车 2台」的 2 是设备数非规格清单量；
- * 检测端间隙豁免与数值后窗豁免共用同一词表） */
-const DEVICE_BODY_RE = /运输车|搅拌车|罐车|挖掘机|挖机|装载机|压路机|摊铺机|打夯机|夯实机|洒水车|浇水车|吊车|起重机|泵车|地泵|发电机组|发电机|电焊机|空压机|水泵|提升泵|潜水泵|雾炮机|机械|设备|机具|车辆|机组/u;
+ * 检测端间隙豁免与数值后窗豁免共用同一词表。C8 S4-④ 扩围：「充桩」（充电桩/慢充桩/快充桩）与
+ * 「桩机」（打桩机/静压桩机）——s28m'「7kW 5套」（5套=慢充桩配置数）误报实锤；
+ * 「桩」单字不入表（「灌注桩/桩基」为工程对象，其数量与设备配置语义不同）。 */
+const DEVICE_BODY_RE = /运输车|搅拌车|罐车|挖掘机|挖机|装载机|压路机|摊铺机|打夯机|夯实机|洒水车|浇水车|吊车|起重机|泵车|地泵|发电机组|发电机|电焊机|空压机|水泵|提升泵|潜水泵|雾炮机|充桩|桩机|机械|设备|机具|车辆|机组/u;
 
 /** 规格 → 所属名称合计条目（R20）：同一规格至多归属首个体现在 aggregateSpecs 的条目 */
 function findAggregateSpecInfo(authority: ReconciliationAuthority, specKey: string): { entryName: string; info: AggregateSpecInfo } | undefined {
@@ -632,13 +634,25 @@ function scanSpecBindingHits(markdown: string, authority: ReconciliationAuthorit
     // 工艺参数约束豁免（4.31 丰乐镇 v6 #2）：「DN25 管不大于 1.0m」的 1.0m 是支架间距的工艺
     // 约束上限（不大于/不超过类），非该规格的清单数量，不得与其他规格数量互比张冠李戴
     if (/不大于|不超过|不得大于|不得超过/.test(valueMatch[1])) continue;
+    // 枚举换项豁免（C8 S4-④，s28m' 两处误报实锤）：「安装7kW充电桩、庭院灯5套」（5套属庭院灯）、
+    // 「利用柱内…φ16主筋通长焊接，断接卡子2套」（2套属断接卡子）——规格与数值之间出现枚举
+    // 分隔（、,，）且末段为新的对象实体词时，数值归属枚举后项对象，不绑定前规格；
+    // 末段含合计/用量类连接语（「120W合计」）或为空时维持原绑定（R20 合计挂单项/「混凝土，300m³」
+    // 常规形态仍照检，防假阴性）。
+    const bindingGap = valueMatch[1];
+    if (/[、,，]/u.test(bindingGap)) {
+      const tailItem = bindingGap.split(/[、,，]/u).pop() || '';
+      if (/[\u4e00-\u9fa5]/u.test(tailItem) && !/合计|小计|共计|总计|总量|用量|总长|共/u.test(tailItem)) continue;
+    }
     // 设备配置豁免（r28g B3 归因·r28f 实测）：间隙词点名设备主体（运输车/搅拌车/泵车…类）且数值
     // 单位为「台」时，数值是该设备的配置台数——「C30 商品混凝土由混凝土搅拌运输车2台按浇筑计划
     // 配送」的 2 台是搅拌车配置数，不是 C30 的清单量；旧口径下间隙 ≤16 字的数值无条件绑定给规格，
     // 恰撞其他规格条目值（清单条目「涵头」2 台）即误报张冠李戴。间隙无设备主体词时仍全检
     // （如「C30 混凝土 300m³」照常绑定），保真阳性不漏。
-    // C-T1 补后窗形态：「C30 混凝土 2台搅拌运输车」数值后紧跟设备主体词同样属设备配置数（数值在设备词前）
-    if (valueMatch[3] === '台') {
+    // C-T1 补后窗形态：「C30 混凝土 2台搅拌运输车」数值后紧跟设备主体词同样属设备配置数（数值在设备词前）。
+    // C8 S4-④ 单位扩「套」：充电桩类设备配置数标准计量为「套」（「7kW充电桩5套」「水泵2套」），
+    // 与「台」同权豁免（s28m'「7kW 5套」gap=充电桩、庭院灯 实锤）。
+    if (valueMatch[3] === '台' || valueMatch[3] === '套') {
       const suffixStart = matchEnd + valueMatch[1].length + valueMatch[2].length + valueMatch[3].length;
       if (DEVICE_BODY_RE.test(valueMatch[1]) || DEVICE_BODY_RE.test(markdown.slice(suffixStart, suffixStart + 12))) continue;
     }

@@ -244,13 +244,15 @@ describe('M9 落位判定扩围（首段实体主名 + 短名救回 + 豁免扩�
     expect(traces.filter(t => t.placed)).toHaveLength(2);
   });
 
-  it('2 字泛词不救回（「其他」「材料」在正文必然出现，不构成落位证据）', () => {
+  it('2 字泛词不救回且豁免（「其他」「材料」在正文必然出现，不构成落位证据；C3-5-8 豁免登记）', () => {
     const model = boq([
       ['1', '010101001001', '其他', '5', '项'],
       ['2', '010101001002', '材料', '10', '批'],
     ]);
     const traces = buildBoqRowTraces('其他材料由总包统一采购，其他事项另行约定。', model);
     expect(traces.filter(t => t.placed)).toHaveLength(0);
+    // C3-5-8：泛词短名行豁免登记（隐形分母消除——字面三通道因长度门槛全不可达）；行保留在追踪中供审计
+    expect(traces.filter(t => t.exempt)).toHaveLength(2);
   });
 
   it('豁免扩围：噪声行/费用行/分部标题行登记 exempt 不进分母', () => {

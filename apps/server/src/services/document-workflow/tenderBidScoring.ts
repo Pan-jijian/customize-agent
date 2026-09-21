@@ -10,8 +10,11 @@ import {
   emergencyStructureCheck,
   difficultyCountermeasureReport,
   crossProjectResidueHits,
+  isFillerPoolExcludedLine,
   type TemplatingLevel,
 } from './tenderBidChecks';
+import { isNarrativeLine, isTocClusterLine, stripHeadingLines } from './narrativeContext';
+import { countSentencePatternHits, SENTENCE_PATTERN_FAMILIES, sentencePatternThreshold } from './templatingGovernance';
 
 /**
  * 招标技术标评审六维评分（确定性计算，非 LLM）：
@@ -122,16 +125,21 @@ function specificityScore(chapters: DocumentDraftChapter[], factTraces: Document
 
 /**
  * 合规性：危大闭环链（辨识→方案→审批论证→交底→监测→验收）+ 三级配电两级保护 + 实名制/工资专户/应急/绿色施工；
- * 按 docx 判定标尺叠加：危大两步确认法（类别匹配+参数分级，10%）与应急预案八部分结构（10%）
+ * 按 docx 判定标尺叠加：危大两步确认法（类别匹配+参数分级，10%）与应急预案八部分结构（10%）。
+ * C0-2 语境约束：危大两步与应急八部分为词面型分量，消费结构证据文本（stripHeadingLines）——
+ * 标题行/目录行剥离：空壳标题（如标题行「生产安全事故应急预案与应急演练」）不得单独构成结构
+ * 证据（C0 基线：纯标题文档在旧口径下骗得应急覆盖率分数）；表格/列表/正文行保留且不设切句
+ * 长度门槛（危大清单表等结构化载体与短句是合法证据）。
  */
 function complianceScore(markdown: string, anyBlockMatches: (query: string) => boolean) {
   const hits = COMPLIANCE_ITEM_QUERIES.filter(anyBlockMatches).length;
   const base = hits / COMPLIANCE_ITEM_QUERIES.length;
-  const dangerous = dangerousTwoStepCheck(markdown);
+  const evidenceText = stripHeadingLines(markdown);
+  const dangerous = dangerousTwoStepCheck(evidenceText);
   const dangerousRate = dangerous.twoStepComplete ? 1
     : dangerous.categories.length > 0 && dangerous.graded ? 0.6
       : dangerous.categories.length > 0 ? 0.3 : 0;
-  const emergency = emergencyStructureCheck(markdown);
+  const emergency = emergencyStructureCheck(evidenceText);
   return Math.round((base * 0.8 + dangerousRate * 0.1 + emergency.coverage * 0.1) * 100);
 }
 
@@ -170,23 +178,76 @@ export function normalizationScore(issues: ValidationIssue[]) {
   return Math.max(0, 100 - normErrors * 8 - Math.min(normWarnings * 3, 30));
 }
 
+/** 重复句统计共享单源（C0-4）：行级过滤（标题/表格/列表/引用/目录条目行/目录聚簇行）
+ * 后按。；; 切句，去标点后 ≥12 字计一句；duplicateInstances=重复出现次数（总数-唯一数）。
+ * uniqueness 扣分与模板化报告的 duplicateSentenceRate 同源消费，禁止双口径漂移。
+ * C8 S5（U 通道）：出现明细拆为 duplicateSentenceOccurrences——评分统计与句级复读坍塌修复
+ * （duplicateSentenceCollapse，检测定位=修复定位）两端口径严格同源。 */
+export interface DuplicateSentenceStats {
+  totalSentences: number;
+  uniqueSentences: number;
+  duplicateInstances: number;
+  duplicateRate: number;
+}
+
+/** 完全重复句出现（C8 S5）：行号 + 行内起止（trim 后句本体，不含句末分隔符——删除修复按此定位） */
+export interface DuplicateSentenceOccurrence {
+  lineIndex: number;
+  start: number;
+  end: number;
+  raw: string;
+}
+
+/** 完全重复句分组（按出现序；含唯一句组——修复端过滤 length≥2）：
+ * 比较键 = 去标点归一化文本，与 duplicateSentenceStats 原口径逐字一致。 */
+export function duplicateSentenceOccurrences(markdown: string): Array<{ key: string; occurrences: DuplicateSentenceOccurrence[] }> {
+  const groups = new Map<string, DuplicateSentenceOccurrence[]>();
+  markdown.split('\n').forEach((line, lineIndex) => {
+    if (isFillerPoolExcludedLine(line) || isTocClusterLine(line)) return;
+    for (const match of line.matchAll(/[^。；;]+/gu)) {
+      const text = match[0] || '';
+      const raw = text.trim();
+      const key = raw.replace(/[\s，,、:：（）()【】[\]《》“”"'`]/gu, '');
+      if (key.length < 12) continue;
+      const start = (match.index || 0) + (text.length - text.trimStart().length);
+      const list = groups.get(key) || [];
+      list.push({ lineIndex, start, end: start + raw.length, raw });
+      groups.set(key, list);
+    }
+  });
+  return [...groups.entries()].map(([key, occurrences]) => ({ key, occurrences }));
+}
+
+export function duplicateSentenceStats(markdown: string): DuplicateSentenceStats {
+  const groups = duplicateSentenceOccurrences(markdown);
+  const totalSentences = groups.reduce((sum, group) => sum + group.occurrences.length, 0);
+  const uniqueSentences = groups.length;
+  const duplicateInstances = totalSentences - uniqueSentences;
+  return {
+    totalSentences,
+    uniqueSentences,
+    duplicateInstances,
+    duplicateRate: totalSentences > 0 ? duplicateInstances / totalSentences : 0,
+  };
+}
+
 /**
  * 低雷同性：空话禁用词命中率 + 模糊应答词（附录一第 3 类，零出现要求）+ 套话密度超标扣分
  * （docx L156：核心章节套话占比≤10%）+ 重复句式率（≥12 字符正文句去标点后重复比例）。
  * 模糊应答扣分走语义复核口径（vagueSemanticSentences）：「力争上游/左右对称」等合法句词面命中不扣分。
+ * C0-4 长度归一校准：重复句预算 = 每万字 1 条（最少 10 条）——短文档不因个别合理复述被重罚、
+ * 长文档按篇幅摊薄（r28l 6 万字 17 条重复在旧口径扣 ~1 分，校准后扣 7 分；s28l 14.5 万字 25 条
+ * 校准后扣 10 分）；超出预算部分每条扣 1 分，与原比例扣分取较大值（短文档保持原口径）。
  */
 function uniquenessScore(markdown: string, filler: Awaited<ReturnType<typeof fillerDensityReport>>) {
   const forbiddenHits = FORBIDDEN_EMPTY_PHRASES.filter(phrase => markdown.includes(phrase)).length;
   const vagueHitCount = filler.vagueSemanticSentences;
   const fillerPenalty = Math.max(0, filler.ratio - 0.1) * 100;
-  const sentences = markdown
-    .split(/\n+/u)
-    .filter(line => line.trim() && !/^\s*(#{1,6}\s+|\||[-*+]\s|>)/u.test(line))
-    .flatMap(line => line.split(/[。；;]/u))
-    .map(sentence => sentence.replace(/[\s，,、：:（）()【】[\]《》“”"'`]/gu, ''))
-    .filter(sentence => sentence.length >= 12);
-  const duplicateRate = sentences.length ? (sentences.length - new Set(sentences).size) / sentences.length : 0;
-  return Math.max(0, Math.round(100 - forbiddenHits * 4 - vagueHitCount * 6 - fillerPenalty * 0.5 - duplicateRate * 60));
+  const dup = duplicateSentenceStats(markdown);
+  const dupBudget = Math.max(10, Math.ceil(documentTextLength(markdown) / 10000));
+  const dupExcess = Math.max(0, dup.duplicateInstances - dupBudget);
+  const duplicatePenalty = Math.max(dup.duplicateRate * 60, dupExcess);
+  return Math.max(0, Math.round(100 - forbiddenHits * 4 - vagueHitCount * 6 - fillerPenalty * 0.5 - duplicatePenalty));
 }
 
 export interface TenderBidScores {
@@ -228,6 +289,8 @@ export interface TenderBidTemplatingReport {
   difficultyCountermeasures: number;
   /** 重难点章节重度模板化警示 */
   difficultyHeavyTemplated: boolean;
+  /** C4 句模复读命中族（≥ 密度命中线 sentencePatternThreshold；检测/修复目标同源计数）：filler 语义原型正交的结构帧证据 */
+  sentencePatternHits: Array<{ patternId: string; patternLabel: string; count: number }>;
 }
 
 export async function buildTenderBidTemplatingReport(
@@ -236,17 +299,23 @@ export async function buildTenderBidTemplatingReport(
 ): Promise<TenderBidTemplatingReport> {
   const filler = await fillerDensityReport(markdown, embedDocuments);
   const vagueHits = vagueResponseHits(markdown);
-  const sentences = markdown
-    .split(/\n+/u)
-    .filter(line => line.trim() && !/^\s*(#{1,6}\s+|\||[-*+]\s|>)/u.test(line))
-    .flatMap(line => line.split(/[。；;]/u))
-    .map(sentence => sentence.replace(/[\s，,、:：（）()【】[\]《》“”"'`]/gu, ''))
-    .filter(sentence => sentence.length >= 12);
-  const duplicateRate = sentences.length ? (sentences.length - new Set(sentences).size) / sentences.length : 0;
+  const duplicateRate = duplicateSentenceStats(markdown).duplicateRate;
   const difficulty = await difficultyCountermeasureReport(markdown, embedDocuments);
   const residue = crossProjectResidueHits(markdown);
-  // 重难点对策双达标占比 <50% 直接判重度模板化（docx L156）；否则按套话密度三档
-  const level: TemplatingLevel = difficulty.heavyTemplated ? 'heavy' : filler.level;
+  // C4 评分接入（D3）：句模复读并入模板化降档——≥1 族命中判中档下限、≥2 族或单族 ≥2 倍命中线判重档
+  // （r28l/s28l 实机：完整链 13/47 句、闭环 11/28 句——语义套话原型判不出，按结构帧计分）；
+  // C8 S3② 命中线密度化（sentencePatternThreshold 单源：max(6, 正文字数/5000)，长文防误伤）
+  const sentencePatternLine = sentencePatternThreshold(markdown);
+  const sentencePatternHits = SENTENCE_PATTERN_FAMILIES
+    .map(family => ({ patternId: family.id, patternLabel: family.label, count: countSentencePatternHits(markdown, family) }))
+    .filter(hit => hit.count >= sentencePatternLine);
+  const sentencePatternSevere = sentencePatternHits.length >= 2 || sentencePatternHits.some(hit => hit.count >= sentencePatternLine * 2);
+  // 重难点对策双达标占比 <50% 直接判重度模板化（docx L156）；否则按套话密度与句模复读合成三档
+  const level: TemplatingLevel = difficulty.heavyTemplated || filler.level === 'heavy' || sentencePatternSevere
+    ? 'heavy'
+    : filler.level === 'medium' || sentencePatternHits.length > 0
+      ? 'medium'
+      : 'light';
   return {
     level,
     fillerRatio: filler.ratio,
@@ -260,28 +329,99 @@ export async function buildTenderBidTemplatingReport(
     difficultyBothCount: difficulty.bothCount,
     difficultyCountermeasures: difficulty.countermeasures,
     difficultyHeavyTemplated: difficulty.heavyTemplated,
+    sentencePatternHits,
   };
 }
 
-/** 评分块切分（R13 精度修正 + r26 标题块独立实测）：①旧口径「空行分块 + ≥30 字」下小节
- * 标题或独立成短块被丢弃、或并入跨小节大块（R13 实测 5.15 万字仅 59 块、块均 870 字，
- * 超 bge 512 token 窗口后标题在块中部截断，19 项模块/合规查询仅命中 7 项）；②块内「标题+正文」
- * 合并嵌入时标题语义被正文稀释（r26 实测 6 强制模块仅命中 4）——小节标题（如「#### 10.2 施工
- * 总平面布置」）是模块查询的天然对准面，沉入块中部即失去对齐。现口径：标题行摘出为独立
- * 判定单元（与评审人按小节查阅的粒度一致），余部按空行分块，标题与正文块共享「≥12 字」过滤
- * （纯编号标题仍过滤）。导出供单测验证切分粒度（行为不变，仅可见性）。 */
+/** 评分小节（C0-1）：标题 + 实质正文段落（含空壳小节——标题承接 partial 判定用）。
+ * 实质段落 = 块内含 ≥1 个 ≥12 字叙述行（非标题/表格/列表/引用/目录聚簇行），目录聚簇行在段内剔除。 */
+export interface ScoringSection {
+  /** 原始标题行（含 # 号）；无标题区为空串 */
+  heading: string;
+  /** 标题文本（去 # 号与编号，partial 判定与诊断展示用） */
+  headingText: string;
+  /** 是否有实质正文（≥1 个实质段落） */
+  hasSubstantiveBody: boolean;
+  /** 实质正文段落（判定文本源，已剔除目录聚簇行） */
+  substantiveParagraphs: string[];
+}
+
+/** 小节切分（C0-1 单源）：按标题行切分 markdown，聚合空行分界的实质段落。
+ * 空壳标题（无实质正文）保留在 sections 中（供评分细则映射层的「标题承接」partial 判定），
+ * 但不进入评分判定单元（splitScoringBlocks 消费）。 */
+export function splitScoringSections(markdown: string): ScoringSection[] {
+  const cleaned = markdown.replace(/[\u200b-\u200f\u2060\ufeff]/gu, '');
+  const rawSections = cleaned.split(/(?=^#{1,6}\s)/mu);
+  const sections: ScoringSection[] = [];
+  for (const raw of rawSections) {
+    if (!raw.trim()) continue;
+    const lines = raw.split('\n');
+    const hasHeading = /^#{1,6}\s/u.test(lines[0] || '');
+    const heading = hasHeading ? (lines[0] || '').trim() : '';
+    const headingText = hasHeading ? normalizeHeadingTitle(heading.replace(/^#{1,6}\s+/u, '')) : '';
+    const bodyLines = hasHeading ? lines.slice(1) : lines;
+    const paragraphs: string[][] = [];
+    let current: string[] = [];
+    for (const line of bodyLines) {
+      if (!line.trim()) {
+        if (current.length > 0) {
+          paragraphs.push(current);
+          current = [];
+        }
+        continue;
+      }
+      current.push(line);
+    }
+    if (current.length > 0) paragraphs.push(current);
+    const substantiveParagraphs: string[] = [];
+    for (const paragraph of paragraphs) {
+      const kept = paragraph.filter(line => !isTocClusterLine(line));
+      if (kept.some(line => isNarrativeLine(line))) {
+        substantiveParagraphs.push(kept.map(line => line.trim()).join('\n'));
+      }
+    }
+    sections.push({ heading, headingText, hasSubstantiveBody: substantiveParagraphs.length > 0, substantiveParagraphs });
+  }
+  return sections;
+}
+
+/** 评分判定单元长度上限（防 bge 512 token 窗口截断：单位汉字约 1 token，600 字内单窗可嵌） */
+const SCORING_UNIT_MAX_CHARS = 600;
+
+/** 段落切窗：命中文本=正文本体（C0 探针实测：去标题词后 r28l/s28l 真实成稿命中零损失
+ * 19/19，堆词样本模块命中 2/6→0——标题词不得构成语义证据「须同节正文含实体响应」），
+ * 超长段落按行累积切为 ≤600 字多窗（分段末内容不再沉入块中部被截断） */
+function windowParagraph(paragraph: string): string[] {
+  const units: string[] = [];
+  let buffer: string[] = [];
+  let length = 0;
+  for (const line of paragraph.split('\n')) {
+    if (length > 0 && length + line.length > SCORING_UNIT_MAX_CHARS) {
+      units.push(buffer.join('\n'));
+      buffer = [];
+      length = 0;
+    }
+    buffer.push(line);
+    length += line.length + 1;
+  }
+  if (buffer.length > 0) units.push(buffer.join('\n'));
+  return units;
+}
+
+/** 评分判定单元（C0-1 内容级判定）：标题不单独构成判定单元且不参与命中文本——单元=实质正文窗口。
+ * 空壳标题（无实质正文）不产出单元（r28l 实测：仅标题块命中 14/19、6 强制模块全部靠标题单独命中，
+ * 「### 1.1 编制说明与工程概况」类空壳标题误命中「编制专项施工方案」）；标题词的语义诱饵不计
+ * （标题承接由评分细则映射层 partial 独立判定）；目录聚簇行剔除、超长段落切窗。
+ * 导出供单测与对抗套件验证切分粒度。 */
 export function splitScoringBlocks(markdown: string): string[] {
-  return markdown
-    .split(/(?=^#{1,6}\s)/mu)
-    .flatMap(section => {
-      const lines = section.split('\n');
-      const hasHeading = /^#{1,6}\s/u.test(lines[0] || '');
-      const heading = hasHeading ? (lines[0] || '').trim() : '';
-      const body = (hasHeading ? lines.slice(1) : lines).join('\n');
-      return [heading, ...body.split(/\n{2,}/u)];
-    })
-    .map(block => block.trim())
-    .filter(block => block.length >= 12);
+  const units: string[] = [];
+  for (const section of splitScoringSections(markdown)) {
+    if (!section.hasSubstantiveBody) continue;
+    for (const paragraph of section.substantiveParagraphs) {
+      units.push(...windowParagraph(paragraph));
+    }
+  }
+  return units;
 }
 
 export async function buildTenderBidScores(input: {

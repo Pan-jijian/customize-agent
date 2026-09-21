@@ -178,7 +178,7 @@ function validateBlueprintComposition(blueprint: IntegratedBlueprint): string {
   const figureCount = composition.appendixPlan.filter(entry => entry.kind === 'figure').length;
   return [
     `标书类型：${typeLabel}`,
-    `正文口径：${composition.bodyTablePolicy === 'forbidden' ? '禁表格/禁图片（图表转文末附表区）' : '可含表格'}`,
+    `正文口径：${[composition.bodyTablePolicy === 'forbidden' ? '禁表格（显式禁表句）' : '表格允许', composition.bodyFigurePolicy === 'forbidden' ? '禁图片' : '图片允许'].join('/')}`,
     composition.appendixPlan.length > 0 ? `文末附表 ${composition.appendixPlan.length} 项（表类 ${tableCount}/图类 ${figureCount}）` : '',
   ].filter(Boolean).join('；');
 }

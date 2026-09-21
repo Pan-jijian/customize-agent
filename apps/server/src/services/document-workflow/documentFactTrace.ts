@@ -1,11 +1,15 @@
 import type { BoqRowTrace, DocumentDraftChapter, DocumentFact, DocumentFactTrace, DocumentFactsModel, StructuredTableFact, ValidationIssue } from './types';
 import { stringifyFactValue } from './utils';
 import { normalizeEngineeringTextForFactMatch } from './engineeringUnits';
-import { classifyBillPlacementExemption } from './billFactLock';
+import { BOQ_GENERIC_NAME_STOPWORDS, classifyBillPlacementExemption } from './billFactLock';
 
 function normalize(value: string) {
   return value.replace(/[\s,，.。:：;；|｜（）()《》<>【】"“”'‘’]/gu, '').toLowerCase();
 }
+
+/** 归一化口径导出（C3-5）：修复轮复检（chapterClassResidual boq-placement 分支）与
+ * buildBoqRowTraces 落位判定同源复用，防复检口径与检测端分叉 */
+export const normalizeBoqMatchText = normalize;
 
 /** 事实值清洗：去除表格行尾巴（| | | |）、条款尾巴（“4．未尽事宜详见……”）、残留分隔标点等抽取噪音 */
 export function cleanFactValue(value: string) {
@@ -172,15 +176,34 @@ export function factTraceIssues(traces: DocumentFactTrace[], options: { maxIssue
     }));
 }
 
-/** 2 字首段泛词保护名单（r28h M9 实机复核）：s28h2「材料」「人工」「软件」等费用子行/占位行与
- * r28h2「其他」类汇总行——泛词在正文必然出现，但不构成清单项的落位证据（2 字工程实义词如
- * 「圈梁」「垫层」「压膜」不在表内，照常判定） */
-const BOQ_PRIMARY_NAME_STOPWORDS = new Set([
-  '其他', '材料', '人工', '软件', '硬件', '机械', '设备', '建筑', '安装', '拆除',
-  '服务', '费用', '项目', '工程', '施工', '内容', '其中', '以上', '以下', '临时', '措施', '合计', '小计',
-]);
+/** 2 字首段泛词保护名单迁移至 billFactLock.BOQ_GENERIC_NAME_STOPWORDS（C3-5-8 共源）：
+ * boqItemCarriedInText 首段保护与 classifyBillPlacementExemption 泛词行豁免复用同一名单——
+ * 历史分叉：本地名单只挡「首段主名通道」，泛词行仍计分母形成永不可达的隐形分母（s28l「软件」4 行） */
 
-/** 构建 BOQ 行级落位追踪 */
+/** 清单表列口径单源（C3-5）：名称/编码/数量/单位列标签整格锚定。历史缺陷：无锚定匹配会把表标题行
+ * （「e.1分部分项工程量清单计价表」含「分部分项」）误当名称列，itemName 取到序号 → 该表全行永不落位；
+ * 裸「清单项」放开会把「清单项目编码」类列名误判为名称列（itemName 取到编码值）——统一收窄为
+ * 「清单项名称/清单项目名称」；编码列不含「序号」（避免序列号误匹配为编码通道）。 */
+export const BOQ_NAME_COLUMN_RE = /^(?:项目名称|名称|清单项名称|清单项目名称|分部分项(?:工程)?名称|项目特征|工程内容|材料名称|设备名称)/u;
+export const BOQ_CODE_COLUMN_RE = /^(?:项目编码|编码|编号)/u;
+export const BOQ_QTY_COLUMN_RE = /^(?:工程量|数量)/u;
+export const BOQ_UNIT_COLUMN_RE = /单位/u;
+
+/** 单条目落位判定（C3-5 单源，供 buildBoqRowTraces 与修复轮复检共用；入参为已归一化文本）：
+ * 三通道——首段主名 12 字符（2 字主名须过泛词保护名单）/ 整名 12 字符 / 编码 8 字符 */
+export function boqItemCarriedInText(normalizedText: string, itemName: string, itemCode = ''): boolean {
+  const normalizedName = normalize(itemName);
+  const normalizedCode = normalize(itemCode);
+  const primaryName = normalize(String(itemName || '').split(/[\s（(、，,;；:：]/u)[0] || '');
+  const primaryOk = primaryName.length >= 3 || (primaryName.length === 2 && !BOQ_GENERIC_NAME_STOPWORDS.has(primaryName));
+  return (primaryOk && normalizedText.includes(primaryName.slice(0, 12)))
+    || (normalizedName.length >= 3 && normalizedText.includes(normalizedName.slice(0, 12)))
+    || (normalizedCode.length >= 3 && normalizedText.includes(normalizedCode.slice(0, 8)));
+}
+
+/** 构建 BOQ 行级落位追踪（C3-5 单源：行识别/豁免/落位判定唯一实现——门禁 boqPlacementIssues、
+ * 报告出口 boq-row-trace、分项覆盖 boqDivisionCoverageIssues 全链消费本函数，修历史口径双轨：
+ * 门禁 16 字符整名前缀 vs 报告 12 字符首段前缀，s28l 实测 1118 vs 822 行未落位差 296 行） */
 export function buildBoqRowTraces(markdown: string, factsModel: DocumentFactsModel): BoqRowTrace[] {
   const tables = factsModel.tables || [];
   const traces: BoqRowTrace[] = [];
@@ -188,10 +211,10 @@ export function buildBoqRowTraces(markdown: string, factsModel: DocumentFactsMod
 
   for (const table of tables) {
     const headers = table.headers.map(h => h.replace(/\s+/gu, '').toLowerCase());
-    const nameCol = headers.findIndex(h => /项目名称|名称|清单项|分部分项|项目特征|工程内容|材料名称|设备名称/u.test(h));
-    const codeCol = headers.findIndex(h => /编码|编号|序号|项目编码/u.test(h));
-    const qtyCol = headers.findIndex(h => /数量|工程量/u.test(h));
-    const unitCol = headers.findIndex(h => /单位/u.test(h));
+    const nameCol = headers.findIndex(h => BOQ_NAME_COLUMN_RE.test(h));
+    const codeCol = headers.findIndex(h => BOQ_CODE_COLUMN_RE.test(h));
+    const qtyCol = headers.findIndex(h => BOQ_QTY_COLUMN_RE.test(h));
+    const unitCol = headers.findIndex(h => BOQ_UNIT_COLUMN_RE.test(h));
 
     for (const row of table.rows) {
       let itemName = nameCol >= 0 ? (row[nameCol] || '') : '';
@@ -210,17 +233,12 @@ export function buildBoqRowTraces(markdown: string, factsModel: DocumentFactsMod
 
       if (!itemName && !itemCode) continue;
 
-      const normalizedName = normalize(itemName);
-      const normalizedCode = normalize(itemCode);
       // r28h M9 落位判定扩围（实机归因）：名称首段实体主名——括号/顿号/枚举形态（「矩形柱（含梯柱）」
       // 「天沟、挑檐板」）与 2 字短名（「圈梁」「垫层」）原先因长度门槛与整串前缀失配而永不落位
       // （s28h2 实测 411 行短名死区）；2 字主名须过泛词保护名单；原整名前缀通道保留（无分隔符形态同源，
-      // 「给、排水附（配）件」类首段过短的枚举名走整名通道）
-      const primaryName = normalize(itemName.split(/[\s（(、，,;；:：]/u)[0] || '');
-      const primaryOk = primaryName.length >= 3 || (primaryName.length === 2 && !BOQ_PRIMARY_NAME_STOPWORDS.has(primaryName));
-      const placed = (primaryOk && normalizedMarkdown.includes(primaryName.slice(0, 12)))
-        || (normalizedName.length >= 3 && normalizedMarkdown.includes(normalizedName.slice(0, 12)))
-        || (normalizedCode.length >= 3 && normalizedMarkdown.includes(normalizedCode.slice(0, 8)));
+      // 「给、排水附（配）件」类首段过短的枚举名走整名通道）。C3-5：判定抽为 boqItemCarriedInText 单源
+      // （修复轮复检同口径复用）
+      const placed = boqItemCarriedInText(normalizedMarkdown, itemName, itemCode);
 
       traces.push({
         itemCode: itemCode.slice(0, 50),
@@ -231,6 +249,8 @@ export function buildBoqRowTraces(markdown: string, factsModel: DocumentFactsMod
         placed,
         // C-T5 豁免口径单源：汇总/噪声/费用/分部标题行标记豁免（不计入落位率分母，行保留在追踪中供审计登记）
         exempt: classifyBillPlacementExemption(itemName, { code: itemCode, quantity }) !== undefined,
+        // C3-5 单源化：行内全文（项目特征描述等）——责任章映射的 token 命中文本 + 修复轮补写指令上下文
+        description: row.map(cell => String(cell ?? '')).join(' ').replace(/\s+/gu, ' ').trim().slice(0, 240),
       });
     }
   }

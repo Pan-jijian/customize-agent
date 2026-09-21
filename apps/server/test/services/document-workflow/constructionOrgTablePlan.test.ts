@@ -8,7 +8,7 @@
  * B-T1 追加：图位/图题机制单测（编号归一化/引用同步/补位注入/规格汇集/覆盖对账/无内部话术）。
  */
 import { describe, expect, it } from 'vitest';
-import { attachDiagramArtifacts, collectFigurePlaceholderSpecs, completeTitlelessTableTitles, diagramRequirementsPrompt, ensureFigurePlaceholders, extractDiagramArtifacts, extractFigureCaptions, extractMarkdownTableCandidates, figureCoverage, groupTablePlansForSections, injectTableCaptions, mergeStructureDiagramArtifacts, normalizeFigureNumbering, normalizeTableNumbering, recoverTitlelessTableTitlesFromDrafts, splitGluedTableCaptions, tablePlanExecutionGaps } from '@/services/document-workflow/constructionOrgTablePlan';
+import { attachDiagramArtifacts, collectFigurePlaceholderSpecs, completeTitlelessTableTitles, diagramRequirementsPrompt, ensureFigurePlaceholders, extractDiagramArtifacts, extractFigureCaptions, extractMarkdownTableCandidates, figureCoverage, groupTablePlansForSections, injectTableCaptions, mergeStructureDiagramArtifacts, normalizeFigureNumbering, normalizeFigureSpecName, normalizeTableNumbering, recoverTitlelessTableTitlesFromDrafts, splitGluedTableCaptions, tablePlanExecutionGaps } from '@/services/document-workflow/constructionOrgTablePlan';
 import { scanTableNumberingDefects } from '@/services/document-workflow/structureIntegrityRules';
 import type { DocumentTemplateChapter, PlannedTablePlan } from '@/services/document-workflow/types';
 
@@ -802,5 +802,69 @@ describe('B-T1 图位补位（ensureFigurePlaceholders）与规格汇集', () =>
     expect(merged.map(item => item.name)).toEqual(['横道图', '项目管理机构图']);
     expect(merged[1].instruction).toContain('文字框图');
     expect(mergeStructureDiagramArtifacts([], [])).toEqual([]);
+  });
+
+  it('C2 normalizeFigureSpecName：工程图类构成词尾补「图」；已带图尾/非构成词尾原样（防正文引用句误修）', () => {
+    expect(normalizeFigureSpecName('施工进度计划')).toBe('施工进度计划图');
+    expect(normalizeFigureSpecName('项目管理机构')).toBe('项目管理机构图');
+    expect(normalizeFigureSpecName('总平面布置')).toBe('总平面布置图');
+    expect(normalizeFigureSpecName('施工进度网络图')).toBe('施工进度网络图');
+    expect(normalizeFigureSpecName('组织机构图')).toBe('组织机构图');
+    // 非图类构成词尾原样（宁缺不假：「中所示内容」类正文引用句不得被改成图题）
+    expect(normalizeFigureSpecName('中所示内容')).toBe('中所示内容');
+    expect(normalizeFigureSpecName('施工部署')).toBe('施工部署');
+  });
+
+  it('C2 规格汇集归一化：无尾词图类名补「图」，注入/覆盖对账口径闭环', () => {
+    const specs = collectFigurePlaceholderSpecs({
+      structureItems: [
+        { chapterTitle: '施工进度计划', form: 'diagram', element: '施工进度计划' },
+        { chapterTitle: '施工组织总体安排', form: 'org_chart', element: '项目管理机构' },
+      ],
+    });
+    expect(specs).toEqual([
+      { chapterTitle: '施工进度计划', name: '施工进度计划图' },
+      { chapterTitle: '施工组织总体安排', name: '项目管理机构图' },
+    ]);
+    const md = ['## 第1章 施工进度计划', '## 第2章 施工组织总体安排'].join('\n');
+    const result = ensureFigurePlaceholders(md, specs);
+    // 注入行与规格同口径（严格判据可达），归一化后覆盖对账 2/2
+    expect(result.markdown).toContain('图 施工进度计划图');
+    const numbered = normalizeFigureNumbering(result.markdown);
+    expect(figureCoverage(specs, numbered)).toEqual({ total: 2, covered: 2, missing: [] });
+  });
+
+  it('C2 就地修复：尾词补全/句读粘连拆分/编号缺尾词补全；修复行纳入既有图题不重复注入；幂等', () => {
+    const md = [
+      '## 第1章 施工进度计划',
+      '图 施工进度计划',
+      '## 第2章 进度网络图',
+      '图4-3 网络图相关内容纳入施工组织设计与作业流程管理，资料员每日更新记录、测量员每周复核数据。',
+      '正文段落。',
+      '## 第3章 项目管理机构',
+      '图 9-1 项目管理机构',
+    ].join('\n');
+    const specs = [
+      { chapterTitle: '施工进度计划', name: '施工进度计划图' },
+      { chapterTitle: '进度网络图', name: '网络图' },
+      { chapterTitle: '项目管理机构', name: '项目管理机构图' },
+    ];
+    const result = ensureFigurePlaceholders(md, specs);
+    // ①裸图题缺尾词 → 补全
+    expect(result.markdown).toContain('图 施工进度计划图');
+    // ②句读粘连 → 图题行保留 + 残余句独立成行
+    expect(result.markdown).toContain('图4-3 网络图');
+    expect(result.markdown).toContain('\n相关内容纳入施工组织设计与作业流程管理，资料员每日更新记录、测量员每周复核数据。');
+    // ③带编号缺尾词 → 补全
+    expect(result.markdown).toContain('图9-1 项目管理机构图');
+    // 修复后三项全部计入既有图题，零注入
+    expect(result.inserted).toEqual([]);
+    const numbered = normalizeFigureNumbering(result.markdown);
+    expect(numbered).toContain('图1-1 施工进度计划图');
+    expect(figureCoverage(specs, numbered)).toEqual({ total: 3, covered: 3, missing: [] });
+    // 幂等：重跑零变化
+    const again = ensureFigurePlaceholders(numbered, specs);
+    expect(again.markdown).toBe(numbered);
+    expect(again.inserted).toEqual([]);
   });
 });

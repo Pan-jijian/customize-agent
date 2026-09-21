@@ -19,7 +19,9 @@
 import { chapterRelevanceTokens, expandRelevanceToken } from './billFactLock';
 import { isGenerationExcludedFact } from './factsModel';
 import { normalizeEngineeringTextForFactMatch } from './engineeringUnits';
-import type { DocumentFact } from './types';
+import { classifyPoolNoiseText, type PoolNoiseCategory } from './poolNoise';
+import { stableHash } from './utils';
+import type { DocumentFact, ValidationIssue } from './types';
 
 /** 参数池输入（factsModel 子集；factIndex 缺失时回退 preciseFacts，与检测端 collectPreciseFactTokens 同源兜底） */
 export interface ParameterFactsSource {
@@ -43,12 +45,24 @@ function parameterFactText(fact: DocumentFact): string {
   return `${fact.key || ''} ${fact.fieldName || ''} ${fact.value || ''}`.trim();
 }
 
-/** 可用参数池：空值/噪声/商务/重复剔除（去重键 key|value，池内原始顺序保持） */
-function usableParameterFacts(factsModel: ParameterFactsSource | undefined | null): DocumentFact[] {
-  if (!factsModel) return [];
+/** 可用参数池 + 净化出池登记（D6 池净化：只出池不删档——噪声条目移出义务集但保留在审计中） */
+interface UsableParameterPool {
+  /** 可用参数（空值/噪声/商务/重复剔除后） */
+  usable: DocumentFact[];
+  /** D6 表格噪声出池登记（图签/坐标/残片/目录行/编号粘连，与要求池同源判定，可审计） */
+  noiseExcluded: Array<{ fact: DocumentFact; category: PoolNoiseCategory }>;
+}
+
+/** 可用参数池：空值/噪声/商务/重复剔除（去重键 key|value，池内原始顺序保持）。
+ * D6 同源净化：表格噪声（图签/坐标/残片/粘连）与要求池共用 poolNoise 判定——一处判定全链生效
+ * （写作注入/义务审计/修复分配三处消费同一池，噪声零进入义务集）。 */
+function usableParameterFacts(factsModel: ParameterFactsSource | undefined | null): UsableParameterPool {
+  const empty: UsableParameterPool = { usable: [], noiseExcluded: [] };
+  if (!factsModel) return empty;
   const pool = factsModel.factIndex?.parameterFacts?.length ? factsModel.factIndex.parameterFacts : (factsModel.preciseFacts || []);
   const seen = new Set<string>();
-  const result: DocumentFact[] = [];
+  const usable: DocumentFact[] = [];
+  const noiseExcluded: Array<{ fact: DocumentFact; category: PoolNoiseCategory }> = [];
   for (const fact of pool) {
     if (!fact) continue;
     const value = String(fact.value || '').trim();
@@ -58,12 +72,20 @@ function usableParameterFacts(factsModel: ParameterFactsSource | undefined | nul
     // 消费侧再兜底排除补充词面（预留金/暂列金额/暂估价）与商务域事实
     if (isGenerationExcludedFact(fact)) continue;
     if (PARAMETER_COMMERCIAL_EXTRA_RE.test(parameterFactText(fact))) continue;
+    // D6 表格噪声净化（与要求池同源判定）：图签/坐标/目录行/残片/粘连出池——不可锚定正文且误导修复。
+    // 判定对象为「值」：键/字段名是分类标签（项目名称/精确参数），拼接判定会以键前缀遮蔽值首形态
+    // （「项目名称 2225111舒城县…」值首编号粘连漏判），值才是最终要逐字落位的内容
+    const noiseCategory = classifyPoolNoiseText(value);
+    if (noiseCategory) {
+      noiseExcluded.push({ fact, category: noiseCategory });
+      continue;
+    }
     const dedupeKey = `${fact.key}|${value}`;
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
-    result.push(fact);
+    usable.push(fact);
   }
-  return result;
+  return { usable, noiseExcluded };
 }
 
 /** 章 token 展开集（标题+小节切词 → 双字子词展开，一次展开供全池打分复用） */
@@ -91,7 +113,7 @@ export function selectChapterParameterFacts(
   chapterTitle: string,
   options: { sections?: string[]; maxEntries?: number } = {},
 ): DocumentFact[] {
-  const pool = usableParameterFacts(factsModel);
+  const { usable: pool } = usableParameterFacts(factsModel);
   if (pool.length === 0) return [];
   const tokens = chapterParameterTokens(chapterTitle, options.sections || []);
   if (tokens.length === 0) return [];
@@ -156,15 +178,18 @@ export interface ParameterUsageBreakdown {
   relevantMissed: DocumentFact[];
   /** 不相关遗漏：与全部章均无词面相关且正文未使用（仅归因登记，不计义务） */
   irrelevantMissed: DocumentFact[];
+  /** D6 表格噪声出池登记（图签/坐标/残片/粘连——移出义务集，保留审计） */
+  noiseExcluded: Array<{ fact: DocumentFact; category: PoolNoiseCategory }>;
 }
 
-/** 参数使用归因（口径单源）：逐池参数做使用判定（字面命中 → used），未使用按「是否与任一章相关」二分归因 */
+/** 参数使用归因（口径单源）：逐池参数做使用判定（字面命中 → used），未使用按「是否与任一章相关」二分归因；
+ * D6 噪声条目在池入口已出池（noiseExcluded 登记），不计义务 */
 export function classifyParameterUsage(
   markdown: string,
   factsModel: ParameterFactsSource | undefined | null,
   chapters: Array<{ title: string; sections?: string[] }> = [],
 ): ParameterUsageBreakdown {
-  const pool = usableParameterFacts(factsModel);
+  const { usable: pool, noiseExcluded } = usableParameterFacts(factsModel);
   const normalizedMarkdown = normalizeEngineeringTextForFactMatch(markdown || '');
   const tokenSets = chapters.map(chapter => chapterParameterTokens(chapter.title, chapter.sections || []));
   const used: DocumentFact[] = [];
@@ -178,7 +203,7 @@ export function classifyParameterUsage(
     const relevant = tokenSets.some(tokens => tokens.length > 0 && parameterRelevanceScore(fact, tokens) > 0);
     (relevant ? relevantMissed : irrelevantMissed).push(fact);
   }
-  return { totalParams: pool.length, used, relevantMissed, irrelevantMissed };
+  return { totalParams: pool.length, used, relevantMissed, irrelevantMissed, noiseExcluded };
 }
 
 /** 可靠参数使用审计（DocumentQualityReport.parameterUsageAudit 出口；义务口径见 rate 注释） */
@@ -193,6 +218,10 @@ export interface ParameterUsageAudit {
   relevantMissed: string[];
   /** 不相关遗漏数（归因：与全部章无词面相关，不计义务） */
   irrelevantMissedCount: number;
+  /** D6 池净化出池计数（表格噪声：图签/坐标/残片/粘连——不计义务，只出池不删档可审计；旧存档报告无此字段） */
+  noiseExcludedCount?: number;
+  /** 出池噪声明细（前 10 条，`[类别]键：值` 截断，供交付审计核验） */
+  noiseExcluded?: string[];
   /** 义务满足率 = usedParams/(usedParams+relevantMissedCount)；义务集为空或章集缺失（相关口径不可判定）时 null */
   rate: number | null;
 }
@@ -215,6 +244,8 @@ export function buildParameterUsageAudit(input: {
     relevantMissedCount,
     relevantMissed: breakdown.relevantMissed.slice(0, 20).map(fact => `${fact.key}：${String(fact.value).slice(0, 60)}`),
     irrelevantMissedCount: breakdown.irrelevantMissed.length,
+    noiseExcludedCount: breakdown.noiseExcluded.length,
+    noiseExcluded: breakdown.noiseExcluded.slice(0, 10).map(item => `[${item.category}]${item.fact.key}：${String(item.fact.value).slice(0, 50)}`),
     rate: chapters.length > 0 && obligationTotal > 0 ? usedParams / obligationTotal : null,
   };
 }
@@ -233,7 +264,17 @@ export function missingRelevantParameterTokens(
     .slice(0, max);
 }
 
-/** 相关而遗漏参数 → 目标章索引的修复分配（选定最相关章，同分取大纲靠前章；逐章/总量限额防指令膨胀） */
+/** 参数值可注入长度上限（与 missingRelevantParameterTokens 同口径：超长值无法自然嵌入正文，不进补写指令） */
+const PARAMETER_REPAIR_VALUE_MAX = 80;
+
+/** 修复分配预算（C3-4 扩容：初版 6/24 在 s28l 净化后 74 条缺口下仅覆盖 17 条，义务满足率无法向 90% 收敛——
+ * 单章/总量上限按 s28l/r28l 实机缺口量级放宽；防指令膨胀由「同章参数聚合单条补写指令 + 值长过滤」兜底） */
+const PARAMETER_REPAIR_MAX_PER_CHAPTER = 16;
+const PARAMETER_REPAIR_MAX_TOTAL = 96;
+
+/** 相关而遗漏参数 → 目标章索引的修复分配（逐条按相关性降序取章，同分取大纲靠前章；
+ * 首选章满额时顺位次优章——仅分数 >0 的章可承载，防单章拥塞（s28l 质量/施工方法两章集中 60+ 条）
+ * 造成分配浪费；逐章/总量限额防指令膨胀） */
 export function assignMissingParameterChapters(
   markdown: string,
   factsModel: ParameterFactsSource | undefined | null,
@@ -242,31 +283,62 @@ export function assignMissingParameterChapters(
 ): Map<number, string[]> {
   const assignment = new Map<number, string[]>();
   if (chapters.length === 0) return assignment;
-  const maxPerChapter = Math.max(1, options.maxPerChapter ?? 6);
-  const maxTotal = Math.max(1, options.maxTotal ?? 24);
+  const maxPerChapter = Math.max(1, options.maxPerChapter ?? PARAMETER_REPAIR_MAX_PER_CHAPTER);
+  const maxTotal = Math.max(1, options.maxTotal ?? PARAMETER_REPAIR_MAX_TOTAL);
   const missed = classifyParameterUsage(markdown, factsModel, chapters).relevantMissed;
   if (missed.length === 0) return assignment;
   const tokenSets = chapters.map(chapter => chapterParameterTokens(chapter.title, chapter.sections || []));
   let assigned = 0;
   for (const fact of missed) {
     if (assigned >= maxTotal) break;
-    let bestIndex = -1;
-    let bestScore = 0;
-    for (let index = 0; index < tokenSets.length; index += 1) {
-      const tokens = tokenSets[index] ?? [];
-      if (tokens.length === 0) continue;
-      const score = parameterRelevanceScore(fact, tokens);
-      if (score > bestScore) {
-        bestScore = score;
-        bestIndex = index;
-      }
+    const value = String(fact.value).trim();
+    if (value.length === 0 || value.length > PARAMETER_REPAIR_VALUE_MAX) continue;
+    // 相关性降序候选章（同分取大纲靠前章；分数 >0 才入候选——与 relevantMissed 判定同尺度）
+    const ranked = tokenSets
+      .map((tokens, index) => ({ index, score: tokens.length === 0 ? 0 : parameterRelevanceScore(fact, tokens) }))
+      .filter(item => item.score > 0)
+      .sort((left, right) => right.score - left.score || left.index - right.index);
+    for (const candidate of ranked) {
+      const list = assignment.get(candidate.index) ?? [];
+      if (list.length >= maxPerChapter) continue;
+      list.push(value);
+      assignment.set(candidate.index, list);
+      assigned += 1;
+      break;
     }
-    if (bestIndex < 0) continue;
-    const list = assignment.get(bestIndex) ?? [];
-    if (list.length >= maxPerChapter) continue;
-    list.push(String(fact.value).trim());
-    assignment.set(bestIndex, list);
-    assigned += 1;
   }
   return assignment;
+}
+
+/** 可靠参数义务满足率门槛（C3-4 验收出口：可落位者全落位；义务集规模小于最小值时不判定防小样本抖动） */
+export const PARAMETER_OBLIGATION_MIN_RATE = 0.9;
+export const PARAMETER_OBLIGATION_MIN_TOTAL = 8;
+
+/**
+ * 可靠参数义务缺口检测（参数池净化后义务满足率 < 门槛 → error）：
+ * 与报告出口 buildParameterUsageAudit.rate、修复出口 assignMissingParameterChapters 同源单源
+ * （classifyParameterUsage）——检测定位=修复定位（content-depth-repair 按 provenance 消费本类 error）。
+ * 义务集为空或章节缺失（相关口径不可判定）时不判定。
+ */
+export function parameterObligationUsageIssues(
+  markdown: string,
+  factsModel: ParameterFactsSource | undefined | null,
+  chapters: Array<{ title: string; sections?: string[] }> = [],
+): ValidationIssue[] {
+  if (chapters.length === 0) return [];
+  const breakdown = classifyParameterUsage(markdown, factsModel, chapters);
+  const obligationTotal = breakdown.used.length + breakdown.relevantMissed.length;
+  if (obligationTotal < PARAMETER_OBLIGATION_MIN_TOTAL) return [];
+  const rate = breakdown.used.length / obligationTotal;
+  if (rate >= PARAMETER_OBLIGATION_MIN_RATE) return [];
+  const samples = breakdown.relevantMissed.slice(0, 3).map(fact => String(fact.value).slice(0, 30));
+  return [{
+    level: 'error',
+    category: 'fact_consistency',
+    owner: 'llm',
+    repairability: 'llm_repairable',
+    message: `可靠参数义务落位不足：${breakdown.used.length}/${obligationTotal}（相关而遗漏 ${breakdown.relevantMissed.length} 项${samples.length > 0 ? `，缺失如 ${samples.join('、')}` : ''}）`,
+    suggestion: '请将资料中的可靠参数（规格/型号/尺寸/强度/规范编号等）在对应章节的对应位置自然写入，保持原值原形态（数字、单位、编号中的连字符与年份不得改写、拆分或省略）；商务金额、单价、税率、预留金类数据一律不得写入正文。',
+    provenance: { detectorId: 'parameter-obligation-usage', fingerprint: stableHash(markdown) },
+  }];
 }

@@ -12,6 +12,7 @@
  * （runSurfaceDeterministicCleans / replayBlueprintCitationNumericFixes / replayRequirementTailClosure）
  * 之后、stageFinalGate 之前——终门禁所检 = 交付所存 = 收口后成稿。
  */
+import { cleanAppendixInternalPhrases } from '../../composeAppendices';
 import { fixTocFromBody } from '../../documentIntegrityChecks';
 import { splitOverlengthBodyParagraphs } from '../../helpers/markdownCleanup';
 import { displayStage, upsertProgressStage } from '../../progress';
@@ -19,6 +20,13 @@ import type { FinalizeSession } from '../finalizeSession';
 
 export async function stageDeliveryStructureClosure(session: FinalizeSession): Promise<void> {
   const details: string[] = [];
+  // C2 D4 兜底复洗：附表区内部推导话术确定性中性化（幂等；源头已在 composeTenderAppendixMarkdown 出口净版，
+  // 此处收口链中段 rebuild/LLM 补写句再引入的附表区话术）
+  const cleaned = cleanAppendixInternalPhrases(session.finalMarkdown);
+  if (cleaned !== session.finalMarkdown) {
+    session.finalMarkdown = cleaned;
+    details.push('附表区内部话术清洗：内部推导口径已中性化（唯一口径/经验工效区间/清单批注等）');
+  }
   // ③ 超长段落切分先于目录重建：切分不改标题行，目录重建基于切分后正文（同一次 recompute 收口）
   const split = splitOverlengthBodyParagraphs(session.finalMarkdown);
   if (split.markdown !== session.finalMarkdown) {

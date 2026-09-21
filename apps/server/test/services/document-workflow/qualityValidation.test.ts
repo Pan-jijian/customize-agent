@@ -3,7 +3,7 @@
  * 均为 L2 确定性结构检测，无需语义通道。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { applyDeterministicConsistencyFixesToMarkdown, basisRegulationsCoverageIssues, boqPlacementIssues, resourceBreakdownConsistencyIssues, collectSectionContentGaps, crossChapterConsistencyIssues, criticalPreciseTokens, degenerateContentIssues, evaluationCriteriaCoreKeywords, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, markdownTableQualityIssues, missingCriticalPreciseTokens, preciseFactUsageIssues, processSpecConflictIssues, punctuationArtifactIssues } from '@/services/document-workflow/qualityValidation';
+import { applyDeterministicConsistencyFixesToMarkdown, basisRegulationsCoverageIssues, boqPlacementIssues, resourceBreakdownConsistencyIssues, collectSectionContentGaps, crossChapterConsistencyIssues, criticalPreciseTokens, degenerateContentIssues, evaluationCriteriaCoreKeywords, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, markdownTableQualityIssues, missingCriticalPreciseTokens, preciseFactUsageIssues, processSpecConflictIssues, punctuationArtifactIssues, scanTablePlaceholderCells } from '@/services/document-workflow/qualityValidation';
 import type { BlueprintData } from '@/services/document-workflow/integratedBlueprint';
 import type { DocumentDraftChapter, DocumentFactsModel } from '@/services/document-workflow/types';
 
@@ -117,6 +117,25 @@ describe('C-T5 落位口径（90% 阈值 + 显性说明审计 + 责任章标注�
     expect(issues).toHaveLength(1);
     expect(issues[0]!.message).toContain('建议落位「第五章 排水工程施工方案」');
   });
+
+  it('C3-5 挂靠锚点：error 带 provenance/blocker/repairability，未落位行按 unique 名称归并（×N 形态）', async () => {
+    const model = tablesFactsModel(['项目编码', '项目名称', '单位', '工程量'], [
+      ['030901010001', '混凝土管铺设', 'm', '80'],
+      ['030901010002', '混凝土管铺设', 'm', '75'],
+      ['030901010003', '混凝土管铺设', 'm', '70'],
+      ['030901010004', '回填方', 'm3', '50'],
+    ]);
+    const issues = await boqPlacementIssues('本工程完成回填方施工。', [], model);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.level).toBe('error');
+    expect(issues[0]!.severity).toBe('blocker');
+    expect(issues[0]!.owner).toBe('llm');
+    expect(issues[0]!.repairability).toBe('llm_repairable');
+    expect(issues[0]!.provenance?.detectorId).toBe('boq-placement');
+    // unique 名称归并：同名 3 行合并为 1 类（message 前 30 项截断窗口不被同类重复项占满，修复轮拿到完整义务清单）
+    expect(issues[0]!.message).toContain('共3行/1类');
+    expect(issues[0]!.message).toContain('混凝土管铺设×3');
+  });
 });
 
 describe('formalContentIntegrityIssues 截断词表扩展（h13c）', () => {
@@ -215,6 +234,39 @@ describe('formalPlaceholderIssues 占位式表达（h13c 词表扩展 + D-T5 口
     ].join('\n');
     expect(formalPlaceholderIssues(table).filter(issue => /占位式表达/u.test(issue.message))).toEqual([]);
     expect(markdownTableQualityIssues(table).filter(issue => /占位符/u.test(issue.message))).toEqual([]);
+  });
+
+  it('C5 扩围：设备/仪器附表投产信息列「—」全豁免（s28l 实机 8 行×3 列 24 处误报；生成端如实留空不编造 vs 检测端阻断的口径冲突消解）', () => {
+    // composeAppendices renderEquipmentAppendix/renderInstrumentAppendix 对国别产地/制造年份/
+    // 额定功率/生产能力/用于施工部位硬编码「—」（投产信息如实留空不造数据），检测端豁免列未含
+    // 投产信息列致阻断——豁免列与附表生成端表头对齐后生成端直出形态零命中
+    const equipmentTable = [
+      '| 序号 | 设备名称 | 型号规格 | 数量 | 国别产地 | 制造年份 | 额定功率（kW） | 生产能力 | 用于施工部位 | 备注 |',
+      '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+      '| 1 | 挖掘机 | 0.6~1.0m³ | 4-6 | — | — | — | — | — | 人机配合开挖 |',
+      '| 2 | 振动压路机 | — | 4 | — | — | — | — | — | 路基碾压 |',
+    ].join('\n');
+    expect(scanTablePlaceholderCells(equipmentTable)).toEqual([]);
+    expect(formalPlaceholderIssues(equipmentTable).filter(issue => /占位符/u.test(issue.message))).toEqual([]);
+    expect(markdownTableQualityIssues(equipmentTable).filter(issue => /占位符/u.test(issue.message))).toEqual([]);
+  });
+
+  it('C5 扩围反例：豁免列仅认破折号形态 + 非豁免列占位词照报（防豁免过宽）', () => {
+    // ①非豁免列（备注）「待定」——占位词任何行任何列不豁免
+    const pendingRemark = [
+      '| 序号 | 设备名称 | 型号规格 | 数量 | 国别产地 | 备注 |',
+      '| --- | --- | --- | --- | --- | --- |',
+      '| 1 | 挖掘机 | — | 5台 | 国产 | 待定 |',
+    ].join('\n');
+    expect(scanTablePlaceholderCells(pendingRemark).some(hit => hit.cell === '待定')).toBe(true);
+    // ②豁免列填非破折号占位词（「若干」）——投产信息列豁免仅限单个/多个破折号形态
+    const vagueOrigin = [
+      '| 序号 | 设备名称 | 型号规格 | 数量 | 国别产地 | 备注 |',
+      '| --- | --- | --- | --- | --- | --- |',
+      '| 1 | 挖掘机 | 0.6~1.0m³ | 5台 | 若干 | 人机配合开挖 |',
+    ].join('\n');
+    expect(scanTablePlaceholderCells(vagueOrigin).some(hit => hit.cell === '若干')).toBe(true);
+    expect(formalPlaceholderIssues(vagueOrigin).some(issue => /占位式表达：表格数据格占位符/u.test(issue.message))).toBe(true);
   });
 });
 

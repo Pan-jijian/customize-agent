@@ -125,7 +125,7 @@ export async function stageLengthCompressionRepair(session: FinalizeSession): Pr
             promptTexts: instruction,
             requirement: session.requirement,
             forbidDrawingImages: false,
-            // 标书编制规格（暗标禁表）：修复链 system 口径同步
+            // 标书编制规格（正文表格口径）：修复链 system 口径同步
             bidComposition: session.bidComposition,
             diagnostics: session.generationDiagnostics,
             signal: session.signal,

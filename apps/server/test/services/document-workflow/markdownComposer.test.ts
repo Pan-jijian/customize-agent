@@ -420,7 +420,7 @@ describe('plannedStructurePrompt / plannedStructureIssues', () => {
     expect(issues[0].message).toContain('主要材料进场计划表');
   });
 
-  it('逐表对账全承接 → 无缺表 error；暗标禁表 → 直接豁免', () => {
+  it('逐表对账全承接 → 无缺表 error；正文禁表口径 → 直接豁免', () => {
     const withPlans: DocumentTemplate = {
       ...template,
       chapters: [{
@@ -436,7 +436,7 @@ describe('plannedStructurePrompt / plannedStructureIssues', () => {
       '主要材料进场计划表', '', '| 序号 | 材料名称 | 单位 |', '|---|---|---|', '| 1 | 水泥 | t |',
     ].join('\n');
     expect(plannedStructureIssues(markdown, withPlans).filter(item => item.category === 'table')).toEqual([]);
-    // 暗标正文禁表：缺表类门禁整体豁免（图表由文末附表区承接）
+    // 正文禁表（bodyTablePolicy=forbidden，显式禁表句）：缺表类门禁整体豁免（图表由文末附表区承接）
     expect(plannedStructureIssues(markdown, withPlans, true)).toEqual([]);
   });
 });

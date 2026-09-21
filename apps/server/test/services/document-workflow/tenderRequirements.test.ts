@@ -19,6 +19,7 @@ import { callDocumentLlmJson } from '@/services/document-workflow/llmClient';
 import {
   assignStructureRequirementsToChapters,
   assignTenderRequirementsToChapters,
+  collectRequirementAnchors,
   detectStructureRequirements,
   emptyTenderRequirements,
   extractTenderRequirements,
@@ -784,7 +785,7 @@ describe('消费侧（摘要/检查项/语义查询/写作规则/章分片）', 
     expect(renderChapterRequirementSlice([])).toBe('');
   });
 
-  it('renderChapterStructureSlice：明标口径提示以图/表形态落实；暗标口径禁图表实体并以文字+附表区承载（B-T1/B-T2 专项）', () => {
+  it('renderChapterStructureSlice：允许口径提示以图/表形态落实；正文禁表/禁图允许表双口径（B-T1/B-T2 专项）', () => {
     const items = [
       { element: '项目管理机构', form: 'org_chart' as const, sourceText: '组织机构以框图方式表示。' },
       { element: '施工总平面布置图', form: 'diagram' as const, sourceText: '提供施工总平面布置图。' },
@@ -798,12 +799,19 @@ describe('消费侧（摘要/检查项/语义查询/写作规则/章分片）', 
     expect(open).toContain('项目管理机构与岗位职责');
     expect(open).toContain('岗位责任矩阵');
     expect(open).toContain('严禁出现人员姓名');
-    const blind = renderChapterStructureSlice(items, { blind: true });
-    expect(blind).toContain('暗标正文不得出现任何表格/图片');
-    expect(blind).toContain('文末附表区');
-    expect(blind).toContain('严禁出现人员姓名');
-    expect(blind).not.toContain('规范图题行');
-    expect(blind).toContain('分岗位的职责分工与协作关系');
+    // 禁图允许表口径（暗标常态 C1）：表格/框图照常落实，图类文字承载 + 图题行，禁止图片
+    const figurePlain = renderChapterStructureSlice(items, { bodyFigureForbidden: true });
+    expect(figurePlain).toContain('文字框图或表格式时间轴');
+    expect(figurePlain).toContain('禁止插入图片或图件占位');
+    expect(figurePlain).toContain('岗位责任矩阵');
+    // 正文禁表口径（显式禁表句）：不得出现任何表格/图片，图文由文末附表区承载
+    const tableForbidden = renderChapterStructureSlice(items, { bodyTableForbidden: true });
+    expect(tableForbidden).toContain('【本章必须落实的呈现要求（招标明文规定呈现形态，正文禁表口径）】');
+    expect(tableForbidden).toContain('不得出现任何表格/图片');
+    expect(tableForbidden).toContain('文末附表区');
+    expect(tableForbidden).toContain('严禁出现人员姓名');
+    expect(tableForbidden).not.toContain('规范图题行');
+    expect(tableForbidden).toContain('分岗位的职责分工与协作关系');
     expect(renderChapterStructureSlice([])).toBe('');
   });
 
@@ -1335,5 +1343,39 @@ describe('M14a 判定口径指纹（缓存失效自动防线：口径变更不�
     for (const name of called) {
       expect(listText, `判据 ${name} 未入 CACHE_JUDGE_FINGERPRINT_SOURCES（口径变更将不失效缓存）`).toContain(name);
     }
+  });
+});
+
+describe('collectRequirementAnchors（条款锚点全清单单源）', () => {
+  it('coreTerms 数字复合词分解 + 数字单位锚点 + 具名奖项（前导动词剥离）', () => {
+    const anchors = collectRequirementAnchors({
+      text: '确保一次性成活率95%，工期120天，争创黄山杯。',
+      coreTerms: ['一次性成活率95%', '黄山杯'],
+    });
+    expect(anchors).toEqual(expect.arrayContaining(['一次性成活率', '95%', '120天', '黄山杯']));
+    expect(anchors).not.toContain('确保黄山杯');
+    expect(anchors).not.toContain('争创黄山杯');
+  });
+
+  it('引用性词（文号/行政文件名）不作锚点；「N.N项」编号切片丢弃而整数+项保留', () => {
+    const anchors = collectRequirementAnchors({
+      text: '按《XX市建设工程施工招标投标管理办法》执行，包含1.1项目名称及3项保证措施。',
+      coreTerms: ['XX市建设工程施工招标投标管理办法', '施工招标'],
+    });
+    expect(anchors).toContain('施工招标');
+    expect(anchors).toContain('3项');
+    expect(anchors).not.toContain('1.1项');
+    expect(anchors.some(anchor => anchor.includes('管理办法'))).toBe(false);
+  });
+
+  it('skipNumericAnchors 跳过商务数字参数；长度 <2 的 coreTerms 过滤', () => {
+    expect(collectRequirementAnchors({ text: '工期120天。', coreTerms: ['工'] })).toEqual(['120天']);
+    expect(collectRequirementAnchors({ text: '工期120天。', coreTerms: [] }, { skipNumericAnchors: true })).toEqual([]);
+  });
+
+  it('全角百分号归一（coreTerms 与条款原文同源，写作侧半角不假 miss）', () => {
+    const anchors = collectRequirementAnchors({ text: '成活率95％以上。', coreTerms: ['成活率95％'] });
+    expect(anchors).toEqual(expect.arrayContaining(['成活率', '95%']));
+    expect(anchors.every(anchor => !anchor.includes('％'))).toBe(true);
   });
 });

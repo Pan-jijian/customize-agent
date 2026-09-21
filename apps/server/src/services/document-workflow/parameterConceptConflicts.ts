@@ -168,8 +168,11 @@ function extractParamTokens(markdown: string): ParamToken[] {
       const strippedConcept = rawConcept.replace(CONCEPT_LEAD_IN_RE, '').replace(CONCEPT_TASK_DEADLINE_RE, '');
       const concept = strippedConcept.length >= 2 ? strippedConcept : rawConcept;
       if (concept.length < 2 || !/[\u4e00-\u9fa5A-Za-z]{2,}/u.test(concept) || !Number.isFinite(value) || value <= 0) continue;
-      // 纯通用量词概念跳过：无具体对象无从判定口径，不同对象同量词聚簇必误报
-      if (GENERIC_MEASURE_WORDS.some(word => normalizeConcept(concept) === word)) continue;
+      // 纯通用量词概念跳过：无具体对象无从判定口径，不同对象同量词聚簇必误报。
+      // C8 S4-①a 归因（s28m' 实测「层数2层、层数1层」两单体误报阻断）：normalizeConcept 的单位
+      // 剥离表含「层」——「层数」归一后被剥成「数」，与量词表登记形态失配恒 false；原词面直比
+      // 前置消解（「层数」直比命中即跳过），其余概念仍走归一后比较。
+      if (GENERIC_MEASURE_WORDS.some(word => concept === word || normalizeConcept(concept) === word)) continue;
       // 纯边界虚词概念跳过（4.52 P3a）：公差符号打断前缀致 concept 坍缩为「以内」类虚词时
       // 概念信息不足，不参与口径互斥（见 BARE_RELATION_WORDS）
       if (BARE_RELATION_WORDS.some(word => normalizeConcept(concept) === word)) continue;
@@ -399,6 +402,15 @@ export async function conceptConflictGroups(markdown: string): Promise<ConceptCo
           // 跨对象分辨；仅放宽同值对，冲突判定仍由全部异值对承载（真冲突「同概念异值」的异值对
           // 残留为空即不豁免，照常报出）
           if (left.value === right.value) return true;
+          // C5 扩围（r28l/s28l 实机误报：「基础底板钢筋保护层厚度40mm、柱梁钢筋保护层厚度25mm、
+          // 板钢筋保护层厚度15mm」按构件分值是规范正确取值）：一方完整概念恰好是另一方的后缀
+          // 子串（「板钢筋保护层厚度」⊂「基础底板钢筋保护层厚度」——最长公共子串吞并「板」字后
+          // 一侧残留为空，原互不包含判定返 false 致误报），且短方以构件语素开头、长度 ≥4（含参量
+          // 词尾，独立构件的完整概念；纯构件名「板」⊂「钢筋混凝土板」的同对象简称形态短于 4 字
+          // 不豁免——同对象值不同仍判冲突）。构件细分各自参量（板/梁/柱/墙/底/顶）非同一参数多口径。
+          const shorterConcept = left.concept.length <= right.concept.length ? left.concept : right.concept;
+          const longerConcept = left.concept.length <= right.concept.length ? right.concept : left.concept;
+          if (shorterConcept.length >= 4 && shorterConcept.length < longerConcept.length && longerConcept.endsWith(shorterConcept) && /^[板梁柱墙底顶]/u.test(shorterConcept)) return true;
           const span = longestCommonHanSubstringSpan(left.concept, right.concept);
           if (span.length < 2) return false;
           const common = left.concept.slice(span.start, span.end);

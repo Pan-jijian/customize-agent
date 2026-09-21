@@ -382,10 +382,11 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     ? `本章小节由生成前规划得到，请完整包含并展开以下小节：\n${chapter.sections.map(section => `- ${section}`).join('\n')}`
     : '本章没有预设小节；请按用户提示词、模板章节、角色要求和绑定材料自然组织正文。';
   const sectionBudgetInstruction = buildSectionBudgetInstruction(chapter, options.targetWords || options.minWords || 0, options.sectionQuotas);
-  // 标书编制规格（阶段 1 判定）：暗标正文禁表（招标要求）时表格计划指令短路（不注入表格硬性要求）
-    const tablePlanInstruction = isBodyTableForbidden(options.bidComposition) ? '' : tablePlansPrompt(chapter);
-    // R20 C1 图类呈现指令（明标：文字框图/时间轴承载；暗标正文禁图表时短路，图类归附表区）
-    const diagramInstruction = isBodyTableForbidden(options.bidComposition) ? '' : diagramRequirementsPrompt(chapter);
+  // 标书编制规格（阶段 1 证据判定）：正文禁表（bodyTablePolicy=forbidden，招标显式禁表句）时表格计划指令短路；
+  // 允许口径（暗标允许句/无证据默认）自然放行，表格按系统表格计划注入
+  const tablePlanInstruction = isBodyTableForbidden(options.bidComposition) ? '' : tablePlansPrompt(chapter);
+  // R20 C1 图类呈现指令（文字框图/时间轴承载；正文禁表口径时短路，图类数据化输出归附表区）
+  const diagramInstruction = isBodyTableForbidden(options.bidComposition) ? '' : diagramRequirementsPrompt(chapter);
   const constructionOrgRuleInstruction = constructionOrgChapterRulePrompt(chapter);
   const constructionOrgBonusInstruction = constructionOrgBonusModulePrompt(chapter);
   // D-T9 专业工序链约束（两级判定：章标题+小节标题优先，回退资料文本——资料内容驱动，不依赖
@@ -403,7 +404,7 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     // 3.2 L0 恒定前缀（跨 Writer 类型共享 prefix cache）；DOCUMENT_L0_SYSTEM_PREFIX=0 回退原前缀
     writerSystemPrefix(FORMAL_WRITING_RULES),
     options.forbidDrawingImages ? '图片类材料只作为文本事实依据；禁止插入图片或 Markdown 图片语法。' : '',
-    // 标书编制规格写作口径（暗标：正文纯文字/禁图/身份禁语硬约束；明标/未识别返回空串不注入）
+    // 标书编制规格写作口径（正文表格计划口径/禁图/身份禁语硬约束；无口径差异时返回空串不注入）
     bidCompositionWritingRules(options.bidComposition),
     // A5a 前缀缓存：可变 promptTexts 已移入 user 首部，system 保持恒定（跨章共享 prefix cache）
   ].filter(Boolean).join('\n\n');
@@ -1169,7 +1170,7 @@ export interface PlannedChapterContentInput {
   targetWords: number;
   maxWords?: number;
   forbidDrawingImages: boolean;
-  /** 标书编制规格（阶段 1 判定）：暗标正文禁表/禁图写作口径与块级传递 */
+  /** 标书编制规格（阶段 1 证据判定）：正文表格/图片口径与块级传递 */
   bidComposition?: BidCompositionSpec;
   factCoverageContext?: string;
   compactProjectContext?: boolean;
@@ -1195,12 +1196,64 @@ export interface PlannedChapterContentInput {
 export interface PlannedChapterContentResult {
   /** 按 structure.blocks 顺序的块成稿正文（失败块为 undefined） */
   sections: Array<string | undefined>;
-  /** 成稿失败的主题块（含原 index 与缺陷反馈原文），供上层 C3 块级隔离重试定向重写 */
-  failedBlocks: Array<{ index: number; block: PlannedChapterBlock; retryFeedback?: string }>;
+  /** 成稿失败的主题块（含原 index 与缺陷反馈原文），供上层 C3 块级隔离重试定向重写；
+   * C7 补充 lastAttempt/failureKinds：块最近一次有效尝试原文与失败类别清单——
+   * 供上层（stageChapterLoop）在隔离重写耗尽后判定「章级超产对冲接纳」 */
+  failedBlocks: Array<{ index: number; block: PlannedChapterBlock; retryFeedback?: string; lastAttempt?: string; failureKinds?: string[] }>;
   /** 全部块成稿成功 */
   allSucceeded: boolean;
   /** 成功块拼接的章节 Markdown（含章标题外壳；失败块缺失时不包含该块正文） */
   markdown: string;
+}
+
+/** C7 章级超产对冲接纳线（与块末轮容差线同口径 1.2×）：隔离重写耗尽后，失守块全部仅篇幅超产时，
+ * 接纳后章总量落在此区间内即可对冲接纳末轮内容成章；下限 0.85× 与块达标区下限同源（防欠产侧混入） */
+export const CHAPTER_OVER_PRODUCE_ACCEPTANCE_MAX_RATIO = 1.2;
+export const CHAPTER_OVER_PRODUCE_ACCEPTANCE_MIN_RATIO = 0.85;
+
+export interface ChapterOverProduceAcceptanceInput {
+  /** 章级块成稿结果（隔离重写后：成功块为正文，失守块为 undefined） */
+  sections: Array<string | undefined>;
+  /** 隔离重写耗尽后仍失守的块（带最近一次有效尝试原文与失败类别清单） */
+  exhaustedBlocks: Array<{ index: number; lastAttempt?: string; failureKinds?: string[] }>;
+  /** 各块目标字数（章级总量守恒分母 = 块预算合计，Σ 与章预算守恒由容量规划保证） */
+  blockTargetWords: number[];
+}
+
+/** C7 章级超产对冲接纳（纯函数，单测锚点）：隔离重写耗尽后，失守块若全部满足——
+ *  ① 携带非空末轮内容；② 失败类别严格为 ['over-produce']（结构/数值/密度/套话/归因/格式等任何
+ *  内容类缺陷混入即拒绝）；③ 填回后无剩余缺口块；④ 章总量 ∈ [0.85,1.2]×块预算合计——
+ * 则接纳末轮内容成章（返回拼接后 sections 与审计详情）；任一条件不满足返回 undefined（照旧章阻断）。
+ *  动机（r28m 实机）：块内容质量全达标、仅篇幅超产（末轮 1.30×）被判块死 → 整章阻断 → 文档缺章；
+ * 而章总量 3776 ≈ 章预算 3703 本守恒——块容差只吸收末轮抖动，累计放大由章级审计（>1.2× 告警）
+ * 与文档级阻断线（目标总额 +20%）兜底（4.51 分层容差设计意图的缺口补链，零静默降级不变：
+ * 非篇幅类失守/严重超产/无末轮内容一律照旧显式失败）。 */
+export function salvageChapterByOverProduceAcceptance(input: ChapterOverProduceAcceptanceInput): { sections: string[]; detail: string } | undefined {
+  const { sections, exhaustedBlocks, blockTargetWords } = input;
+  if (exhaustedBlocks.length === 0 || sections.length !== blockTargetWords.length) return undefined;
+  const filled = [...sections];
+  const acceptedIndexes: number[] = [];
+  for (const item of exhaustedBlocks) {
+    if (item.index < 0 || item.index >= filled.length) return undefined;
+    const lastAttempt = item.lastAttempt;
+    if (!lastAttempt || !lastAttempt.trim()) return undefined;
+    const kinds = item.failureKinds || [];
+    if (kinds.length !== 1 || kinds[0] !== 'over-produce') return undefined;
+    const existing = filled[item.index];
+    if (existing && existing.trim()) return undefined;
+    filled[item.index] = lastAttempt;
+    acceptedIndexes.push(item.index);
+  }
+  if (filled.some(section => !section || !section.trim())) return undefined;
+  const total = documentTextLength(filled.join('\n\n'));
+  const budget = blockTargetWords.reduce((sum, words) => sum + (Number.isFinite(words) && words > 0 ? words : 0), 0);
+  const minAcceptance = Math.floor(budget * CHAPTER_OVER_PRODUCE_ACCEPTANCE_MIN_RATIO);
+  const maxAcceptance = Math.ceil(budget * CHAPTER_OVER_PRODUCE_ACCEPTANCE_MAX_RATIO);
+  if (budget <= 0 || total < minAcceptance || total > maxAcceptance) return undefined;
+  return {
+    sections: filled as string[],
+    detail: `章级超产对冲接纳 ${acceptedIndexes.length} 块（块序号 ${acceptedIndexes.join('、')}，末轮仅篇幅超产）：章总量 ${total} 字 vs 块预算合计 ${budget} 字（接纳区间 ${minAcceptance}~${maxAcceptance} 字，累计放大由章/文档级观测兜底）`,
+  };
 }
 
 /** 4.19.5 分部章容器块总述提示词（丰乐镇第二轮验收）：分部章容器块（「主要分部分项工程施工方案」在
@@ -1323,6 +1376,10 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
   // C3 隔离重写定向反馈收集（key=块 index）：块失败时把缺陷反馈原文交给上层——
   // 单块重写（stageChapterLoop.retryFailedBlocks）attempt=0 注入 initialFeedback，避免从零复现同一漏点
   const blockRetryFeedbacks = new Map<number, string>();
+  // C7 章级超产对冲接纳痕迹（key=块 index）：块每次质检失败即覆盖记录最近一次有效尝试原文与失败类别——
+  // 隔离重写耗尽后由上层判定「失守块全部仅篇幅超产 + 章总量守恒」即对冲接纳，否则照旧章阻断
+  const blockLastAttempts = new Map<number, string>();
+  const blockFailureKinds = new Map<number, string[]>();
   const writeBlock = async (block: (typeof blocks)[number], index: number): Promise<string | undefined> => {
     // 彻底修复同名结构：与主题块标题同名的 H4 要点由 H3 外壳直接承担，不再要求输出同名 H4
     // （历史缺陷：H3/H4 同名诱发模型把同名 H4 重复展开多轮 → 重复质检两轮失败 → dedupe 兜底字数不足 → 章阻断）
@@ -1736,6 +1793,9 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         //    仍 >1.2× 才判块失败（上层隔离重写，仍失败即章阻断、文档显式失败：严重超产零降级、
         //    宁缺毋假不变）。1.2× 与章级超产审计线（stageChapterLoop 章完成率 >1.2× 告警）及文档级
         //    阻断线（目标总额 +20%）分层对齐：块容差只吸收末轮抖动，累计放大由章/文档级观测兜底。
+        //    C7 补链：隔离重写耗尽后，失守块全部仅篇幅超产且章总量 ∈[0.85,1.2]×块预算合计时，
+        //    由 stageChapterLoop 章级对冲接纳（salvageChapterByOverProduceAcceptance）——块容差吸收
+        //    末轮抖动、章级接纳吸收累计抖动、文档级观测兜底，三层链闭合。
         const overProduceLine = Math.ceil(block.targetWords * 1.15);
         // 4.51 末轮容差线：仅最后一轮生效（前轮仍 1.15× 全阻断，压缩收敛方向不变）
         const overProduceToleranceLine = Math.ceil(block.targetWords * 1.2);
@@ -1804,6 +1864,23 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
             return repaired;
           }
         }
+        // C7 章级超产对冲接纳痕迹收集：记录本块最近一次有效尝试原文与失败类别清单（每轮覆盖，
+        // 最终留末轮或最近一次有效尝试）——隔离重写仍失败时，上层在全链条件满足（失守块全部仅
+        // 篇幅超产 + 填回后章总量 ∈ [0.85,1.2]×块预算合计）时可对冲接纳末轮内容成章；
+        // 结构/数值/密度/套话/归因/格式等任何内容类缺陷混入即拒绝（零静默降级：非篇幅类失守照旧章阻断）
+        blockLastAttempts.set(index, withBlockShell);
+        blockFailureKinds.set(index, [
+          ...(overProduceBlocking ? ['over-produce'] : []),
+          ...(underProduceBlocking ? ['under-produce'] : []),
+          ...(missing.length > 0 || duplicates.length > 0 || extraneous.length > 0 ? ['structure-titles'] : []),
+          ...(structureBlocking ? ['structure-integrity'] : []),
+          ...(numericBlocking ? ['numeric'] : []),
+          ...(flowFormBlocking ? ['flow-form'] : []),
+          ...(fillerBlocking ? ['templating'] : []),
+          ...(densityBlocking ? ['density'] : []),
+          ...(attributionBlocking ? ['attribution'] : []),
+          ...(formatBlocking ? ['format'] : []),
+        ]);
         if (input.diagnostics) input.diagnostics.llm.lastError = `规划块质检未达标：${block.title}（${chars} 字，缺 ${missing.join('、') || '无'}${duplicates.length ? `，重复 H4 ${duplicates.join('、')}` : ''}${extraneous.length ? `，清单外 ${extraneous.slice(0, 5).join('、')}${extraneous.length > 5 ? ' 等' : ''}` : ''}${blockStructureScan.blocking.length ? `，结构缺陷 ${blockStructureScan.blocking.length} 处` : ''}${densityBlocking ? `，密度缺口 ${densityAssessment.verdict.params}/${densityAssessment.verdict.required}` : ''}${attributionBlocking && attributionVerdict ? `，归因量化 ${(attributionVerdict.bothRatio * 100).toFixed(0)}%` : ''}${formatBlocking ? `，后台话术 ${formatHits.length} 行` : ''}）`;
         // 章失败归因诊断日志：块级质检不达标详情落盘（轮3 实测“重点难点/新技术”两章两次尝试仍未成稿，
         // failures=0 表示 LLM 正常返回但质检不过，必须拿到具体不达标项才能定向修复）
@@ -1840,7 +1917,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
   // plannedFirst 为 falsy → C3 块级隔离重试被整体跳过 → 章直接阻断；4.44 丰乐镇实机实测：
   // 工期章 2 块全失败因此失去隔离重写机会——失败块清单照常返回，由上层决定隔离重写或章阻断）
   const failedBlocks = blocks
-    .map((block, index) => ({ index, block, retryFeedback: blockRetryFeedbacks.get(index) }))
+    .map((block, index) => ({ index, block, retryFeedback: blockRetryFeedbacks.get(index), lastAttempt: blockLastAttempts.get(index), failureKinds: blockFailureKinds.get(index) }))
     .filter(({ index }) => !results[index]);
   // 相邻同标题块 H3 外壳合并（防御性）：容量规划归并保序拼接时若相邻块标题归一化同名，
   // 剥离后块开头的同标题 H3（内容续接同一小节），目录不出现重复小节

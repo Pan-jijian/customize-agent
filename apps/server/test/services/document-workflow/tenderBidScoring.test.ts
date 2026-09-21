@@ -19,7 +19,7 @@ vi.mock('@/services/document-workflow/semanticSimilarity', () => ({
   }),
 }));
 
-import { buildTenderBidScores, buildTenderBidTemplatingReport, FORBIDDEN_EMPTY_PHRASES, FORBIDDEN_PROMPT_PHRASES, splitScoringBlocks } from '@/services/document-workflow/tenderBidScoring';
+import { buildTenderBidScores, buildTenderBidTemplatingReport, duplicateSentenceStats, FORBIDDEN_EMPTY_PHRASES, FORBIDDEN_PROMPT_PHRASES, splitScoringBlocks } from '@/services/document-workflow/tenderBidScoring';
 import type { DocumentDraftChapter, DocumentFactTrace, DocumentTemplate } from '@/services/document-workflow/types';
 
 const draftChapter = (title: string, content: string): DocumentDraftChapter => ({ id: `d-${title}`, title, content, evidence: [], missingFacts: [] });
@@ -71,38 +71,41 @@ describe('禁用词库', () => {
   });
 });
 
-describe('splitScoringBlocks 评分块切分（r14 精度修正：标题边界 + 阈值 12；r26 标题块独立）', () => {
-  it('标题行与正文单换行紧贴 → 标题独立成块（不再与正文并入同块稀释近词面对齐）', () => {
-    // r26 实测：6 强制模块仅命中 4——标题与正文合并嵌入时标题语义被正文稀释；
-    // 标题行摘出为独立判定单元后与模块查询近词面对齐（短正文 <12 字被过滤）
-    const blocks = splitScoringBlocks(['#### 7.1.1 扬尘污染防治措施', '施工内容甲。', '#### 7.1.2 建筑工人实名制管理', '施工内容乙。'].join('\n'));
-    expect(blocks).toEqual([
-      '#### 7.1.1 扬尘污染防治措施',
-      '#### 7.1.2 建筑工人实名制管理',
-    ]);
-  });
-
-  it('短标题块保留（≥12 字）：含术语原词的标题独立参与嵌入', () => {
-    // R13 实测：空行分隔的 28 字小节标题在旧阈值 30 下被丢弃，评审查询无法与小节近面对齐
-    const blocks = splitScoringBlocks(['#### 7.1.4 生产安全事故应急预案与应急演练', '', '正文段落。'].join('\n'));
-    expect(blocks).toContain('#### 7.1.4 生产安全事故应急预案与应急演练');
-  });
-
-  it('纯编号短标题（<12 字）仍过滤（防噪声块）', () => {
-    const blocks = splitScoringBlocks(['## 7.1', '', '正文块内容足够长。'].join('\n'));
-    expect(blocks).not.toContain('## 7.1');
+describe('splitScoringBlocks 评分判定单元（C0-1 内容级判定：标题不单独成单元且不参与命中文本）', () => {
+  it('空壳标题（无实质正文）不构成判定单元（标题党封堵）', () => {
+    // C0 基线：r28l 仅标题块命中 14/19、6 强制模块全部靠标题单独命中；
+    // 「#### 9.1.2 扬尘污染防治措施」类空壳标题不得单独命中模块查询
+    const blocks = splitScoringBlocks(['#### 9.1.2 扬尘污染防治措施', '#### 9.1.3 建筑工人实名制管理'].join('\n'));
     expect(blocks).toEqual([]);
   });
 
-  it('R13 实测回归：6 小节单换行串联 → 12 块（标题块与正文块各自独立判定单元）', () => {
+  it('单元=正文窗口（标题词的语义诱饵不计，标题承接由映射层 partial 独立判定）', () => {
+    const blocks = splitScoringBlocks(['#### 7.1.1 扬尘污染防治措施', '现场设置围挡并定期洒水降尘，出入口配置车辆冲洗设施。'].join('\n'));
+    expect(blocks).toEqual(['现场设置围挡并定期洒水降尘，出入口配置车辆冲洗设施。']);
+  });
+
+  it('正文不足 12 字（口水句）不构成实质正文 → 无单元', () => {
+    const blocks = splitScoringBlocks(['#### 7.1.4 生产安全事故应急预案与应急演练', '', '正文段落。'].join('\n'));
+    expect(blocks).toEqual([]);
+  });
+
+  it('目录聚簇行剔除（多章节/编号条目堆叠且无句读）', () => {
+    const tocline = '第一章 工程概况 1.1 编制说明与工程概况 1.2 编制依据 1.3 工程范围';
+    const markdown = ['## 施工部署', tocline, '按施工段组织流水作业，主体结构与装饰装修分阶段穿插施工。'].join('\n');
+    const blocks = splitScoringBlocks(markdown);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).not.toContain('第一章');
+    expect(blocks[0]).toContain('按施工段组织流水作业');
+  });
+
+  it('R13 回归：6 小节单换行串联 → 每小节 1 正文单元（超窗才切分）', () => {
     const sections = Array.from({ length: 6 }, (_, i) => [
       `#### 7.1.${i + 1} 小节标题第${i + 1}部分内容说明`,
       `本小节正文内容用于验证切分粒度，段落编号 ${i + 1}。`,
     ].join('\n'));
     const blocks = splitScoringBlocks(sections.join('\n'));
-    expect(blocks).toHaveLength(12);
-    expect(blocks.filter((_, index) => index % 2 === 0).every(block => block.startsWith('####'))).toBe(true);
-    expect(blocks.filter((_, index) => index % 2 === 1).every(block => !block.startsWith('#'))).toBe(true);
+    expect(blocks).toHaveLength(6);
+    expect(blocks.every(block => block.startsWith('本小节正文内容'))).toBe(true);
   });
 });
 
@@ -351,6 +354,15 @@ describe('buildTenderBidScores 编制规范性与低雷同性', () => {
       issues: [],
     });
     expect(scores.uniqueness).toBe(100);
+  });
+
+  it('C0-4 长度归一：长文档重复句按每万字 1 条摊薄，超预算每条扣 1 分', async () => {
+    const base = Array.from({ length: 2000 }, (_, i) => `第${i + 1}段控制要点采用盘扣式脚手架支撑体系，立杆间距900mm，验收合格后进入下道工序。`);
+    const markdown = [...base, ...base.slice(0, 17)].join('\n');
+    // 重复实例 17，预算 max(10, ceil(≈7.4 万/10000)=8) = 10 → 超 7 → 扣 7（旧比例口径仅扣 0.5）
+    expect(duplicateSentenceStats(markdown).duplicateInstances).toBe(17);
+    const scores = await buildTenderBidScores({ markdown, chapters: [], template: null, factTraces: [], issues: [] });
+    expect(scores.uniqueness).toBe(93);
   });
 });
 

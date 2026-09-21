@@ -1,5 +1,5 @@
 /**
- * 模板化治理单源模块（结构标签 / 标题完整性 / 工序表达形式轮换 / 句式骨架指纹）。
+ * 模板化治理单源模块（结构标签 / 标题完整性 / 工序表达形式轮换 / 句式骨架指纹 / 句模聚类复读）。
  *
  * 背景（舒城模板实测）：分部分项章被「施工概况/施工流程/施工方法」三段标签链统治——
  * 段首标签 40 处、同名标签 H4 三组、箭头链 328 处、句式骨架 45/62/46 次、残缺小节名。
@@ -12,6 +12,7 @@
  * 模块依赖仅 utils（归一化与工序表达判定），不得反向引用写作/规划/修复侧模块（防环）。
  */
 import type { ValidationIssue } from './types';
+import { documentTextLength } from './budget';
 import { hasProcessSequenceExpression, normalizeSubsectionTitleForDedup, WORK_PACKAGE_SECTION_RE } from './utils';
 
 // ═══════════════════════════ 一、结构标签遏制 ═══════════════════════════
@@ -189,10 +190,12 @@ export function nextFlowForm(form: FlowSequenceForm): FlowSequenceForm {
 }
 
 const FLOW_FORM_DIRECTIVES: Record<FlowSequenceForm, string> = {
-  顺序词叙述: '用顺序词连贯叙述工序先后（“先……，再……，随后……，然后……，最后……”）',
-  编号步骤: '用编号步骤分行列出工序（“1. 测量放线；2. 基槽开挖；3. 基础施工；……”）',
-  有序列表: '用无序要点列表分行列出工序（“- 基层清理；- 放线定位；- 分层摊铺；……”）',
-  箭头链: '用箭头链表达工序先后（“基层清理→放线定位→分层摊铺→碾压→验收”）',
+  // C4 D7：去内容例句（「先……，再……，随后……，然后……，最后……」等示例被 LLM 直接当模板抄写，
+  // 示例即模板化源头——与 SKELETON_FINGERPRINT_BAN_LINE 去示例同方针），只保留形式特征描述
+  顺序词叙述: '用顺序词连贯叙述工序先后（衔接词按语境自然变化，不得与相邻小节复用同一连接词序列）',
+  编号步骤: '用编号步骤分行列出工序（每行一个步骤，行首连续编号）',
+  有序列表: '用要点列表分行列出工序（每行一个步骤，行首列表符）',
+  箭头链: '用箭头链表达工序先后（工序元素按先后顺序用箭头连接）',
 };
 
 /**
@@ -879,6 +882,224 @@ export function fixSkeletonFingerprintRepetition(markdown: string): SkeletonFing
   }
   return { markdown: next, fixedCount, details };
 }
+
+// ═══════════════════════════ 三·五、句模聚类复读（C4：D3 检测器扩面） ═══════════════════════════
+
+/**
+ * 句模族定义（句式结构帧级，与骨架指纹族互补：骨架指纹=词面焦点族（3 组定位词），
+ * 句模=过程句结构帧）。历史缺陷（C4-1 实测）：fillerDensityReport 语义原型只抓
+ * 「无信息套话」，结构完整的同句式复读在语义原型下判非套话——r28l/s28l 实测
+ * 「先…再…随后…然后…最后」多段链 13/47 句、「并形成记录闭环」11/28 句，filler 高分
+ * 与用户实读复读矛盾；flowFormRepeatIssues 只查相邻块同形式、skeletonFingerprint 只覆盖
+ * 3 族词面，均不覆盖句模级复读（D3）。
+ */
+export interface SentencePatternFamily {
+  id: string;
+  label: string;
+  /** 句级结构帧判定（同一句命中多次只计一次；以「结构帧+连接词共现」为界，不按词面单点） */
+  test: (sentence: string) => boolean;
+}
+
+/** 顺序连接词表（句模族共享：序列链判定的连接词共现计数） */
+const SEQUENCE_CONNECTIVES = ['再', '接着', '随后', '然后', '继而', '最后', '而后'] as const;
+
+/**
+ * 句模族表（P3 item 11：结构帧聚类——「先…再…随后…然后…最后」「完成…后，进行…」
+ * 「…合格后，进入下道工序」「采用…，…，…；…并形成记录闭环」等）。判定均为结构帧
+ * （连接词共现/从句帧 + 后续承接动作），与项目专名无关（通用性红线）；新增族在此登记即
+ * 全链生效（检测/修复目标/评分/复检同源消费）。
+ * C4-1 实机校准（r28l/s28l 探针）：sequence-chain 以「先/首先 + ≥3 连接词」（先…再…随后…最后
+ * 完整链，探针 F1e 口径：全文 13/47 句）为界；仅 2 连接词的短链（先…再…最后）不计数，防误伤；
+ * 句首聚类实测的宣告式复读（「施工按以下顺序组织：」×6、「工序按编号步骤组织：」×7）
+ * 另设 form-announcement 族。
+ */
+export const SENTENCE_PATTERN_FAMILIES: SentencePatternFamily[] = [
+  {
+    id: 'sequence-chain',
+    label: '多段顺序词链（先…再…随后/然后…最后）',
+    test: sentence => /先|首先/u.test(sentence) && SEQUENCE_CONNECTIVES.filter(word => sentence.includes(word)).length >= 3,
+  },
+  {
+    id: 'after-completion-action',
+    label: '完成即转入式（完成/结束…后，进行/开展…）',
+    test: sentence => /(?:完成|完毕|结束|完工)[^。！？\n]{0,40}?后\s*[，,、]?\s*(?:进行|开展|实施|开始|转入|安排|及时|组织)/u.test(sentence),
+  },
+  {
+    id: 'acceptance-next-step',
+    label: '验收衔接式（…合格后，方可/进入下道工序）',
+    test: sentence => /(?:合格|通过验收|验收通过|签认)[^。！？\n]{0,16}?后\s*[，,、]?\s*(?:方可|才能|进入|转入|进行|开始|实施|组织)/u.test(sentence),
+  },
+  {
+    id: 'closed-loop-record',
+    label: '资料闭环式（…并形成记录/资料闭环）',
+    test: sentence => /(?:并)?形成[^。！？\n]{0,24}?(?:记录|资料|台账|档案|影像)(?:闭环|闭合|归档|备查)/u.test(sentence),
+  },
+  {
+    id: 'form-announcement',
+    label: '形式宣告式（施工/工序按顺序/编号步骤…组织：）',
+    test: sentence => /(?:施工|工序|流程|作业|操作)[^。！？\n]{0,14}?(?:按|依)(?:以下|下列)?[^。！？\n]{0,40}?(?:顺序|步骤|编号|次序)[^。！？\n]{0,12}?(?:组织|展开|安排|排列)/u.test(sentence),
+  },
+];
+
+/** 同模式句复读命中线底线（短文档/小样本口径；长文经 sentencePatternThreshold 按正文字数密度上浮） */
+export const SENTENCE_PATTERN_MIN_REPEATS = 6;
+
+/**
+ * 句模复读命中线（C8 S3② 密度归一，P3 口径校准）：绝对计数 6 于长文误伤自然语式
+ * （r28m' 6.5 万字 form-announcement 8 处判误报 vs s28m' 21 万字 46 处判真复读）——
+ * 命中线按正文字数密度上浮：max(6, ceil(documentTextLength/5000))（=2.0 处/万字）。
+ * 校准锚点：r28m'（1.23/万，自然语式）应通过、s28m' 修复前（2.20/万，真复读）应命中、
+ * S3① 引导句确定性剥离后残留（1.82/万）应通过。检测/修复目标/评分/复检四端单源消费。
+ */
+export function sentencePatternThreshold(markdown: string): number {
+  return Math.max(SENTENCE_PATTERN_MIN_REPEATS, Math.ceil(documentTextLength(markdown) / 5000));
+}
+
+/** 句池（markdown 级单源）：剔除标题行/表格行，按 。！？ 切句（保分号链完整——顺序词链常跨分号），
+ * 剥条目编号/列表符前缀，≥8 字。检测/修复目标/复检三端同源引用（防口径漂移）。 */
+function sentencePoolOf(markdown: string): string[] {
+  const sentences: string[] = [];
+  for (const rawLine of markdown.split(/\r?\n/u)) {
+    const line = rawLine.replace(/[\u200b-\u200f\u2060\ufeff]/gu, '').trim();
+    if (!line || /^#{1,6}\s/u.test(line) || line.startsWith('|')) continue;
+    const body = line.replace(/^(?:\d+(?:\.\d+)*[.、)）]|[-*•])\s*/u, '');
+    for (const part of body.split(/(?<=[。！？])/u)) {
+      const sentence = part.trim();
+      if (sentence.length >= 8) sentences.push(sentence);
+    }
+  }
+  return sentences;
+}
+
+/** 单族全文命中计数（检测/复检/报告同源口径） */
+export function countSentencePatternHits(markdown: string, family: SentencePatternFamily): number {
+  return sentencePoolOf(markdown).filter(family.test).length;
+}
+
+/**
+ * 句模复读检测（终检注册）：任一结构帧全篇命中数 ≥ 密度阈值即 error/blocker——同模式句重复即模板
+ * 化观感（句内事实可核查，但与 filler 语义概念正交，属独立治理维度；阈值口径见 sentencePatternThreshold）。
+ */
+export function sentencePatternRepeatIssues(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const pool = sentencePoolOf(markdown);
+  const threshold = sentencePatternThreshold(markdown);
+  for (const family of SENTENCE_PATTERN_FAMILIES) {
+    const count = pool.filter(family.test).length;
+    if (count < threshold) continue;
+    issues.push({
+      level: 'error',
+      severity: 'blocker',
+      category: 'style',
+      owner: 'llm',
+      repairability: 'llm_repairable',
+      message: `句式模版复读：「${family.label}」全篇出现 ${count} 处（复读命中线 ${threshold} 处）——同模式句重复，模板化观感`,
+      suggestion: `保留全文前 ${threshold - 1} 处，其余处逐句改写为自然多样表达（变换句式结构与连接方式，或拆分为多句；各句改写方向须彼此不同，不得集中复用同一替换句式）；改写保留原句全部工序顺序、数值与验收事实，不得删减工艺参数。`,
+    });
+  }
+  return issues;
+}
+
+/** 句模复读修复目标（repairTemplatingIssues 消费：按章聚合超量命中句，保留额度按章序消耗，每章每族至多 4 句） */
+export interface SentencePatternRepairTarget {
+  chapterTitle: string;
+  patternId: string;
+  patternLabel: string;
+  /** 全篇命中总数（prompt 供 LLM 了解治理量级） */
+  totalCount: number;
+  /** 全篇保留额度（复读命中线前 N-1 处） */
+  cap: number;
+  sentences: string[];
+}
+
+export function sentencePatternRepairTargets(markdown: string): SentencePatternRepairTarget[] {
+  const targets: SentencePatternRepairTarget[] = [];
+  const chapters = chapterSlices(markdown);
+  const pool = sentencePoolOf(markdown);
+  const threshold = sentencePatternThreshold(markdown);
+  // 跨族去重：同一句只进最先命中的族（族表顺序即优先级），防同句双锚点重复改写
+  const assigned = new Set<string>();
+  for (const family of SENTENCE_PATTERN_FAMILIES) {
+    const total = pool.filter(family.test).length;
+    if (total < threshold) continue;
+    const cap = threshold - 1;
+    const byChapter = new Map<string, string[]>();
+    for (const chapter of chapters) {
+      if (!chapter.body) continue;
+      const list: string[] = [];
+      for (const sentence of sentencePoolOf(chapter.body)) {
+        if (assigned.has(sentence) || !family.test(sentence) || list.includes(sentence)) continue;
+        list.push(sentence);
+      }
+      if (list.length > 0) byChapter.set(chapter.title, list);
+    }
+    let keepQuota = cap;
+    for (const [chapterTitle, sentences] of byChapter) {
+      const overflow = sentences.slice(keepQuota).slice(0, 4);
+      keepQuota = Math.max(0, keepQuota - sentences.length);
+      if (overflow.length > 0) {
+        overflow.forEach(sentence => assigned.add(sentence));
+        targets.push({ chapterTitle, patternId: family.id, patternLabel: family.label, totalCount: total, cap, sentences: overflow });
+      }
+    }
+  }
+  return targets.slice(0, 16);
+}
+
+/**
+ * 句模宣告引导句确定性剥离（C8 S3①：链尾 markdown-only 收口区消费，零 LLM）——判定与句池
+ * form-announcement 族单源（检测定位=修复定位）：行内最后一句命中该族且以「：」结尾
+ *（「施工按以下顺序组织：」+ 列表的引导语；列表自承载全部信息，删除无损——s28m' 终稿
+ * 46 处族命中中 8 处此类，r28m' 亦含「施工按以下编号步骤组织：」形态）。
+ * 动作：整行仅此句则删行（其后紧邻空行一并压缩，段间保留单一空行）；行内前文保留、
+ * 只删末句子串；删除后不做标点修补（实测前驱句均以「。」结尾，无损最小变更）。
+ * 幂等：无目标/已剥离时零变更可安全重放（零变更时原样返回，不触碰换行与空白）。
+ */
+export function stripSentencePatternAnnouncements(markdown: string): {
+  markdown: string;
+  removedCount: number;
+  removedSentences: string[];
+} {
+  const family = SENTENCE_PATTERN_FAMILIES.find(item => item.id === 'form-announcement')!;
+  const removedSentences: string[] = [];
+  const out: string[] = [];
+  let skipNextBlank = false;
+  for (const rawLine of markdown.split(/\r?\n/u)) {
+    if (skipNextBlank) {
+      skipNextBlank = false;
+      if (rawLine.trim() === '') continue;
+    }
+    const line = rawLine.replace(/[\u200b-\u200f\u2060\ufeff]/gu, '').trim();
+    if (!line || /^#{1,6}\s/u.test(line) || line.startsWith('|')) { out.push(rawLine); continue; }
+    const prefix = line.match(/^(?:\d+(?:\.\d+)*[.、)）]|[-*•])\s*/u)?.[0] ?? '';
+    const lastSentence = line.slice(prefix.length).split(/(?<=[。！？])/u).pop()?.trim() ?? '';
+    if (lastSentence.length < 8 || !/[：:]\s*$/u.test(lastSentence) || !family.test(lastSentence)) {
+      out.push(rawLine);
+      continue;
+    }
+    const cutIndex = rawLine.lastIndexOf(lastSentence);
+    if (cutIndex < 0) { out.push(rawLine); continue; }
+    removedSentences.push(lastSentence);
+    const keptLine = rawLine.slice(0, cutIndex).replace(/\s+$/u, '');
+    if (keptLine.trim() === '') { skipNextBlank = true; continue; }
+    out.push(keptLine);
+  }
+  return removedSentences.length === 0
+    ? { markdown, removedCount: 0, removedSentences }
+    : { markdown: out.join('\n'), removedCount: removedSentences.length, removedSentences };
+}
+
+/**
+ * 泛化归口式帧（C8 S5 U 通道：句级复读坍塌修复轮——duplicateSentenceCollapse——的泛句判据基准）。
+ * s28m' 唯一性 0.59（53/90）复算归因：重复句超预算扣分中泛句复读 excess 37 为「上述/相关/有关
+ * ＋泛对象词」引首的泛化归口句复读（「上述要求纳入…每日检查、每周复核」类），全篇复读 39 种
+ * 仅 1 种命中句模族表 → 修复通道死角；且 r28m'/s28m' 泛句密度不可分（2.47 vs 2.77 处/万字，
+ * 族计数式判据会误触发长文阈值），故判据定为「帧命中 ∩ 完全同句复读」（修复轮消费
+ * duplicateSentenceOccurrences 单源出现明细——检测定位=修复定位）。
+ * v2 校准（probe4）：s28m' 21 种泛句全覆盖，且精确排除「上述＋具体业务名词」的 4 句帧首同形
+ * 业务句（岗位证书/新材料/纠偏动作/规范编号——句首同帧但句体为真实业务事实，跨章复读保留）。
+ */
+export const GENERALIZED_CLOSURE_SENTENCE_RE = /^(?:上述|相关|有关)(?:要求|做法|措施|内容|安排|控制要点|控制项|控制内容|作业要求)/u;
 
 // ═══════════════════════════ 四、标题完整性 ═══════════════════════════
 

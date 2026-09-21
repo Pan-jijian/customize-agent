@@ -698,12 +698,12 @@ export const MARKDOWN_TABLE_FORMAT_RULES = [
  * 内容落地五要素、负面词库禁写、评分点响应、数据表格化、数据自洽、黄金公式与低雷同 */
 export const TENDER_BID_WRITING_RULES = [
   '【内容落地五要素】每项管控措施必须写全五要素：方案 + 流程 + 责任人 + 时间节点 + 验收标准；责任人落到具体岗位（项目经理/技术负责人/施工员/质检员/安全员/材料员等），检查频次量化到每日/每周/每月/不少于X次，整改落到“整改→复查→销项”闭环。禁止只写“加强、落实、确保”式无责任、无标准、无频次的空话。',
-  '【闭环句式密度硬约束】全文每 1500 字至少 1 段完整闭环句式：同一自然段内必须同时出现责任岗位（项目经理/技术负责人/施工员/质检员/安全员/材料员/试验员等）+ 检查频次（每日/每周/每月/不少于X次/定期）+ 整改闭环（整改/复查/销项/复验）三要素，缺一不可；禁止措施段落只有频次数字而无责任岗位，或只有岗位口号而无量化频次。',
+  '【闭环句式密度硬约束】全文每 1500 字至少 1 段完整闭环句式：同一自然段内必须同时出现责任岗位（项目经理/技术负责人/施工员/质检员/安全员/材料员/试验员等）+ 检查频次（每日/每周/每月/不少于X次/定期）+ 整改闭环（整改/复查/销项/复验）三要素，缺一不可；不得以固定句模复读，三要素分散融入叙述（相邻小节不得同句式开头，同一句式全文不得反复使用）；禁止措施段落只有频次数字而无责任岗位，或只有岗位口号而无量化频次。',
   '【空话禁用】措施句不得使用无动作对象、无量化标准的宣传口号式短语作为核心表述，不得以单字虚词（合理、充分、完善、切实、尽量、适时）作为措施句核心动词；一律改写为“责任岗位 + 执行动作 + 量化标准 + 检查频次 + 整改闭环”句式。',
   '【评分点响应】段落首句先回应本节评分点或招标评审关键词，再展开具体措施；一段只写一个主题，避免多个得分点混在大段文字中；三级标题尽量直接放置评分关键词。',
   '【数据表格化】关键数据（建筑面积、层数、总工期、开工竣工节点、设备型号数量、管理人员配置、劳动力人数、材料批次、养护天数、检测频次、检验批划分）优先用表格呈现，不藏在正文大段文字中；正文中数据密集型内容（多组对比数值、多岗位职责分工、多阶段资源配置、多节点工期安排、多类管控指标、多工种劳动力分配）宁可多用表格，直观性优于纯文字叙述。表格前必须有 1～2 句引导叙述说明表格作用与关键结论，表格不能替代小节正文。每张表格应有说明性标题或表前引导句点名用途；同一主题同一数据不得重复堆叠凑数，但内容较多的主题可合理分组为多张表。',
   '【工艺参数密度】正文每 1000 字至少落位 6 处带单位的量化工艺参数（如 20mm、C30、0.5MPa、养护 28 天、搭接长度 500mm、压实度 95%、含水率 3%），均匀分布在各章节而非集中在个别小节；参数必须来自绑定材料或行业通用规范值，不得编造。当绑定材料可提供的参数不足该密度时，以材料全部参数落位为准，禁止用行业先验虚构参数凑数。',
-  '【工序顺序表达】施工流程、施工方法、检验验收类叙述必须有清晰的工序顺序表达，形式按小节序号轮换使用：顺序词叙述（先…再…最后…、依次/先后/按…顺序）、编号步骤、有序列表、箭头链；禁止相邻小节同一形式、禁止通篇同一形式（如通篇箭头链）。每个分部分项方案至少 1 处 3 环节以上的工序顺序表达，全文含工序顺序表达的段落占比不低于 8%。',
+  '【工序顺序表达】施工流程、施工方法、检验验收类叙述必须有清晰的工序顺序表达，工序环节按先后顺序分步展开（相邻小节不得同句式开头，同一句式全文不得反复使用，禁止以固定句模复读）。每个分部分项方案至少 1 处 3 环节以上的工序顺序表达，全文含工序顺序表达的段落占比不低于 8%。',
   '【数据自洽】全文核心数据（工程名称、建设地点、总工期、建筑面积、层数、人员、机械、材料批次、施工阶段划分、危大工程清单）必须前后一致，任何跨章冲突、参数矛盾即为内容缺陷；数据以绑定材料与计划推导结果为准，不得一处一改。',
   '【工艺黄金公式】工艺描述按“工艺名称 + 来源依据 + 适用范围 + 核心工序（按施工顺序 3～5 步）+ 质量控制要点（1～2 个量化指标）”展开；提及规范标准必须带编号（如 GB 50204-2015）并采用现行有效版本，不得虚构或引用已废止版本。',
   '【重难点公式】重难点 = 项目具体条件 + 难度分析 + 影响后果；工程重点 3～5 条、工程难点 3～4 条，每个重难点必须在后续对应章节给出解决措施形成跨章闭环。',
@@ -1456,7 +1456,7 @@ function applyForbiddenTermReplacements(markdown: string, rules?: PromptDocument
 
 export function applyPromptDocumentRules(markdown: string, rules?: PromptDocumentRuleSet, bodyTableForbidden?: boolean) {
   if (!rules) return applyForbiddenTermReplacements(markdown);
-  // 暗标正文禁表（标书编制规格 bodyTablePolicy=forbidden）：关闭提示词必需表格的确定性兜底插入——
+  // 正文禁表（bodyTablePolicy=forbidden，招标显式禁表句）：关闭提示词必需表格的确定性兜底插入——
   // 表格需求已裁定收敛入终稿文末附表区，正文一律纯文字，不插表
   let next = bodyTableForbidden ? markdown : ensureRequiredTables(markdown, rules);
   if (rules.forbidCover) {
@@ -1537,7 +1537,7 @@ function hasMarkdownTable(markdown: string) {
   return /\|[^\n]+\|\s*\n\s*\|\s*:?-{3,}:?\s*\|/u.test(markdown);
 }
 
-/** Markdown 表格块计数（分隔线行计数，与 hasMarkdownTable 同口径；用于暗标正文禁表反向门禁与拆表修复同源复检） */
+/** Markdown 表格块计数（分隔线行计数，与 hasMarkdownTable 同口径；用于正文禁表反向门禁与拆表修复同源复检） */
 export function countMarkdownTables(markdown: string) {
   return markdown.split(/\r?\n/u).filter(line => /^\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*$/u.test(line)).length;
 }
@@ -1625,7 +1625,7 @@ export async function promptDocumentRuleIssues(markdown: string, rules?: PromptD
   if (rules.tocPolicy === 'required' && !hasToc) issues.push({ level: 'error', message: '正文缺少提示词要求的目录', suggestion: '用户明确要求目录时，应基于最终合法正文标题生成目录。' });
   if (rules.forbidCover && hasCover) issues.push({ level: 'error', message: '正文残留封面内容', suggestion: '总控提示词禁止封面时，正式正文必须直接进入第一章。' });
   if (rules.forbidToc && hasToc) issues.push({ level: 'error', message: '正文残留目录内容', suggestion: '总控提示词禁止目录时，正式正文不得生成目录或导航页。' });
-  // 暗标正文禁表（标书编制规格）：提示词必需表格已裁定收敛入终稿文末附表区，正文缺表不再作为缺陷
+  // 正文禁表（bodyTablePolicy=forbidden）：提示词必需表格已裁定收敛入终稿文末附表区，正文缺表不再作为缺陷
   const missingTables = compositionGate?.bodyTableForbidden ? [] : (rules.requiredTables || []).filter(title => !new RegExp(escapedRegExp(title), 'u').test(markdown) || !tableNearTitle(markdown, title));
   if (missingTables.length > 0) issues.push({ level: 'error', message: `正文缺少总控提示词要求的正式表格：${missingTables.join('、')}`, suggestion: '请在对应章节补齐表名、表头、分隔线和数据行，不得只写表名或空表。' });
   const missingKeywords = (rules.requiredKeywords || []).filter(keyword => keyword && !new RegExp(escapedRegExp(keyword), 'u').test(markdown));
@@ -1684,7 +1684,7 @@ export function tableCaptionIssues(markdown: string, bodyTableForbidden?: boolea
 }
 
 /** 正文表题注覆盖率（产品评分 v2 编制规范性/媒介落实构成分量，与 tableCaptionIssues 同源口径）：
- * 正文区（附表区前）表格逐张核验题注；暗标（正文禁表）或正文无表时 total=0，调用方按不可用降级。 */
+ * 正文区（附表区前）表格逐张核验题注；正文禁表或正文无表时 total=0，调用方按不可用降级。 */
 export function tableCaptionCoverage(markdown: string, bodyTableForbidden?: boolean): { total: number; captioned: number } {
   if (bodyTableForbidden) return { total: 0, captioned: 0 };
   const appendixIndex = markdown.search(/^##\s+附表\s*[一二三四五六七八九十\d]{1,3}/mu);
@@ -1702,7 +1702,7 @@ export function plannedStructureIssues(markdown: string, template: DocumentTempl
       continue;
     }
     const body = block.heading + block.body;
-    // 暗标正文禁表（标书编制规格）：模板法定表格小节已裁定移入文末附表区，正文缺表不再作为缺陷
+    // 正文禁表（bodyTablePolicy=forbidden）：模板法定表格小节已裁定移入文末附表区，正文缺表不再作为缺陷
     if (bodyTableForbidden) continue;
     const plans = chapter.tablePlans || [];
     if (plans.length === 0) {
@@ -1726,32 +1726,90 @@ export function plannedStructureIssues(markdown: string, template: DocumentTempl
   return issues;
 }
 
-/**
- * 暗标正文禁表反向门禁（标书编制规格 bodyTablePolicy=forbidden）：扫描正文区域残留 Markdown 表格，
- * 残留即 blocker 进修复/导出门禁——正文表格违反招标暗标编制要求（正文应纯文字，图表入文末附表区）。
- * 文末附表区（## 附表N）与封面块不属正文口径，不在阻断范围。
- */
-export function bodyCompositionTableIssues(markdown: string, bodyTableForbidden?: boolean): ValidationIssue[] {
-  if (!bodyTableForbidden) return [];
-  const appendixIndex = markdown.search(/^##\s+附表\s*[一二三四五六七八九十\d]{1,3}/mu);
-  const bodyMarkdown = (appendixIndex >= 0 ? markdown.slice(0, appendixIndex) : markdown).replace(/<div class="document-cover">[\s\S]*?<\/div>/gu, '');
-  const tables = countMarkdownTables(bodyMarkdown);
-  if (tables === 0) return [];
-  return [{
-    level: 'error',
-    severity: 'blocker',
-    category: 'structure',
-    owner: 'llm',
-    repairability: 'llm_repairable',
-    message: `正文残留 Markdown 表格 ${tables} 处（招标暗标编制要求正文纯文字，图表仅限文末附表区）`,
-    suggestion: '请把表格承载的数据改写为段落式连贯叙述（数值、口径保持不变），删除表格表头与分隔线结构；不得新增或删除其它正文内容。',
-  }];
+/** 正文表名归一（章级授权豁免匹配用）：去空白与标点、去尾「表」字 */
+function normalizeBodyTableTitleKey(title: string) {
+  return (title || '').replace(/[\s:：.。；;，,、（）()【】\[\]「」“”"]/gu, '').replace(/表$/u, '');
+}
+
+/** 表名双向包含匹配（提示词必需表格兜底插入的豁免判据） */
+function bodyTableTitleMatches(candidateTitle: string, requiredKey: string) {
+  const key = normalizeBodyTableTitleKey(candidateTitle);
+  if (!key || !requiredKey) return false;
+  return key.includes(requiredKey) || requiredKey.includes(key);
 }
 
 /**
- * 暗标正文禁图反向门禁（标书编制规格 bodyFigurePolicy=forbidden）：扫描正文区域残留图片
- * （markdown 图片语法/HTML img/图件占位），残留即 blocker 进导出门禁——正文图片违反招标暗标
- * 编制要求（正文应纯文字，图表入文末附表区）。文末附表区（## 附表N）与封面块不属正文口径，不在阻断范围。
+ * 正文表格授权门禁（C1 章级授权口径）：
+ * ① 正文禁表（bodyTablePolicy=forbidden，招标显式禁表句）：正文残留任何 Markdown 表格即 blocker
+ *    （正文应纯文字，结构化数据由文末附表区承载）。
+ * ② 正文允许（默认）：表格须来自系统表格计划——未列入表格计划的章出现 Markdown 表格即 blocker
+ *    （章级授权；实测口径：计划章有表/无计划章无表为健康态，表名级严格匹配误伤率高不作授权判据）。
+ *    提示词必需表格（用户声明必写）可能由终验兜底链插入无计划章——按表名双向包含豁免。
+ * 未传 plannedChapterTitles 时仅执行 ①（防御：调用方未启用章级门禁不误拦）。
+ * 文末附表区（## 附表N）与封面块不属正文口径，不在阻断范围。
+ */
+export function bodyCompositionTableIssues(markdown: string, options?: {
+  bodyTableForbidden?: boolean;
+  /** 章级授权：模板中有表格计划的章标题集合（无计划章有表 → blocker） */
+  plannedChapterTitles?: string[];
+  /** 兜底豁免：提示词必需表格名（用户声明，表名双向包含即豁免） */
+  requiredTableTitles?: string[];
+}): ValidationIssue[] {
+  const appendixIndex = markdown.search(/^##\s+附表\s*[一二三四五六七八九十\d]{1,3}/mu);
+  const bodyMarkdown = (appendixIndex >= 0 ? markdown.slice(0, appendixIndex) : markdown).replace(/<div class="document-cover">[\s\S]*?<\/div>/gu, '');
+  if (options?.bodyTableForbidden) {
+    const tables = countMarkdownTables(bodyMarkdown);
+    if (tables === 0) return [];
+    return [{
+      level: 'error',
+      severity: 'blocker',
+      category: 'structure',
+      owner: 'llm',
+      repairability: 'llm_repairable',
+      message: `正文残留 Markdown 表格 ${tables} 处（招标正文禁表：显式禁表句，图表仅限文末附表区）`,
+      suggestion: '请把表格承载的数据改写为段落式连贯叙述（数值、口径保持不变），删除表格表头与分隔线结构；不得新增或删除其它正文内容。',
+    }];
+  }
+  const planned = options?.plannedChapterTitles;
+  if (!planned) return [];
+  const plannedKeys = new Set(planned.map(title => normalizeGeneratedChapterTitle(title)).filter(Boolean));
+  const requiredKeys = (options?.requiredTableTitles || []).map(normalizeBodyTableTitleKey).filter(Boolean);
+  const issues: ValidationIssue[] = [];
+  // 正文章块枚举：无计划章（章标题不在计划集合）逐章核验章内表格（表名豁免兜底插入的提示词必需表）
+  const chapterHeads = [...bodyMarkdown.matchAll(/^##\s+(.+?)\s*$/gmu)];
+  chapterHeads.forEach((match, index) => {
+    const rawTitle = match[1] || '';
+    const key = normalizeGeneratedChapterTitle(rawTitle);
+    if (!key || plannedKeys.has(key)) return;
+    const start = (match.index || 0) + match[0].length;
+    const end = index + 1 < chapterHeads.length ? (chapterHeads[index + 1].index || bodyMarkdown.length) : bodyMarkdown.length;
+    const block = bodyMarkdown.slice(start, end);
+    const tableCount = countMarkdownTables(block);
+    if (tableCount === 0) return;
+    const candidates = extractMarkdownTableCandidates(block);
+    const scopedMisses = candidates.filter(candidate => !requiredKeys.some(required => bodyTableTitleMatches(candidate.title, required)));
+    const exemptCount = requiredKeys.length > 0 ? candidates.length - scopedMisses.length : 0;
+    const unplannedCount = Math.max(0, tableCount - exemptCount);
+    if (unplannedCount === 0) return;
+    const titles = scopedMisses.map(candidate => (candidate.title ? `「${candidate.title}」` : '（无表题行）'));
+    issues.push({
+      level: 'error',
+      severity: 'blocker',
+      category: 'structure',
+      owner: 'llm',
+      repairability: 'llm_repairable',
+      message: `${rawTitle} 出现 ${unplannedCount} 张未列入表格计划的正文表格（${titles.slice(0, 3).join('、')}${titles.length > 3 ? ' 等' : ''}）——正文表格须来自系统表格计划，不得自设`,
+      suggestion: '请将表格承载数据改写为段落式连贯叙述（数值、口径保持不变），删除表格表头与分隔线结构；确属必要的表格由系统在表格计划中补齐，不得新增其它正文内容。',
+    });
+  });
+  return issues;
+}
+
+/**
+ * 正文禁图反向门禁（标书编制规格 bodyFigurePolicy=forbidden：暗标或招标「不得有图片」证据）：扫描正文区域
+ * 残留图片（markdown 图片语法/HTML img/图件占位括号语），残留即 blocker 进导出门禁。图类要求以「文字框图/
+ * 表格式时间轴 + 图题行」文本化承载（diagramRequirementsPrompt），图题行非图片载体不在此列；
+ * 文末附表区（## 附表N）与封面块不属正文口径，不在阻断范围。
  */
 export function bodyCompositionFigureIssues(markdown: string, bodyFigureForbidden?: boolean): ValidationIssue[] {
   if (!bodyFigureForbidden) return [];
@@ -1767,7 +1825,7 @@ export function bodyCompositionFigureIssues(markdown: string, bodyFigureForbidde
     category: 'structure',
     owner: 'llm',
     repairability: 'llm_repairable',
-    message: `正文残留图片/图件占位 ${total} 处（招标暗标编制要求正文纯文字，图表仅限文末附表区）`,
+    message: `正文残留图片/图件占位 ${total} 处（招标要求正文不得出现图片：图类内容数据化输出，图件归文末附表区）`,
     suggestion: '请删除图片语法、HTML 图片标签与图件占位，图片承载的信息改以段落式文字叙述补充；不得改动其它正文内容。',
   }];
 }

@@ -22,6 +22,7 @@ import { SURFACE_FIX_STEPS } from '../../deterministicFixChains';
 import { displayStage, upsertProgressStage } from '../../progress';
 import { stageAutoSpecGateRepair } from './autoSpecGateRepair';
 import { stageBasisRegulationsRepair } from './basisRegulationsRepair';
+import { stageBasisRegulationsCrossRepair } from './basisRegulationsCrossRepair';
 import { stageDangerousApplicabilityRepair } from './dangerousApplicabilityRepair';
 import { stageQuotationBalanceRepair } from './quotationBalanceRepair';
 import { enforceCanonicalTermAnchorsInSections, isolateCanonicalAnchorLines } from './canonicalTermAnchors';
@@ -51,7 +52,7 @@ export async function stagePostReviewSurface(session: FinalizeSession): Promise<
     chapterDraftsFinal: session.finalChapterDrafts, template: session.template, repairPromptTexts: session.repairPromptTexts,
     requirement: session.requirement, signal: session.signal, generationDiagnostics: session.generationDiagnostics, progressStages: session.progressStages, emitProgress: session.emitProgress, withProgressHeartbeat: session.withProgressHeartbeat,
     finalGateRepairStages: session.finalGateRepairStages,
-    // 标书编制规格（暗标禁表）：交付前补写链与写作链同口径
+    // 标书编制规格（正文表格口径）：交付前补写链与写作链同口径
     bidComposition: session.bidComposition,
   });
   if (plannedSectionFixFinal.plannedSectionFixApplied) {
@@ -74,6 +75,12 @@ export async function stagePostReviewSurface(session: FinalizeSession): Promise<
   // 链尾章级定位 + LLM 定向补列缺失类目（照抄招标文件引用法规 + 按本工程分部分项选列现行规范名称
   // 及编号），位置在引文成对性收口之后（同一编制依据段族系）、toc-consistency 之前
   await stageBasisRegulationsRepair(session);
+  // C5 一致性类 P6（编制依据↔正文双向对账链尾收口，r28l/s28l 实测：声明未用 8/4、引用未声明 7/15
+  // 直坠终门禁）：used_not_declared 确定性补入编制依据同类目（零 LLM）+ declared_not_used 区分性
+  // token 定位应用章 LLM 补引用 / 不适用确定性移除 + 全局复检（净减少/双向不上升/防删除门槛，
+  // 违反即整体回滚）。位置在 basis-regulations-repair 之后（同编制依据段族系：覆盖在前、对账在后）、
+  // dangerous-applicability-repair 之前
+  await stageBasisRegulationsCrossRepair(session);
   // r28j 危大辨识清单漏项链尾收口（s28i 连续两轮实测）：正文出现「拆除工程」等适用前提而辨识
   // 叙述区缺别名精确词，此前只有终检 dangerous-applicability 报出、无修复轮消费——链尾定位含
   // 辨识区章 + LLM 定向补列遗漏项（补列紧邻既有辨识叙述），位置在法规收口之后、toc-consistency 之前
@@ -420,8 +427,8 @@ export async function runSurfaceDeterministicCleans(session: FinalizeSession): P
   // 表仍带题名——「正文 1 张表格缺少题注编号」blocker 直坠门禁）。①以章草稿表头归一键反查同表
   // 题名回填（recoverTitlelessTableTitlesFromDrafts，数据源为写作层原始草稿）；②按导出链同口径
   // 重跑题注注入+编号唯一化（injectTableCaptions 幂等跳过已带题注表、normalizeTableNumbering
-  // 拆粘连/编号重排）——收口后终检所检与导出链产物一致。暗标（正文禁表）由守卫跳过（与导出链
-  // 调用侧同口径）；零回填且链零变化时零成本静默（幂等可重放）。
+  // 拆粘连/编号重排）——收口后终检所检与导出链产物一致。正文禁表（bodyTablePolicy=forbidden，
+  // 招标显式禁表句）由守卫跳过（与导出链调用侧同口径）；零回填且链零变化时零成本静默（幂等可重放）。
   if (!isBodyTableForbidden(session.bidComposition)) {
     const titleRecovery = recoverTitlelessTableTitlesFromDrafts(session.finalMarkdown, session.finalChapterDrafts.map(chapter => chapter.content || ''));
     // B-T1 图题链同口径收口：章级 patch/重建可能使图题编号错位——重跑编号归一化（幂等，无图题零改动）

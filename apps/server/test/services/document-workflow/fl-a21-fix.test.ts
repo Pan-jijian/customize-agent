@@ -68,6 +68,16 @@ describe('B7 自伤句式 A21 形态', () => {
     expect(result.markdown).not.toContain('未采用');
   });
 
+  it('C5 主语泛化：本工程主语变体同句式命中（r28l 实机漏改修复）', () => {
+    // r28l 实机：实句主语为「本工程以成熟可靠的常规工艺为主」，原正则写死「本项目」致失配漏改
+    //（与 C1 地点泛化同类）；「本(项目|工程)」捕获组 + $1 透传后两形态同链改写
+    const md = '本工程以成熟可靠的常规工艺为主，未采用行业认定的新技术、新材料、新工艺或新设备。';
+    const result = fixSelfUnderminingCandidates(md);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).toContain('本工程工艺选择以成熟可靠为原则');
+    expect(result.markdown).not.toContain('未采用');
+  });
+
   it('R9 分包否定式自述改写为自主组织正向表述', () => {
     const md = '招标要求响应（前附表响应条款）：本招标项目不允许分包。本工程不进行分包，全部施工内容由我方自行组织完成。';
     const result = fixSelfUnderminingCandidates(md);

@@ -90,7 +90,61 @@ export interface BlueprintDerivationStrategy {
   powerFallbackText: string;
   /** 临时用水句尾口径 */
   waterNoteText: string;
+  /** C2 附表二数据源：试验检测仪器配置（缺省 DEFAULT_INSTRUMENT_TABLE；策略组可整体覆盖） */
+  instrumentTable?: BlueprintInstrumentRow[];
+  /** C2 附表五/六数据源：临时设施与用地配置（缺省 DEFAULT_SITE_FACILITY_TABLE；策略组可整体覆盖） */
+  siteFacilityTable?: BlueprintSiteFacilityRow[];
 }
+
+/** 试验检测仪器配置行（C2 附表二数据源）：行业通用仪器，投标人拟配备口径（非项目事实推导） */
+export interface BlueprintInstrumentRow {
+  name: string;
+  spec?: string;
+  quantity: number;
+  purpose: string;
+}
+
+/** 临时设施配置行（C2 附表五/六数据源）：面积=固定值（area）或按劳动力峰值人均指标（areaPerCapita）推导 */
+export interface BlueprintSiteFacilityRow {
+  name: string;
+  area?: number;
+  areaPerCapita?: number;
+  locationHint: string;
+  durationHint: string;
+  note: string;
+}
+
+/** 通用试验检测仪器配置（C2 附表二默认集）：覆盖市政/房建/道路类项目常规试验检测需求；
+ * 仅列投标人拟配备口径，型号与数量为行业常规配置，投产列（产地/年份/台时数）如实留空 */
+export const DEFAULT_INSTRUMENT_TABLE: BlueprintInstrumentRow[] = [
+  { name: '水准仪', spec: 'DS3', quantity: 2, purpose: '高程控制测量与标高复核' },
+  { name: '全站仪', spec: '2″级', quantity: 1, purpose: '平面控制测量与施工放样' },
+  { name: '经纬仪', spec: 'J2', quantity: 1, purpose: '轴线投测与角度测量' },
+  { name: '钢卷尺', spec: '50m', quantity: 4, purpose: '距离测量与构件尺寸复核' },
+  { name: '靠尺', spec: '2m', quantity: 4, purpose: '平整度与垂直度检测' },
+  { name: '水准标尺', spec: '5m', quantity: 2, purpose: '水准测量配套' },
+  { name: '混凝土试模', spec: '150mm 立方体', quantity: 12, purpose: '混凝土强度试件成型' },
+  { name: '砂浆试模', spec: '70.7mm 立方体', quantity: 6, purpose: '砂浆强度试件成型' },
+  { name: '坍落度筒', spec: '标准', quantity: 2, purpose: '混凝土拌合物和易性检测' },
+  { name: '环刀', spec: '标准', quantity: 6, purpose: '回填土密实度取样' },
+  { name: '灌砂筒', spec: '标准', quantity: 4, purpose: '压实度现场检测' },
+  { name: '回弹仪', spec: '标准', quantity: 2, purpose: '混凝土强度无损检测' },
+  { name: '电子天平', spec: '0.01g', quantity: 1, purpose: '试验称量' },
+  { name: '温湿度计', spec: '标准', quantity: 4, purpose: '施工环境温湿度记录' },
+];
+
+/** 通用临时设施配置（C2 附表五/六默认集）：办公/生活/生产/堆场/加工区，面积按固定值或
+ * 劳动力峰值人均指标推导；位置为功能区位口径（不指定具体方位，不编造现场事实） */
+export const DEFAULT_SITE_FACILITY_TABLE: BlueprintSiteFacilityRow[] = [
+  { name: '项目部办公区', areaPerCapita: 4, locationHint: '现场出入口附近', durationHint: '施工全过程', note: '项目管理人员办公与会议用房' },
+  { name: '工人生活区', areaPerCapita: 5, locationHint: '场内有组织的生活区（远离作业区）', durationHint: '施工全过程', note: '工人宿舍、食堂与卫生设施' },
+  { name: '材料堆放场', area: 800, locationHint: '场内运输道路旁', durationHint: '施工全过程', note: '钢筋、管材、砂石料分类堆放并分区标识' },
+  { name: '加工区（钢筋/木工）', area: 300, locationHint: '材料堆放场邻侧', durationHint: '主体施工期间', note: '钢筋加工棚与木工加工棚' },
+  { name: '机械设备停放区', area: 200, locationHint: '场内生产区', durationHint: '施工全过程', note: '施工机械停放与日常维护' },
+  { name: '试验用房', area: 60, locationHint: '项目部办公区附近', durationHint: '施工全过程', note: '标准养护室与现场试验操作间' },
+  { name: '临时用电配电房', area: 30, locationHint: '靠近负荷中心处', durationHint: '施工全过程', note: '总配电房与分配电箱布置' },
+  { name: '消防与卫生设施', area: 40, locationHint: '生活区与材料区分别设置', durationHint: '施工全过程', note: '消防器材点、沉淀池与垃圾收集点' },
+];
 
 // ═══════════════════════════════ 气候区域表（替换硬编码华东值） ═══════════════════════════════
 

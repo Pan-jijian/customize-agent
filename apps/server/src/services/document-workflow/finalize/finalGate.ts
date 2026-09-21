@@ -10,6 +10,7 @@ import { reviewTemplatingSemantics } from '../templatingReview';
 import { callBreakdownTopDetails, callBreakdownTopSummary, phaseWaterfallDetails, slowMetricSummary } from '../documentGeneratorHelpers';
 import { displayStage } from '../progress';
 import { buildSuspensionChecklist, formatSuspensionDetails } from '../suspensionChecklist';
+import { buildDeliveryReviewReport, saveDeliveryReviewReport } from '../deliveryReviewReport';
 import type { FinalizeSession } from './finalizeSession';
 
 export async function stageFinalGate(session: FinalizeSession): Promise<void> {
@@ -57,4 +58,37 @@ export async function stageFinalGate(session: FinalizeSession): Promise<void> {
     : '';
   session.finalStages.push(displayStage({ type: 'validation', roleId: 'document-diagnostics', status: 'success', message: `性能统计：LLM ${session.generationDiagnostics.llm.calls} 次，失败 ${session.generationDiagnostics.llm.failures} 次，瞬态重试 ${session.generationDiagnostics.llm.retries} 次，schema 校验失败 ${session.generationDiagnostics.llm.schemaFailures} 次，峰值并行 ${session.generationDiagnostics.llm.maxActive}，检索 ${session.generationDiagnostics.evidence.searchQueries} 次/${Math.round(session.generationDiagnostics.evidence.searchMs / 1000)} 秒，证据上下文 ${session.generationDiagnostics.evidence.contextChars} 字，噪声过滤 ${session.generationDiagnostics.evidence.filteredNoise} 条，预算裁剪 ${session.generationDiagnostics.evidence.budgetDropped} 条，质量问题 阻断${session.generationDiagnostics.quality.blockingCount}/重要${session.generationDiagnostics.quality.importantCount}/轻微${session.generationDiagnostics.quality.minorCount}${factSanitizeMessage}${slowMetrics ? `，Top耗时：${slowMetrics}` : ''}${callTopSummary ? `，调用输入Top5：${callTopSummary}` : ''}`, details: [...phaseWaterfallDetails(session.generationDiagnostics.metrics), ...callBreakdownTopDetails(session.generationDiagnostics.llm.callBreakdown)] }, { subtitle: '后台诊断' }));
 
+  // C6 交付报告类（P5/D5）：三件套报告确定性落盘（评分/进度/下轮预估）——纯聚合既有产物（零新增
+  // 判定，口径与主尺同源）；构建在自身 stage 入列之前（报告内容不含自引用，离线复算可确定性重建）；
+  // 写盘失败不阻断交付（stage 显性记录 failed）；documentId 缺失时跳过（直接调用管线场景）
+  if (session.documentId) {
+    try {
+      const reportMarkdown = buildDeliveryReviewReport({
+        documentId: session.documentId,
+        title: session.template.outputTitle,
+        qualityReport: session.qualityBundle.qualityReport,
+        professionalScore: session.professionalScore,
+        exportGate: session.qualityBundle.finalExportGate,
+        stages: session.finalStages,
+        metrics: session.generationDiagnostics.metrics,
+      });
+      const reportPath = saveDeliveryReviewReport(session.projectRoot, session.documentId, reportMarkdown);
+      const blockingCountForReport = session.qualityBundle.finalExportGate.blockingIssues.length;
+      session.finalStages.push(displayStage({
+        type: 'reference',
+        roleId: 'delivery-review-report',
+        status: 'success',
+        message: `交付三件套报告已产出：${reportPath}`,
+        details: [
+          session.qualityBundle.qualityReport.summary,
+          `专业度（从属口径）：${session.professionalScore.summary}`,
+          `阻断：${blockingCountForReport} 项${blockingCountForReport > 0 ? '（人工复核清单随报告归档，不阻断交付）' : '（终检检测器全部通过）'}`,
+          '下轮预估目标：按当前六维缺口计算各维提升空间与达标路径（见报告第三节）',
+        ],
+      }, { subtitle: '交付报告' }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      session.finalStages.push(displayStage({ type: 'reference', roleId: 'delivery-review-report', status: 'failed', message: `交付三件套报告产出失败（不阻断交付）：${message}` }, { subtitle: '交付报告' }));
+    }
+  }
 }

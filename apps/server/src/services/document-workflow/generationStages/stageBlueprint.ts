@@ -57,7 +57,7 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
     // 标书编制规格展示（防御：阶段 1 判定缺失时降级文案——展示行不得阻断蓝图挂载）
     const compositionSpec = session.understanding.bidComposition;
     const compositionLabel = compositionSpec
-      ? `${compositionSpec.bidType === 'blind' ? '暗标（正文禁表格/禁图片，图表转文末附表区）' : compositionSpec.bidType === 'open' ? '明标（正文可含表格）' : '未识别勾选标记（按常规口径）'}${compositionSpec.appendixPlan.length > 0 ? `；文末附表 ${compositionSpec.appendixPlan.length} 项` : ''}`
+      ? `${compositionSpec.bidType === 'blind' ? `暗标（正文${compositionSpec.bodyTablePolicy === 'forbidden' ? '禁表格（显式禁表句）' : '表格按证据口径允许'}/禁图片）` : compositionSpec.bidType === 'open' ? '明标（正文可含表格）' : '未识别勾选标记（按常规口径）'}${compositionSpec.appendixPlan.length > 0 ? `；文末附表 ${compositionSpec.appendixPlan.length} 项` : ''}`
       : '未识别（阶段 1 判定缺失，按常规口径）';
     upsertProgressStage(session.global.progressStages, displayStage({
       type: 'validation',

@@ -26,7 +26,7 @@ vi.mock('@/services/document-workflow/semanticSimilarity', () => ({
 import { FINALIZE_REPAIR_ROUNDS } from '@/services/document-workflow/detectorFixerRegistry';
 import { stageDeliveryStructureClosure } from '@/services/document-workflow/finalize/repairRounds/deliveryStructureClosure';
 import { replaySurfacePunctuationClosure } from '@/services/document-workflow/finalize/repairRounds/postReviewSurface';
-import { splitOverlengthBodyParagraphs } from '@/services/document-workflow/helpers/markdownCleanup';
+import { splitLongParagraphs, splitOverlengthBodyParagraphs } from '@/services/document-workflow/helpers/markdownCleanup';
 import type { FinalizeSession } from '@/services/document-workflow/finalize/finalizeSession';
 
 const SRC_DIR = path.resolve(__dirname, '../../../src/services/document-workflow');
@@ -76,7 +76,12 @@ describe('delivery-structure-closure 接线（防「修复器存在但未接线�
     const alignIndex = rounds.indexOf('section-alignment-sweep');
     const closureIndex = rounds.indexOf('delivery-structure-closure');
     expect(closureIndex).toBeGreaterThan(alignIndex);
-    expect(closureIndex).toBe(rounds.length - 1);
+    // C8 S3 链尾收口轮（sentence-pattern-sweep）紧随其后，同为链尾 markdown-only 收口
+    expect(rounds[closureIndex + 1]).toBe('sentence-pattern-sweep');
+    // C8 S5 句级复读坍塌轮（duplicate-sentence-collapse）续接句模收口，同为链尾 markdown-only 收口
+    expect(rounds[closureIndex + 2]).toBe('duplicate-sentence-collapse');
+    // C8 S6 A' 对象错位（templating-tail-replay）续接复读坍塌，markdown 版 templating 重放
+    expect(rounds[closureIndex + 3]).toBe('templating-tail-replay');
   });
 
   it('documentPipeline.ts 在最后净变更点之后、stageFinalGate 之前调用', () => {
@@ -209,6 +214,46 @@ describe('splitOverlengthBodyParagraphs 切分器矩阵（D-T6 ③）', () => {
     const result = splitOverlengthBodyParagraphs(markdown);
     expect(result.splitCount).toBe(0);
     expect(result.markdown).toBe(markdown);
+  });
+});
+
+/**
+ * C8 S2① 括号深度感知切分（splitOutsideBrackets，splitLongParagraphs/splitOverlengthBodyParagraphs 共用）：
+ * s28m' stage 162 实证：引用词条「（GB 50016-2014，2018年版）」内逗号被当分句点切开，产生
+ * 「（GB 50016-2014，」悬挂括号残片（尾段缺右括号）。修复契约：仅在括号外（深度 0）的分隔符处
+ * 切分；未闭合左括号之后不再切分（宁可段超长不可劈语法）；多余右括号不阻断后续切分。
+ */
+describe('C8 S2① 括号深度感知切分（防悬挂括号残片）', () => {
+  const CITATION = '（GB 50016-2014，2018年版；GB 55037-2022）';
+  const SENTENCE = '防火设计依据现行国家工程建设消防技术标准执行。';
+  const CITATION_LINE = SENTENCE.repeat(20) + CITATION + '并按图审意见完善。';
+
+  it('引用词条内部逗号/分号不参与切分：词条原样保留、零残片、零丢失、幂等', () => {
+    expect(CITATION_LINE.length).toBeGreaterThan(380);
+    const result = splitOverlengthBodyParagraphs(CITATION_LINE);
+    expect(result.splitCount).toBeGreaterThanOrEqual(1);
+    // 引用词条原样保留（历史实现切出「（GB 50016-2014，」+空行+「2018年版）」悬挂残片）
+    expect(result.markdown).toContain(CITATION);
+    expect(result.markdown).not.toMatch(/（GB 50016-2014，\s/u);
+    expect(result.markdown.split('\n').every(line => line.length <= 380)).toBe(true);
+    // 正文零丢失 + 幂等
+    expect(result.markdown.replace(/\s/gu, '')).toBe(CITATION_LINE.replace(/\s/gu, ''));
+    const again = splitOverlengthBodyParagraphs(result.markdown);
+    expect(again.splitCount).toBe(0);
+    expect(again.markdown).toBe(result.markdown);
+    // 写作期同源切分器（splitLongParagraphs）同口径保护
+    expect(splitLongParagraphs(CITATION_LINE)).toContain(CITATION);
+  });
+
+  it('未闭合左括号之后不切分：宁可段超长不可劈语法（内容零丢失原样返回）', () => {
+    const unclosed = '（未闭合引用说明' + '内容。'.repeat(130);
+    const line = `前置引导句。${unclosed}`;
+    expect(line.length).toBeGreaterThan(380);
+    const result = splitOverlengthBodyParagraphs(line);
+    expect(result.splitCount).toBe(0);
+    // 未闭合括号之后的全部标点均不成为切分点：词条整段保持连续
+    expect(result.markdown).toContain(unclosed);
+    expect(result.markdown.replace(/\s/gu, '')).toBe(line.replace(/\s/gu, ''));
   });
 });
 

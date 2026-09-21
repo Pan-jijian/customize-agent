@@ -2,21 +2,21 @@ import type { AutoDocumentSpecGateRule, AutoDocumentSpecPackage, GateRuleEvaluat
 import { readEngineeringDocumentConfig } from '../document-validation/engineeringDocumentConfigService';
 import { CHAPTER_HEADING_RE, EXPORT_BLOCKING_ISSUE_RE, EXPORT_GATE_PRECISION_ISSUE_RE, EXPORT_GATE_PROJECT_CONTAMINATION_RE, FALLBACK_GATE_EVALUATORS, FORMAL_PLACEHOLDER_PATTERNS, LINE_SPLIT_RE, MARKDOWN_IMAGE_RE, MARKDOWN_SECTION_HEADING_RE, MARKDOWN_TABLE_DIVIDER_RE, MARKDOWN_TABLE_ROW_RE, MARKDOWN_TOP_HEADING_RE, NON_BLANK_RE, PRECISE_FACT_MIN_TOKEN_COUNT, PRECISE_FACT_MIN_USAGE_RATE, PRECISE_FACT_SOURCE_RE, PRECISE_FACT_TOKEN_RE, DOCUMENT_BASIC_INFO_BLOCK_RE, DOCUMENT_BASIC_INFO_FIELDS, DOCUMENT_BASIC_INFO_TABLE_RE, PROMPT_EXAMPLE_BLOCK_RE, QUALITY_SEVERITY_RULES, SPEC_GATE_RULE_HANDLERS, SPECIFICATION_CONTENT_RE, STRUCTURED_DATA_CONTENT_RE, TABLE_PLACEHOLDER_APPROX_RE, TABLE_PLACEHOLDER_CELL_FORMS_RE, TOC_BLOCK_RE, TOC_INDENTED_SECTION_LINE_RE, TOC_SECTION_LINE_RE, WHITESPACE_RE } from '../constants';
 import type { QualitySeverity, QualitySeveritySummary, SpecGateRuleContext } from '../types';
-import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel, DocumentTemplate, ExportGateResult, NumericScopeConflict, ProjectBinding, PromptBinding, ValidationIssue } from './types';
+import type { BoqRowTrace, DocumentDraftChapter, DocumentFact, DocumentFactsModel, DocumentTemplate, ExportGateResult, NumericScopeConflict, ProjectBinding, PromptBinding, ValidationIssue } from './types';
 import type { FactTokenScopeClassifier } from './factTokenClassifier';
 import type { SemanticSimilarityFn } from './semanticSimilarity';
-import { buildSemanticSimilarity } from './semanticSimilarity';
+import { buildSemanticSimilarity, SEMANTIC_COVERAGE_THRESHOLD } from './semanticSimilarity';
 import type { ContentNeedKey, DepthDimension, ProfessionalDepthAnalysis } from './professionalDepthClassifier';
 import { documentTextLength, estimateDocumentPages } from './budget';
 import { extractEngineeringMeasureTokens, normalizeEngineeringTextForFactMatch } from './engineeringUnits';
-import { classifyNumericTraceToken } from './documentFactTrace';
+import { buildBoqRowTraces, classifyNumericTraceToken } from './documentFactTrace';
 import { displayChapterTitle, isTenderClauseFragmentTitle } from './outline';
 import { extractGeneratedSections, mergeTableLineBreaks, sectionHeadingIdentityKey } from './markdownComposer';
 import { stripTableCellInvisibleChars } from './helpers/markdownCleanup';
 import { PAIRED_PUNCTUATION_SYMBOLS } from './structureIntegrityRules';
 import type { BlueprintData } from './integratedBlueprint';
 import { drawingFactPlacement, type DrawingFactLock } from './drawingFactLock';
-import { assignBillRowChapter, classifyBillPlacementExemption, scanBillExplicitDispositions } from './billFactLock';
+import { assignBillRowChapter, scanBillExplicitDispositions } from './billFactLock';
 import { buildResourceBreakdownAuthority, scanEquipmentCountClaims, scanResourceBreakdownClaims } from './resourceBreakdownNumbers';
 import { evidenceSatisfiesSpecField } from './factMatching';
 import { readPromptContents } from './templateStore';
@@ -698,13 +698,24 @@ export function formalHeadingHierarchyIssues(markdown: string): ValidationIssue[
  * 豁免口径：①合计/小计/总计/累计行的「—」为不适用语义（cellIndex>0，行首格即合计标签）；
  * ②规格型号/规格/型号/额定功率/功率/生产能力/产能列的「—」为「源资料不提供、强填诱导编造」合法形态
  * （丰乐镇实测：蛙式打夯机无型号，LLM 修复轮曾编造 HW-60；r28g B7 扩围额定功率/生产能力）。
- * 其余占位词（若干/约/待定/无等）任何行任何列均不豁免，只豁免单个/多个破折号形态。
+ * C5 扩围（s28l 实机 8 行×3 列 24 处误报）：国别产地/制造年份/用于施工部位/已使用台时数为设备
+ * 仪器附表生成端硬编码「—」的投产信息列（composeAppendices renderEquipmentAppendix/
+ * renderInstrumentAppendix 注明「如实留空不编造」），与规格类列同族豁免——生成端故意留空与
+ * 检测端报阻断的口径冲突在此单源消解（豁免列与附表生成端表头保持对齐）。
+ * C8 S4-③ 扩围（r28m' 维保台账实锤）：业务过程记录列（存在问题/整改措施/复查结果/备注等）的
+ * 「无」是合法业务语义（无问题/无需整改/无补充），非内容缺失占位符——「存在问题=无、整改措施=无、
+ * 复查结果=正常」3 行 6 处误报实锤；豁免限于「无」形态，其余占位词（若干/约/待定等）任何列不豁免。
+ * 其余占位词（若干/约/待定等）在任何行任何列均不豁免；「无」仅在业务过程记录列豁免（C8 S4-③），
+ * 破折号形态按上述列口径豁免。
  * r28f #42 归因：警告层此前用裸正则（无豁免口径），豁免列「—」被照报（实测 23 处误报）——统一到本判定。 */
 export function isNonExemptTablePlaceholderCell(cell: string, refs: { rowFirstCell?: string; headerCell?: string; cellIndex: number }): boolean {
   if (!TABLE_PLACEHOLDER_CELL_FORMS_RE.test(cell) && !TABLE_PLACEHOLDER_APPROX_RE.test(cell)) return false;
+  // C8 S4-③ 业务语义列豁免：「无」在过程记录列是业务判断结论（无问题/无整改），仅破折号形态豁免
+  // 会报阻断——豁免列与生成端台账列名保持对齐（仅「无」类占位词豁免，不扩到模糊量词）
+  if (refs.headerCell && /存在问题|整改措施|整改情况|复查结果|处理情况|检查情况|落实情况|验收结论|备注|说明/u.test(refs.headerCell) && /^无+$/u.test(cell)) return false;
   if (!/^(?:—+|-+)$/u.test(cell)) return true;
   if (refs.cellIndex > 0 && /^(?:合计|小计|总计|累计)/u.test(refs.rowFirstCell || '')) return false;
-  if (refs.headerCell && /规格型号|规格|型号|额定功率|功率|生产能力|产能/u.test(refs.headerCell)) return false;
+  if (refs.headerCell && /规格型号|规格|型号|额定功率|功率|生产能力|产能|国别产地|制造年份|用于施工部位|已使用台时数/u.test(refs.headerCell)) return false;
   return true;
 }
 
@@ -798,28 +809,34 @@ export function markdownTableQualityIssues(markdown: string): ValidationIssue[] 
   return issues;
 }
 
-/** 提取「编制依据/编制说明」小节文本（H2-H4 或粗体标题，到下一同级/更高级标题止；找不到返回空串）。
- * r16 丰乐镇 B3-B7 归因：单轮「包含匹配」被「编制说明与工程概况」类复合标题抢先命中（首个命中即
- * 返回，真实「编制依据」小节位于其后被整体跳过，法规 5 项检查全落空报缺）——两轮扫描：先精确
- * 「编制依据」候选，无再退回「编制说明/编制原则/编制目的」；均无时静默跳过（模板结构差异不误伤）。
- * r28j 归因（r28i 工程概况实测 3 类缺失误报）：真实清单以「正文行 + 表格」形态落在与关键词无关的
- * 标题段内（「其他分部分项工程施工要点」段内正文行「编制依据涵盖…」「施工组织设计编制依据清单」），
- * 标题两轮均不可见，二轮退回候选误命中「编制说明与工程基本信息」（零书名号）报缺空转修复轮——
- * 第三轮词锚扫描：非标题正文行含「编制依据」字样 → 上方最近标题段（≤60 行）并入候选（与标题段
- * 提取同源、按文本去重）；目录区词锚（点导引/制表符行、上方标题含「目录」）不参与。候选并集参与
- * 五类检查；三路均无痕迹时仍静默跳过（模板结构差异不误伤）。 */
-function extractBasisRegulationSection(markdown: string): string {
+/** 编制依据小节候选行范围（[start, end) 行索引闭开区间；start 指向标题行本身，title 为标题文本）。
+ * C5 一致性类 P6 双向对账与文本提取共用同一扫描单源：声明侧取区段文本、引用侧排除区段取正文，
+ * 口径不得双轨（检测端/修复端在同一范围判定上成立——检测定位=修复定位）。 */
+export interface BasisSectionRange {
+  start: number;
+  end: number;
+  level: number;
+  title: string;
+}
+
+/** 编制依据小节候选行范围（三路扫描单源；与 extractBasisRegulationSection 文本互逆等价）：
+ * 两轮标题扫描（先精确「编制依据」，无再退回「编制说明/编制原则/编制目的」；首个命中即止）；
+ * 第三轮词锚扫描（非标题正文行含「编制依据」字样 → 上方最近标题段（≤60 行）并入候选，
+ * 目录区词锚排除）；按 start 去重（多路命中同段只记一次）。 */
+export function basisRegulationSectionRanges(markdown: string): BasisSectionRange[] {
   const lines = markdown.split(/\r?\n/u);
-  const extractFrom = (startIndex: number, level: number, title: string): string => {
-    const parts: string[] = [title];
+  const rangeEndFrom = (startIndex: number, level: number): number => {
     for (let j = startIndex + 1; j < lines.length; j += 1) {
       const next = /^(#{1,4})\s+(.+)$/u.exec(lines[j].trim());
-      if (next && (level === 0 || next[1].length <= level)) break;
-      parts.push(lines[j]);
+      if (next && (level === 0 || next[1].length <= level)) return j;
     }
-    return parts.join('\n');
+    return lines.length;
   };
-  const candidates: string[] = [];
+  const ranges: BasisSectionRange[] = [];
+  const pushRange = (start: number, level: number, title: string) => {
+    if (ranges.some(range => range.start === start)) return;
+    ranges.push({ start, end: rangeEndFrom(start, level), level, title });
+  };
   for (const titleRe of [/编制依据/u, /编制说明|编制原则|编制目的/u]) {
     let hit = false;
     for (let i = 0; i < lines.length; i += 1) {
@@ -829,8 +846,7 @@ function extractBasisRegulationSection(markdown: string): string {
       if (!hashHeading && !boldHeading) continue;
       const title = hashHeading ? hashHeading[2] : (boldHeading?.[1] ?? '');
       if (!titleRe.test(title)) continue;
-      const level = hashHeading ? hashHeading[1].length : 0;
-      candidates.push(extractFrom(i, level, title));
+      pushRange(i, hashHeading ? hashHeading[1].length : 0, title);
       hit = true;
       break;
     }
@@ -842,24 +858,38 @@ function extractBasisRegulationSection(markdown: string): string {
     if (!trimmed.includes('编制依据')) continue;
     if (/^#{1,6}\s/u.test(trimmed) || /^\*\*(.+)\*\*$/u.test(trimmed)) continue;
     if (trimmed.includes('\t') || /[.·…]{4,}/u.test(trimmed)) continue;
-    let headingIndex = -1;
-    let level = 0;
-    let headingTitle = '';
     for (let j = i - 1; j >= 0; j -= 1) {
       const up = lines[j].trim();
       const hashHeading = /^(#{2,4})\s+(.+)$/u.exec(up);
       const boldHeading = hashHeading ? null : /^\*\*(.+)\*\*$/u.exec(up);
       if (!hashHeading && !boldHeading) continue;
-      headingIndex = j;
-      level = hashHeading ? hashHeading[1].length : 0;
-      headingTitle = hashHeading ? hashHeading[2] : (boldHeading?.[1] ?? '');
+      if (i - j > 60) break;
+      const headingTitle = hashHeading ? hashHeading[2] : (boldHeading?.[1] ?? '');
+      if (/目录/u.test(headingTitle)) break;
+      pushRange(j, hashHeading ? hashHeading[1].length : 0, headingTitle);
       break;
     }
-    if (headingIndex < 0 || i - headingIndex > 60 || /目录/u.test(headingTitle)) continue;
-    const section = extractFrom(headingIndex, level, headingTitle);
-    if (!candidates.includes(section)) candidates.push(section);
   }
-  return candidates.join('\n');
+  return ranges.sort((left, right) => left.start - right.start);
+}
+
+/** 提取「编制依据/编制说明」小节文本（H2-H4 或粗体标题，到下一同级/更高级标题止；找不到返回空串）。
+ * r16 丰乐镇 B3-B7 归因：单轮「包含匹配」被「编制说明与工程概况」类复合标题抢先命中（首个命中即
+ * 返回，真实「编制依据」小节位于其后被整体跳过，法规 5 项检查全落空报缺）——两轮扫描：先精确
+ * 「编制依据」候选，无再退回「编制说明/编制原则/编制目的」；均无时静默跳过（模板结构差异不误伤）。
+ * r28j 归因（r28i 工程概况实测 3 类缺失误报）：真实清单以「正文行 + 表格」形态落在与关键词无关的
+ * 标题段内（「其他分部分项工程施工要点」段内正文行「编制依据涵盖…」「施工组织设计编制依据清单」），
+ * 标题两轮均不可见，二轮退回候选误命中「编制说明与工程基本信息」（零书名号）报缺空转修复轮——
+ * 第三轮词锚扫描：非标题正文行含「编制依据」字样 → 上方最近标题段（≤60 行）并入候选（与标题段
+ * 提取同源、按文本去重）；目录区词锚（点导引/制表符行、上方标题含「目录」）不参与。候选并集参与
+ * 五类检查；三路均无痕迹时仍静默跳过（模板结构差异不误伤）。
+ * C5 起候选范围由 basisRegulationSectionRanges 单源供出（本函数与范围扫描互逆等价，供双向对账
+ * 排除区段复用）。 */
+export function extractBasisRegulationSection(markdown: string): string {
+  const lines = markdown.split(/\r?\n/u);
+  return basisRegulationSectionRanges(markdown)
+    .map(range => [range.title, ...lines.slice(range.start + 1, range.end)].join('\n'))
+    .join('\n');
 }
 
 /** 编制依据小节法规/规范完整性检测（十度实测缺陷：LLM 有时漏写法规清单，
@@ -1223,6 +1253,26 @@ const SCALE_GAP_WORDS_RE = /占地|用地|地下|地上|办公|生活|附属|辅
 // 口径词紧前上下文防护：只挡“XX区/XX室/XX房”式专项范围词（gap 防护已覆盖占地/地下等语义词），
 // 避免“地上6层、总建筑面积28570.36”这类正确表述被误 skip（防错改优先于漏检）
 const SCALE_PREFIX_WORDS_RE = /办公区|生活区|加工区|施工区|堆场|门卫|配电|泵房|锅炉房|车库|车棚|岗亭|传达|警卫|样板房|售楼|门房|地下室|楼层|单层|每层|架空|雨棚/u;
+// C8 S2② 长窗实体隔离门（48 字符）：子项实体词出现在口径词更远的前文时，16 字符紧前窗、空 gap
+// 与 24 字符语义窗均无法拦截（s28m' stage 145 实证：「综合配套用房节能设计按甲类…（表A.0.3-1）
+// 执行，建筑面积774.11m2」「门卫节能设计按乙类…（表A.0.3-2）执行，建筑面积13.85m2」中实体词距
+// 口径词约 33~35 字符，774.11/13.85 被确定性替换为项目总量 937.72，同段出现 937.72 与 774.11
+// 并排矛盾）。口径词前 48 字符（不跨空行段落边界）内出现实体词 → 视为子项实体归属语境：检测侧
+// 不列冲突、确定性修复不替换（防错改优先），被跳过项经 scaleSkipped 以「规模口径复核」warning
+// 显性交 LLM 依事实卡核对口径（零静默降级）。「栋/座/处」须带数字前缀（「3栋」），防「处理」类
+// 误命中；「单体」不入列——资料「单体建筑面积28570.36」是建筑总量合法表述（scaleConsistency
+// 检测/修复双侧回归锁定），入列会使期望口径解析与败选值替换同时失效。
+const SCALE_ENTITY_WORDS_RE = /门卫|门房|岗亭|值班室|传达室|警卫室|公厕|车棚|雨棚|配电房|配电室|泵房|水泵房|锅炉房|样板房|售楼处|构筑物|用房|配套设施|\d{1,3}[栋座处]/u;
+const SCALE_ENTITY_WINDOW_CHARS = 48;
+
+/** 实体隔离门：取口径词前 48 字符窗口（空行段落边界外不取，单换行表格行/折行同段保留）、
+ * 去除空白后做实体词判定（防「配套 设施」折行形态漏判）。命中 → 该候选属子项实体语境。 */
+function entityAttributionHit(text: string, index: number): boolean {
+  const windowText = text.slice(Math.max(0, index - SCALE_ENTITY_WINDOW_CHARS), index);
+  const boundary = windowText.lastIndexOf('\n\n');
+  const segment = boundary >= 0 ? windowText.slice(boundary + 2) : windowText;
+  return SCALE_ENTITY_WORDS_RE.test(segment.replace(/\s+/gu, ''));
+}
 const COST_GAP_WORDS_RE = /暂列|暂估|费率|税率|利润|规费|安全文明|措施费|人工费|材料费|机械费|管理费|暂定/u;
 
 // 阶段五语义升级：范围词/费用词 gap 语义扩围——词面未命中但语义属"子项/专项口径"的上下文
@@ -1261,19 +1311,20 @@ async function buildCostGapGate(embedDocuments?: (texts: string[]) => Promise<nu
   });
 }
 
-async function scopedNumericEntries(text: string, scopeRe: RegExp, unitRe: RegExp, gapWords?: RegExp, prefixWords?: RegExp, gapGate?: (texts: string[]) => Promise<boolean[]>) {
+async function scopedNumericEntries(text: string, scopeRe: RegExp, unitRe: RegExp, gapWords?: RegExp, prefixWords?: RegExp, gapGate?: (texts: string[]) => Promise<boolean[]>, entityWords?: RegExp) {
   const entries: Array<{ value: string; unit: string; scope: string }> = [];
   const skipped: Array<{ value: string; unit: string; scope: string; context: string }> = [];
   const seen = new Set<string>();
   const pattern = new RegExp(`(?:${scopeRe.source})(?:[^\\n。；;，,]{0,14}?)(\\d{2,}(?:[.,]\\d+)?\\s*万?)\\s*(${unitRe.source})`, 'giu');
   const matches = [...text.matchAll(pattern)];
-  // 语义扩围：词面 gap/prefix 均未命中的候选做语义复核，语义属范围词/费用词 → 同样跳过比对
+  // 语义扩围：词面 gap/prefix 均未命中的候选做语义复核，语义属范围词/费用词 → 同样跳过比对；
+  // 长窗实体词命中（C8 S2②）属确定性词面判定，不进语义复核队列（已确定跳过，省一次 LLM 调用）
   const uncertain = gapGate
     ? matches
       .filter(match => {
         const gap = match[0].slice(0, match[0].indexOf(match[1]));
         const prefix = text.slice(Math.max(0, (match.index ?? 0) - 16), match.index ?? 0);
-        return !((gapWords && gapWords.test(gap)) || (prefixWords && prefixWords.test(prefix)));
+        return !((gapWords && gapWords.test(gap)) || (prefixWords && prefixWords.test(prefix)) || (entityWords && entityAttributionHit(text, match.index ?? 0)));
       })
       .map(match => {
         const gap = match[0].slice(0, match[0].indexOf(match[1]));
@@ -1288,7 +1339,7 @@ async function scopedNumericEntries(text: string, scopeRe: RegExp, unitRe: RegEx
     const unit = match[2];
     const gap = match[0].slice(0, match[0].indexOf(match[1]));
     const prefix = text.slice(Math.max(0, (match.index ?? 0) - 16), match.index ?? 0);
-    if ((gapWords && gapWords.test(gap)) || (prefixWords && prefixWords.test(prefix)) || semanticSkip.has(match.index ?? 0)) {
+    if ((gapWords && gapWords.test(gap)) || (prefixWords && prefixWords.test(prefix)) || (entityWords && entityAttributionHit(text, match.index ?? 0)) || semanticSkip.has(match.index ?? 0)) {
       skipped.push({ value, unit, scope: match[0].slice(0, gap.length).replace(/\s+/gu, ''), context: `${prefix}${gap}`.replace(/\s+/gu, '').slice(-24) });
       continue;
     }
@@ -1340,6 +1391,11 @@ const SCALE_SCOPE_RE = /(?<![地上地下门卫室值班室配电室配电房泵
 const SCALE_UNIT_RE = /㎡|m²|m2|平方米/u;
 const COST_SCOPE_RE = /合同估算价|合同估算价格|投资估算|最高投标限价|招标控制价|工程总投资|总投资|工程造价/u;
 const COST_UNIT_RE = /万元|亿元/u;
+
+/** 设备分组/调度显式声明词（C8 S4-①b）：与分组词（组/村）同权——「本组配置8台，按全项目总表
+ * 调度」类声明是对分组口径与全项目总量分层关系的显式注明，声明语境下的多值属合法分层提示；
+ * 未声明语境的多值维持 blocker（真冲突照报）。 */
+const SCHEDULE_DECLARATION_RE = /本组配置|分组配置|按全项目总表调度|按总表调度|总表调度|按全项目机械配置总表|按机械配置总表|按设备配置总表/u;
 
 export async function crossChapterConsistencyIssues(markdown: string, factsModel: DocumentFactsModel, scopeConflicts?: NumericScopeConflict[], analyses?: Map<string, ProfessionalDepthAnalysis>, embedDocuments?: (texts: string[]) => Promise<number[][]>): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = [];
@@ -1395,7 +1451,7 @@ export async function crossChapterConsistencyIssues(markdown: string, factsModel
   const expectedScale = areaResolution ?? scaleFactCandidates.find((_, index) => scaleResolutions[index] !== undefined);
   if (expectedScale) {
     const scaleMain = areaResolution ? numericEntryFromResolution(areaResolution) : await resolveScaleExpectation(expectedScale, scaleGapGate);
-    const { entries: scaleMatches, skipped: scaleSkipped } = await scopedNumericEntries(markdown, SCALE_SCOPE_RE, SCALE_UNIT_RE, SCALE_GAP_WORDS_RE, SCALE_PREFIX_WORDS_RE, scaleGapGate);
+    const { entries: scaleMatches, skipped: scaleSkipped } = await scopedNumericEntries(markdown, SCALE_SCOPE_RE, SCALE_UNIT_RE, SCALE_GAP_WORDS_RE, SCALE_PREFIX_WORDS_RE, scaleGapGate, SCALE_ENTITY_WORDS_RE);
     if (scaleMain) {
       const scaleConflicts = scaleMatches.filter(entry => scaledNumericValue(entry) !== scaledNumericValue(scaleMain));
       if (scaleConflicts.length >= 1) issues.push({ level: 'error', message: `跨章一致性冲突：正文出现与资料建设规模不一致的表述 ${scaleConflicts.slice(0, 6).map(entry => `${entry.value}${entry.unit}`).join('、')}`, suggestion: `请统一使用资料中的建设规模口径：${expectedScale.slice(0, 80)}` });
@@ -1415,7 +1471,7 @@ export async function crossChapterConsistencyIssues(markdown: string, factsModel
         category: 'fact_consistency',
         owner: 'llm',
         repairability: 'llm_repairable',
-        message: `规模口径复核：正文 ${scaleSkipped.slice(0, 3).map(item => `“${item.context.slice(-14)}${item.value}${item.unit}”`).join('、')} 等 ${scaleSkipped.length} 处数值与口径词之间混入子项/专项口径词，需核对口径归属`,
+        message: `规模口径复核：正文 ${scaleSkipped.slice(0, 3).map(item => `“${item.context.slice(-14)}${item.value}${item.unit}”`).join('、')} 等 ${scaleSkipped.length} 处数值的口径词与数值之间或口径词前文出现子项/专项/实体口径词，需核对口径归属`,
         suggestion: `依据项目规模事实卡逐处核对该数值的口径归属（${cardParts.join('；') || '无可用事实卡，以绑定资料原文为准'}）：与事实卡对应口径一致的数值保留原样，口径错位或数值不一致的数值改正为事实卡对应口径值，不得把子项/专项口径数值改成建筑总量数值。`,
       });
     }
@@ -1439,7 +1495,7 @@ export async function crossChapterConsistencyIssues(markdown: string, factsModel
   // 扩展为通用机械名抽取（scanEquipmentCountClaims 单源：机/吊/泵/车/夯 结尾 + 虚词截断归一 +
   // 量词残留/片段拦截 + 备用租赁辅助配置丢弃 + 否定分句豁免；与 constructionOrgConsistency
   // 机械数量型号规则共用同一名称归一，避免检测口径漂移）
-  const equipmentMatches = new Map<string, string[]>();
+  const equipmentMatches = new Map<string, { values: string[]; grouped: boolean }>();
   // gap 排除顿号/逗号（4.27.0 A3 校准）：「5台挖掘机，其中3台用于…」的分配语境不得采为「挖掘机3台」口径——
   // 与修复器 CROSS_SECTION_ANCHORS excavator 模式（排除 、，）检测/修复口径对齐，防检测报冲突而修复看不到的拉扯
   for (const claim of scanEquipmentCountClaims(markdown)) {
@@ -1449,19 +1505,25 @@ export async function crossChapterConsistencyIssues(markdown: string, factsModel
     if (isUnitPairRatioMatch(markdown, claim.start, claim.text)) continue;
     const equipment = claim.name;
     const value = String(claim.count);
-    // 分组语境窗口覆盖捕获文本本身（贪婪捕获起点前移：分组词可能落在 raw 内，如「每组挖掘机2台」）
-    const context = markdown.slice(Math.max(0, claim.start - 20), claim.start + claim.raw.length);
-    const key = /组|本组|每组|村/u.test(context) ? `${equipment}@group` : equipment;
-    const list = equipmentMatches.get(key) || [];
-    if (!list.includes(value)) list.push(value);
-    equipmentMatches.set(key, list);
+    // 分组语境窗口覆盖捕获文本本身（贪婪捕获起点前移：分组词可能落在 raw 内，如「每组挖掘机2台」），
+    // 并覆盖数值后置声明（C8 S4-①b：「本组配置8台，按全项目总表调度」的声明词在数值之后）
+    const context = markdown.slice(Math.max(0, claim.start - 20), claim.start + claim.text.length + 24);
+    // C8 S4-①b 归因（s28m'「高清网络球形摄像机」33/8/22 与「数字硬盘录像机」8/33 误报阻断实锤）：
+    // 调度声明词（本组配置/分组配置/按全项目总表调度）与分组词（组/村）同权识别——此前仅按「组」
+    // 字窗口分类，「按全项目总表调度」类声明不含「组」字不亮，声明取值与未声明取值分池后普通池
+    // 仍多值 → 误报 blocker。同设备**任一**取值带分组/调度语境 → 该设备整体按分组口径提示降级
+    // warning（全项目总量与分组配置并存属合法分层，删除与总表矛盾的硬阻断）；无任何声明语境时
+    // 维持 blocker（真冲突照报，零放松）。
+    const grouped = /组|村/u.test(context) || SCHEDULE_DECLARATION_RE.test(context);
+    const entry = equipmentMatches.get(equipment) || { values: [], grouped: false };
+    if (!entry.values.includes(value)) entry.values.push(value);
+    entry.grouped = entry.grouped || grouped;
+    equipmentMatches.set(equipment, entry);
   }
-  for (const [key, values] of equipmentMatches) {
-    if (values.length < 2) continue;
-    const isGroup = key.endsWith('@group');
-    const equipment = key.replace(/@group$/u, '');
-    const conflictText = values.join('、');
-    if (isGroup) {
+  for (const [equipment, entry] of equipmentMatches) {
+    if (entry.values.length < 2) continue;
+    const conflictText = entry.values.join('、');
+    if (entry.grouped) {
       issues.push({ level: 'warning', severity: 'warning', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `设备分组口径提示：正文「${equipment}」存在分组配置台数 ${conflictText} 多值并存，需注明分组与全项目总量的调度关系`, suggestion: `分组配置（组/村级）与全项目总量并存时，必须在正文注明「本组配置、按总表调度」或明确分组数量与总量数量之间的对应关系，避免评标误读为口径矛盾。` });
     } else {
       issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `跨章一致性冲突：正文「${equipment}」配置台数出现互相矛盾的取值 ${conflictText}`, suggestion: `全项目「${equipment}」配置总量必须全文唯一：以全项目机械配置总表为准统一全部表述；分组配置必须显式注明「本组配置、按总表调度」并删除与总表矛盾的全项目口径数字。` });
@@ -1743,8 +1805,9 @@ async function fixChapterDeterministic(text: string, targets: Awaited<ReturnType
   // 建设规模/估算价：与检测同源模式带 span 重新匹配，败选数值替换为期望口径（单位保留原样）。
   // 同源口径词防护（q1a）：口径词与数值之间（gap）或紧前上下文（prefix）混入子项/专项口径词时
   // 跳过替换——确定性只碰同词形紧邻数值，跨口径形态交 LLM 规模口径复核（防错改优先于盲修复）；
-  // 语义扩围与 scopedNumericEntries 同口径（gapGate 语义属子项/费用词 → 同样跳过）
-  const collectScopeSpans = async (target: { value: string; unit: string } | undefined, scopeRe: RegExp, unitRe: RegExp, kindLabel: string, gapWords?: RegExp, prefixWords?: RegExp, gapGate?: (texts: string[]) => Promise<boolean[]>) => {
+  // 语义扩围与 scopedNumericEntries 同口径（gapGate 语义属子项/费用词 → 同样跳过）；
+  // 长窗实体门（C8 S2②）：口径词前 48 字符内出现子项实体词同样跳过，与检测侧 entityAttributionHit 单源同门
+  const collectScopeSpans = async (target: { value: string; unit: string } | undefined, scopeRe: RegExp, unitRe: RegExp, kindLabel: string, gapWords?: RegExp, prefixWords?: RegExp, gapGate?: (texts: string[]) => Promise<boolean[]>, entityWords?: RegExp) => {
     if (!target) return;
     const pattern = new RegExp(`(?:${scopeRe.source})(?:[^\\n。；;，,]{0,14}?)(\\d{2,}(?:[.,]\\d+)?\\s*万?)\\s*(${unitRe.source})`, 'giu');
     const matches = [...text.matchAll(pattern)];
@@ -1753,7 +1816,7 @@ async function fixChapterDeterministic(text: string, targets: Awaited<ReturnType
         .filter(match => {
           const gap = match[0].slice(0, match[0].indexOf(match[1]));
           const prefix = text.slice(Math.max(0, (match.index ?? 0) - 16), match.index ?? 0);
-          return !((gapWords && gapWords.test(gap)) || (prefixWords && prefixWords.test(prefix)));
+          return !((gapWords && gapWords.test(gap)) || (prefixWords && prefixWords.test(prefix)) || (entityWords && entityAttributionHit(text, match.index ?? 0)));
         })
         .map(match => {
           const gap = match[0].slice(0, match[0].indexOf(match[1]));
@@ -1766,7 +1829,7 @@ async function fixChapterDeterministic(text: string, targets: Awaited<ReturnType
     for (const match of matches) {
       const gap = match[0].slice(0, match[0].indexOf(match[1]));
       const prefix = text.slice(Math.max(0, (match.index ?? 0) - 16), match.index ?? 0);
-      if ((gapWords && gapWords.test(gap)) || (prefixWords && prefixWords.test(prefix)) || semanticSkip.has(match.index ?? 0)) continue;
+      if ((gapWords && gapWords.test(gap)) || (prefixWords && prefixWords.test(prefix)) || (entityWords && entityAttributionHit(text, match.index ?? 0)) || semanticSkip.has(match.index ?? 0)) continue;
       const entry = { value: match[1].replace(/[,，]/gu, '').replace(/\s+/gu, ''), unit: match[2] };
       if (scaledNumericValue(entry) === scaledNumericValue(target)) continue;
       const start = (match.index ?? 0) + match[0].indexOf(match[1]);
@@ -1775,7 +1838,7 @@ async function fixChapterDeterministic(text: string, targets: Awaited<ReturnType
       replacements.push({ start, end, replacement: target.value, detail: `${kindLabel} ${entry.value}${entry.unit}→${target.value}${entry.unit}` });
     }
   };
-  await collectScopeSpans(targets.scaleTarget, SCALE_SCOPE_RE, SCALE_UNIT_RE, '建设规模', SCALE_GAP_WORDS_RE, SCALE_PREFIX_WORDS_RE, targets.scaleGapGate);
+  await collectScopeSpans(targets.scaleTarget, SCALE_SCOPE_RE, SCALE_UNIT_RE, '建设规模', SCALE_GAP_WORDS_RE, SCALE_PREFIX_WORDS_RE, targets.scaleGapGate, SCALE_ENTITY_WORDS_RE);
   await collectScopeSpans(targets.costTarget, COST_SCOPE_RE, COST_UNIT_RE, '估算价', COST_GAP_WORDS_RE, undefined, targets.costGapGate);
   if (replacements.length === 0) return { content: text, fixedCount: 0, details: [] };
   replacements.sort((a, b) => b.start - a.start);
@@ -1817,7 +1880,7 @@ export async function closedLoopDensityIssues(markdown: string): Promise<Validat
   const { closedLoopBlocks } = await fiveElementBlockStats(markdown);
   const target = Math.max(6, Math.ceil(documentTextLength(markdown) / 1500));
   if (closedLoopBlocks >= target) return [];
-  return [{ level: 'warning', message: `可落地性闭环句式密度不足：全文 ${closedLoopBlocks} 段完整闭环句式，未达每 1500 字 1 段（目标 ${target} 段）`, suggestion: '在措施类段落中补齐“责任岗位 + 检查频次 + 整改闭环”三要素齐全的闭环句式：同一自然段内同时出现岗位（如项目经理/质检员/安全员）、频次（每日/每周/不少于X次）与闭环（整改/复查/销项）。' }];
+  return [{ level: 'warning', message: `可落地性闭环句式密度不足：全文 ${closedLoopBlocks} 段完整闭环句式，未达每 1500 字 1 段（目标 ${target} 段）`, suggestion: '在措施类段落中补齐“责任岗位 + 检查频次 + 整改闭环”三要素齐全的闭环表述：同一自然段内同时出现岗位（如项目经理/质检员/安全员）、频次（每日/每周/不少于X次）与闭环（整改/复查/销项）；三要素分散融入叙述，不得以固定句模复读。' }];
 }
 
 export function managementMeasureNumberIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>, analyses?: Map<string, ProfessionalDepthAnalysis>): ValidationIssue[] {
@@ -2420,125 +2483,124 @@ export function missingCriticalPreciseTokens(markdown: string, factsModel: Docum
   return criticalTokens.filter(token => !normalized.includes(normalizeEngineeringTextForFactMatch(token)));
 }
 
-/** 清单落位校验（Q1 修复链；C-T5 有效行口径）：字面匹配 + 本地 bge 语义兜底 + 显性说明处置，
- * 有效行（豁免汇总口径行后）处置率 <90% 升级 error 进修复循环；豁免/显性说明登记进审计出口 */
+/** 语义兜底分批大小（C3-5）：每批一次批量嵌入，短句跨批走全局嵌入 LRU 缓存不重复推理 */
+const SEMANTIC_BOQ_NAME_BATCH = 60;
+
+/** 清单落位校验（Q1 修复链；C-T5 有效行口径 / C3-5 单源化）：行识别/豁免/落位判定全链消费
+ * buildBoqRowTraces（documentFactTrace 单源——与报告出口 boq-row-trace、分项覆盖 boqDivisionCoverageIssues
+ * 同源同口径；修历史双轨缺陷：门禁 16 字符整名前缀 vs 报告 12 字符首段前缀，s28l 实测 1118 vs 822 行
+ * 未落位差 296 行，且短名行计分母不入明细造成隐形分母）；有效行（豁免汇总口径行后）处置率 <90% 升级
+ * error（provenance 由修复轮 boq-placement 锚定消费）；语义兜底（bge ≥0.6）对全量 unique 名称分批覆盖
+ * （历史缺陷：slice(0,30) 截断致 s28l 171 unique 中 141 个无兜底机会）；豁免/显性说明登记进审计出口 */
 export async function boqPlacementIssues(markdown: string, chapters: DocumentDraftChapter[], factsModel: DocumentFactsModel): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = [];
-  const tables = factsModel.tables || [];
-  if (tables.length === 0) return issues;
+  if ((factsModel.tables || []).length === 0) return issues;
 
-  const normalizedMarkdown = markdown.replace(/\s+/gu, '').toLowerCase();
-  let totalRows = 0;
-  let placedRows = 0;
-  let exemptRows = 0;
-  const placedNames: string[] = [];
-  const unplaced: Array<{ name: string; quantity: string; context: string }> = [];
-
-  for (const table of tables) {
-    const headers = table.headers.map(h => h.replace(/\s+/gu, '').toLowerCase());
-    // 列名标签必须整格锚定：旧实现用 `项目名称|…|分部分项|项目特征` 无锚定，会把表标题行
-    // （“e.1分部分项工程量清单计价表”）误当名称列，itemName 取到序号（“8”）→ 永不落位
-    const nameCol = headers.findIndex(h => /^(?:项目名称|名称|清单项名称|清单项|分部分项(?:工程)?名称|项目特征)/u.test(h));
-    const codeCol = headers.findIndex(h => /^(?:项目编码|编码|编号)/u.test(h)); // 不含"序号"，避免序列号误匹配
-    const qtyCol = headers.findIndex(h => /^工程量$|^数量$/u.test(h)); // 不含"单位"，避免单位列误读为数量
-
-    for (const row of table.rows) {
-      let itemName = nameCol >= 0 ? (row[nameCol] || '').replace(/\s+/gu, '') : '';
-      let itemCode = codeCol >= 0 ? (row[codeCol] || '').replace(/\s+/gu, '') : '';
-      const quantity = qtyCol >= 0 ? (row[qtyCol] || '').replace(/\s+/gu, '') : '';
-      // 行内形状识别兜底（真实生成缺陷：清单表证据丢失表头行，headers 是首行数据或“表标题+COL 占位”，
-      // 标签列识别全部落空 → 74 行 itemName 全空、落位率恒 0/74、unplaced 明细为空、修复轮空转）：
-      // 清单编码形态（12 位数字如 030901010001，或字母前缀+8 位以上数字如 WB011701009001）定位编码列，
-      // 编码后一格即项目名称列（清单表列序固定：序号|项目编码|项目名称|项目特征|单位|工程量）
-      if (!itemName && !itemCode) {
-        const codeIdx = row.findIndex(cell => /^\d{10,12}$/u.test(cell) || /^[A-Z]{1,3}\d{8,}$/u.test(cell));
-        if (codeIdx >= 0) {
-          itemCode = row[codeIdx].replace(/\s+/gu, '');
-          itemName = (row[codeIdx + 1] || '').replace(/\s+/gu, '');
-        }
-      }
-      // C-T5 豁免口径单源（billFactLock.classifyBillPlacementExemption）：汇总口径行（分部小计/合计/规费/
-      // 税金）、版式噪声行（清单表页眉/表标题，r28h M9 实机归因）、费用组成行（…费/税/暂估价，长度限幅）、
-      // 分部标题行（XX工程，无码无量）均不是清单明细项，无法落位也无须落位，登记豁免数不计入分母
-      // （豁免行清单进审计出口）；无法识别名/码的行（空行/表头残片）不计入分母也不计入未落位
-      if (!itemName && !itemCode) continue;
-      if (classifyBillPlacementExemption(itemName, { code: itemCode, quantity })) { exemptRows += 1; continue; }
-      totalRows += 1;
-
-      // 检查清单项名称或编码是否在正文中出现（统一使用 16 字符前缀匹配）
-      const namePrefix = itemName.length >= 3 ? itemName.slice(0, Math.min(itemName.length, 16)) : '';
-      const codePrefix = itemCode.length >= 3 ? itemCode.slice(0, Math.min(itemCode.length, 12)) : '';
-      const namePlaced = namePrefix && normalizedMarkdown.includes(namePrefix);
-      const codePlaced = codePrefix && normalizedMarkdown.includes(codePrefix);
-
-      if (namePlaced || codePlaced) {
-        placedRows += 1;
-        placedNames.push(itemName);
-      } else if (itemName.length >= 3) {
-        unplaced.push({ name: itemName, quantity, context: row.join(' ').replace(/\s+/gu, ' ').slice(0, 160) });
-      }
-    }
-  }
-  if (totalRows === 0) return issues;
+  const traces = buildBoqRowTraces(markdown, factsModel);
+  // C-T5 豁免口径单源（billFactLock.classifyBillPlacementExemption，traces.exempt）：汇总口径行（分部小计/
+  // 合计/规费/税金）、版式噪声行（清单表页眉/表标题）、费用组成行（…费/税/暂估价，长度限幅）、分部标题行
+  // （XX工程，无码无量）均不是清单明细项，无法落位也无须落位，不计入分母（豁免行清单进审计出口）
+  const considered = traces.filter(trace => !trace.exempt);
+  if (considered.length === 0) return issues;
+  const exemptRows = traces.length - considered.length;
+  const placedTraces = considered.filter(trace => trace.placed);
+  const unplacedTraces = considered.filter(trace => !trace.placed);
+  const totalRows = considered.length;
+  const placedRows = placedTraces.length;
 
   // C-T5 显性说明出口（方案 C-T5③）：修复链对未落位行的两种合法处置——补写落位或显性说明；
   // 说明句含条目名称即自然成为字面落位证据（正文写入“XX利旧/不涉及/由厂家配套”即完成处置）；
   // 此处对已落位行做说明式处置识别（利旧/甲供/不涉及等语气），审计区分「施工内容落位」与「说明式处置」
-  const explicitDisposed = scanBillExplicitDispositions(markdown, placedNames);
+  const explicitDisposed = scanBillExplicitDispositions(markdown, placedTraces.map(trace => trace.itemName));
 
   // Q1 语义兜底：字面未命中的清单项名 vs 正文句 bge 余弦 ≥0.6 视为落位（"立面块料拆除"与"拆除外立面幕墙"同义落位）
+  // C3-5 扩面：全量 unique 名称分批（每批 60 条批量嵌入）——历史 slice(0,30) 对 s28l 171 unique 名称仅覆盖
+  // 前 30 个，其余 141 个无兜底机会（语义已承接仍被判未落位），落位率被系统性低估
   const semanticPlacedNames = new Set<string>();
-  if (unplaced.length > 0 && placedRows / totalRows < 0.9) {
+  if (unplacedTraces.length > 0 && placedRows / totalRows < 0.9) {
     const sentences = markdown
       .split(/[。；;|]/u)
       .map(sentence => sentence.trim())
       .filter(sentence => sentence.length >= 6 && sentence.length <= 160)
       .slice(0, 300);
-    const names = [...new Set(unplaced.map(item => item.name))].slice(0, 30);
-    if (sentences.length > 0 && names.length > 0) {
-      const similarity = await buildSemanticSimilarity(names, sentences);
-      for (const name of names) {
-        if (sentences.some(sentence => similarity(name, sentence) >= 0.6)) semanticPlacedNames.add(name);
+    const uniqueNames = [...new Set(unplacedTraces.map(trace => trace.itemName))];
+    if (sentences.length > 0 && uniqueNames.length > 0) {
+      for (let offset = 0; offset < uniqueNames.length; offset += SEMANTIC_BOQ_NAME_BATCH) {
+        const batch = uniqueNames.slice(offset, offset + SEMANTIC_BOQ_NAME_BATCH);
+        const similarity = await buildSemanticSimilarity(batch, sentences);
+        for (const name of batch) {
+          if (sentences.some(sentence => similarity(name, sentence) >= SEMANTIC_COVERAGE_THRESHOLD)) semanticPlacedNames.add(name);
+        }
       }
     }
   }
-  const placedTotal = placedRows + unplaced.filter(item => semanticPlacedNames.has(item.name)).length;
-  // 剩余未落位 = 字面/语义未命中的行；责任章标注（C-T5② 每行→责任章）为修复链给出补写归属章
-  const remainingUnplaced = unplaced.filter(item => !semanticPlacedNames.has(item.name));
-  const responsibleChapterOf = (item: { name: string; context: string }): string => {
+  const placedTotal = placedRows + unplacedTraces.filter(trace => semanticPlacedNames.has(trace.itemName)).length;
+  // 剩余未落位 = 字面/语义未命中的行；按 unique 名称归并（s28l 实测 1118 行仅 171 unique、重复率 5.99×——
+  // 行级明细会在 message 前 30 项截断窗口内被同类重复项占满，修复轮拿不到完整补写义务清单）；
+  // 责任章标注（C-T5② 每行→责任章）为修复链给出补写归属章
+  const remainingUnplaced = unplacedTraces.filter(trace => !semanticPlacedNames.has(trace.itemName));
+  const responsibleChapterOf = (trace: BoqRowTrace): string => {
     if (chapters.length === 0) return '';
-    const assignment = assignBillRowChapter({ name: item.name, description: item.context }, chapters);
+    const assignment = assignBillRowChapter({ name: trace.itemName, description: trace.description || '' }, chapters);
     return assignment ? `，建议落位「${assignment.chapterTitle.slice(0, 24)}」` : '';
   };
+  const unplacedGroups = new Map<string, { name: string; rows: number; sample: BoqRowTrace }>();
+  for (const trace of remainingUnplaced) {
+    const key = trace.itemName.slice(0, 40);
+    const group = unplacedGroups.get(key);
+    if (group) group.rows += 1;
+    else unplacedGroups.set(key, { name: trace.itemName, rows: 1, sample: trace });
+  }
+  const groupList = [...unplacedGroups.values()].sort((a, b) => b.rows - a.rows);
   const rate = placedTotal / totalRows;
   const auditNote = [
     exemptRows > 0 ? `口径行 ${exemptRows} 行（汇总/噪声/费用/标题等非清单明细）已豁免不计入分母` : '',
     explicitDisposed.size > 0 ? `显性说明 ${explicitDisposed.size} 行（利旧/甲供/不涉及等说明式处置）` : '',
   ].filter(Boolean).join('；');
-  const unplacedSummary = remainingUnplaced.length > 0
-    ? `未落位项（共${remainingUnplaced.length}项）：${remainingUnplaced.slice(0, 30).map(item => `${item.name.slice(0, 40)}${item.quantity ? ` ${item.quantity}` : ''}（未落位${responsibleChapterOf(item)}）`).join('；')}${remainingUnplaced.length > 30 ? ` 及其他${remainingUnplaced.length - 30}项（同类项按已列名称分组归并补写）` : ''}`
+  const unplacedSummary = groupList.length > 0
+    ? `未落位项（共${remainingUnplaced.length}行/${groupList.length}类）：${groupList.slice(0, 30).map(group => `${group.name.slice(0, 40)}${group.rows > 1 ? `×${group.rows}` : ''}${group.sample.quantity ? ` ${group.sample.quantity}` : ''}（未落位${responsibleChapterOf(group.sample)}）`).join('；')}${groupList.length > 30 ? ` 及其他${groupList.length - 30}类（同类项按已列名称分组归并补写）` : ''}`
     : '';
-  // C-T5 落位率阈值 60%→90%（有效行口径：豁免行不计分母，显性说明行计入已处置）；
-  // <90% 升 error 进修复循环（补写未落位项或显性说明处置）；不命中 CRITICAL_BLOCK_RE 硬阻断清单，
-  // 修复轮补写后仍不足时由导出门禁按软性项处理，不卡死交付
+  // C-T5 落位率阈值 90%（有效行口径：豁免行不计分母，显性说明行计入已处置）；<90% 升 error 进修复循环
+  // （补写未落位项或显性说明处置）；provenance.detectorId='boq-placement' 供修复轮锚定消费（C3-5 挂靠
+  // 缺口根治：历史 error 无 provenance、LLM_PATCH_REPAIR_ROUNDS 17 轮无一消费直坠终门禁）；不命中
+  // CRITICAL_BLOCK_RE 硬阻断清单，修复轮补写后仍不足时由导出门禁按软性项处理，不卡死交付
   if (rate < 0.9) {
     // 未落位明细必须并入 message：交付阻断修复链的 rechecker 只转发 message，明细留在 suggestion
     // 会丢失（真实生成缺陷：修复指令声称“缺陷描述中已列明细”但明细从未送达，LLM 无据可补写）
-    issues.push({ level: 'error', message: `清单项落位不足：${placedTotal}/${totalRows} 项（${Math.round(rate * 100)}%）${unplacedSummary ? `。${unplacedSummary}` : ''}`, suggestion: `请将未落位清单项按专业工程分组补写进对应章节"主要施工内容"小节（融入各专业工程的作业对象与工程量、工序顺序、施工方法叙述），优先落位主要分部分项、关键规格与大额工程量；对确实不涉及/利旧/甲供/由厂家配套的条目，在正文对应章节显性说明处置方式（说明句须含条目名称）。${unplacedSummary}${auditNote ? `〔落位审计：${auditNote}〕` : ''}` });
+    issues.push({
+      level: 'error',
+      severity: 'blocker',
+      category: 'evidence_coverage',
+      owner: 'llm',
+      repairability: 'llm_repairable',
+      provenance: { detectorId: 'boq-placement', fingerprint: stableHash(markdown) },
+      message: `清单项落位不足：${placedTotal}/${totalRows} 项（${Math.round(rate * 100)}%）${unplacedSummary ? `。${unplacedSummary}` : ''}`,
+      suggestion: `请将未落位清单项按专业工程分组补写进对应章节"主要施工内容"小节（融入各专业工程的作业对象与工程量、工序顺序、施工方法叙述），优先落位主要分部分项、关键规格与大额工程量；对确实不涉及/利旧/甲供/由厂家配套的条目，在正文对应章节显性说明处置方式（说明句须含条目名称）。${unplacedSummary}${auditNote ? `〔落位审计：${auditNote}〕` : ''}`,
+    });
   }
   return issues;
 }
+
+/**
+ * 图纸引用率目标线（C3-6-5，plan v3 §10 第 10 条：图纸全引用目标 ≥90%）：目标线以下的未完全落位
+ * 产出「可修复 warning」（owner=llm + provenance 打点），由 content-depth-repair 的图纸通道定向补写；
+ * 目标线以上不再报出（无缺口）。<50% 保持 blocker 硬阻断（C3-6 原有口径，未改动）。
+ */
+const DRAWING_REFERENCE_TARGET_RATE = 0.9;
 
 /**
  * B-T3 图纸事实引用率验收：可用图纸（含可判定 token 的图纸）↔ 正文图纸事实 token 落位（≥1 处/份）。
  * 历史口径缺陷（B4 根因之一）：原实现以「文件全路径去扩展名去斜杠」前 12 字符匹配正文——匹配的是
  * 目录路径前缀（正文永远不含），且正文规则禁止引用文件名（FILE_NAME_RE 清洗）——口径本身错位，
  * 真实数据恒判 0%；现口径改为消费图纸事实锁（drawingFactLock）的确定性 token，与写作直读通道同源。
+ * C3-6-5：三条产出档位——全落位静默；<目标线 warning（可修复，provenance 单源）；<50% blocker。
  */
 export function drawingReferenceIssues(markdown: string, drawingFactLock?: DrawingFactLock): ValidationIssue[] {
   if (!drawingFactLock || drawingFactLock.groups.length === 0) return [];
   const placement = drawingFactPlacement(drawingFactLock, markdown);
   if (placement.unreferenced.length === 0) return [];
+  // 目标线（90%）以上视为达标：残留少量未引用不再报出（无修复动作的永久 warning 属噪音）
+  if (placement.rate >= DRAWING_REFERENCE_TARGET_RATE) return [];
   const total = drawingFactLock.groups.length;
   const details = placement.unreferenced.slice(0, 6).map(group => {
     const sample = group.factLines[0]?.slice(0, 60) || '';
@@ -2553,14 +2615,19 @@ export function drawingReferenceIssues(markdown: string, drawingFactLock?: Drawi
       severity: 'blocker',
       owner: 'llm',
       repairability: 'llm_repairable',
+      provenance: { detectorId: 'drawing-reference', fingerprint: stableHash(markdown) },
       message: `图纸事实落位不足：${placement.referenced.length}/${total} 份图纸的规格/做法事实在正文落位（${rate}%）`,
       suggestion,
     }];
   }
+  // 目标线以下（未达 90%）为可修复 warning：打 provenance 与可修复标注——修复轮据此定向补写未落位图纸
   return [{
     level: 'warning',
     severity: 'warning',
-    message: `图纸事实未完全落位：${placement.referenced.length}/${total} 份图纸被正文引用（${rate}%）`,
+    owner: 'llm',
+    repairability: 'llm_repairable',
+    provenance: { detectorId: 'drawing-reference', fingerprint: stableHash(markdown) },
+    message: `图纸事实未完全落位：${placement.referenced.length}/${total} 份图纸被正文引用（${rate}%，目标 ≥${Math.round(DRAWING_REFERENCE_TARGET_RATE * 100)}%）`,
     suggestion,
   }];
 }

@@ -311,3 +311,63 @@ describe('detectFactConflicts 程序性语义复核（h5 事实候选过滤）',
     expect(conflicts[0]).toContain('绿色建筑等级');
   });
 });
+
+/**
+ * C8 S2② 长窗实体隔离门（48 字符）：子项实体词距口径词 17~48 字符（超出 16 字符紧前窗、空 gap
+ * 与 24 字符语义窗均无法拦截）时，该数值属子项实体归属语境——检测侧不列冲突、确定性修复不替换
+ * （防错改优先），被跳过项经 scaleSkipped 以「规模口径复核」warning 显性交 LLM 核对（零静默降级）。
+ * s28m' stage 145 实证：「综合配套用房节能设计按甲类…（表A.0.3-1）执行，建筑面积774.11m2」
+ * 「门卫节能设计按乙类…（表A.0.3-2）执行，建筑面积13.85m2」——实体词距口径词约 33~35 字符，
+ * 774.11/13.85 被确定性替换为项目总量 937.72，同段出现 937.72 与 774.11 并排矛盾。
+ */
+describe('C8 S2② 长窗实体隔离门（48 字符）', () => {
+  const ENTITY_LINES = [
+    '综合配套用房节能设计按甲类公共建筑节能设计标准（表A.0.3-1）执行，建筑面积774.11m2。',
+    '',
+    '值班室节能设计按乙类公共建筑节能设计标准（表A.0.3-3）执行，建筑面积52.36m2。',
+  ];
+  const MODEL = () => buildFactsModel([scaleFact('建设规模：总建筑面积937.72平方米')]);
+
+  it('修复侧：实体行数值不替换（实体词距口径词 17~48 字符），总量败选值照常替换', async () => {
+    const model = await MODEL();
+    const markdown = [...ENTITY_LINES, '', '本项目总建筑面积900.00平方米。'].join('\n');
+    const fixed = await applyDeterministicConsistencyFixesToMarkdown(markdown, model, undefined, embedDocuments);
+    // 仅总量行败选值 900.00 被替换；实体行 774.11/52.36 原样保留（防错改优先）
+    expect(fixed.fixedCount).toBe(1);
+    expect(fixed.markdown).toContain('774.11');
+    expect(fixed.markdown).toContain('52.36');
+    expect(fixed.markdown).not.toContain('900.00');
+    expect(fixed.markdown).toContain('937.72');
+    expect(fixed.details.some(line => line.includes('建设规模 900.00'))).toBe(true);
+  });
+
+  it('修复侧：「N栋」数字实体与「配套\\n设施」折行形态同样隔离；「处理」类不误命中', async () => {
+    const model = await MODEL();
+    const markdown = [
+      '3栋节能设计按乙类公共建筑节能设计标准执行，建筑面积28.10m2。',
+      '',
+      '配套\n设施节能设计按甲类公共建筑节能设计标准执行，建筑面积240.00m2。',
+      '',
+      '污水经三级处理达标排放，本项目总建筑面积850.00平方米。',
+    ].join('\n');
+    const fixed = await applyDeterministicConsistencyFixesToMarkdown(markdown, model, undefined, embedDocuments);
+    // 「3栋」「配套\n设施」（折行折叠）命中实体门 → 保留；「处理」无数字前缀不误命中 → 850.00 照常替换
+    expect(fixed.fixedCount).toBe(1);
+    expect(fixed.markdown).toContain('28.10');
+    expect(fixed.markdown).toContain('240.00');
+    expect(fixed.markdown).not.toContain('850.00');
+    expect(fixed.markdown).toContain('937.72');
+  });
+
+  it('检测侧：实体长窗数值不报建设规模冲突，显性转「规模口径复核」warning（零静默降级）', async () => {
+    const model = await MODEL();
+    const markdown = ENTITY_LINES.join('\n');
+    const issues = await crossChapterConsistencyIssues(markdown, model, undefined, undefined, embedDocuments);
+    // 子项实体数值（774.11/52.36）被实体门隔离：不出现「跨章一致性冲突」报错
+    expect(issues.filter(issue => issue.message.includes('跨章一致性冲突') && issue.message.includes('建设规模'))).toHaveLength(0);
+    // 隔离项显性转「规模口径复核」warning（交 LLM 依事实卡核对口径归属）
+    const review = issues.find(issue => issue.message.includes('规模口径复核'));
+    expect(review).toBeDefined();
+    expect(review?.message).toContain('2 处');
+  });
+});

@@ -3,11 +3,17 @@ import { duplicateParagraphIssues, fillerParagraphIssues, processParameterDensit
 import { stripTableCellInvisibleChars } from './helpers/markdownCleanup';
 import { PROCESS_PARAMETER_RE, QUANTIFIED_BODY_PARAM_RE } from './parameterPatterns';
 import { fillerDensityReport } from './tenderBidChecks';
+import { extractContextualTokens, narrativeCharCount, narrativeSentences, sentenceHasCommitmentContext } from './narrativeContext';
+import { PROFESSIONAL_SCORE_CALIBER, type ScoringCaliberStamp } from './scoringCalibration';
 import type { TenderBidTemplatingReport } from './tenderBidScoring';
 
 /**
  * L6 质量度量：施工组织设计专业度评分（7 维）。
  * 每维 0-100 分，加权汇总为专业度总分，用于生成记录页展示与质量报告归档。
+ * C0-2 语境约束校准：密度型（事实落位/工艺参数）token 仅从叙述句提取、
+ * 词面型（评标响应）要求「响应词 + 承诺语境」同句出现、结构完整度加章级叙述字数门禁——
+ * 词表/参数堆叠的无完整句文档（历史实测专业分 87）在语境约束后各维归零。
+ * 口径定位：本报告为从属展示口径（交付主尺为六维质量报告），caliber 字段标注关系。
  */
 
 export interface ProfessionalDimension {
@@ -24,15 +30,24 @@ export interface ProfessionalScoreReport {
   dimensions: ProfessionalDimension[];
   summary: string;
   topIssues: string[];
+  /** 评分口径戳（C0-7）：从属展示口径，交付主尺见六维质量报告 */
+  caliber: ScoringCaliberStamp;
 }
 
 function clamp(value: number) {
   return Math.max(0, Math.min(100, Math.round(value)));
 }
 
-/** 1. 结构完整度：核心结构组是否齐备 */
+/** 章级叙述字数门禁（C0-2）：低于此值的章不参与结构组判定——结构组词面命中必须建立在
+ * 足量叙述正文之上（词表堆叠章（如「工程概况 主要施工内容 …」列表行）不构成结构存在性证据）。 */
+const STRUCTURE_NARRATIVE_GATE_CHARS = 200;
+
+/** 1. 结构完整度：核心结构组是否齐备（章级叙述字数门禁：叙述正文不足的章不计命中） */
 function structureScore(chapters: DocumentDraftChapter[]): { score: number; detail: string } {
-  const wholeText = chapters.map(chapter => `${chapter.title} ${(chapter.sections || []).join(' ')} ${chapter.content}`).join('\n');
+  const wholeText = chapters
+    .map(chapter => `${chapter.title} ${(chapter.sections || []).join(' ')} ${chapter.content}`)
+    .filter(text => narrativeCharCount(text) >= STRUCTURE_NARRATIVE_GATE_CHARS)
+    .join('\n');
   const groups: Array<{ label: string; pattern: RegExp }> = [
     { label: '工程概况', pattern: /工程概况|项目概况|基本概况/u },
     { label: '主要施工内容', pattern: /主要施工内容/u },
@@ -51,24 +66,24 @@ function structureScore(chapters: DocumentDraftChapter[]): { score: number; deta
   return { score, detail: `覆盖 ${hit.length}/${groups.length} 个核心结构组${missing.length ? `；缺失：${missing.join('、')}` : ''}` };
 }
 
-/** 2. 事实落位率：量化数字与项目事实覆盖。
+/** 2. 事实落位率：量化数字与项目事实覆盖（C0-2：token 仅从叙述句提取，罗列段不计）。
  * 标尺校准：量化密度系数 18→22；事实词按 18 类覆盖率计分（类数/18×15），消除长文档字数稀释。 */
 function factLandingScore(chapters: DocumentDraftChapter[]): { score: number; detail: string } {
   const wholeText = chapters.map(chapter => chapter.content).join('\n');
-  const quantified = new Set(wholeText.match(QUANTIFIED_BODY_PARAM_RE) || []);
-  const factTokens = new Set(wholeText.match(/工程量|材料|设备|范围|流程|验收|检测|复试|调试|隐蔽|检验批|资料|记录|系统|部位|接口|规格|标准/gu) || []);
+  const quantified = extractContextualTokens(wholeText, QUANTIFIED_BODY_PARAM_RE);
+  const factTokens = extractContextualTokens(wholeText, /工程量|材料|设备|范围|流程|验收|检测|复试|调试|隐蔽|检验批|资料|记录|系统|部位|接口|规格|标准/gu);
   const totalChars = Math.max(1, wholeText.length);
   const quantifiedDensity = quantified.size / (totalChars / 1000);
   const score = clamp(Math.min(100, quantifiedDensity * 22 + (factTokens.size / 18) * 15));
   return { score, detail: `量化参数 ${quantified.size} 项（每千字 ${quantifiedDensity.toFixed(1)}），专业事实词 ${factTokens.size}/18 类` };
 }
 
-/** 3. 工艺参数密度。
+/** 3. 工艺参数密度（C0-2：token 仅从叙述句提取，参数堆叠串不计）。
  * 标尺校准：口径扩展为参数库统一口径（强度等级 M5.0/C25、体积面积 m³/m²、绝缘电阻 MΩ、养护时间等）；
  * 公式由 密度×12+20 调整为 密度×20+40，与参考库优秀样本锚定。 */
 function processParameterScore(chapters: DocumentDraftChapter[]): { score: number; detail: string } {
   const wholeText = chapters.map(chapter => chapter.content).join('\n');
-  const processParams = new Set(wholeText.match(PROCESS_PARAMETER_RE) || []);
+  const processParams = extractContextualTokens(wholeText, PROCESS_PARAMETER_RE);
   const totalChars = Math.max(1, wholeText.length);
   const density = processParams.size / (totalChars / 1000);
   const score = clamp(Math.min(100, density * 20 + 40));
@@ -129,9 +144,12 @@ function duplicationScore(chapters: DocumentDraftChapter[]): { score: number; de
 
 /** 7. 评标响应度：招标硬性要求响应检测统一由 tenderRequirements.ts 锚点级语义通道
  * （requirementAcceptanceIssues）承担，本维度仅保留评分用的词面响应率快照，
- * 不再复用已删除的 constructionOrgAudit.reviewResponseIssues（阶段五 5.3 口径分裂治理） */
+ * 不再复用已删除的 constructionOrgAudit.reviewResponseIssues（阶段五 5.3 口径分裂治理）。
+ * C0-2 语境约束：响应词必须与承诺语境同句出现（叙述句内）——词表行/标题行内出现响应词
+ * 不构成响应（历史实测：无完整句的响应词表文档评标响应 100 分）。 */
 function reviewResponseScore(chapters: DocumentDraftChapter[], markdown = ''): { score: number; detail: string } {
   const wholeText = markdown || chapters.map(chapter => chapter.content).join('\n\n');
+  const sentences = narrativeSentences(wholeText);
   const responseItems: Array<{ label: string; pattern: RegExp }> = [
     { label: '质量标准', pattern: /质量标准|质量要求|合格率/u },
     { label: '计划工期', pattern: /计划工期|工期要求|日历天/u },
@@ -139,8 +157,8 @@ function reviewResponseScore(chapters: DocumentDraftChapter[], markdown = ''): {
     { label: '安全目标', pattern: /安全.{0,8}目标|文明.{0,8}目标/u },
     { label: '项目经理', pattern: /项目经理|项目负责人/u },
   ];
-  const hit = responseItems.filter(item => item.pattern.test(wholeText));
-  const missed = responseItems.filter(item => !item.pattern.test(wholeText));
+  const hit = responseItems.filter(item => sentences.some(sentence => item.pattern.test(sentence) && sentenceHasCommitmentContext(sentence)));
+  const missed = responseItems.filter(item => !hit.includes(item));
   const score = clamp((hit.length / responseItems.length) * 100);
   return { score, detail: `招标硬性要求响应 ${hit.length}/${responseItems.length} 项${missed.length ? `（未响应：${missed.map(item => item.label).join('、')}）` : ''}` };
 }
@@ -175,7 +193,8 @@ export async function buildProfessionalScoreReport(chapters: DocumentDraftChapte
     total: cappedTotal,
     grade,
     dimensions,
-    summary: `施工组织设计专业度评分 ${cappedTotal} 分（${grade}）${options.templating && options.templating.level !== 'light' ? `；模板化等级：${options.templating.level === 'heavy' ? '重度' : '中度'}（降档已生效）` : ''}${weakDimensions.length ? `；待提升：${weakDimensions.join('、')}` : ''}`,
+    summary: `施工组织设计专业度评分 ${cappedTotal} 分（${grade}；从属口径，交付主尺见六维质量报告）${options.templating && options.templating.level !== 'light' ? `；模板化等级：${options.templating.level === 'heavy' ? '重度' : '中度'}（降档已生效）` : ''}${weakDimensions.length ? `；待提升：${weakDimensions.join('、')}` : ''}`,
     topIssues,
+    caliber: PROFESSIONAL_SCORE_CALIBER,
   };
 }

@@ -97,3 +97,50 @@ describe('S4 r28f 门禁自伤候选逐字原文回归（豁免不漏网）', ()
     }
   });
 });
+
+describe('S5 C5 扩围（影像管理动作表：补拍/重拍/补传/重新上传）', () => {
+  // s28l 实机误报：影像资料周检句「发现缺失或影像无法辨识的，责成施工员在24小时内补拍并
+  // 重新上传」被语义召回为自伤——第 3 分支（发现-缺失-动作三段链）动作表缺影像管理标准动作词
+  const IMAGE_RECHECK_SENTENCE = '质检员每周对影像资料完整性进行核查，发现缺失或影像无法辨识的，责成施工员在24小时内补拍并重新上传。';
+  it('S5-1 正样本：影像周检「发现缺失→补拍并重新上传」三段链豁免', () => {
+    expect(SELF_UNDERMINING_PROCEDURAL_EXEMPT_RE.test(IMAGE_RECHECK_SENTENCE)).toBe(true);
+  });
+  it('S5-2 变体动作（重拍/补传）同构句豁免', () => {
+    expect(SELF_UNDERMINING_PROCEDURAL_EXEMPT_RE.test('对影像资料不全的部位，责成施工员当日内重拍补传。')).toBe(true);
+  });
+  it('S5-3 真伤护栏：影像缺失无处置链保持召回（不豁免）', () => {
+    expect(SELF_UNDERMINING_PROCEDURAL_EXEMPT_RE.test('影像资料存在缺失，相关工序验收记录不完整')).toBe(false);
+  });
+  it('S5-4 全通道：影像周检句零候选、无处置链句保持召回（语义恒值 0.9）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    expect(await selfUnderminingCandidateIssues(IMAGE_RECHECK_SENTENCE)).toEqual([]);
+    expect((await selfUnderminingCandidateIssues('影像资料存在缺失，相关工序验收记录不完整。')).length).toBe(1);
+  });
+});
+
+describe('S6 C5 扩围②（清运责任段：未…的＋主体处置＋闭环目标）', () => {
+  // s28l 实机误报：「未完成清运的责任段由施工员组织加班清运，直至现场无遗留堆体」——
+  // 责任段划分+每日核查+未完成即加班清运直至闭环的管理机制描述（条件从句+责任主体处置+闭环目标），
+  // 与 r27 ⑭ 进度纠偏句同族；⑱ 分支要求完整五段链，缺闭环尾段/缺主体引导词链均保持召回
+  const RESPONSIBILITY_SEGMENT_SENTENCE = '未完成清运的责任段由施工员组织加班清运，直至现场无遗留堆体';
+  it('S6-1 正样本：清运责任段闭环句豁免', () => {
+    expect(SELF_UNDERMINING_PROCEDURAL_EXEMPT_RE.test(RESPONSIBILITY_SEGMENT_SENTENCE)).toBe(true);
+  });
+  it('S6-2 谱系变体：双层责任链（由X责成Y）与「责成」直接引导形态同构句豁免', () => {
+    expect(SELF_UNDERMINING_PROCEDURAL_EXEMPT_RE.test('未清理到位的作业面由项目部责成班组当日清理完善，直至无遗留')).toBe(true);
+    expect(SELF_UNDERMINING_PROCEDURAL_EXEMPT_RE.test('未完成清运的责任段责成施工员组织加班清运，直至无遗留堆体')).toBe(true);
+  });
+  it('S6-3 条件边界：缺闭环目标尾段不豁免', () => {
+    expect(SELF_UNDERMINING_PROCEDURAL_EXEMPT_RE.test('尚未完成的施工组织设计由项目部负责完善')).toBe(false);
+  });
+  it('S6-4 真伤护栏：无主体处置链/无闭环的现状断言保持召回', () => {
+    for (const sentence of ['本工程部分专项设计文件尚未完成，将可能导致后续施工组织调整', '尚未完成的部分组织论证后将调整方案', '专项设计文件尚未完成，待后续补充']) {
+      expect(SELF_UNDERMINING_PROCEDURAL_EXEMPT_RE.test(sentence)).toBe(false);
+    }
+  });
+  it('S6-5 全通道：清运责任段句零候选、真伤句保持召回（语义恒值 0.9）', async () => {
+    vi.mocked(buildSemanticSimilarity).mockImplementation(CONST_SIM(0.9));
+    expect(await selfUnderminingCandidateIssues(RESPONSIBILITY_SEGMENT_SENTENCE)).toEqual([]);
+    expect((await selfUnderminingCandidateIssues('本工程部分专项设计文件尚未完成，将可能导致后续施工组织调整。')).length).toBe(1);
+  });
+});

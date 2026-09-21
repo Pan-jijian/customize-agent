@@ -90,6 +90,39 @@ export interface BlueprintTestPlanItem {
   basis: string;
 }
 
+/** 试验检测仪器配置行（C2 附表二数据源）：策略组确定性配置的行业通用仪器——
+ * 投标人拟配备口径（非项目事实推导）；型号/产地/年份等填报列如实留空（—），不得编造 */
+export interface BlueprintInstrumentItem {
+  name: string;
+  spec?: string;
+  quantity?: number;
+  purpose: string;
+  basis: string;
+}
+
+/** 临时设施/用地规划行（C2 附表五/六共用数据源）：用途（设施名）/面积/位置/需用时间 +
+ * 说明（总平面数据表列）；面积来自策略组配置或按劳动力峰值人均指标推导 */
+export interface BlueprintTempLandItem {
+  purpose: string;
+  area?: number;
+  location: string;
+  duration: string;
+  note: string;
+  basis: string;
+}
+
+/** 进度计划工序行（C2 附表四数据源）：里程碑顺序累加推导（起止天序），
+ * 关键线路=主体施工工序链（prep 准备与清杂为前导不占关键线路） */
+export interface BlueprintScheduleItem {
+  seq: number;
+  label: string;
+  duration: number;
+  startDay: number;
+  endDay: number;
+  critical: boolean;
+  basis: string;
+}
+
 export interface BlueprintEarthworkBalance {
   excavation?: number;
   backfill?: number;
@@ -184,6 +217,12 @@ export interface BlueprintData {
   materialsPlan: BlueprintMaterialPlanItem[];
   fundPlan: BlueprintFundPlan;
   testPlan: BlueprintTestPlanItem[];
+  /** C2 附表二数据源：试验检测仪器配置（策略组确定性配置；附表区备注列经中性化出口） */
+  testInstruments: BlueprintInstrumentItem[];
+  /** C2 附表五/六数据源：临时设施与用地规划（用途/面积/位置/需用时间/说明） */
+  tempLand: BlueprintTempLandItem[];
+  /** C2 附表四数据源：进度计划工序表（里程碑顺序累加；起止天序 + 关键线路标注） */
+  schedule: BlueprintScheduleItem[];
   earthworkBalance: BlueprintEarthworkBalance;
   tempUtilities: BlueprintTempUtilities;
   /** L1a 红线事实专项（must_cite 进正文；amount 条目不进正文） */

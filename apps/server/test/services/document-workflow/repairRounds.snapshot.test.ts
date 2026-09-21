@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { FINALIZE_REPAIR_ROUNDS, LLM_PATCH_REPAIR_ROUNDS } from '@/services/document-workflow/detectorFixerRegistry';
 
 describe('修复轮顺序快照（变更必须显式改快照并附理由）', () => {
-  it('FINALIZE_REPAIR_ROUNDS 31 轮顺序快照', () => {
+  it('FINALIZE_REPAIR_ROUNDS 35 轮顺序快照', () => {
     expect([...FINALIZE_REPAIR_ROUNDS]).toEqual([
       'fact-landing-round',          // 重要事实落位补写轮（uncoveredImportantFacts 触发）
       'table-repair-round',          // 表格数据完整性修复轮（markdownTableQualityIssues error 触发）
@@ -28,6 +28,7 @@ describe('修复轮顺序快照（变更必须显式改快照并附理由）', (
       'regulation-number-typo',      // 4.44 法规文号残缺链尾收口（stage5 后 LLM patch 轮可再引入「（国务院令第279订）」类残缺）
       'quotation-balance-repair',    // r4 引文成对性残缺链尾修复（法规列举句自吞噬拼接丢失：终检报出后无轮消费直坠门禁）
       'basis-regulations-repair',    // 丰乐镇实机终门禁 #8：编制依据法规/规范漏列链尾修复（照抄招标文件引用法规 + 按分部选列现行规范）
+      'basis-regulations-cross-repair', // C5 P6：编制依据↔正文双向对账链尾收口（used 确定性补入 + declared 应用引用/不适用移除 + 全局复检；basis-regulations-repair 之后）
       'dangerous-applicability-repair', // r28j 危大辨识清单漏项链尾修复（s28i 连续两轮：定位含危大辨识区章 + LLM 定向补列遗漏适用项，复检覆盖数 + 变差回滚）
       'auto-spec-gate-repair',       // D-T8 配置必要内容缺失链尾收口（autoSpecGates 术语缺口 bigram 归属到章 + LLM 定向补写；位于 basis-regulations-repair 之后、toc-consistency 之前）
       'toc-consistency',             // 目录与正文一致性兜底（fixTocFromBody）
@@ -40,10 +41,13 @@ describe('修复轮顺序快照（变更必须显式改快照并附理由）', (
       'templating-sweep',            // D-T7 模板化清理链尾重放（零信息前缀句确定性删除 + 逐章段落完全重复去重；section-alignment-sweep 之后、链尾 markdown-only 重放之前）
       'duplicate-theme-merge',       // D-T7 重复主题小节链尾合并（同桶规划小节 ≥2 确定性合并 + 规划数组同步 + 章内编号原子重放；templating-sweep 之后、delivery-structure-closure 之前）
       'delivery-structure-closure',  // D-T6 交付结构收口（超长段落切分 + 目录按正文实际结构重建；最后净变更点之后、stageFinalGate 之前）
+      'sentence-pattern-sweep',      // C8 S3 句模复读链尾收口（宣告引导句确定性剥离 + 密度命中线四端单源；delivery-structure-closure 之后、链尾标点兜底之前）
+      'duplicate-sentence-collapse', // C8 S5 句级复读坍塌链尾收口（完全重复句保首次删后续：同章一律坍塌、跨章仅泛化归口帧坍塌；sentence-pattern-sweep 之后、链尾标点兜底之前）
+      'templating-tail-replay',      // C8 S6 A' 对象错位（markdown 版 templating 重放：finalMarkdown 切章构造伪 chapters + 前缀句删除 + 章内重复段去重；duplicate-sentence-collapse 之后、链尾标点兜底之前）
     ]);
   });
 
-  it('LLM_PATCH_REPAIR_ROUNDS 17 轮顺序快照（P11 全链接入的登记载体）', () => {
+  it('LLM_PATCH_REPAIR_ROUNDS 18 轮顺序快照（P11 全链接入的登记载体）', () => {
     expect(LLM_PATCH_REPAIR_ROUNDS.map(round => round.id)).toEqual([
       'fact-landing',
       'table-repair',
@@ -57,6 +61,7 @@ describe('修复轮顺序快照（变更必须显式改快照并附理由）', (
       'control-loop-repair',
       'professional-chain-repair',
       'basis-regulations-repair',
+      'basis-regulations-cross-repair',
       'dangerous-applicability-repair',
       'auto-spec-gate-repair',
       'length-compression-repair',
@@ -79,6 +84,7 @@ describe('修复轮顺序快照（变更必须显式改快照并附理由）', (
       { id: 'control-loop-repair', anchoredTo: 'construction-org-control-loop' },
       { id: 'professional-chain-repair', anchoredTo: 'construction-org-professional-chain' },
       { id: 'basis-regulations-repair', anchoredTo: 'basis-regulations-coverage' },
+      { id: 'basis-regulations-cross-repair', anchoredTo: 'basis-regulations-cross' },
       { id: 'dangerous-applicability-repair', anchoredTo: 'dangerous-applicability' },
       { id: 'auto-spec-gate-repair', anchoredTo: 'planned-auto-spec-gate' },
       { id: 'length-compression-repair', anchoredTo: 'document-budget' },

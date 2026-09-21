@@ -64,8 +64,9 @@ function hitKeys(text: string): Set<ElementKey> {
   return hits;
 }
 
-/** 排他块：未完成标记/代码围栏/封面 HTML/表格块
- * （表格结构零风险原则：表格行内或表后不做拼接，表格块整体跳过）
+/** 排他块：未完成标记/代码围栏/封面 HTML/表格块/引用块（C2）
+ * （表格结构零风险原则：表格行内或表后不做拼接，表格块整体跳过；
+ * 引用块为图件说明/提示性内容，非措施正文，补句会污染图件说明——r28l 实测）
  * 目录区不在此判定——目录导航行常自成一段且段首不是「目录」标题，
  * 由主函数按行范围（目录标题行 → 下一个 H1/H2 前）整区跳过 */
 function isExcludedBlock(text: string): boolean {
@@ -73,6 +74,7 @@ function isExcludedBlock(text: string): boolean {
   if (/WRITER_MISSING_SECTION|Writer\s*未完成/u.test(text)) return true;
   if (text.includes('```') || /<div\s|<table\s/iu.test(text)) return true;
   if (/^\s*\|/mu.test(text)) return true;
+  if (/^\s*>/mu.test(text)) return true;
   return false;
 }
 
@@ -100,6 +102,10 @@ export function enforceFiveElementClosureBoost(markdown: string): { markdown: st
     tocRanges.push({ start: index, end });
   });
   const inTocRange = (lineIndex: number): boolean => tocRanges.some(range => lineIndex >= range.start && lineIndex <= range.end);
+  // C2 防护：附表区行范围（「## 附表…」标题起至文末）整区跳过——附表区为数据表/图件说明/骨架，
+  // 补强句会污染数据表与图件说明（r28l 实测附表四/五图件说明被补强句污染）
+  const appendixStart = lines.findIndex(line => /^##\s*附表/u.test(line.trim()));
+  const inAppendixRange = (lineIndex: number): boolean => appendixStart >= 0 && lineIndex >= appendixStart;
   interface Segment { startLine: number; endLine: number; text: string }
   const segments: Segment[] = [];
   let segmentStart = -1;
@@ -109,7 +115,7 @@ export function enforceFiveElementClosureBoost(markdown: string): { markdown: st
     if ((blank || index === lines.length - 1) && segmentStart >= 0) {
       const endLine = blank ? index - 1 : index;
       const text = lines.slice(segmentStart, endLine + 1).join('\n');
-      if (text.trim().length >= 30 && !inTocRange(segmentStart)) {
+      if (text.trim().length >= 30 && !inTocRange(segmentStart) && !inAppendixRange(segmentStart)) {
         segments.push({ startLine: segmentStart, endLine, text });
       }
       segmentStart = -1;
@@ -144,14 +150,14 @@ export function enforceFiveElementClosureBoost(markdown: string): { markdown: st
     const sentence = pickSentence(hits, pools, parseInt(stableHash(segment.text).slice(0, 8), 16) || 0);
     if (!sentence) continue;
     usage.set(sentence, (usage.get(sentence) || 0) + 1);
-    // 段末行是标题行、或其后首个非空行是表格行（表题行/表前引导行形态）时向上找正文行——
-    // 防补句被拼进标题行或表题行（r27 扩围归因：补句拼到表题行后经题注链按粘连形态拆行、
-    // 续文被移至表后独立成段，同句跨块复用触发「段落完全重复」误报——通用结构判据，无
-    // 项目语义）；段内全为标题/表题行时跳过本段不补
+    // 段末行是标题行、图题行，或其后首个非空行是表格行（表题行/表前引导行形态）时向上找正文行——
+    // 防补句被拼进标题行/图题行/表题行（r28l 实测：补句拼到图题行「图4-3 网络图」尾后经图位链
+    // 形成「图4-3 网络图相关内容纳入…」污染行；通用结构判据，无项目语义）；
+    // 段内全为标题/图题/表题行时跳过本段不补
     let target = segment.endLine;
     while (target >= segment.startLine) {
       const current = (lines[target] ?? '').trim();
-      if (/^#{1,6}\s/u.test(current) || nextNonBlankLine(lines, target).startsWith('|')) {
+      if (/^#{1,6}\s/u.test(current) || nextNonBlankLine(lines, target).startsWith('|') || /^\*{0,2}图\s*(?:\d|[ 　])/u.test(current)) {
         target -= 1;
         continue;
       }

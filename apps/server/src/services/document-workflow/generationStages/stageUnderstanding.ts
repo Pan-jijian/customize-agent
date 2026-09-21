@@ -26,7 +26,7 @@ import { buildBidProcedureJudge, evidenceSafetyKey, partitionEvidenceByContentSa
 import { buildFactsModel, extractLocalFactPool } from '../factsModel';
 import { arbitrateFactPool, buildCanonicalFactModel, extractDrawingAnnotationFacts, PROJECT_BASIC_FIELD_SPECS } from '../factGovernance';
 import { emptyTenderRequirements, extractTenderRequirements, hasTenderRequirements, readCachedTenderRequirements, tenderRequirementsCacheKey, tenderRequirementsSummary, writeCachedTenderRequirements } from '../tenderRequirements';
-import { bidCompositionSummary, extractBidCompositionSpec, isBodyTableForbidden, stripRequiredTableRuleLine } from '../bidComposition';
+import { bidCompositionSummary, extractBidCompositionSpec } from '../bidComposition';
 
 export async function stageUnderstanding(session: GenerationSession): Promise<void> {
   session.understanding.evidenceScopePaths = new Set(session.prepare.materialFilePaths);
@@ -202,7 +202,7 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
   session.understanding.bidStructureAudit = validateBidStructureBeforeGeneration({ template: session.prepare.template, chapters: enrichedOutlineChapters, requirement: session.global.input.requirement, evaluationItems: session.understanding.evaluationItems, semanticSimilarity: criteriaSimilarity });
   // ── 标书编制规格判定（暗标/明标）——一处判定、全链消费 ──
   // 与评分项要求提取链同源直读（招标/补疑/答疑/评标文件全量切片，不经检索命中），确定性解析（无 LLM）：
-  // 判定结果驱动阶段 2 小节规划/表格计划口径（暗标正文禁表 → 不产出表格需求）、阶段 3 蓝图 composition 承接
+  // 判定结果驱动阶段 2 小节规划/表格计划口径（正文禁表 bodyTablePolicy=forbidden → 不产出表格需求）、阶段 3 蓝图 composition 承接
   // （附表清单与数据源绑定）、阶段 4 写作/门禁（禁表禁图注入 + 正文表格反向阻断）、终稿文末附表直出与封面口径；
   // 未能识别标书类型标记时显性展示（skipped，按常规口径），不静默猜测。
   const bidCompositionTexts: string[] = [];
@@ -227,52 +227,21 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
   }, { subtitle: '标书编制规格', order: session.global.progressStages.length }));
   session.global.emitProgress();
   // F-T1 判定失败显性告警（不静默退化）：未识别标书类型时独立告警节点显性展示风险与核查动作——
-  // 防「明标口径产出暗标文件」（正文表格/图片本应禁止而未被禁止，施工组织设计部分不得分）
+  // 防「常规口径产出暗标文件」（暗标硬口径：正文图片禁出与投标人身份标记禁语，未被禁止时施工组织设计部分不得分）
   if (session.understanding.bidComposition.bidType === 'unknown') {
     upsertProgressStage(session.global.progressStages, displayStage({
       type: 'validation',
       roleId: 'bid-composition-warning',
       status: 'skipped',
-      message: '标书类型判定告警：未识别暗标/明标标记——本次按常规（明标）口径生成，正文表格与图片不受限制；若本项目实为暗标，将出现「明标口径产出暗标文件」的编制错位，请核对招标文件后重跑',
+      message: '标书类型判定告警：未识别暗标/明标标记——本次按常规口径生成（正文表格策略按招标证据判定、正文图片允许）；若本项目实为暗标，正文图片与投标人标记可能未被禁止（暗标通常不得出现），请核对招标文件后重跑',
       details: ['核查点：招标文件「施工组织设计采用」勾选项（标记字符变体与「按暗标/采用暗标评审」语义条款均已覆盖）或「暗标编制要求」条款', '判定证据链见「标书编制规格」节点'],
     }, { subtitle: '标书编制规格·判定告警', order: session.global.progressStages.length }));
     session.global.emitProgress();
   }
-  // 暗标口径消解（B6 门禁反转）：阶段 0 先于本判定拼装运行时提示词，已把「必须输出以下正式 Markdown 表格」
-  // 规则行写入写作/事实提取/审查/修复四条消费链——判定为正文禁表后从这些文本中移除该行（字符串消解，
-  // 不重建提示词），使阶段 2/4/终稿各轮消费的提示词与招标暗标口径一致；表格需求改由终稿文末附表区承接。
-  if (isBodyTableForbidden(session.understanding.bidComposition)) {
-    const dissolve = (text: string): { next: string; changed: boolean } => {
-      const next = stripRequiredTableRuleLine(text || '');
-      return { next, changed: next !== (text || '') };
-    };
-    const dissolvedFields: string[] = [];
-    const runtimeRulesResult = dissolve(session.prepare.runtimeRulesText);
-    session.prepare.runtimeRulesText = runtimeRulesResult.next;
-    if (runtimeRulesResult.changed) dissolvedFields.push('runtimeRulesText');
-    const promptTextsResult = dissolve(session.prepare.promptTexts);
-    session.prepare.promptTexts = promptTextsResult.next;
-    if (promptTextsResult.changed) dissolvedFields.push('promptTexts');
-    const factExtractionResult = dissolve(session.prepare.factExtractionPromptTexts);
-    session.prepare.factExtractionPromptTexts = factExtractionResult.next;
-    if (factExtractionResult.changed) dissolvedFields.push('factExtractionPromptTexts');
-    const reviewResult = dissolve(session.prepare.reviewPromptTexts);
-    session.prepare.reviewPromptTexts = reviewResult.next;
-    if (reviewResult.changed) dissolvedFields.push('reviewPromptTexts');
-    const repairResult = dissolve(session.prepare.repairPromptTexts);
-    session.prepare.repairPromptTexts = repairResult.next;
-    if (repairResult.changed) dissolvedFields.push('repairPromptTexts');
-    if (dissolvedFields.length > 0) {
-      upsertProgressStage(session.global.progressStages, displayStage({
-        type: 'validation',
-        roleId: 'bid-composition-prompt-dissolve',
-        status: 'success',
-        message: `暗标口径消解：提示词「必须输出表格」规则行已从 ${dissolvedFields.length} 处消费文本移除（${dissolvedFields.join('、')}）`,
-        details: ['正文表格需求改由终稿文末附表区按招标附表清单直出；写作/检查/修复提示词不再要求正文输出表格'],
-      }, { subtitle: '标书编制规格', order: session.global.progressStages.length }));
-      session.global.emitProgress();
-    }
-  }
+  // C1 口径反转（原 B6 消解链删除）：正文禁表此前由「暗标→禁表」硬推得出，判定后需从提示词链
+  // 移除「必须输出表格」规则行；现改证据驱动三态判定——允许句/无证据 → allowed（表格计划正常构建，
+  // 提示词链不再消解）；仅显式禁表句 → forbidden（表格计划短路，需求由文末附表区承接）。
+  // 提示词「表格需求行」并入表格计划统一裁决，不再做字符串级消解。
   // C1 前置链并行：招标要求提取链（条款穷举切分 → 逐条判定 → 重复合并 → 对账闭合 → 缓存 v4）
   // 独立任务与大纲规划并行执行——判定 LLM 时间被规划 LLM 时间覆盖；
   // 提取失败独立降级为空模型 + skipped 显性警示（提取失败不得阻断生成）

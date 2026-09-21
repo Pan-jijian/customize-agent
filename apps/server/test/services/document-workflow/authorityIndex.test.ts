@@ -50,6 +50,9 @@ function makeBlueprintData(): BlueprintData {
     ],
     fundPlan: { wageRule: '按月足额', usagePlan: '专款专用' },
     testPlan: [{ scope: '混凝土试块', count: 12, basis: '推导' }],
+    testInstruments: [{ name: '水准仪', spec: 'DS3', quantity: 2, purpose: '高程控制测量与标高复核', basis: '检定合格后投入使用' }],
+    tempLand: [{ purpose: '材料堆放场', area: 800, location: '场内运输道路旁', duration: '施工全过程', note: '分类堆放并分区标识', basis: '施工总平面布置规划' }],
+    schedule: [{ seq: 1, label: '施工准备', duration: 20, startDay: 1, endDay: 20, critical: false, basis: '前导工作，与主体施工穿插进行' }],
     earthworkBalance: { excavation: 10000, backfill: 8000, disposal: 2000, basis: '清单汇总' },
     tempUtilities: { powerLoad: '200kW', waterUsage: '50m³/天' },
     redLineFacts: [
@@ -189,13 +192,14 @@ describe('quantityValueIsLegal（分村多值合法性判定）', () => {
 });
 
 describe('V5 P2 渲染覆盖率（全量渲染、零截断、顺序稳定）', () => {
-  it('10 域全部有渲染路径：每域代表性行输出（机制：新增 domain 未登记渲染器即编译失败）', () => {
+  it('11 域全部有渲染路径：每域代表性行输出（机制：新增 domain 未登记渲染器即编译失败）', () => {
     const index = buildAuthorityIndex(makeBlueprintData());
-    expect(index.byDomain.size).toBe(10);
+    expect(index.byDomain.size).toBe(11);
     const rows = renderAuthorityDomains(index);
     const text = rows.join('\n');
     expect(text).toContain('- 总工期：240 日历天');
     expect(text).toContain('- 里程碑（各节点用时，总和 ≤ 总工期）：施工准备 20 天、主体施工 180 天');
+    expect(text).toContain('- 进度工序（里程碑展开，起止天序系统推导，不得自设）：施工准备 第1~20天');
     expect(text).toContain('- 机动工期：40 天');
     expect(text).toContain('- 劳动力峰值：180 人');
     expect(text).toContain('- 分阶段劳动力投入（各阶段同时在场人数，分阶段计划表数据源）：施工准备阶段 25 人、主体施工阶段 130 人');
@@ -206,14 +210,16 @@ describe('V5 P2 渲染覆盖率（全量渲染、零截断、顺序稳定）', (
     expect(text).toContain('- 工程量清单（合计口径；分组明细为合法多值）：挖沟槽土方 20420.39m³（分组：白鸥观澜公厕 838.81、青青家园 213.99）、塑料检查井 555座');
     expect(text).toContain('- 规格权威（清单特征原文，必须原样引用，不得自编）：垫层=C20');
     expect(text).toContain('- 土方平衡（清单汇总口径）：挖方 10000m³、填方 8000m³、弃方 2000m³');
+    expect(text).toContain('- 临时设施与用地（面积/位置规划，不得自设）：材料堆放场 800㎡');
     expect(text).toContain('- 试验计划（推导口径，不得自设）：混凝土试块 12次');
+    expect(text).toContain('- 试验检测仪器（配置清单，不得自设）：水准仪（DS3） 2 台');
     expect(text).toContain('- 评审红线事实（must_cite，正文必须逐条出现且数值一致）：自然村数量=9 个自然村；绿化养护期=2 年');
     expect(text).toContain('- 金额类红线事实（商务禁区，不进正文）：合同估算价=1200 万元');
   });
 
-  it('渲染次序稳定：contract → schedule → labor → equipment → material → quantity → spec → earthwork → test → redline', () => {
+  it('渲染次序稳定：contract → schedule → labor → equipment → material → quantity → spec → earthwork → site → test → redline', () => {
     const rows = renderAuthorityDomains(buildAuthorityIndex(makeBlueprintData()));
-    const prefixes = ['- 总工期', '- 里程碑（', '- 劳动力峰值', '- 主要机械', '- 物资计划', '- 工程量清单', '- 规格权威', '- 土方平衡', '- 试验计划', '- 评审红线事实'];
+    const prefixes = ['- 总工期', '- 里程碑（', '- 进度工序', '- 劳动力峰值', '- 主要机械', '- 物资计划', '- 工程量清单', '- 规格权威', '- 土方平衡', '- 临时设施与用地', '- 试验计划', '- 试验检测仪器', '- 评审红线事实'];
     const positions = prefixes.map(prefix => rows.findIndex(row => row.startsWith(prefix)));
     expect(positions.every(position => position >= 0)).toBe(true);
     expect(positions).toEqual([...positions].sort((left, right) => left - right));

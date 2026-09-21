@@ -4,7 +4,7 @@
  * drawingReferenceIssues 验收口径（消费锁的确定性 token，不再以文件名/路径匹配正文）。
  */
 import { describe, expect, it } from 'vitest';
-import { buildDrawingFactLock, drawingFactPlacement, extractDrawingFactTokens, renderDrawingFactLockText, type DrawingFactLock } from '@/services/document-workflow/drawingFactLock';
+import { buildDrawingFactLock, drawingFactPlacement, extractDrawingFactTokens, normalizeDrawingMatchText, renderDrawingFactLockText, type DrawingFactLock } from '@/services/document-workflow/drawingFactLock';
 import { drawingReferenceIssues } from '@/services/document-workflow/qualityValidation';
 import type { DocumentEvidence } from '@/services/document-workflow/types';
 
@@ -176,5 +176,113 @@ describe('drawingReferenceIssues 引用率验收（B-T3）', () => {
   it('无图纸锁时静默（不误报）', () => {
     expect(drawingReferenceIssues('正文', undefined)).toEqual([]);
     expect(drawingReferenceIssues('正文', lockFixture([]))).toEqual([]);
+  });
+
+  // ── C3-6-5 三档口径（达标线 90% / 可修复 warning / 阻断线 50%）──
+
+  const tenLock = lockFixture(Array.from({ length: 10 }, (_, index) => ({
+    sourceFile: `资料/g${index + 1}图纸.pdf`,
+    factLines: ['规格 C30 混凝土'],
+    tokens: [`c${index}0`],
+  })));
+
+  it('C3-6-5 达标线（≥90%）静默：残留少量未引用不再报出（无修复动作的永久 warning 属噪音）', () => {
+    const issues = drawingReferenceIssues('规格 c00 与 c10、c20、c30、c40、c50、c60、c70、c80 一致。', tenLock);
+    expect(issues).toEqual([]);
+  });
+
+  it('C3-6-5 目标线与阻断线之间为可修复 warning（provenance 单源供修复轮消费）', () => {
+    const issues = drawingReferenceIssues('规格 c00 与 c10、c20、c30、c40 一致。', tenLock);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.level).toBe('warning');
+    expect(issues[0]!.severity).toBe('warning');
+    expect(issues[0]!.owner).toBe('llm');
+    expect(issues[0]!.repairability).toBe('llm_repairable');
+    expect(issues[0]!.provenance?.detectorId).toBe('drawing-reference');
+    expect(issues[0]!.message).toContain('5/10');
+    expect(issues[0]!.message).toContain('目标 ≥90%');
+  });
+
+  it('C3-6-5 阻断线以下（<50%）保持 blocker 且带 provenance（修复轮最高优先级消费）', () => {
+    const issues = drawingReferenceIssues('无关正文。', tenLock);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.level).toBe('error');
+    expect(issues[0]!.severity).toBe('blocker');
+    expect(issues[0]!.provenance?.detectorId).toBe('drawing-reference');
+  });
+});
+
+// ── C3-6-2 提取端提纯与分母治理（C3-6 图纸事实引用扩容） ──
+
+describe('C3-6-2 提取端提纯（colN/xNNN 残片过滤 + 目录类衍生文档剔除）', () => {
+  it('表格列名残片（col2/COL10）与尺寸对拆分残片（x18/x594）不进入 token 池', () => {
+    const tokens = extractDrawingFactTokens('洞口尺寸 18x18x3，图框 420x594，表格 col2 COL10 数据行。');
+    expect(tokens).not.toContain('col2');
+    expect(tokens).not.toContain('col10');
+    expect(tokens).not.toContain('x18');
+    expect(tokens).not.toContain('x594');
+  });
+
+  it('防误伤：完整尺寸对（18x18/420x594）与真实规格 token 保留', () => {
+    const tokens = extractDrawingFactTokens('洞口尺寸 18x18x3，图框 420x594，混凝土 C30。');
+    expect(tokens).toEqual(expect.arrayContaining(['18x18', '420x594', 'c30']));
+  });
+
+  it('图纸目录/清单类衍生文档不入锁（列名残片分母治理：正文永不可能引用）', () => {
+    const lock = buildDrawingFactLock({ evidence: [
+      evidence('资料/图纸目录.xls', 'col1 col2 col3 封面 总平面图 道路平面图'),
+      evidence('资料/道路施工图.pdf', ROAD_CONTENT),
+    ] })!;
+    expect(lock.groups.map(group => group.sourceFile)).toEqual(['资料/道路施工图.pdf']);
+    expect(lock.usableDrawings).toBe(1);
+  });
+
+  it('防误伤：目录路径段含「图纸」不误伤真实图纸（按 basename 判目录词）', () => {
+    const lock = buildDrawingFactLock({ evidence: [
+      evidence('图纸/道路平面图.dwg', ROAD_CONTENT),
+      evidence('资料/照明施工图.pdf', DRAIN_CONTENT),
+    ] })!;
+    expect(lock.groups).toHaveLength(2);
+  });
+});
+
+// ── C3-6-3 三段式渲染（注入覆盖扩容：大池下旋转覆盖段保障中尾部份） ──
+
+describe('C3-6-3 三段式渲染覆盖（深段 + 相关性段 + 旋转覆盖段）', () => {
+  const LONG_LINE = `设计说明：规格参数构造做法取值${'参数'.repeat(20)}${'X'.repeat(200)}`;
+  const manyLock = lockFixture(Array.from({ length: 40 }, (_, index) => {
+    const name = index < 34 ? `a${String(index + 1).padStart(2, '0')}图纸.pdf` : `z${String(index - 33).padStart(2, '0')}图纸.pdf`;
+    return { sourceFile: `资料/${name}`, factLines: [LONG_LINE], tokens: [`t${index + 1}`] };
+  }));
+  const seenIn = (title: string) => {
+    const text = renderDrawingFactLockText(manyLock, title, { maxChars: 3000, perDrawingMinLines: 1 });
+    return new Set([...text.matchAll(/([^\s｜]+\.pdf)｜/gu)].map(match => match[1]!));
+  };
+
+  it('深段注入相关性头部份（逐份保底行）', () => {
+    const seen = seenIn('主要施工方法');
+    for (let index = 1; index <= 6; index += 1) {
+      expect(seen.has(`a${String(index).padStart(2, '0')}图纸.pdf`)).toBe(true);
+    }
+  });
+
+  it('旋转覆盖段真实生效：预算耗尽前中尾部未注入份获得注入（旧实现被前 22 份耗尽）', () => {
+    const seen = seenIn('主要施工方法');
+    const head = new Set(Array.from({ length: 7 }, (_, index) => `a${String(index + 1).padStart(2, '0')}图纸.pdf`));
+    const outside = [...seen].filter(name => !head.has(name));
+    expect(outside.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('旋转起点随章标题变化：不同章的中尾部覆盖组合不同（跨章互补）', () => {
+    const tails = ['主要施工方法', '道路工程施工方案', '质量管理体系与措施'].map(title => {
+      const seen = seenIn(title);
+      const head = new Set(Array.from({ length: 7 }, (_, index) => `a${String(index + 1).padStart(2, '0')}图纸.pdf`));
+      return [...seen].filter(name => !head.has(name)).sort().join(',');
+    });
+    expect(new Set(tails).size).toBeGreaterThan(1);
+  });
+
+  it('normalizeDrawingMatchText 与 token 同口径（去空白/全角冒号/小写）', () => {
+    expect(normalizeDrawingMatchText('配合比 1：2\n水泥砂浆 C30')).toBe('配合比1:2水泥砂浆c30');
   });
 });

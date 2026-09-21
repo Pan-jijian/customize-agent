@@ -14,9 +14,9 @@ import { repairTableExecutionGaps } from '../../globalQualityGates';
 import type { FinalizeSession } from '../finalizeSession';
 
 export async function stageTableRepair(session: FinalizeSession): Promise<void> {
-  // 暗标禁表（标书编制规格 bodyTablePolicy=forbidden）：表格修复轮反转为拆表轮——
+  // 正文禁表（bodyTablePolicy=forbidden，显式禁表句）：表格修复轮反转为拆表轮——
   // 正文残留表格改写为段落式叙述（与生成期全局轮同一实现 repairTableExecutionGaps 的拆表分支），
-  // 不做单元格修复（暗标正文不应存在表格，补全单元格只会让违规表格更完整）
+  // 不做单元格修复（正文禁表口径下不应存在表格，补全单元格只会让违规表格更完整）
   if (isBodyTableForbidden(session.bidComposition)) {
     const { tableFixApplied } = await repairTableExecutionGaps({
       effectiveChapters: session.effectiveChapters,

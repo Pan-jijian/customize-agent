@@ -9,6 +9,8 @@ import type { AuthorityAuditReport } from '../authorityAudit';
 import type { SuspensionChecklist } from '../suspensionChecklist';
 import type { ParameterUsageAudit } from '../chapterParameterFacts';
 import type { KeyFactPlacementAudit } from '../keyFactPlacement';
+import type { ScoringCaliberStamp } from '../scoringCalibration';
+import type { EvaluationCriteriaAttainmentAudit } from '../evaluationCriteriaMapping';
 
 export interface ChapterCoverageReport {
   chapterId: string;
@@ -119,6 +121,11 @@ export interface DocumentQualityReport {
   actions: string[];
   /** 模板化套用专项检测报告（docx 第十类核心降档判定，重难点重度模板化→直接降档） */
   templating?: TenderBidTemplatingReport;
+  /** 评分口径戳（C0-7）：主尺口径版本 + 主从关系标注（旧报告可能缺省） */
+  caliber?: ScoringCaliberStamp;
+  /** 招标评分表条目承接审计（C0-3）：评分项逐条三态判定（met/partial/missing）与专家视角模拟分；
+   * 条目不可用或为空时不输出（旧报告可能缺省） */
+  evaluationCriteriaAttainment?: EvaluationCriteriaAttainmentAudit;
 }
 
 export interface DocumentReviewChecklistItem {

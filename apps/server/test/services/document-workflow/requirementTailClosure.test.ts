@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { applyRequirementTailClosure } from '@/services/document-workflow/finalize/repairRounds/requirementResponseRepair';
+import { applyRequirementTailClosure, insertionMaterialRejection, insertionSignature } from '@/services/document-workflow/finalize/repairRounds/requirementResponseRepair';
 import { tenderRequirementResponseGaps } from '@/services/document-workflow/tenderRequirements';
 import type { TenderRequirementAssignment } from '@/services/document-workflow/tenderRequirements';
 import { stableHash } from '@/services/document-workflow/utils';
@@ -73,11 +73,13 @@ describe('repairRounds.tailClosure · 招标要求响应链尾终局收口', () 
       embedDocuments: zeroEmbed,
     });
     expect(result.insertedCount).toBe(2);
-    // voice 素材逐字落位（第三人称指代已转投标人口吻）
+    // voice 素材逐字落位（第三人称指代已转投标人口吻；C8 S1：行首枚举前缀「2.」随
+    // bidderVoiceClauseText 统一剥离——条款号不再泄漏进正文，检测端 voice 通道同源）
     const warrantyMaterial = '我方在质量保修期内承担工程质量保修责任。';
-    const emergencyMaterial = '2.发生紧急事故需抢修的，我方接到事故通知后立即到达事故现场抢修。';
+    const emergencyMaterial = '发生紧急事故需抢修的，我方接到事故通知后立即到达事故现场抢修。';
     expect(result.markdown).toContain(warrantyMaterial);
     expect(result.markdown).toContain(emergencyMaterial);
+    expect(result.markdown).not.toContain('2.发生紧急事故');
     // 章末定位：保修段落在第二章区间内（第三章标题之前），应急段落在第三章之后
     const ch2 = result.markdown.indexOf('## 第二章');
     const ch3 = result.markdown.indexOf('## 第三章');
@@ -152,5 +154,142 @@ describe('repairRounds.tailClosure · 招标要求响应链尾终局收口', () 
     const fingerprint = stableHash(ENTRY_WARRANTY.text);
     expect(fingerprint).toBe(stableHash(ENTRY_WARRANTY.text));
     expect(fingerprint).not.toBe(stableHash(ENTRY_EMERGENCY.text));
+  });
+});
+
+/**
+ * C8 S1 · 链尾插入物质量闸（requirementResponseRepair）：
+ * ①签名查重加固（insertionSignature 等价形态折叠、下限 24→8——r28m'「4000×3200」vs「4000*3200」
+ * 查重漏网根因）；②形态闸拒插（insertionMaterialRejection 六类形态：空/过短/表格拍平/括号不配对/
+ * OCR 残片/截断尾——r28m' 实机坏数据形态逐一对齐，拒插即显性记录不静默）；③跨轮幂等
+ * （attemptedSignatures 跨轮传递「已插入/已拒插」签名）；④短条款整体兜底（判定死锁消除——
+ * 「（9）发现脏、差，有缺损。」插入一次即 satisfied，链上重跑零重插）。全程零 LLM / 零嵌入网络依赖。
+ */
+describe('C8 S1 · 链尾插入物质量闸（签名查重 + 形态拒插 + 跨轮幂等）', () => {
+  describe('insertionSignature 等价形态折叠', () => {
+    it('乘号族：×/✳/·/* 全部折叠为 *（r28m’ 查重漏网根因形态）', () => {
+      expect(insertionSignature('4000×3200')).toBe('4000*3200');
+      expect(insertionSignature('4000✳3200')).toBe('4000*3200');
+      expect(insertionSignature('4000·3200')).toBe('4000*3200');
+      expect(insertionSignature('4000*3200')).toBe('4000*3200');
+    });
+
+    it('全半角/空白/大小写折叠：全角数字字母归一为 ASCII、空白全去、统一小写', () => {
+      expect(insertionSignature('ＡＢＣ－１２３')).toBe('abc-123');
+      expect(insertionSignature(' 我 方 Ａ B ')).toBe('我方ab');
+    });
+
+    it('引号族/括号族/标点族同形折叠：等价表述签名一致', () => {
+      expect(insertionSignature('「钉钉」系统')).toBe(insertionSignature('“钉钉”系统'));
+      expect(insertionSignature('（GB 50016-2014）')).toBe(insertionSignature('(GB50016-2014)'));
+      expect(insertionSignature('发现脏、差，有缺损。')).toBe(insertionSignature('发现脏,差,有缺损.'));
+    });
+  });
+
+  describe('insertionMaterialRejection 形态闸（拒插即显性、宁缺毋假）', () => {
+    it('拒插：空素材与归一化过短（<6 与分句下限同源）', () => {
+      expect(insertionMaterialRejection('')).toBe('空素材');
+      expect(insertionMaterialRejection('   ')).toBe('空素材');
+      expect(insertionMaterialRejection('以上')).toContain('过短');
+    });
+
+    it('拒插：表格拍平残片（品牌表拍平实机形态）', () => {
+      expect(insertionMaterialRejection('主材品牌|规格型号')).toContain('表格拍平');
+      expect(insertionMaterialRejection('项目名称\t备注说明')).toContain('表格拍平');
+    });
+
+    it('拒插：括号不配对（截断/拼接残片）', () => {
+      expect(insertionMaterialRejection('（GB 50016-2014，2018年版')).toContain('括号不配对');
+      expect(insertionMaterialRejection('2018年版）执行防火设计')).toContain('括号不配对');
+    });
+
+    it('拒插：OCR 残片与截断尾（r28m’「（18laxj）」/「…在发布最」实录）', () => {
+      expect(insertionMaterialRejection('归档资料详见（18laxj）记录。')).toContain('OCR 残片');
+      expect(insertionMaterialRejection('由代理机构在发布最')).toContain('截断尾');
+      expect(insertionMaterialRejection('发现脏、差，')).toContain('截断尾');
+    });
+
+    it('防误伤反样本：完整表述/无标点长句/成对引用/短条款带句末标点全部放行', () => {
+      expect(insertionMaterialRejection('（9）发现脏、差，有缺损。')).toBeNull();
+      expect(insertionMaterialRejection('本工程严格以开工令为准确定开工日期')).toBeNull();
+      expect(insertionMaterialRejection('（GB 50016-2014，2018年版）执行防火设计。')).toBeNull();
+      expect(insertionMaterialRejection('我方在质量保修期内承担工程质量保修责任。')).toBeNull();
+    });
+  });
+
+  it('三连重复根因回归：短条款「（9）发现脏、差，有缺损。」插入一次即 satisfied，链上重跑零重插', async () => {
+    const entry: TenderRequirementEntry = { text: '（9）发现脏、差，有缺损。', coreTerms: [], sources: [], category: '现场管理', policy: 'respond' };
+    const first = await applyRequirementTailClosure({
+      markdown: BASE_MARKDOWN,
+      tenderRequirements: modelOf([entry]),
+      requirementAssignments: [],
+      embedDocuments: zeroEmbed,
+    });
+    expect(first.insertedCount).toBe(1);
+    expect(first.rejectedCount).toBe(0);
+    // 「（9）」条款号随 bidderVoiceClauseText 剥离，正文只留实质表述
+    expect(first.markdown).toContain('发现脏、差，有缺损。');
+    expect(first.markdown).not.toContain('（9）发现脏');
+    // 插入后确定性复检（检测端同源三通道）：voice 分句通道整体命中 → 无「未确认落位」
+    expect(first.details.filter(line => line.includes('未确认落位'))).toHaveLength(0);
+    expect(first.details).toHaveLength(1);
+    // 链上重跑：插入物按构造 satisfied → 零重插（历史每轮重插 → 三连重复）
+    const second = await applyRequirementTailClosure({
+      markdown: first.markdown,
+      tenderRequirements: modelOf([entry]),
+      requirementAssignments: [],
+      embedDocuments: zeroEmbed,
+    });
+    expect(second.insertedCount).toBe(0);
+    expect(second.markdown).toBe(first.markdown);
+  });
+
+  it('签名查重加固：等价形态（×/*）已落位正文 → 判残留但跳过重插（防重复段落）', async () => {
+    const entry: TenderRequirementEntry = { text: '屋面排水沟盖板按4000×3200统一预制。', coreTerms: [], sources: [], category: '现场布置', policy: 'respond' };
+    const markdown = ['# 施工组织设计', '', '## 第一章 工程概况', '', '本工程位于工业园区，屋面排水沟盖板按4000*3200统一预制。'].join('\n');
+    const attempted = new Set<string>();
+    const result = await applyRequirementTailClosure({
+      markdown,
+      tenderRequirements: modelOf([entry]),
+      requirementAssignments: [],
+      embedDocuments: zeroEmbed,
+      attemptedSignatures: attempted,
+    });
+    expect(result.insertedCount).toBe(0);
+    expect(result.rejectedCount).toBe(0);
+    expect(result.markdown).toBe(markdown);
+    // 命中查重路径（而非「已满足」跳过）：等价形态签名已入 attempted（已满足路径不触达本集合）
+    expect(attempted.has(insertionSignature(entry.text))).toBe(true);
+    expect(attempted.size).toBe(1);
+  });
+
+  it('跨轮幂等：形态闸拒插素材显性记录且跨轮不重试（attemptedSignatures 传递）', async () => {
+    const entry: TenderRequirementEntry = { text: '归档资料详见（18laxj）记录。', coreTerms: [], sources: [], category: '资料管理', policy: 'respond' };
+    const attempted = new Set<string>();
+    const first = await applyRequirementTailClosure({
+      markdown: BASE_MARKDOWN,
+      tenderRequirements: modelOf([entry]),
+      requirementAssignments: [],
+      embedDocuments: zeroEmbed,
+      attemptedSignatures: attempted,
+    });
+    expect(first.insertedCount).toBe(0);
+    expect(first.rejectedCount).toBe(1);
+    expect(first.markdown).toBe(BASE_MARKDOWN);
+    expect(first.details[0]).toContain('形态闸拒插');
+    expect(first.details[0]).toContain('OCR 残片');
+    expect(attempted.size).toBe(1);
+    // 第二轮（同一跨轮集合）：拒插签名命中 → 不重复判定、不重复记录
+    const second = await applyRequirementTailClosure({
+      markdown: BASE_MARKDOWN,
+      tenderRequirements: modelOf([entry]),
+      requirementAssignments: [],
+      embedDocuments: zeroEmbed,
+      attemptedSignatures: attempted,
+    });
+    expect(second.insertedCount).toBe(0);
+    expect(second.rejectedCount).toBe(0);
+    expect(second.details).toHaveLength(0);
+    expect(attempted.size).toBe(1);
   });
 });

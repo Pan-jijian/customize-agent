@@ -84,6 +84,9 @@ export interface FinalizeGenerationInput {
   promptBindings: PromptBinding[]; promptDocumentRules: RuntimePromptRuleSet;
   // ── 项目上下文 ──
   projectUnderstanding: ProjectUnderstanding; projectContext: string; projectRoot: string; projectId: string;
+  /** C6 交付报告类（P5）：生成任务文档 ID（launchTask 以 diversitySeed 传入）——终门禁收口时
+   * 三件套报告落盘 generatedDocuments/reports/<docId>-review.md 的命名源；未提供时跳过写盘 */
+  documentId?: string;
   /** A2 章级 scoped 上下文工厂（生成器预构建）：Final Gate 补写调用按章精确裁剪蓝图；未提供时回退全量 projectContext */
   chapterScopedContext?: (chapter: DocumentTemplateChapter) => string;
   // ── 质量门禁输入（生成期审计产物）──
@@ -145,6 +148,8 @@ export interface FinalizeSession {
   signal?: AbortSignal;
   projectRoot: string;
   projectId: string;
+  /** C6 交付报告类（P5）：生成任务文档 ID（三件套报告文件名源；直接调用管线时为 undefined） */
+  documentId?: string;
   projectMaterialSummary: ProjectMaterialSummary;
   documentSpec: AutoDocumentSpecPackage;
   documentBudget: DocumentBudget;
@@ -243,6 +248,7 @@ export function createFinalizeSession(input: FinalizeGenerationInput): FinalizeS
     signal,
     projectRoot: input.projectRoot,
     projectId: input.projectId,
+    documentId: input.documentId,
     projectMaterialSummary: input.projectMaterialSummary,
     documentSpec: input.documentSpec,
     documentBudget: input.documentBudget,

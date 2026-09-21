@@ -1,7 +1,7 @@
 /**
  * 标书编制规格（BidCompositionSpec）真实数据验证（.manual.ts 显式运行）：
  * 1) 舒城招标文件 kb 全量直读（readProjectKbChunkTextsByHints 定向短语，生产同源通道）
- * 2) extractBidCompositionSpec 判定：暗标/正文禁表/6 附表/格式要求/身份禁语
+ * 2) extractBidCompositionSpec 判定：暗标/正文表格口径（C1 证据驱动三态）/6 附表/格式要求/身份禁语
  * 3) 冲突裁决与写作约束渲染核验
  *
  * 运行：npx vitest run --config vitest.manual.config.ts apps/server/test/bid-composition.manual.ts
@@ -38,7 +38,9 @@ describe('标书编制规格识别（舒城暗标真实数据）', () => {
     console.log('\n=== writing rules ===\n', bidCompositionWritingRules(spec));
 
     expect(spec.bidType).toBe('blind');
-    expect(spec.bodyTablePolicy).toBe('forbidden');
+    // C1 归零验证：舒城招标有表格允许句（「除文字表述外可附下列图表」等）且无显式禁表句
+    // → bodyTablePolicy=allowed（原「暗标→禁表」硬推为 s28l 正文零表空壳根因）
+    expect(spec.bodyTablePolicy).toBe('allowed');
     expect(spec.bodyFigurePolicy).toBe('forbidden');
     expect(spec.appendixPlan.length).toBe(6);
     expect(spec.appendixPlan.filter(item => item.kind === 'figure').length).toBe(2);
@@ -47,7 +49,7 @@ describe('标书编制规格识别（舒城暗标真实数据）', () => {
     expect(spec.formatRules.pageLimit).toBe(200);
     expect(spec.formatRules.cover).toBe('forbidden');
     expect(spec.identityMarksForbidden).toBe(true);
-    expect(spec.conflicts.length).toBe(3);
-    expect(spec.conflicts.find(item => item.resolution.includes('收敛入文末'))).toBeTruthy();
+    // 允许口径下提示词必需表格不产生冲突（原禁表口径的收敛/取消裁决仅作用于显式禁表句场景）
+    expect(spec.conflicts).toEqual([]);
   });
 });

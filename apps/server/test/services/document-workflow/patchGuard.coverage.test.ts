@@ -43,7 +43,7 @@ describe('patchGuard 全链接入防回归（P11/P22）', () => {
   it('12 个调用点全部存在且每处均传 patchGuard（源码 grep 式断言）', () => {
     const allBlocks = REPAIR_CALL_FILES.flatMap(file => repairCallBlocks(readFileSync(path.join(SRC_DIR, file), 'utf8')));
     // 12 个调用点：fact-landing / table-repair / table-caption-repair / table-arithmetic-repair / control-loop-repair / length-compression-repair（finalize/repairRounds） + 6 处（globalQualityGates：
-    // 补表/拆表同域 table-execution-repair 双闭环——补表（非暗标缺表）与暗标拆表（bodyTablePolicy=forbidden）互斥）
+    // 补表/拆表同域 table-execution-repair 双闭环——补表（允许口径缺表）与正文禁表拆表（bodyTablePolicy=forbidden）互斥）
     expect(allBlocks).toHaveLength(12);
     allBlocks.forEach((block, index) => {
       expect(block, `第 ${index + 1} 个调用点未传 patchGuard`).toMatch(/patchGuard\s*:/u);

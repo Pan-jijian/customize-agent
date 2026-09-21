@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assignChapterFactsToBlocks, BLOCK_LENGTH_DISPLAY_SCALE, buildChapterFactCoverageContext, buildSectionBudgetInstruction, capFactCoverageContext, displayWordCap, extractEngineeringObjectNames, renderLengthContractLine, sectionTargets } from '@/services/document-workflow/chapterGeneration';
+import { assignChapterFactsToBlocks, BLOCK_LENGTH_DISPLAY_SCALE, buildChapterFactCoverageContext, buildSectionBudgetInstruction, capFactCoverageContext, CHAPTER_OVER_PRODUCE_ACCEPTANCE_MAX_RATIO, CHAPTER_OVER_PRODUCE_ACCEPTANCE_MIN_RATIO, displayWordCap, extractEngineeringObjectNames, renderLengthContractLine, salvageChapterByOverProduceAcceptance, sectionTargets } from '@/services/document-workflow/chapterGeneration';
 import { buildChapterStructureFromBlueprint } from '@/services/document-workflow/integratedBlueprint';
 import type { DocumentEvidence, DocumentTemplateChapter, SpecAuthorityMap } from '@/services/document-workflow/types';
 
@@ -258,5 +258,157 @@ describe('4.43 篇幅上限语义 + 显示校准（根治字数控不住）', ()
     expect(line).toContain('超出即不合格');
     expect(line).not.toContain('篇幅目标');
     expect(line).not.toContain('1500');
+  });
+});
+
+describe('C7 章级超产对冲接纳（salvageChapterByOverProduceAcceptance）：正/反样本 + 防误伤守护', () => {
+  /** documentTextLength 去空白口径下恰为 chars 的正文段（'施' 重复 chars-1 + 全角句号计 1 字） */
+  const exactLen = (chars: number): string => `${'施'.repeat(Math.max(0, chars - 1))}。`;
+  type AcceptanceInput = Parameters<typeof salvageChapterByOverProduceAcceptance>[0];
+  const baseInput = (overrides: Partial<AcceptanceInput> = {}): AcceptanceInput => ({
+    sections: [undefined, exactLen(1303)],
+    exhaustedBlocks: [{ index: 0, lastAttempt: exactLen(2473), failureKinds: ['over-produce'] }],
+    blockTargetWords: [1903, 1800],
+    ...overrides,
+  });
+
+  it('口径常数守护：接纳线 1.2× 与块末轮容差线同口径；下限 0.85× 与块达标区下限同源', () => {
+    expect(CHAPTER_OVER_PRODUCE_ACCEPTANCE_MAX_RATIO).toBe(1.2);
+    expect(CHAPTER_OVER_PRODUCE_ACCEPTANCE_MIN_RATIO).toBe(0.85);
+  });
+
+  it('r28m 实机复刻：块1 末轮仅篇幅超产（2473 字）+ 块2 放行（1303 字）→ 章总量 3776 ∈ [3147,4444] 接纳成章', () => {
+    // r28m 实机形态：章预算 3703 拆 2 块（1903/1800）；块1 四轮 LLM 成功但篇幅超产（末轮 1.30×）判块死
+    // → 整章阻断 → 文档缺章；而章总量 3776 ≈ 章预算 3703 本守恒——对冲接纳消除不对称毁灭
+    const result = salvageChapterByOverProduceAcceptance(baseInput());
+    expect(result).toBeDefined();
+    expect(result?.sections[0]).toContain('施');
+    expect(result?.detail).toContain('章级超产对冲接纳 1 块');
+    expect(result?.detail).toContain('章总量 3776 字 vs 块预算合计 3703 字');
+    expect(result?.detail).toContain('块序号 0');
+  });
+
+  it('多块失守均仅篇幅超产 → 一并接纳（块序保持）', () => {
+    const result = salvageChapterByOverProduceAcceptance({
+      sections: [undefined, undefined],
+      exhaustedBlocks: [
+        { index: 0, lastAttempt: exactLen(2200), failureKinds: ['over-produce'] },
+        { index: 1, lastAttempt: exactLen(2100), failureKinds: ['over-produce'] },
+      ],
+      blockTargetWords: [1800, 1800],
+    });
+    expect(result).toBeDefined();
+    expect(result?.detail).toContain('章级超产对冲接纳 2 块');
+    expect(result?.detail).toContain('块序号 0、1');
+  });
+
+  it('边界上限：章总量恰等于 ceil(1.2×Σ)=4444 → 接纳；再超 1 字 → 拒绝', () => {
+    const atLimit = salvageChapterByOverProduceAcceptance({
+      sections: [undefined, exactLen(2000)],
+      exhaustedBlocks: [{ index: 0, lastAttempt: exactLen(2444), failureKinds: ['over-produce'] }],
+      blockTargetWords: [1903, 1800],
+    });
+    expect(atLimit).toBeDefined();
+    const overLimit = salvageChapterByOverProduceAcceptance({
+      sections: [undefined, exactLen(2000)],
+      exhaustedBlocks: [{ index: 0, lastAttempt: exactLen(2445), failureKinds: ['over-produce'] }],
+      blockTargetWords: [1903, 1800],
+    });
+    expect(overLimit).toBeUndefined();
+  });
+
+  it('边界下限：章总量恰等于 floor(0.85×Σ)=3147 → 接纳；再少 1 字 → 拒绝', () => {
+    const atFloor = salvageChapterByOverProduceAcceptance({
+      sections: [undefined, exactLen(1147)],
+      exhaustedBlocks: [{ index: 0, lastAttempt: exactLen(2000), failureKinds: ['over-produce'] }],
+      blockTargetWords: [1903, 1800],
+    });
+    expect(atFloor).toBeDefined();
+    const belowFloor = salvageChapterByOverProduceAcceptance({
+      sections: [undefined, exactLen(1146)],
+      exhaustedBlocks: [{ index: 0, lastAttempt: exactLen(2000), failureKinds: ['over-produce'] }],
+      blockTargetWords: [1903, 1800],
+    });
+    expect(belowFloor).toBeUndefined();
+  });
+
+  it('反样本：失败类别混入结构标题缺陷 → 拒绝（仅篇幅可接纳）', () => {
+    const result = salvageChapterByOverProduceAcceptance(baseInput({
+      exhaustedBlocks: [{ index: 0, lastAttempt: exactLen(2473), failureKinds: ['over-produce', 'structure-titles'] }],
+    }));
+    expect(result).toBeUndefined();
+  });
+
+  it('反样本：失败类别为欠产/结构完整性/数值/工序形式/套话/密度/归因/格式任一 → 一律拒绝', () => {
+    for (const kind of ['under-produce', 'structure-integrity', 'numeric', 'flow-form', 'templating', 'density', 'attribution', 'format']) {
+      const result = salvageChapterByOverProduceAcceptance(baseInput({
+        exhaustedBlocks: [{ index: 0, lastAttempt: exactLen(2473), failureKinds: [kind] }],
+      }));
+      expect(result, `failureKind=${kind}`).toBeUndefined();
+    }
+  });
+
+  it('反样本：无末轮内容（未记录尝试）或空白内容 → 拒绝', () => {
+    expect(salvageChapterByOverProduceAcceptance(baseInput({
+      exhaustedBlocks: [{ index: 0, failureKinds: ['over-produce'] }],
+    }))).toBeUndefined();
+    expect(salvageChapterByOverProduceAcceptance(baseInput({
+      exhaustedBlocks: [{ index: 0, lastAttempt: '   ', failureKinds: ['over-produce'] }],
+    }))).toBeUndefined();
+  });
+
+  it('反样本：严重超产（章总量 5600 > 1.2×Σ=4444）→ 拒绝（块容差不放大为章级膨胀）', () => {
+    const result = salvageChapterByOverProduceAcceptance({
+      sections: [undefined, exactLen(2600)],
+      exhaustedBlocks: [{ index: 0, lastAttempt: exactLen(3000), failureKinds: ['over-produce'] }],
+      blockTargetWords: [1903, 1800],
+    });
+    expect(result).toBeUndefined();
+  });
+
+  it('反样本：填回后仍有缺口块（非失守块缺失）→ 拒绝（不允许带缺成章）', () => {
+    const result = salvageChapterByOverProduceAcceptance({
+      sections: [undefined, undefined],
+      exhaustedBlocks: [{ index: 0, lastAttempt: exactLen(2473), failureKinds: ['over-produce'] }],
+      blockTargetWords: [1903, 1800],
+    });
+    expect(result).toBeUndefined();
+  });
+
+  it('反样本：无失守块 / 长度不匹配 / index 越界 / 位置已有内容 → 拒绝（防御性）', () => {
+    expect(salvageChapterByOverProduceAcceptance(baseInput({ exhaustedBlocks: [] }))).toBeUndefined();
+    expect(salvageChapterByOverProduceAcceptance(baseInput({ blockTargetWords: [1903] }))).toBeUndefined();
+    expect(salvageChapterByOverProduceAcceptance(baseInput({
+      exhaustedBlocks: [{ index: 5, lastAttempt: exactLen(2473), failureKinds: ['over-produce'] }],
+    }))).toBeUndefined();
+    expect(salvageChapterByOverProduceAcceptance({
+      sections: [exactLen(2400), exactLen(1303)],
+      exhaustedBlocks: [{ index: 0, lastAttempt: exactLen(2473), failureKinds: ['over-produce'] }],
+      blockTargetWords: [1903, 1800],
+    })).toBeUndefined();
+  });
+
+  it('防误伤守护：混合失守（块1 仅超额、块2 结构缺陷）→ 整体拒绝（不做部分接纳）', () => {
+    const result = salvageChapterByOverProduceAcceptance({
+      sections: [undefined, undefined],
+      exhaustedBlocks: [
+        { index: 0, lastAttempt: exactLen(2200), failureKinds: ['over-produce'] },
+        { index: 1, lastAttempt: exactLen(2100), failureKinds: ['structure-titles'] },
+      ],
+      blockTargetWords: [1800, 1800],
+    });
+    expect(result).toBeUndefined();
+  });
+
+  it('防误伤守护：多块失守仅部分带末轮内容 → 拒绝（任一失守块不满足即不接纳）', () => {
+    const result = salvageChapterByOverProduceAcceptance({
+      sections: [undefined, undefined],
+      exhaustedBlocks: [
+        { index: 0, lastAttempt: exactLen(2200), failureKinds: ['over-produce'] },
+        { index: 1, failureKinds: ['over-produce'] },
+      ],
+      blockTargetWords: [1800, 1800],
+    });
+    expect(result).toBeUndefined();
   });
 });

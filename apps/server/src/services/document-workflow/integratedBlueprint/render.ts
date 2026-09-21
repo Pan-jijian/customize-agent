@@ -82,6 +82,7 @@ export const AUTHORITY_DOMAIN_CHAPTER_ROUTES: Array<{
   { domain: 'quantity', chapterPattern: /分部分项|施工方案|施工方法|土方|道路|管网|工程概况/u },
   { domain: 'spec', chapterPattern: /材料|物资|质量|技术|施工方案|分部分项/u },
   { domain: 'earthwork', chapterPattern: /土方|土石方|道路|管网|施工方案|分部分项/u },
+  { domain: 'site', chapterPattern: /总平面|平面布置|临时设施|临时用地|驻地|堆场|加工区|施工方案/u },
   { domain: 'test', chapterPattern: /质量|试验|检测|验收/u },
   { domain: 'redline', chapterPattern: /绿化|种植|养护|苗木|技能|培训|成品保护|质量|亮化|路灯|照明|概况|工程|总体/u },
 ];

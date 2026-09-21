@@ -10,6 +10,8 @@
  * LLM 通道 mock（callDocumentLlm 按 prompt 特征返回受控内容）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import * as path from 'node:path';
 import { buildPlannedChapterContent } from '@/services/document-workflow/chapterGeneration';
 import { createGenerationDiagnostics } from '@/services/document-workflow/rolePipeline';
 import type { PlannedChapterBlock, PlannedChapterStructure } from '@/services/document-workflow/integratedBlueprint';
@@ -433,5 +435,66 @@ describe('buildPlannedChapterContent（块字数分层验收 + 结构硬门 + �
     expect(result?.sections).toEqual([undefined, undefined]);
     // 诊断文案区分全失败/部分失败（供章阻断归因展示）
     expect(diag.llm.lastError).toContain('规划块全部失败');
+  });
+
+  it('C7 对冲接纳痕迹收集：两轮超产（末轮 >1.2× 容差线）→ failedBlocks 携带 lastAttempt 与 failureKinds=[over-produce]', async () => {
+    // r28m 形态：块两轮均超产 → 块失败；失败清单须携带「最近一次有效尝试原文 + 失败类别」，
+    // 供上层（stageChapterLoop）在隔离重写耗尽后判定章级超产对冲接纳（仅篇幅超产才可接纳）
+    llmMock.mockResolvedValue(passingContent([H4A, H4B, H4C, H4D], 200));
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure());
+    expect(result?.allSucceeded).toBe(false);
+    const failed = result?.failedBlocks[0];
+    expect(failed?.failureKinds).toEqual(['over-produce']);
+    expect(failed?.lastAttempt).toContain(H4A);
+    expect(failed?.lastAttempt).toContain('施');
+  });
+
+  it('C7 痕迹末轮覆盖：两轮内容不同 → lastAttempt 为末轮原文（最近一次有效尝试）', async () => {
+    const round1 = passingContent([H4A, H4B, H4C, H4D], 200);
+    const round2 = passingContent([H4A, H4B, H4C, H4D], 200).replace(BODY_TAILS[3]!, `${BODY_TAILS[3]}二轮标记`);
+    llmMock.mockResolvedValueOnce(round1).mockResolvedValueOnce(round2);
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure());
+    expect(result?.failedBlocks[0]?.failureKinds).toEqual(['over-produce']);
+    expect(result?.failedBlocks[0]?.lastAttempt).toContain('二轮标记');
+  });
+
+  it('C7 反样本守护：结构类失守（缺 H4）→ failureKinds 含 structure-titles（非篇幅类不进入对冲接纳）', async () => {
+    llmMock.mockResolvedValue(shortContent);
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure());
+    expect(result?.failedBlocks[0]?.failureKinds).toContain('structure-titles');
+    expect(result?.failedBlocks[0]?.failureKinds).not.toEqual(['over-produce']);
+  });
+
+  it('C7 反样本守护：句尾截断（结构完整性，确定性不可修复）→ failureKinds 含 structure-integrity', async () => {
+    const truncated = `### 测量放线\n\n#### ${H4A}\n\n${bodyLine(60, 0)}\n\n垂直度偏差用靠尺实测不超过3mm，并核查门窗性能检测报告\n\n#### ${H4B}\n\n${bodyLine(60, 1)}\n\n#### ${H4C}\n\n${bodyLine(60, 2)}\n\n#### ${H4D}\n\n${bodyLine(60, 3)}`;
+    llmMock.mockResolvedValue(truncated);
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure());
+    expect(result?.failedBlocks[0]?.failureKinds).toContain('structure-integrity');
+  });
+});
+
+/** C7 章级超产对冲接纳接线锁定（源文本静态断言，防重构静默删除对冲接纳链；行为语义由上方用例与本文件 C7 段覆盖） */
+describe('C7 章级超产对冲接纳源文本锁定（防静默回归）', () => {
+  const SRC_DIR = path.resolve(__dirname, '../../../src/services/document-workflow');
+  const chapterGenerationSrc = readFileSync(path.join(SRC_DIR, 'chapterGeneration.ts'), 'utf8');
+  const stageChapterLoopSrc = readFileSync(path.join(SRC_DIR, 'generationStages', 'stageChapterLoop.ts'), 'utf8');
+
+  it('写作层：失败块痕迹收集 + 接纳纯函数与常数导出不缺失', () => {
+    expect(chapterGenerationSrc).toContain('blockLastAttempts.set(index, withBlockShell)');
+    expect(chapterGenerationSrc).toContain('blockFailureKinds.set(index, [');
+    expect(chapterGenerationSrc).toContain('export function salvageChapterByOverProduceAcceptance');
+    expect(chapterGenerationSrc).toContain('export const CHAPTER_OVER_PRODUCE_ACCEPTANCE_MAX_RATIO = 1.2');
+    expect(chapterGenerationSrc).toContain('export const CHAPTER_OVER_PRODUCE_ACCEPTANCE_MIN_RATIO = 0.85');
+  });
+
+  it('章收口：对冲接纳分支 + 审计记录 + stage details 追加不缺失', () => {
+    expect(stageChapterLoopSrc).toContain('salvageChapterByOverProduceAcceptance({');
+    expect(stageChapterLoopSrc).toContain('overProduceAcceptanceNote = acceptance.detail');
+    expect(stageChapterLoopSrc).toContain('...(overProduceAcceptanceNote ? [overProduceAcceptanceNote] : [])');
+  });
+
+  it('零静默降级守护：接纳失败路径仍走章阻断（显式 throw 分支不消失）', () => {
+    expect(stageChapterLoopSrc).toContain('已阻断生成（${failureReason.slice(0, 160)}）');
+    expect(stageChapterLoopSrc).toContain('throw new Error(message)');
   });
 });

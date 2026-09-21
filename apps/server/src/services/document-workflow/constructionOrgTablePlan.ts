@@ -46,14 +46,15 @@ function requiredTableMatchScore(title: string, chapter: DocumentTemplateChapter
  * （按章按节产出）。无静态目录匹配、无系统创作——规划没有的表不出现。
  * 提示词声明的必需表格逐表全章评分归属最高分章；无归属（评分低于 TABLE_ATTACH_MIN_SCORE）的显性返回，
  * 交由最终门禁的必需表格兜底链（markdownComposer.insertRequiredTable）处理并供进度消息展示。
- * 标书编制规格为 forbidden（暗标：正文内不允许出现表格与框图）时短路：正文不注入任何表格计划
- * （LLM 规划表格需求与提示词必需表格均已由阶段 1 编制规格裁决，图表由终稿附表区直出承接）。
+ * 标书编制规格为 forbidden（招标显式禁表句：正文不得出现表格/图表）时短路：正文不注入任何表格计划
+ * （LLM 规划表格需求与提示词必需表格均已由阶段 1 编制规格裁决，图表由终稿附表区直出承接）；
+ * allowed（暗标/明标/未识别且无禁表证据）时正常构建。
  */
 export function buildPlannedTablePlans(input: {
   chapters: DocumentTemplateChapter[];
   plannedTables: Map<string, PlannedTableRequest[]>;
   requiredTables?: string[];
-  /** 标书编制规格（阶段 1 判定）的正文表格策略：forbidden 时正文不注入任何表格计划 */
+  /** 标书编制规格（阶段 1 判定）的正文表格策略：forbidden（显式禁表句）时正文不注入任何表格计划 */
   bodyTablePolicy?: 'forbidden' | 'allowed';
 }): { chapters: DocumentTemplateChapter[]; unattachedRequiredTables: string[] } {
   if (input.bodyTablePolicy === 'forbidden') return { chapters: input.chapters, unattachedRequiredTables: [] };
@@ -1018,7 +1019,7 @@ export function attachDiagramArtifacts(
   return { chapters: nextChapters, unattached };
 }
 
-/** 章级图类呈现指令（Writer prompt 片段）：与表格计划指令并列注入；暗标由调用方短路（正文禁图表，图类归附表区）。
+/** 章级图类呈现指令（Writer prompt 片段）：与表格计划指令并列注入；正文禁表口径（显式禁表句）由调用方短路（图类归文末附表区）。
  * B-T1：图类内容以文字框图/表格式时间轴承载（内容承载），内容结束处输出规范图题行（形态声明，图名即要素名）；
  * 图题行独立成行、不附加说明文字；禁止任何内部话术（不得出现「由编制人绘制后附」类说明）。 */
 export function diagramRequirementsPrompt(chapter: DocumentTemplateChapter) {
@@ -1039,8 +1040,22 @@ const FIGURE_CAPTION_NUMBERED_RE = /^图\s*(\d+(?:[-—–－]\d+)?)\s+(\S.*)$/u
 const FIGURE_CAPTION_BARE_RE = /^图\s+(\S.*)$/u;
 /** 图题名尾词（图类命名构成词，产品级通用词表）：规范图位须以图类名词落定 */
 const FIGURE_NAME_TAIL_RE = /(图|图表)$/u;
+/** 图名构成词尾白名单（C2 归一化）：尾词未落「图」的工程图类构成词——仅此类补「图」，
+ * 防正文引用句（「…中所示内容」类）被误改成图题（宁缺不假） */
+const FIGURE_NAME_COMPOSITE_TAIL_RE = /(计划|机构|布置|流程|示意|系统|架构|组织|网络|横道|曲线|关系|框图|简图|大样|剖面|平面|立面|结构|工艺|路线|流向|时序|方案|安排)$/u;
 /** 图题名样开头排除（引用/叙述句，防正文句子被当图题）：宽松扫描口径 */
 const FIGURE_NAME_LIKE_EXCLUDE_RE = /^(?:所示|如下|见|参见|详见|如|按|为|其中|内|上|下)/u;
+
+/** C2 图名归一化（规格汇集与注入双口径统一）：尾词未落「图」的工程图类构成名补「图」
+ * （「施工进度计划」→「施工进度计划图」「项目管理机构」→「项目管理机构图」）；
+ * 已带图类尾词或非构成词尾原样返回（不猜不造） */
+export function normalizeFigureSpecName(rawName: string): string {
+  const name = (rawName || '').trim();
+  if (!name) return name;
+  if (FIGURE_NAME_TAIL_RE.test(name)) return name;
+  if (FIGURE_NAME_COMPOSITE_TAIL_RE.test(name)) return `${name}图`;
+  return name;
+}
 
 /** 图题名合法性（编号分配口径，宁漏不误）：剥括号注释后 2~36 字、图类尾词落定、无句读空白 */
 function validFigureCaptionName(name: string): boolean {
@@ -1190,15 +1205,71 @@ export interface FigurePlaceholderSpec {
   name: string;
 }
 
+/** C2 现地修复：非规范「图 …」行（缺图类尾词/句读粘连）就地修复（正文区限定）。
+ * ①粘连前缀拆分：「图4-3 网络图相关内容纳入…」→「图4-3 网络图」+ 残余句另起行
+ *   （取最短「图类尾词落定」前缀，前缀须过严格判据）；
+ * ②尾词补全：「图 施工进度计划」→「图 施工进度计划图」（仅构成词尾白名单，防正文引用句误修）。
+ * 修复不改语义（残余句独立成行）、幂等（修复后行通过严格判据，复跑零变化）。 */
+function repairMalformedFigureLines(lines: string[]): { lines: string[]; repaired: number } {
+  const bodyEnd = figureBodyEndIndex(lines);
+  const output: string[] = [];
+  let repaired = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    const raw = lines[index] ?? '';
+    if (index >= bodyEnd) {
+      output.push(raw);
+      continue;
+    }
+    if (probeFigureCaptionLine(raw)) {
+      output.push(raw);
+      continue;
+    }
+    // 仅处理「图」起始行（编号/裸形态；非图起始行原样）
+    const row = raw.trim();
+    const match = /^图\s*(\d+(?:[-—–－]\d+)?)?\s+(\S.*)$/u.exec(row);
+    if (!match) {
+      output.push(raw);
+      continue;
+    }
+    const number = match[1] || '';
+    const rawName = match[2].trim();
+    const figureLine = (name: string) => (number ? `图${number} ${name}` : `图 ${name}`);
+    // ①粘连前缀拆分（最短图类尾词落定前缀）
+    const prefixMatch = /^(.{1,30}?(?:图|图表))/u.exec(rawName);
+    if (prefixMatch && validFigureCaptionName(prefixMatch[1])) {
+      const prefix = prefixMatch[1];
+      const rest = rawName.slice(prefix.length).replace(/^[。；，、,.;！？!?\s]+/u, '').trim();
+      output.push(figureLine(prefix));
+      if (rest) output.push(rest);
+      repaired += 1;
+      continue;
+    }
+    // ②尾词补全（无句读 + 构成词尾白名单）
+    if (!/[。；！？，,.;!?：:]/u.test(rawName)) {
+      const completed = normalizeFigureSpecName(rawName);
+      if (completed !== rawName && validFigureCaptionName(completed)) {
+        output.push(figureLine(completed));
+        repaired += 1;
+        continue;
+      }
+    }
+    output.push(raw);
+  }
+  return { lines: output, repaired };
+}
+
 /**
  * B-T1 图位补位（终稿确定性兜底）：图类要求规格 ↔ 正文已有图题（宽松扫描 + 图名核心词匹配，
  * 「横道图」↔「施工进度横道图」同图）对照，缺失的规格把无编号图题行「图 图名」注入目标章正文末尾
  * （下一个一级标题前；目标章标题未定位时注入全文末尾保底）。编号由 normalizeFigureNumbering 统一分配，
  * 二函数须串行成对使用；幂等（重放时规格图名已在正文，零注入）。
+ * C2：注入前先做非规范图题行就地修复（拆分/补尾词），修复行进入既有图题扫描——根治
+ * 「宽松认『像』不补、严格不认」的补了白补死循环。
  */
 export function ensureFigurePlaceholders(markdown: string, specs: FigurePlaceholderSpec[]): { markdown: string; inserted: string[] } {
   if (specs.length === 0) return { markdown, inserted: [] };
-  const lines = markdown.replace(/\r/gu, '').split('\n');
+  const repair = repairMalformedFigureLines(markdown.replace(/\r/gu, '').split('\n'));
+  const lines = repair.lines;
   const bodyEnd = figureBodyEndIndex(lines);
   // 已有图题（宽松扫描：编号/无编号形态均可）——防重复注入
   const existingNames: string[] = [];
@@ -1209,8 +1280,11 @@ export function ensureFigurePlaceholders(markdown: string, specs: FigurePlacehol
     const name = (numbered ? numbered[2] : bare ? bare[1] : '').trim();
     if (name && figureCaptionNameLike(name)) existingNames.push(name);
   }
-  const missing = specs.filter(spec => !existingNames.some(name => figureNamesMatch(name, spec.name)));
-  if (missing.length === 0) return { markdown, inserted: [] };
+  const missing = specs.filter(spec => !existingNames.some(name => figureNamesMatch(name, normalizeFigureSpecName(spec.name))));
+  // C2：无缺失但原地修复过时同样输出修复结果（修复即收益；纯补位路径原样返回）
+  if (missing.length === 0) {
+    return repair.repaired > 0 ? { markdown: lines.join('\n'), inserted: [] } : { markdown, inserted: [] };
+  }
   // 一级标题行索引（章区间=[标题行, 下一个一级标题行)；目录/附表标题不计）
   const headingIndexes: number[] = [];
   for (let index = 0; index < bodyEnd; index += 1) {
@@ -1234,9 +1308,11 @@ export function ensureFigurePlaceholders(markdown: string, specs: FigurePlacehol
   for (const spec of missing) {
     const end = locateChapterEnd(spec.chapterTitle);
     const bucket = insertAt.get(end) || [];
-    bucket.push(`图 ${spec.name}`);
+    // C2：注入名归一化（尾词补「图」）——注入行须能被严格判据/编号链/覆盖对账闭环识别
+    const injectedName = normalizeFigureSpecName(spec.name);
+    bucket.push(`图 ${injectedName}`);
     insertAt.set(end, bucket);
-    inserted.push(`${spec.chapterTitle}：「${spec.name}」`);
+    inserted.push(`${spec.chapterTitle}：「${injectedName}」`);
   }
   const output: string[] = [];
   for (let index = 0; index < lines.length; index += 1) {
@@ -1286,7 +1362,9 @@ export function collectFigurePlaceholderSpecs(input: {
   const specs: FigurePlaceholderSpec[] = [];
   const add = (chapterTitle: string, rawName: string) => {
     const chapter = (chapterTitle || '').trim();
-    const name = (rawName || '').trim();
+    // C2：规格图名归一化（尾词补「图」）——注入/评分/覆盖对账三口径与严格判据一致，
+    // 根治「施工进度计划」类规格补了不被认（严格判据拒收）的死循环
+    const name = normalizeFigureSpecName((rawName || '').trim());
     if (!chapter || !name || name.length > 60) return;
     if (specs.some(spec => spec.chapterTitle === chapter && figureNamesMatch(spec.name, name))) return;
     specs.push({ chapterTitle: chapter, name });
@@ -1304,14 +1382,15 @@ export function collectFigurePlaceholderSpecs(input: {
   return specs;
 }
 
-/** 图位覆盖对账（B-T1 验收：招标明文每项图类要求 → 正文规范图位一一对照；图名核心词匹配） */
+/** 图位覆盖对账（B-T1 验收：招标明文每项图类要求 → 正文规范图位一一对照；图名核心词匹配）。
+ * C2：规格图名先归一化（尾词补「图」）——与注入链/严格判据同口径，防「补了不被认」虚缺 */
 export function figureCoverage(specs: FigurePlaceholderSpec[], markdown: string): { total: number; covered: number; missing: FigurePlaceholderSpec[] } {
   if (specs.length === 0) return { total: 0, covered: 0, missing: [] };
   const captionNames = extractFigureCaptions(markdown).map(entity => entity.name);
   const missing: FigurePlaceholderSpec[] = [];
   let covered = 0;
   for (const spec of specs) {
-    if (captionNames.some(name => figureNamesMatch(name, spec.name))) covered += 1;
+    if (captionNames.some(name => figureNamesMatch(name, normalizeFigureSpecName(spec.name)))) covered += 1;
     else missing.push(spec);
   }
   return { total: specs.length, covered, missing };

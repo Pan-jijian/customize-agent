@@ -224,6 +224,26 @@ export function stripForbiddenPlaceholderSentences(content: string) {
  * 属于「按图纸…图集…」式非法引用话术，不得进入正式正文）；短语连同前置逗号整体删除，
  * 保留句子其余内容，句子末尾标点不动。标题行/表格行豁免。 */
 
+/** 图集引用短语正则源（C3-6-4 单源：删除链 stripAtlasReferencePhrases 与检测端
+ * atlasReferencePhraseHits 共用同一词面；修复定位=检测定位）。前缀闭集含「构造做法/节点做法/做法」，
+ * 动词闭集执行/参照/详见/见/依据/按，尾部锚图集或国标编号；前瞻限定句界防跨句吞并 */
+const ATLAS_REFERENCE_PHRASE_SOURCE = '(?:[，,]\\s*)?(?:构造做法|节点做法|做法)(?:执行|参照|详见|见|依据|按)[^。；!！?？\\n]{0,30}(?:图集|国标\\s?[0-9]{1,4}[^。；!！?？\\n]{0,16})(?=[。；!！?？]|$)';
+const newAtlasReferencePhraseRe = () => new RegExp(ATLAS_REFERENCE_PHRASE_SOURCE, 'gu');
+
+/** 图集引用短语检测（C3-6-4 检测端，与 stripAtlasReferencePhrases 同源词面 + 同行豁免）：
+ * 返回命中的正文短语列表（空数组=无命中）；标题行/表格行与删除链同口径豁免 */
+export function atlasReferencePhraseHits(markdown: string): string[] {
+  if (!/做法(?:执行|参照|详见|见|依据|按)/u.test(markdown)) return [];
+  const hits: string[] = [];
+  for (const line of markdown.split('\n')) {
+    if (/^\s*#{1,6}\s/u.test(line) || /^\s*\|/u.test(line)) continue;
+    for (const match of line.matchAll(newAtlasReferencePhraseRe())) {
+      if (match[0].trim()) hits.push(match[0].trim());
+    }
+  }
+  return hits;
+}
+
 export function stripAtlasReferencePhrases(markdown: string): { markdown: string; fixedCount: number } {
   if (!/做法(?:执行|参照|详见|见|依据|按)/u.test(markdown)) return { markdown, fixedCount: 0 };
   let fixedCount = 0;
@@ -231,7 +251,7 @@ export function stripAtlasReferencePhrases(markdown: string): { markdown: string
     .split('\n')
     .map(line => {
       if (/^\s*#{1,6}\s/u.test(line) || /^\s*\|/u.test(line)) return line;
-      return line.replace(/(?:[，,]\s*)?(?:构造做法|节点做法|做法)(?:执行|参照|详见|见|依据|按)[^。；!！?？\n]{0,30}(?:图集|国标\s?[0-9]{1,4}[^。；!！?？\n]{0,16})(?=[。；!！?？]|$)/gu, () => {
+      return line.replace(newAtlasReferencePhraseRe(), () => {
         fixedCount += 1;
         return '';
       });
@@ -376,17 +396,42 @@ export function filterResolvedFinalIssues(markdown: string, issues: ValidationIs
 const OVERLONG_LINE_CHARS = 380;
 const PARAGRAPH_TARGET_CHARS = 360;
 
+/** C8 S2① 括号深度感知切分：仅在括号外（深度 0）的分隔符处切分，分隔符附于左段（与
+ * split(/(?<=…)/) 语义一致）。栈跟踪（）()【】「」；未闭合左括号之后不再切分——
+ * s28m' stage 162 实证：引用词条「（GB 50016-2014，…）」内逗号被当分句点切开，
+ * 产生「（GB 50016-2014，」悬挂括号残片（尾段缺右括号）。多余右括号不阻断后续切分；
+ * 切分是排版优化非契约，无切分点时返回单段原文，宁可段超长不可劈语法。 */
+function splitOutsideBrackets(text: string, separators: string): string[] {
+  const openToClose: Record<string, string> = { '（': '）', '(': ')', '【': '】', '「': '」' };
+  const parts: string[] = [];
+  const stack: string[] = [];
+  let current = '';
+  for (const ch of text) {
+    current += ch;
+    if (separators.includes(ch) && stack.length === 0) {
+      parts.push(current);
+      current = '';
+      continue;
+    }
+    const close = openToClose[ch];
+    if (close) stack.push(close);
+    else if (stack.length > 0 && ch === stack[stack.length - 1]) stack.pop();
+  }
+  if (current) parts.push(current);
+  return parts;
+}
+
 /** 单行超长切分：仅切「>380 且非结构行（标题/列表/表格）」的行；短行与结构行原样返回。
- * 切句口径与原实现一致：句号/分号拆句，单句超限再按逗号拆，按 360 上限重排为多段（空行相接）。 */
+ * 切句口径与旧实现一致（句号/分号拆句，单句超限再按逗号拆，按 360 上限重排为多段、
+ * 空行相接），差异仅在两级切分均括号深度感知（C8 S2①）：括号内部标点不参与切分。 */
 function splitOverlongLine(line: string): string {
   if (line.length <= OVERLONG_LINE_CHARS) return line;
   if (/^\s*(#{1,6}\s+|[-*+]\s+|\|)/u.test(line)) return line;
-  const sentences = line
-    .split(/(?<=[。；])/u)
+  const sentences = splitOutsideBrackets(line, '。；')
     .flatMap(item => {
       const sentence = item.trim();
       if (!sentence) return [];
-      if (sentence.length > PARAGRAPH_TARGET_CHARS) return sentence.split(/(?<=[，,])/u).map(part => part.trim()).filter(Boolean);
+      if (sentence.length > PARAGRAPH_TARGET_CHARS) return splitOutsideBrackets(sentence, '，,').map(part => part.trim()).filter(Boolean);
       return [sentence];
     });
   const chunks: string[] = [];

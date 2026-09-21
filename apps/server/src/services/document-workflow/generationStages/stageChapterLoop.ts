@@ -33,8 +33,8 @@ import { renderDrawingFactLockText } from '../drawingFactLock';
 import { renderChapterParameterLines } from '../chapterParameterFacts';
 import { extractBoqDivisionCoverage, formatBoqDivisionCoverage } from '../documentFactTrace';
 import { retrievePlannedMaterialEvidence, sampleProjectMaterialEvidence } from '../projectMaterialProfile';
-import { buildChapterFactCoverageContext, buildPlannedChapterContent, capFactCoverageContext, evidenceForSection } from '../chapterGeneration';
-import { isBodyTableForbidden } from '../bidComposition';
+import { buildChapterFactCoverageContext, buildPlannedChapterContent, capFactCoverageContext, evidenceForSection, salvageChapterByOverProduceAcceptance } from '../chapterGeneration';
+import { isBodyFigureForbidden, isBodyTableForbidden } from '../bidComposition';
 import type { PlannedChapterContentInput, PlannedChapterContentResult } from '../chapterGeneration';
 import { chapterCompletionStatus, chapterGenerationTargets, compactChapterQueries, finalizeChapterContentQuality, optimizeChapterEvidence, preselectSemanticCandidates, resolveChapterPromptExecution, retrieveSectionEvidence, semanticEvidenceText, stripBidDisciplineSentencesSemantic } from '../documentGeneratorHelpers';
 import { alignChapterContentToBlueprint, buildChapterStructureFromBlueprint, chapterBlueprintAuthoritiesNeeded, chapterBlueprintAuthorityGaps, findBlueprintChapter, renderBlueprintMustCiteValues } from '../integratedBlueprint';
@@ -281,9 +281,9 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     let deepEvidenceCount = 0;
     // P1-4：事实需求计算提前到深召回判断之前，把 requiredMissingNeeds 并入深召回一次完成，
     // 避免缺失事实与必需事实需求两次深召回查询集高度重叠
-    // 标书编制规格（阶段 1 判定）：暗标正文禁图（招标「不得有图片和扉页」）驱动写作侧禁图提示与清理；
-    // 明标/未识别（undefined）保持原行为（false）
-    const forbidDrawingImages = isBodyTableForbidden(session.understanding.bidComposition);
+    // 标书编制规格（阶段 1 判定）：正文禁图（暗标或招标「不得有图片」证据，bodyFigurePolicy）驱动写作侧
+    // 禁图提示与清理；C1 出口错位修复——原实现误用 isBodyTableForbidden（表格口径）驱动禁图
+    const forbidDrawingImages = isBodyFigureForbidden(session.understanding.bidComposition);
     const graphRoleHint = graphMapping
       ? [
           graphMapping.graphWorks.length ? `图谱识别本章工程内容：${graphMapping.graphWorks.join('、')}` : '',
@@ -305,12 +305,13 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       return renderChapterRequirementSlice(entries);
     })();
     // A-T1 结构/呈现要求写作注入（章级）：招标明文的呈现形态（框图/图/表格/结合图表）必须在正文落实；
-    // 暗标口径下正文不得出图表实体，以完整文字承载并指向文末附表区（形态由附表区兑现）
+    // C1 双证据口径——正文禁表（显式禁表句）→ 不得出图表实体以文字承载并指向附表区；禁图允许表
+    //（暗标常态）→ 表格/框图照常落实，图类以文字框图/表格式时间轴+图题行承载（无图片）
     const chapterStructureContext = (() => {
       if (session.blueprint.structureAssignments.length === 0) return '';
       const chapterTitle = normalizeChapterTitleLine(chapter.title);
       const items = session.blueprint.structureAssignments.filter(assignment => assignment.chapterTitle === chapterTitle).map(assignment => assignment.requirement);
-      return renderChapterStructureSlice(items, { blind: forbidDrawingImages });
+      return renderChapterStructureSlice(items, { bodyTableForbidden: isBodyTableForbidden(session.understanding.bidComposition), bodyFigureForbidden: forbidDrawingImages });
     })();
     // 4.17.8 六个百分百写作侧前置注入：扬尘治理六项是国家规范固定封闭集，历史缺陷只在检测/修复侧
     // 逐项补写（后期修复模式），写作 LLM 凭记忆编写必漏项（4.17.7 实测缺 2 项）；写作时即注入六项
@@ -558,6 +559,8 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       if (event.phase === 'complete' && event.partialSections) emitSectionCheckpoint(event.partialSections);
     };
     let content: string;
+    // C7 章级超产对冲接纳审计记录（章 stage details 追加；全分支可见——接纳仅发生在计划块管线分支）
+    let overProduceAcceptanceNote: string | undefined;
     if (resumedContent) {
       content = finalizeChapterContentQuality(resumedContent, chapter);
       content = await stripBidDisciplineSentencesSemantic(content, session.understanding.bidProcedureJudge);
@@ -588,22 +591,29 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       //（成功块不动，不整章降级重写）。整章降级是历史缺陷「整章备用=整章失败重写」与全文字数雪崩的根因——
       // 单块质检未达标即全章重写，已成功的 2/3 内容全部作废；隔离重写只补失败块，成功块内容与 token 零浪费
       // 达标契约：重写不降标（历史 0.75/0.55 紧缩预算已删除），仍失败即章阻断、文档显式失败
-      const retryFailedBlocks = async (buildInput: PlannedChapterContentInput, failedBlocks: PlannedChapterContentResult['failedBlocks'], sections: Array<string | undefined>): Promise<Array<string | undefined>> => {
+      const retryFailedBlocks = async (buildInput: PlannedChapterContentInput, failedBlocks: PlannedChapterContentResult['failedBlocks'], sections: Array<string | undefined>): Promise<{ merged: Array<string | undefined>; exhausted: Array<{ index: number; lastAttempt?: string; failureKinds?: string[] }> }> => {
         const retried = await Promise.all(failedBlocks.map(({ block, retryFeedback }) =>
           // 定向反馈携带（initialFeedback）：失败块单块重写 attempt=0 即注入上一轮缺陷原文（缺失要点点名等）——
           // 历史缺陷：无反馈的隔离重写从零生成，极易复现同一漏点（4.44 丰乐镇工期章 2 块全失败于气候要点）
           buildPlannedChapterContent({ ...buildInput, targetWords: block.targetWords, maxWords: Math.ceil(block.targetWords * 1.1), initialFeedback: retryFeedback }, { blocks: [block], coveredSections: [], fallbackSections: [] })
-            .then(result => result?.markdown)
             .catch(() => undefined)
         ));
         const merged = [...sections];
-        failedBlocks.forEach(({ index }, position) => {
+        // C7 对冲接纳痕迹回退链：重写轮仍失败时收集失守块（重写轮末轮痕迹优先——更接近收敛的尝试；
+        // 重写轮无痕迹（如异常早退）回退首轮痕迹），供章收口判定「章级超产对冲接纳」
+        const exhausted: Array<{ index: number; lastAttempt?: string; failureKinds?: string[] }> = [];
+        failedBlocks.forEach((original, position) => {
           // 剥壳后必须仍有正文才算重写成功：单块重写失败时 markdown 仅剩章标题壳（"## 标题"），
           // 若把空串写回 merged 会在后续 every 判定中暴露为未定义缺口块（此处保持原 undefined 语义）
-          const body = retried[position]?.replace(/^##\s+.+$/mu, '').trim();
-          if (body) merged[index] = body;
+          const body = retried[position]?.markdown?.replace(/^##\s+.+$/mu, '').trim();
+          if (body) {
+            merged[original.index] = body;
+            return;
+          }
+          const retriedFailure = retried[position]?.failedBlocks?.[0];
+          exhausted.push({ index: original.index, lastAttempt: retriedFailure?.lastAttempt || original.lastAttempt, failureKinds: retriedFailure?.failureKinds || original.failureKinds });
         });
-        return merged;
+        return { merged, exhausted };
       };
       // 规划驱动管线（C1 管线收敛后为章节成稿唯一路径；三期收口：蓝图章切片→块结构确定性转换，零 LLM 调用）：
       // 蓝图小节/工作包映射主题块+H4 要点，相近细目语义合并进重写标题的 H4；
@@ -660,8 +670,26 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
           // C3：失败块定向重写 1 次（同一目标字数、块写作合同不降标），全部成功即拼回完整章节；
           // 仍失败即章阻断、文档显式失败（方案 2.1：块失败 → 章定向重写 1 次 → 章失败 → 文档显式失败；
           // 旧「整章备用」降级与多轮重试路径已随 C1 管线收敛删除，成功块不再被整章重写作废）
-          const mergedSections = await retryFailedBlocks(plannedBuildInput, plannedFirst.failedBlocks, plannedFirst.sections);
-          if (mergedSections.every((section): section is string => Boolean(section))) llmContent = `## ${chapter.title}\n\n${mergedSections.join('\n\n')}`;
+          const retryOutcome = await retryFailedBlocks(plannedBuildInput, plannedFirst.failedBlocks, plannedFirst.sections);
+          if (retryOutcome.merged.every((section): section is string => Boolean(section))) {
+            llmContent = `## ${chapter.title}\n\n${retryOutcome.merged.join('\n\n')}`;
+          } else {
+            // C7 章级超产对冲接纳（r28m 根因补链）：隔离重写耗尽后，失守块若全部为「末轮仅篇幅超产」
+            // 且填回后章总量 ∈ [0.85,1.2]×块预算合计（块容差只吸收末轮抖动，累计放大由章级审计
+            // 与文档级阻断线兜底），接纳末轮内容成章——消除「单块微超产 → 整块丢弃 → 整章阻断 →
+            // 文档缺章」的不对称损失；非篇幅类缺陷混入/严重超产/无末轮内容一律照旧章阻断（零静默降级）
+            const acceptance = salvageChapterByOverProduceAcceptance({
+              sections: retryOutcome.merged,
+              exhaustedBlocks: retryOutcome.exhausted,
+              blockTargetWords: plannedStructure.blocks.map(block => block.targetWords),
+            });
+            if (acceptance) {
+              llmContent = `## ${chapter.title}\n\n${acceptance.sections.join('\n\n')}`;
+              overProduceAcceptanceNote = acceptance.detail;
+              console.error(`[gen][chapter-audit] ${acceptance.detail}：${displayChapterTitle(chapter.title)}`);
+              session.planning.generationDiagnostics.llm.lastInfo = acceptance.detail;
+            }
+          }
         }
       }
       if (!llmContent) {
@@ -735,7 +763,9 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     const chapterChars = documentTextLength(content);
     // 4.40 章级篇幅审计：章完成率 >1.2× 本轮目标即登记超产告警——块级双向硬合同是主拦截面，
     // 章级超产是块级容差超产的累计放大面，此处为文档级阻断线（目标总额 +20%）的早发现观测点；
-    // 不改变 chapterCompletionStatus 语义（字数是质量信号，不单独构成章失败）
+    // 不改变 chapterCompletionStatus 语义（字数是质量信号，不单独构成章失败）。
+    // C7：章级对冲接纳（≤1.2×，见章收口分支）之后的残留超产（>1.2×）在此登记告警——
+    // 接纳吸收累计抖动、告警观测文档级放大，与块容差线（1.15/1.2×）/文档阻断线同口径分层
     const chapterOverProducePercent = targetPlan.roundTarget > 0 ? Math.round(chapterChars / targetPlan.roundTarget * 100) : 0;
     const chapterOverProduce = targetPlan.roundTarget > 0 && chapterChars > Math.ceil(targetPlan.roundTarget * 1.2);
     if (chapterOverProduce) {
@@ -759,7 +789,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       promptId: chapterPromptExecution.primaryPromptId,
       status: chapterStatus,
       message: elapsedMessage(`${displayChapterTitle(chapter.title)} 已由大模型成稿：当前 ${chapterChars} 字；章节预算约 ${targetPlan.budgetTarget} 字，本轮目标约 ${targetPlan.roundTarget} 字${chapterIssues.length ? `；待优化：${chapterIssues.slice(0, 8).join('、')}` : ''}`, chapterStartedAt),
-      details: [`本轮完成率：${chapterOverProducePercent}%`, `结构目标约 ${targetPlan.structureTarget} 字`, ...chapterPromptDetails, `二级小节：${sections.length} 个`, ...(chapterOverProduce ? [`篇幅审计：章超产（${chapterChars} 字 vs 本轮目标 ${targetPlan.roundTarget} 字，终稿篇幅阻断线为目标总额 +20%）`] : [])],
+      details: [`本轮完成率：${chapterOverProducePercent}%`, `结构目标约 ${targetPlan.structureTarget} 字`, ...chapterPromptDetails, `二级小节：${sections.length} 个`, ...(chapterOverProduce ? [`篇幅审计：章超产（${chapterChars} 字 vs 本轮目标 ${targetPlan.roundTarget} 字，终稿篇幅阻断线为目标总额 +20%）`] : []), ...(overProduceAcceptanceNote ? [overProduceAcceptanceNote] : [])],
       progress: { current: chapterOrder + 1, total: session.planning.effectiveChapters.length, label: chapterIssues.length ? '章节已生成' : '章节达标' },
     }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
     session.understanding.chapterGenerationStagesByOrder[chapterOrder] = latestChapterStageForProgress;

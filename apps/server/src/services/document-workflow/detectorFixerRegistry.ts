@@ -190,6 +190,9 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   // WS4 骨架指纹复读（skeletonFingerprintIssues）：由技术负责人组织/合格后方可/验收合格后 各全文 ≤2 次；
   // 4.40 d5e 扩展变体形态：同义替换单形态全篇 ≤8 次（示例变体被 LLM 集中抄写 37/28/17 次实锤）
   { id: 'skeleton-fingerprint', scope: 'full-document', category: 'style' },
+  // C4 句模聚类复读（sentencePatternRepeatIssues）：多段顺序词链/完成即转入/验收衔接/资料闭环式/形式宣告式
+  // 同模式句全篇 ≥6 即命中（语义套话原型不覆盖的结构句式复读；修复轮 templating-repair 同源消费）
+  { id: 'sentence-pattern-repeat', scope: 'full-document', category: 'style' },
   { id: 'repeated-word', scope: 'full-document', category: 'style', deterministicSafe: true },
   { id: 'commercial-data-in-body', scope: 'full-document', category: 'scope' },
   { id: 'overview-recap', scope: 'full-document', category: 'style' },
@@ -206,6 +209,11 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   { id: 'table-quality', scope: 'full-document', category: 'table', deterministicSafe: true },
   { id: 'table-spam', scope: 'full-document', category: 'table', deterministicSafe: true },
   { id: 'basis-regulations-coverage', scope: 'full-document', category: 'fact_consistency', authorities: ['blueprint'] },
+  // C5 一致性类（P6）：编制依据↔正文双向对账（basisRegulationsCrossIssues）——声明未用/用了未声明
+  // 逐条带证据；编号同族匹配年号缺省容忍（GB 55037 ↔ GB 55037-2021）、书名空白归一包含匹配；
+  // 区段扫描单源（basisRegulationSectionRanges，声明侧/引用侧同范围判定）；修复轮
+  // basis-regulations-cross-repair 同源消费（检测定位=修复定位）
+  { id: 'basis-regulations-cross', scope: 'full-document', category: 'fact_consistency' },
   { id: 'resource-breakdown-consistency', scope: 'full-document', category: 'fact_consistency', authorities: ['blueprint'] },
   { id: 'section-content-integrity', scope: 'chapter', category: 'structure' },
   { id: 'professional-content', scope: 'chapter', category: 'professional_chain' },
@@ -240,6 +248,10 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   { id: 'tertiary-heading', scope: 'full-document', category: 'structure', deterministicSafe: true },
   { id: 'min-chapter-section', scope: 'chapter', category: 'structure' },
   { id: 'precise-fact-usage', scope: 'full-document', category: 'fact_consistency' },
+  // C3-4 可靠参数义务落位验收（chapterParameterFacts.parameterObligationUsageIssues）：参数池净化后
+  // 义务满足率 <90% 即 error（兑现报告出口 parameterUsageAudit / 修复出口 assignMissingParameterChapters
+  // 同源单语），使参数义务缺口独立成 blocker 由 content-depth-repair 消费（挂靠缺口根治）
+  { id: 'parameter-obligation-usage', scope: 'full-document', category: 'fact_consistency' },
   { id: 'boq-placement', scope: 'full-document', category: 'evidence_coverage' },
   { id: 'stage-phrasing', scope: 'full-document', category: 'fact_consistency' },
   { id: 'emergency-section-depth', scope: 'full-document', category: 'structure' },
@@ -250,18 +262,20 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   { id: 'prompt-example-leak', scope: 'full-document', category: 'format' },
   { id: 'degenerate-content', scope: 'chapter', category: 'style' },
   { id: 'planned-auto-spec-gate', scope: 'full-document', category: 'structure' },
-  // 暗标正文禁表反向门禁（markdownComposer.bodyCompositionTableIssues，标书编制规格 bodyTablePolicy=forbidden）：
-  // 正文残留 Markdown 表格即 blocker（招标暗标要求正文纯文字，结构化数据由文末附表区承载）
+  // 正文表格授权门禁（markdownComposer.bodyCompositionTableIssues，C1 章级授权口径）：
+  // ① 显式禁表句（bodyTablePolicy=forbidden）：正文残留任何表格即 blocker；
+  // ② 允许口径：未列入表格授权计划的章出现表格即 blocker（表格须来自系统计划，不得自设；
+  //    授权章 = 有表格计划/静态表格声明/图类承载指令，提示词必需表格按表名豁免）
   { id: 'bid-composition-body-table', scope: 'full-document', category: 'structure' },
-  // F-T3 暗标正文禁图反向门禁（markdownComposer.bodyCompositionFigureIssues，标书编制规格 bodyFigurePolicy=forbidden）：
-  // 正文残留图片/图件占位即 blocker（正文纯文字，图表仅限文末附表区；确定性剥离链的终检兜底）
+  // 正文禁图反向门禁（markdownComposer.bodyCompositionFigureIssues，bodyFigurePolicy=forbidden：
+  // 暗标或招标「不得有图片」证据）：正文残留图片/图件占位即 blocker（图类内容数据化输出；确定性剥离链的终检兜底）
   { id: 'bid-composition-body-figure', scope: 'full-document', category: 'structure' },
   // F-T3 暗标身份禁语零容忍终检（detectors.identityLeakageIssues，identityMarksForbidden）：
   // 正文出现以往业绩/获奖表述或证书资质编号类自我标识即 blocker
   { id: 'identity-marks-forbidden', scope: 'full-document', category: 'format' },
   { id: 'planned-structure', scope: 'full-document', category: 'structure' },
   // R20 C3 表题注终检（markdownComposer.tableCaptionIssues）：正文区表格逐张核验「表X-Y」题注
-  //（题注由成稿归一阶段确定性注入器写入，本检测为安全网；暗标正文禁表模式豁免）
+  //（题注由成稿归一阶段确定性注入器写入，本检测为安全网；正文禁表模式豁免）
   { id: 'table-caption', scope: 'full-document', category: 'format' },
   { id: 'prompt-document-rule', scope: 'full-document', category: 'format' },
   { id: 'local-adaptation-keyword', scope: 'full-document', category: 'evidence_coverage' },
@@ -291,6 +305,11 @@ export const AUXILIARY_DETECTORS: readonly DetectorEntry[] = [
   { id: 'finish-thickness', scope: 'full-document', category: 'fact_consistency', deterministicSafe: true },
   { id: 'formula-residue', scope: 'full-document', category: 'format', deterministicSafe: true },
   { id: 'truncated-sentence', scope: 'full-document', category: 'format', deterministicSafe: true },
+  // C3-6-4 图集引用短语检测（markdownCleanup.atlasReferencePhraseHits，与确定性删除链
+  // stripAtlasReferencePhrases 同源词面 + 同行豁免）：修复器 atlas-reference 的锚定目标——
+  // 历史错配：atlas-reference（删「做法执行XX图集」话术）曾锚定 drawing-reference（图纸引用率），
+  // 检测定位=修复定位名不符实，补救链锚定校验形同虚设
+  { id: 'atlas-reference-phrase', scope: 'full-document', category: 'format', deterministicSafe: true },
   // ── 块级质量执行器（方案 2.2 六类，写作时阻断 + finalize 同源复核双职；实现单源 blockQualityExecutors）──
   // ① 结构（契约小节全覆盖/禁发明编号：writeBlock 内联判定，终检复核 section-content-integrity 族）
   { id: 'block-structure-contract', scope: 'chapter', category: 'structure' },
@@ -360,7 +379,9 @@ export const DETERMINISTIC_FIXER_ANCHORS: readonly FixerEntry[] = [
   { id: 'forbidden-configuration', kind: 'deterministic', anchoredTo: 'formal-text-gate', giveUpOnFailure: true },
   // 4.27.2 条款响应重复行去重：与检测器 duplicate-paragraph 同源（整行完全重复的重复段落族）
   { id: 'duplicate-response-line', kind: 'deterministic', anchoredTo: 'duplicate-paragraph', giveUpOnFailure: true },
-  { id: 'atlas-reference', kind: 'deterministic', anchoredTo: 'drawing-reference', giveUpOnFailure: true },
+  // C3-6-4 锚定修正：图集话术删除链锚定 atlas-reference-phrase（同源词面检测），
+  // 历史错锚 drawing-reference（图纸引用率）致锚定校验名不符实
+  { id: 'atlas-reference', kind: 'deterministic', anchoredTo: 'atlas-reference-phrase', giveUpOnFailure: true },
   { id: 'tertiary-h4-dedupe', kind: 'deterministic', anchoredTo: 'tertiary-heading', giveUpOnFailure: true },
   { id: 'internal-term-heading', kind: 'deterministic', anchoredTo: 'internal-terminology-anchor', giveUpOnFailure: true },
   // WS4 骨架指纹确定性兜底（round-2 链末尾 / 终检前最后一道：基准字形 + 变体形态按形态池负载均衡同构改写清零）
@@ -434,7 +455,8 @@ export const LLM_PATCH_REPAIR_ROUNDS: readonly FixerEntry[] = [
   { id: 'fact-landing', kind: 'llm-patch', anchoredTo: 'important-unplaced-facts', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
   { id: 'table-repair', kind: 'llm-patch', anchoredTo: 'table-quality', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
   { id: 'table-execution-repair', kind: 'llm-patch', anchoredTo: 'table-plan-execution', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
-  { id: 'templating-repair', kind: 'llm-patch', anchoredTo: 'templating-filler', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
+  // C4 扩展锚定：sentence-pattern-repeat（句模聚类复读修复目标与套话句同轮承载——检测定位=修复定位）
+  { id: 'templating-repair', kind: 'llm-patch', anchoredTo: 'templating-filler', alsoAnchoredTo: ['sentence-pattern-repeat'], patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
   { id: 'workpackage-skeleton-repair', kind: 'llm-patch', anchoredTo: 'workpackage-skeleton', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
   { id: 'planned-section-repair', kind: 'llm-patch', anchoredTo: 'planned-section-completeness', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
   { id: 'global-consistency-repair', kind: 'llm-patch', anchoredTo: 'global-consistency-review', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
@@ -447,7 +469,11 @@ export const LLM_PATCH_REPAIR_ROUNDS: readonly FixerEntry[] = [
   // 按 provenance + chapterId 章级分组，定向补写（每章 2 轮 + 外层 2 周期收敛 + 变差回滚）。
   // D-T1 扩展锚定：professional-score（报出线统一 8/12 后，<8/12 的章为 warning 级缺口，同轮消费
   // 定向补写，预算单列：每章 1 轮/单周期最多 4 章）。
-  { id: 'content-depth-repair', kind: 'llm-patch', anchoredTo: 'critical-section-depth', alsoAnchoredTo: ['emergency-section-depth', 'construction-org-major-content', 'construction-org-division-section', 'precise-fact-usage', 'overview-recap', 'professional-score'], patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
+  // C3-5 扩展锚定：boq-placement（清单落位不足，severity blocker，C3-5-2 已打 provenance；未落位项
+  // 重算 → 责任章映射 → 逐章载荷定向补写）。历史挂靠缺口：17 轮修复无一消费直坠终门禁。
+  // C3-6-4 扩展锚定：drawing-reference（图纸事实引用率 <90%，warning 级独立通道；未引用份按事实行
+  // 相关性分章 → 逐章载荷定向补写图纸名与规格/做法事实）。历史缺口：96/118 份从未获注入（s28l 实测）。
+  { id: 'content-depth-repair', kind: 'llm-patch', anchoredTo: 'critical-section-depth', alsoAnchoredTo: ['emergency-section-depth', 'construction-org-major-content', 'construction-org-division-section', 'precise-fact-usage', 'parameter-obligation-usage', 'overview-recap', 'professional-score', 'boq-placement', 'drawing-reference'], patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
   // D-T2 评审关注闭环链补写轮（r28f B8 前半归因）：质量三检/进度纠偏/工资代发链「主责章全要素」
   // 判定（construction-org-control-loop warning）此前无修复轮消费——本轮章级实时重算定位 +
   // LLM 定向补写缺失环节（标准词面落位）+ 复检缺失数（变差回滚），与 content-depth-repair 同族链尾补写轮
@@ -461,6 +487,10 @@ export const LLM_PATCH_REPAIR_ROUNDS: readonly FixerEntry[] = [
   // 链尾 LLM 定向补列缺失类目（照抄招标文件引用法规 + 按本工程分部分项选列现行施工验收规范名称
   // 及编号），复检缺失类目数 + 变差回滚。authorities 与锚定检测器同声明（消费蓝图法规清单权威）
   { id: 'basis-regulations-repair', kind: 'llm-patch', anchoredTo: 'basis-regulations-coverage', authorities: ['blueprint'], patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
+  // C5 一致性类 P6（编制依据↔正文双向对账链尾收口，r28l/s28l 实测双向缺口 8/7、4/15）：used_not_declared
+  // 确定性补入编制依据同类目（零 LLM）+ declared_not_used 区分性 token 定位应用章 LLM 补引用（复检
+  // 引用数 + 防删除式汉字数）/ 不适用确定性移除；链尾整体复检（双向缺口净减少且均不上升，违反即回滚）
+  { id: 'basis-regulations-cross-repair', kind: 'llm-patch', anchoredTo: 'basis-regulations-cross', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
   // r28j 实机归因（s28i 连续两轮）：危大工程辨识清单适用项漏列（正文拆改清运「拆除工程」适用前提
   // 真实存在而辨识叙述区缺别名精确词）此前只有终检 dangerous-applicability 报出、修复链无轮消费
   //（4.41 删除确定性补写器后裸奔）——链尾定位含危大辨识区的章 + LLM 定向补列遗漏适用项（补列
@@ -532,6 +562,9 @@ export const FINALIZE_REPAIR_ROUNDS = [
   //（法律法规/地方性法规齐全但零施工验收规范编号直坠终门禁）——链尾 LLM 定向补列缺失类目（照抄
   // 招标文件引用法规 + 按本工程分部分项选列现行规范名称及编号），复检缺失类目数 + 变差回滚
   'basis-regulations-repair',    // 编制依据法规漏列链尾修复（stageBasisRegulationsRepair）
+  // C5 一致性类 P6：编制依据↔正文双向对账链尾收口（used 确定性补入 + declared 应用/移除 + 全局复检）；
+  // postReviewSurface 链尾调用位置：basis-regulations-repair 之后、dangerous-applicability-repair 之前
+  'basis-regulations-cross-repair', // 编制依据双向对账链尾收口（stageBasisRegulationsCrossRepair）
   // r28j 危大辨识清单漏项链尾收口（s28i 连续两轮实测）：正文拆改清运「拆除工程」适用前提真实存在
   // 而辨识叙述区缺别名精确词，终检 dangerous-applicability 报出后无修复轮消费——链尾定位含危大
   // 辨识区的章 + LLM 定向补列遗漏适用项（补列紧邻既有辨识叙述），复检遗漏项覆盖数 + 变差回滚
@@ -583,6 +616,26 @@ export const FINALIZE_REPAIR_ROUNDS = [
   // 与写作期 splitLongParagraphs 同阈值）+ 目录重建（fixTocFromBody 按正文实际结构重建）——
   // 链尾 markdown-only 收口，位于全部 draft-mutating 轮之后、stageFinalGate 之前
   'delivery-structure-closure',  // 交付结构收口轮（stageDeliveryStructureClosure）
+  // C8 S3 句模复读链尾收口（F 通道归因：句模修复仅写作期、finalize 链无重放 + tail closure
+  // markdown-only 插入物对 drafts 消费者不可见 → 写作期残留至终稿反增）：宣告引导句确定性剥离
+  //（stripSentencePatternAnnouncements，与检测端 form-announcement 族单源判定，列表自承载
+  // 信息删除无损）+ 密度命中线（sentencePatternThreshold 四端单源）；链尾 markdown-only，
+  // 位于 delivery-structure-closure 之后、replaySurfacePunctuationClosure（链尾标点兜底）之前
+  'sentence-pattern-sweep',      // 句模复读链尾收口轮（stageSentencePatternSweep）
+  // C8 S5 U 通道句级复读坍塌（uniqueness 0.59 第一约束归因：重复句 excess 主体为泛化归口句复读
+  // 「上述/相关/有关＋泛对象词…纳入/编入…每日/每周」20 种 37 处 + 同章完全复读 17 处；全篇复读
+  // 39 种仅 1 种命中句模族表 → 修复死角）：完全重复句保首次删后续（同章复读一律坍塌、跨章复读
+  // 仅首现句命中泛化归口帧者坍塌，跨章业务句保留），出现枚举与 uniqueness 评分单源消费
+  // duplicateSentenceOccurrences；链尾 markdown-only，位于 sentence-pattern-sweep 之后、
+  // replaySurfacePunctuationClosure（链尾标点兜底）之前
+  'duplicate-sentence-collapse', // 句级复读坍塌链尾收口轮（stageDuplicateSentenceCollapse）
+  // C8 S6 A' 对象错位通道（templating-sweep 扫 drafts 而 markdown-only 插入物只写 finalMarkdown：
+  // s28m' 实测插入物 6 探针 drafts 全 false / markdown 全 true，stage「无重复段落残留」为 drafts
+  // 视角假通过；链尾各 markdown-only 轮删句/断句后亦可能新生重复段）：链尾 markdown 版 templating
+  // 重放——finalMarkdown 按 `## ` 行级切章构造伪 chapters（头区不参与），复用与 templating-sweep
+  // 完全相同的三函数（templatePrefixTargets → stripZeroInfoSloganSentences + 逐章 stripDuplicateParagraphs）；
+  // 链尾 markdown-only，位于 duplicate-sentence-collapse 之后、replaySurfacePunctuationClosure（链尾标点兜底）之前
+  'templating-tail-replay',      // 模板化清理链尾重放轮（markdown 版，stageTemplatingTailReplay）
 ] as const;
 
 export type FinalizeRepairRound = (typeof FINALIZE_REPAIR_ROUNDS)[number];

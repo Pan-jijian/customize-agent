@@ -46,6 +46,9 @@ function makeBlueprintData(): BlueprintData {
     ],
     fundPlan: { wageRule: '按月足额', usagePlan: '专款专用' },
     testPlan: [{ scope: '混凝土试块', count: 12, basis: '推导' }],
+    testInstruments: [{ name: '水准仪', spec: 'DS3', quantity: 2, purpose: '高程控制测量与标高复核', basis: '检定合格后投入使用' }],
+    tempLand: [{ purpose: '材料堆放场', area: 800, location: '场内运输道路旁', duration: '施工全过程', note: '分类堆放并分区标识', basis: '施工总平面布置规划' }],
+    schedule: [{ seq: 1, label: '施工准备', duration: 20, startDay: 1, endDay: 20, critical: false, basis: '前导工作，与主体施工穿插进行' }],
     earthworkBalance: { excavation: 10000, backfill: 8000, disposal: 2000, basis: '清单汇总' },
     tempUtilities: { powerLoad: '200kW', waterUsage: '50m³/天' },
     redLineFacts: [

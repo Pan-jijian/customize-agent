@@ -383,3 +383,33 @@ describe('parameterConceptConflictIssues（h13b 过滤）', () => {
     expect(issues.some(issue => issue.message.includes('垫层厚度'))).toBe(true);
   });
 });
+
+describe('C5 构件细分后缀豁免（r28l/s28l 实机误报：分构件保护层按构件区分取值）', () => {
+  it('C5-1 正样本：构件细分概念后缀包含形态 → 各自取值不互斥（基础底板/柱梁/板保护层 40/25/15mm）', async () => {
+    // r28l/s28l 实机误报：「基础底板钢筋保护层厚度40mm、柱梁钢筋保护层厚度25mm、板钢筋保护层
+    // 厚度15mm」——LCS 吞并「板」字后短方「板钢筋保护层厚度」恰为长方后缀子串，原互不包含
+    // 判定返 false 致误报；构件细分各自参量是按构件类别区分的规范正确取值（非同参数多口径）
+    embedMock.mockResolvedValue([[1, 0], [1, 0], [1, 0]]);
+    const markdown = '基础底板钢筋保护层厚度40mm，柱梁钢筋保护层厚度25mm，板钢筋保护层厚度15mm，均按规范要求控制。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues).toEqual([]);
+  });
+
+  it('C5-2 反例：同对象蕴含形态不豁免（闭水试验短方首字非构件语素 → 照报）', async () => {
+    // 「管道闭水试验」vs「闭水试验」同为后缀包含形态，但短方首字「闭」非构件语素——
+    // 是同一对象的简称复述而非构件细分，值不同仍判冲突（防豁免过宽）
+    embedMock.mockResolvedValue([[1, 0], [1, 0], [0, 1]]);
+    const markdown = '管道闭水试验200m。闭水试验100m。喷锚厚度80mm。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('闭水试验'))).toBe(true);
+  });
+
+  it('C5-3 反例：短方长度 <4 字不豁免（板厚度 3 字 → 照报）', async () => {
+    // 后缀豁免要求短方为独立构件的完整概念（含参量词尾，≥4 字）；「板厚度」3 字过短，
+    // 与「钢筋混凝土板厚度」的后缀包含可能是同对象简称复述 → 保持互斥判定照报
+    embedMock.mockResolvedValue([[1, 0], [1, 0], [0, 1]]);
+    const markdown = '钢筋混凝土板厚度120mm。板厚度180mm。喷锚厚度80mm。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('板厚度'))).toBe(true);
+  });
+});

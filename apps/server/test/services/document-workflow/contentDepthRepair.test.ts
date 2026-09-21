@@ -26,8 +26,9 @@ import { repairChapterByQuality } from '@/services/document-workflow/rolePipelin
 import { FINALIZE_REPAIR_ROUNDS } from '@/services/document-workflow/detectorFixerRegistry';
 import { stageContentDepthRepair } from '@/services/document-workflow/finalize/repairRounds/contentDepthRepair';
 import { criticalSectionDepthIssues, criticalSectionDeficitTotal } from '@/services/document-workflow/finalize/rebuildAndRecompute';
-import { PROFESSIONAL_SCORE_LINE, professionalDepthTotal, professionalScoreTargetLine, professionalWeakDimensions } from '@/services/document-workflow/qualityValidation';
+import { PROFESSIONAL_SCORE_LINE, drawingReferenceIssues, professionalDepthTotal, professionalScoreTargetLine, professionalWeakDimensions } from '@/services/document-workflow/qualityValidation';
 import { overviewRecapIssues } from '@/services/document-workflow/integrity/detectors/detectors';
+import type { DrawingFactLock } from '@/services/document-workflow/drawingFactLock';
 import type { FinalizeSession } from '@/services/document-workflow/finalize/finalizeSession';
 
 const repairMock = vi.mocked(repairChapterByQuality);
@@ -39,7 +40,7 @@ function stageOf(stages: StageLike[], roleId: string): StageLike | undefined {
   return stages.find(stage => stage.roleId === roleId);
 }
 
-function makeSession(chapters: Array<{ id: string; title: string; content: string }>, overrides: Record<string, unknown> = {}) {
+function makeSession(chapters: Array<{ id: string; title: string; content: string; sections?: string[] }>, overrides: Record<string, unknown> = {}) {
   const session = {
     template: {},
     requirement: '',
@@ -47,7 +48,7 @@ function makeSession(chapters: Array<{ id: string; title: string; content: strin
     signal: undefined,
     factsModel: { preciseFacts: [] },
     generationDiagnostics: { llm: { calls: 0, failures: 0, maxActive: 0, retries: 0, lastError: '' } },
-    finalChapterDrafts: chapters.map(chapter => ({ ...chapter, evidence: [], missingFacts: [], sections: [] })),
+    finalChapterDrafts: chapters.map(chapter => ({ ...chapter, evidence: [], missingFacts: [], sections: chapter.sections ?? [] })),
     progressStages: [] as StageLike[],
     finalGateRepairStages: [] as StageLike[],
     finalMarkdown: chapters.map(chapter => `## ${chapter.title}\n${chapter.content}`).join('\n\n'),
@@ -377,5 +378,321 @@ describe('professional-score 专业评分补写（D-T1 消费链）', () => {
     expect(stage?.status).toBe('failed');
     expect(stage?.message).toContain('部分生效');
     expect(stage?.message).toContain('8→4');
+  });
+});
+
+// ── C3-5 清单落位补写（第八类消费：boq-placement） ──
+
+/** 清单事实模型构造：名称/编码/数量/单位四列锚定（与 buildBoqRowTraces 列口径单源） */
+function boqFactsModel(rows: Array<[string, string, string, string]>) {
+  return {
+    project: [], schedule: [], quality: [], safety: [], resources: [], drawings: [], rules: [], specifications: [],
+    preciseFacts: [], schemaFacts: {}, missing: [], conflicts: [],
+    tables: [{
+      tableType: '分部分项工程量清单计价表',
+      headers: ['序号', '项目编码', '项目名称', '单位', '工程量'],
+      rows: rows.map(([code, name, unit, quantity], index) => [String(index + 1), code, name, unit, quantity]),
+      sourceFile: '清单.xlsx',
+    }],
+  };
+}
+
+function boqBlocker() {
+  return {
+    level: 'error', severity: 'blocker', category: 'evidence_coverage',
+    owner: 'llm', repairability: 'llm_repairable',
+    provenance: { detectorId: 'boq-placement', fingerprint: 'x' },
+    message: '清单项落位不足：1804/2786 项（65%）。未落位项（共982行/135类）：人工挖沟槽土方×2（未落位，建议落位「主要施工方法」）',
+    suggestion: '请将未落位清单项按专业工程分组补写进对应章节"主要施工内容"小节。',
+  };
+}
+
+const BOQ_CHAPTER_TITLE = '主要施工方法';
+
+describe('清单落位补写（C3-5 第八类消费：boq-placement）', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('正样本：未落位清单项章级定位 + 定向补写落地（残差清零、rebuild+recompute）', async () => {
+    const chapter = {
+      id: 'ch-1', title: '主要施工方法', sections: ['土方工程'],
+      content: '## 主要施工方法\n\n### 土方工程\n本节按测量放线、机械开挖、人工清底顺序组织施工。',
+    };
+    const session = makeSession([chapter, { id: 'ch-2', title: '工程概况', content: '## 工程概况\n本工程为道路排水工程。' }], {
+      factsModel: boqFactsModel([['010101003001', '人工挖沟槽土方', 'm3', '120']]),
+      validationIssues: [boqBlocker()],
+    });
+    repairMock.mockResolvedValueOnce(repairResult('## 主要施工方法\n\n### 土方工程\n本节按测量放线、机械开挖、人工清底顺序组织施工。人工挖沟槽土方 120m3，按沟槽断面分层开挖，人工配合修整。'));
+    await stageContentDepthRepair(session);
+    expect(repairMock).toHaveBeenCalledTimes(1);
+    const call = repairMock.mock.calls[0][0] as unknown as { chapter: { title: string }; promptTexts: string; issues: string[] };
+    expect(call.chapter.title).toBe(BOQ_CHAPTER_TITLE);
+    expect(call.promptTexts).toContain('未落位清单项');
+    expect(call.promptTexts).toContain('人工挖沟槽土方 120m3');
+    expect(call.issues.join('\n')).toContain('清单项落位不足');
+    expect(session.finalChapterDrafts[0].content).toContain('人工挖沟槽土方');
+    expect(session.rebuildFinalMarkdown).toHaveBeenCalled();
+    expect(session.recomputeFinalValidationBundle).toHaveBeenCalled();
+    const stage = stageOf(session.progressStages, 'agent-content-depth-repair-ch-1');
+    expect(stage?.status).toBe('success');
+    expect(stage?.message).toContain('缺口清零');
+  });
+
+  it('正样本指令载荷形态：名称 + 原值工程量（含单位）+ 同族行数 + 建议小节 + 溢出仅列名', async () => {
+    // 125 项唯一名称（>120 渲染上限）：前 120 项逐项渲染（含原值 12.000 不截尾），后 5 项仅列名
+    const rows: Array<[string, string, string, string]> = [];
+    for (let index = 1; index <= 125; index += 1) {
+      rows.push([`010101003${String(100 + index)}`, `人工挖沟槽土方第${index}段`, 'm3', '12.000']);
+    }
+    const chapter = { id: 'ch-1', title: '主要施工方法', content: '## 主要施工方法\n\n### 土方工程\n本节按测量放线组织施工。', sections: ['土方工程'] };
+    const session = makeSession([chapter], {
+      factsModel: boqFactsModel(rows),
+      validationIssues: [boqBlocker()],
+    });
+    repairMock.mockImplementation(async (input: { chapter: { content: string } }) => repairResult(input.chapter.content));
+    await stageContentDepthRepair(session);
+    expect(repairMock).toHaveBeenCalledTimes(1);
+    const call = repairMock.mock.calls[0][0] as unknown as { promptTexts: string };
+    expect(call.promptTexts).toContain('人工挖沟槽土方第1段 12.000m3［建议小节：土方工程］');
+    expect(call.promptTexts).toContain('另需覆盖（仅列名，共5项');
+    expect(call.promptTexts).toContain('人工挖沟槽土方第121段');
+  });
+
+  it('混类同章收敛：critical-section-depth + boq 单轮双载荷，首轮后仅清单项收缩续轮至清零', async () => {
+    const chapter = { id: 'ch-1', title: '主要施工方法', content: CRITICAL_SHORT, sections: ['危大工程专项施工方案审批流程'] };
+    const session = makeSession([chapter], {
+      factsModel: boqFactsModel([['010902001001', '危大工程边坡支护', 'm2', '200']]),
+      validationIssues: [
+        ...criticalSectionDepthIssues([{ ...chapter, evidence: [], missingFacts: [], sections: chapter.sections }]),
+        boqBlocker(),
+      ],
+    });
+    repairMock.mockResolvedValueOnce(repairResult(CRITICAL_LONG));
+    repairMock.mockResolvedValueOnce(repairResult(`${CRITICAL_LONG}\n危大工程边坡支护 200m2，按专项方案要求分层支护。`));
+    await stageContentDepthRepair(session);
+    expect(repairMock).toHaveBeenCalledTimes(2);
+    const first = repairMock.mock.calls[0][0] as unknown as { promptTexts: string; issues: string[] };
+    expect(first.promptTexts).toContain('未落位清单项');
+    expect(first.promptTexts).toContain('危大工程专项施工方案审批流程');
+    expect(first.issues.join('\n')).toContain('清单项落位不足');
+    // 第 2 轮：critical 残差已清零收缩，仅清单项载荷续轮
+    const second = repairMock.mock.calls[1][0] as unknown as { promptTexts: string; issues: string[] };
+    expect(second.promptTexts).toContain('未落位清单项');
+    expect(second.issues.join('\n')).not.toContain('正文不足');
+    expect(session.finalChapterDrafts[0].content).toContain('危大工程边坡支护');
+    const stage = stageOf(session.progressStages, 'agent-content-depth-repair-ch-1');
+    expect(stage?.status).toBe('success');
+    expect(stage?.message).toContain('缺口清零');
+  });
+
+  it('反样本（快照过期）：清单项全部已落位时重算零载荷，显性记录无法定位不误修', async () => {
+    const chapter = { id: 'ch-1', title: '主要施工方法', sections: ['土方工程'], content: '## 主要施工方法\n人工挖沟槽土方按断面分层开挖。' };
+    const session = makeSession([chapter], {
+      factsModel: boqFactsModel([['010101003001', '人工挖沟槽土方', 'm3', '120']]),
+      validationIssues: [boqBlocker()],
+    });
+    await stageContentDepthRepair(session);
+    expect(repairMock).not.toHaveBeenCalled();
+    const stage = stageOf(session.progressStages, 'content-depth-repair');
+    expect(stage?.status).toBe('failed');
+    expect(stage?.message).toContain('无法定位');
+  });
+
+  it('反样本（变差回滚）：修复使关键小节更短且未补清单项，总残差上升即回滚保留原文', async () => {
+    const chapter = { id: 'ch-1', title: '主要施工方法', content: CRITICAL_SHORT, sections: ['危大工程专项施工方案审批流程'] };
+    const session = makeSession([chapter], {
+      factsModel: boqFactsModel([['010902001001', '危大工程边坡支护', 'm2', '200']]),
+      validationIssues: [
+        ...criticalSectionDepthIssues([{ ...chapter, evidence: [], missingFacts: [], sections: chapter.sections }]),
+        boqBlocker(),
+      ],
+    });
+    // 修复输出：关键小节被压缩（字数缺口扩大）且清单项仍未补写 → 总残差上升回滚
+    repairMock.mockResolvedValueOnce(repairResult('### 危大工程专项施工方案审批流程\n短。'));
+    await stageContentDepthRepair(session);
+    expect(repairMock).toHaveBeenCalledTimes(1);
+    expect(session.finalChapterDrafts[0].content).toBe(CRITICAL_SHORT);
+    const stage = stageOf(session.progressStages, 'agent-content-depth-repair-ch-1');
+    expect(stage?.status).toBe('failed');
+    expect(stage?.message).toContain('已回滚');
+  });
+
+  it('防误伤守护：存在未落位清单行但无 boq-placement blocker 时零触发（惰性重算不越权）', async () => {
+    const chapter = { id: 'ch-1', title: '主要施工方法', sections: ['土方工程'], content: '## 主要施工方法\n本节按测量放线组织施工。' };
+    const session = makeSession([chapter], {
+      factsModel: boqFactsModel([['010101003001', '人工挖沟槽土方', 'm3', '120']]),
+    });
+    await stageContentDepthRepair(session);
+    expect(repairMock).not.toHaveBeenCalled();
+    const stage = stageOf(session.progressStages, 'content-depth-repair');
+    expect(stage?.status).toBe('success');
+    expect(stage?.message).toContain('内容深度验收通过');
+  });
+});
+
+// ── C3-6-4 图纸落位补写（第九类消费：drawing-reference） ──
+
+/** 图纸事实锁构造：单行事实 + 显式 token（判定锚点由检测端 drawingFactPlacement 单源消费） */
+function drawingLockOf(groups: Array<{ file: string; line: string; tokens: string[] }>): DrawingFactLock {
+  return {
+    groups: groups.map(group => ({ sourceFile: group.file, factLines: [group.line], tokens: group.tokens })),
+    usableDrawings: groups.length,
+    unusableDrawings: 0,
+    totalFacts: groups.length,
+  };
+}
+
+const ROAD_LINE = '路面结构：4cm 细粒式沥青混凝土 AC-13 + 6cm 中粒式沥青混凝土 AC-20。';
+const DRAIN_LINE = '检查井盖板采用 C25 混凝土，做法参 02S515 页 96。';
+
+describe('图纸落位补写（C3-6-4 第九类消费：drawing-reference）', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('正样本：warning 档（50%）章级定位 + 定向补写落地（图纸名与参考事实行注入、残差清零）', async () => {
+    const chapter = { id: 'ch-1', title: '主要施工方法', content: '本节按测量放线组织施工，路面采用 AC-13 沥青混凝土施工。' };
+    const lock = drawingLockOf([
+      { file: '资料/道路施工图.pdf', line: ROAD_LINE, tokens: ['ac-13', 'ac-20'] },
+      { file: '资料/排水施工图.pdf', line: DRAIN_LINE, tokens: ['c25', '02s515'] },
+    ]);
+    const markdown = `## 主要施工方法\n${chapter.content}`;
+    const session = makeSession([chapter], { drawingFactLock: lock, validationIssues: drawingReferenceIssues(markdown, lock) });
+    repairMock.mockResolvedValueOnce(repairResult(`${chapter.content}检查井盖板采用 C25 混凝土，做法参 02S515 页 96，井盖与路面平顺衔接。`));
+    await stageContentDepthRepair(session);
+    expect(repairMock).toHaveBeenCalledTimes(1);
+    const call = repairMock.mock.calls[0][0] as unknown as { chapter: { title: string }; promptTexts: string; issues: string[] };
+    expect(call.chapter.title).toBe('主要施工方法');
+    expect(call.promptTexts).toContain('未落位图纸事实');
+    expect(call.promptTexts).toContain('排水施工图.pdf');
+    expect(call.promptTexts).toContain('参考事实行');
+    expect(call.promptTexts).toContain('02S515');
+    expect(call.issues.join('\n')).toContain('图纸事实未完全落位');
+    expect(session.finalChapterDrafts[0].content).toContain('02S515');
+    expect(session.rebuildFinalMarkdown).toHaveBeenCalled();
+    expect(session.recomputeFinalValidationBundle).toHaveBeenCalled();
+    const stage = stageOf(session.progressStages, 'agent-content-depth-repair-ch-1');
+    expect(stage?.status).toBe('success');
+    expect(stage?.message).toContain('缺口清零');
+    expect(session.generationDiagnostics.llm.lastInfo).toContain('1 份图纸事实未落位');
+  });
+
+  it('预算单列：纯图纸 todo 章每章 1 轮（残差下降未清零也不追加轮次）', async () => {
+    const chapter = { id: 'ch-1', title: '主要施工方法', content: '路面采用 AC-13 沥青混凝土施工。' };
+    const lock = drawingLockOf([
+      { file: '资料/道路施工图.pdf', line: ROAD_LINE, tokens: ['ac-13'] },
+      { file: '资料/排水施工图.pdf', line: DRAIN_LINE, tokens: ['c25'] },
+      { file: '资料/照明施工图.pdf', line: '路灯电缆采用 YJV-4x25 铜芯电缆。', tokens: ['yjv-4x25'] },
+    ]);
+    const markdown = `## 主要施工方法\n${chapter.content}`;
+    const session = makeSession([chapter], { drawingFactLock: lock, validationIssues: drawingReferenceIssues(markdown, lock) });
+    repairMock.mockResolvedValueOnce(repairResult(`${chapter.content}检查井盖板采用 C25 混凝土施工。`));
+    await stageContentDepthRepair(session);
+    expect(repairMock).toHaveBeenCalledTimes(1);
+    const stage = stageOf(session.progressStages, 'agent-content-depth-repair-ch-1');
+    expect(stage?.status).toBe('failed');
+    expect(stage?.message).toContain('部分生效');
+    expect(stage?.message).toContain('2→1');
+  });
+
+  it('混类同章收敛：critical-section-depth + 图纸落位单轮双载荷，补写后双类残差清零', async () => {
+    const chapter = { id: 'ch-1', title: '主要施工方法', sections: ['危大工程专项施工方案审批流程'], content: CRITICAL_SHORT };
+    const lock = drawingLockOf([{ file: '资料/排水施工图.pdf', line: DRAIN_LINE, tokens: ['c25'] }]);
+    const markdown = `## 主要施工方法\n${chapter.content}`;
+    const session = makeSession([chapter], {
+      drawingFactLock: lock,
+      validationIssues: [
+        ...criticalSectionDepthIssues([{ ...chapter, evidence: [], missingFacts: [], sections: chapter.sections }]),
+        ...drawingReferenceIssues(markdown, lock),
+      ],
+    });
+    repairMock.mockResolvedValueOnce(repairResult(`${CRITICAL_LONG}\n检查井盖板采用 C25 混凝土施工。`));
+    await stageContentDepthRepair(session);
+    expect(repairMock).toHaveBeenCalledTimes(1);
+    const call = repairMock.mock.calls[0][0] as unknown as { promptTexts: string; issues: string[] };
+    expect(call.promptTexts).toContain('未落位图纸事实');
+    expect(call.promptTexts).toContain('危大工程专项施工方案审批流程');
+    expect(call.issues.join('\n')).toContain('图纸事实未完全落位');
+    expect(call.issues.join('\n')).toContain('正文不足');
+    expect(session.finalChapterDrafts[0].content).toContain('C25');
+    const stage = stageOf(session.progressStages, 'agent-content-depth-repair-ch-1');
+    expect(stage?.status).toBe('success');
+    expect(stage?.message).toContain('缺口清零');
+  });
+
+  it('指令载荷形态：逐份含参考事实行，超出 12 份仅列名（防指令膨胀）', async () => {
+    const chapter = { id: 'ch-1', title: '主要施工方法', content: '本节按测量放线组织施工。' };
+    const lock = drawingLockOf(Array.from({ length: 15 }, (_, index) => ({
+      file: `资料/s${String(index + 1).padStart(2, '0')}图纸.pdf`,
+      line: `设计说明：第${index + 1}份图纸构造做法与规格参数。`,
+      tokens: [`q${index + 1}0`],
+    })));
+    const markdown = `## 主要施工方法\n${chapter.content}`;
+    const session = makeSession([chapter], { drawingFactLock: lock, validationIssues: drawingReferenceIssues(markdown, lock) });
+    repairMock.mockImplementation(async (input: { chapter: { content: string } }) => repairResult(input.chapter.content));
+    await stageContentDepthRepair(session);
+    expect(repairMock).toHaveBeenCalledTimes(1);
+    const call = repairMock.mock.calls[0][0] as unknown as { promptTexts: string };
+    expect(call.promptTexts).toContain('s01图纸.pdf［参考事实行：设计说明：第1份图纸构造做法与规格参数。］');
+    expect(call.promptTexts).toContain('另需覆盖（仅列名，共3份');
+    expect(call.promptTexts).toContain('s13图纸.pdf');
+    expect(call.promptTexts).not.toContain('s13图纸.pdf［参考事实行');
+    const stage = stageOf(session.progressStages, 'agent-content-depth-repair-ch-1');
+    expect(stage?.status).toBe('failed');
+    expect(stage?.message).toContain('未生效');
+  });
+
+  it('反样本（快照过期）：锁内图纸全部已引用时重算零载荷直接通过（不误修）', async () => {
+    const chapter = { id: 'ch-1', title: '主要施工方法', content: '路面采用 AC-13 沥青混凝土施工。' };
+    const lock = drawingLockOf([{ file: '资料/道路施工图.pdf', line: ROAD_LINE, tokens: ['ac-13'] }]);
+    const session = makeSession([chapter], {
+      drawingFactLock: lock,
+      validationIssues: [{
+        level: 'warning', severity: 'warning', category: 'evidence_coverage',
+        owner: 'llm', repairability: 'llm_repairable',
+        provenance: { detectorId: 'drawing-reference', fingerprint: 'x' },
+        message: '图纸事实未完全落位：0/1 份图纸被正文引用（0%，目标 ≥90%）',
+        suggestion: '请补写未落位图纸的设计说明与构造做法。',
+      }],
+    });
+    await stageContentDepthRepair(session);
+    expect(repairMock).not.toHaveBeenCalled();
+    const stage = stageOf(session.progressStages, 'content-depth-repair');
+    expect(stage?.status).toBe('success');
+    expect(stage?.message).toContain('内容深度验收通过');
+  });
+
+  it('反样本（无承载章）：未引用图纸无法映射目标章时显性记录无法定位，不猜测改写', async () => {
+    // 章标题既不含相关性 token 也无设计/说明/构造/主要施工类 fallback 词：不猜测挂靠，显性记录
+    const chapter = { id: 'ch-1', title: '项目总体部署', content: '本项目位于XX县，建设内容包括道路工程。' };
+    const lock = drawingLockOf([{ file: '资料/排水施工图.pdf', line: DRAIN_LINE, tokens: ['c25'] }]);
+    const markdown = `## 项目总体部署\n${chapter.content}`;
+    const session = makeSession([chapter], { drawingFactLock: lock, validationIssues: drawingReferenceIssues(markdown, lock) });
+    await stageContentDepthRepair(session);
+    expect(repairMock).not.toHaveBeenCalled();
+    const stage = stageOf(session.progressStages, 'content-depth-repair');
+    expect(stage?.status).toBe('failed');
+    expect(stage?.message).toContain('无法定位');
+  });
+
+  it('防误伤守护：存在未引用图纸但无 drawing-reference issue 时零触发（惰性重算不越权）', async () => {
+    const chapter = { id: 'ch-1', title: '主要施工方法', content: '本节按测量放线组织施工。' };
+    const lock = drawingLockOf([{ file: '资料/排水施工图.pdf', line: DRAIN_LINE, tokens: ['c25', '02s515'] }]);
+    const session = makeSession([chapter], { drawingFactLock: lock });
+    await stageContentDepthRepair(session);
+    expect(repairMock).not.toHaveBeenCalled();
+    const stage = stageOf(session.progressStages, 'content-depth-repair');
+    expect(stage?.status).toBe('success');
+    expect(stage?.message).toContain('内容深度验收通过');
+  });
+
+  it('防误伤守护：无图纸事实锁时零触发（不注入空载荷）', async () => {
+    const chapter = { id: 'ch-1', title: '主要施工方法', content: '本节按测量放线组织施工。' };
+    const session = makeSession([chapter]);
+    await stageContentDepthRepair(session);
+    expect(repairMock).not.toHaveBeenCalled();
+    const stage = stageOf(session.progressStages, 'content-depth-repair');
+    expect(stage?.status).toBe('success');
   });
 });

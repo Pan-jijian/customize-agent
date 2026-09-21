@@ -171,7 +171,7 @@ export async function stageRequirementResponseRepair(session: FinalizeSession, o
               promptTexts: instructionFor(pendingGaps, rounds),
               requirement: session.requirement,
               forbidDrawingImages: false,
-              // 标书编制规格（暗标禁表）：修复链 system 口径同步
+              // 标书编制规格（正文表格口径）：修复链 system 口径同步
               bidComposition: session.bidComposition,
               diagnostics: session.generationDiagnostics,
               signal: session.signal,
@@ -229,13 +229,67 @@ export async function stageRequirementResponseRepair(session: FinalizeSession, o
 
 // ═══════════════════════════ r10 链尾要求响应终局收口 ═══════════════════════════
 
-/** 链尾终局收口单次确定性补写上限（防御性；终态残留正常为个位数） */
-const MAX_TAIL_CLOSURE_INSERTS = 12;
+/** 链尾终局收口单次确定性补写上限（C3-3 扩容：D6 消费面扩容后残留规模可达数十条——
+ * 语义放行但锚点缺口的条目全部进入修复消费面，单轮 32 × 上限 3 轮覆盖 ~96 条） */
+const MAX_TAIL_CLOSURE_INSERTS = 32;
+
+/** C8 S1 查重下限（24→8）：签名归一化后 ≥8 字符才参与查重——短于 8 的素材子串可能自然命中
+ * 正文不参与判定；≥8 的等价形态全文命中视为已落位（历史 24 护栏使「（9）发现脏、差，有缺损。」
+ * 等 12 字符短条款完全不查重 → 三连重复） */
+const INSERTION_SIGNATURE_MIN_CHARS = 8;
 
 export interface RequirementTailClosureResult {
   markdown: string;
   insertedCount: number;
+  /** C8 S1：形态闸拒插素材条数（显性明细在 details；对应残留由终门禁照常复核，零静默降级） */
+  rejectedCount: number;
   details: string[];
+}
+
+/** 插入物签名归一化（C8 S1 ② 查重加固）：字符变体折叠——乘号族（×、✕、✖、✗、✘ 与星号）、
+ * 引号族、全半角、括号/标点形态、省略号——用于「素材是否已按等价形态落位正文」的查重。
+ * r28m' 实证：「4000×3200」与「4000*3200」字符差异使 includes 查重失效 → 重复插入。 */
+export function insertionSignature(text: string): string {
+  return text
+    .replace(/[０-９Ａ-Ｚａ-ｚ]/gu, ch => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
+    .replace(/％/gu, '%')
+    .replace(/[×✕✖✗✘✳*·‧・]/gu, '*')
+    .replace(/[「」『』“”„‟"'`´]/gu, '"')
+    .replace(/[（【〔〖]/gu, '(')
+    .replace(/[）】〕〗]/gu, ')')
+    .replace(/[，、]/gu, ',')
+    .replace(/。/gu, '.')
+    .replace(/；/gu, ';')
+    .replace(/：/gu, ':')
+    .replace(/！/gu, '!')
+    .replace(/？/gu, '?')
+    .replace(/[－—–‐]/gu, '-')
+    .replace(/…/gu, '...')
+    .replace(/\s+/gu, '')
+    .toLowerCase();
+}
+
+/** 插入物形态闸（C8 S1 ④，确定性零 LLM）：返回拒绝原因（null=放行）。链尾插入物直接进交付成稿、
+ * 无后续质量闸——拒插素材显性记录于 details，对应残留由终门禁照常复核（宁缺毋假）。
+ * 边界（防误拒真素材）：①过短——归一化后 <6 字符与 clauseSegmentCoverage 下限同源（插入也不可能
+ * 达成分句落位，纯污染）；②表格/拍平——含 | 或制表符（品牌表拍平残片实机形态）；③括号不配对——
+ * 四种括号族各自计数不等（截断/拼接残片）；④OCR 残片——括号内 4-8 位无义字母数字串
+ * （r28m' 实录「（18laxj）」）；⑤截断尾——全文无句末终止符且以连接/虚词字符或逗号顿号结尾
+ * （r28m' 实录「…由代理机构在发布最」；含句末标点的完整表述不在此列，避免误拒无标点长句）。 */
+export function insertionMaterialRejection(material: string): string | null {
+  const text = material.trim();
+  if (!text) return '空素材';
+  if (insertionSignature(text).length < 6) return '过短素材（归一化 <6 字符，插入亦无法达成分句落位）';
+  if (/[|\t]/u.test(text)) return '表格拍平残片（含表格分隔符）';
+  for (const [open, close] of [['（', '）'], ['(', ')'], ['【', '】'], ['「', '」']] as const) {
+    const openCount = text.split(open).length - 1;
+    const closeCount = text.split(close).length - 1;
+    if (openCount !== closeCount) return `括号不配对（${open}${close} ${openCount}/${closeCount}）`;
+  }
+  if (/[（(][0-9a-zA-Z]{4,8}[）)]/u.test(text)) return 'OCR 残片（括号内无义字母数字串）';
+  const noTerminal = !/[。！？；.!?;：:]/u.test(text);
+  if (noTerminal && /(?:[，、,]|[与和及或将把对从向于至到则而并且以最更较刚正才遂仍])$/u.test(text)) return '截断尾（无句末标点且以连接/虚词字符结尾）';
+  return null;
 }
 
 /**
@@ -251,6 +305,9 @@ export interface RequirementTailClosureResult {
  * 修复轮同源：requirementAssignments 蓝图分配 + normalizeChapterTitleLine 标题匹配；未定位
  * 回退文末）。调用方随后 recompute，保证「终门禁所检 = 修复所写」；已满足条目天然不在残留中
  * （现场重跑判定），重放幂等零成本。
+ * C8 S1 质量闸：插入前签名归一化查重（insertionSignature，下限 24→8 字符）+ 形态闸
+ * （insertionMaterialRejection：过短/拍平/括号不配对/OCR 残片/截断尾 → 拒插+显性记录）；
+ * attemptedSignatures 跨轮传递「已插入/已拒插」签名——插入过的不重插。
  */
 export async function applyRequirementTailClosure(input: {
   markdown: string;
@@ -258,10 +315,13 @@ export async function applyRequirementTailClosure(input: {
   requirementAssignments: TenderRequirementAssignment[];
   signal?: FinalizeSession['signal'];
   diagnostics?: FinalizeSession['generationDiagnostics'];
+  /** C8 S1 跨轮幂等：调用方（replayRequirementTailClosure 循环）跨轮传递的「已尝试签名」集合
+   * （插入过/拒插过的不重试）；单测/单次调用不传时本函数内新建 */
+  attemptedSignatures?: Set<string>;
   /** 单测注入的嵌入实现（替代本地模型），生产环境不传（与 buildSemanticSimilarity 同口径） */
   embedDocuments?: (texts: string[]) => Promise<number[][]>;
 }): Promise<RequirementTailClosureResult> {
-  const noop: RequirementTailClosureResult = { markdown: input.markdown, insertedCount: 0, details: [] };
+  const noop: RequirementTailClosureResult = { markdown: input.markdown, insertedCount: 0, rejectedCount: 0, details: [] };
   const entries = tenderRequirementCheckItems(input.tenderRequirements).map(({ item }) => item);
   if (entries.length === 0) return noop;
   // 检测端同源现场重跑（与 documentFinalValidation requirements-coverage 装配逐项一致）
@@ -284,25 +344,43 @@ export async function applyRequirementTailClosure(input: {
   if (blockers.length === 0) return noop;
   const entryByFingerprint = new Map(entries.map(entry => [stableHash(entry.text), entry]));
   const seenTexts = new Set<string>();
-  // 防重复插入（调用方循环化后跨轮幂等）：条款 voice 文本已按字符级落位正文时跳过——
-  // 重复段落对交付质量的伤害大于缺一条补写；未落位残留由终门禁照常复核。
-  // 长度护栏 24：短条款子串可能在正文自然命中，不参与查重
-  const normalizedMarkdown = input.markdown.replace(/\s+/gu, '');
+  // 防重复插入（C8 S1 查重加固 + 跨轮幂等）：签名归一化比较（乘号族/引号族/全半角/标点折叠，
+  // 见 insertionSignature）+ 下限 24→8 字符；调用方循环化的重放通过 attemptedSignatures 跨轮
+  // 传递「已插入/已拒插」签名——插入过的不重插。重复段落对交付质量的伤害大于缺一条补写；
+  // 未落位残留由终门禁照常复核。查重命中静默跳过（正文已含等价形态，无需记录）。
+  const markdownSignature = insertionSignature(input.markdown);
+  const attempted = input.attemptedSignatures ?? new Set<string>();
+  const rejectedDetails: string[] = [];
   const records: Array<{ entry: TenderRequirementEntry; chapterTitle: string; material: string }> = [];
   for (const issue of blockers) {
     if (records.length >= MAX_TAIL_CLOSURE_INSERTS) break;
     const entry = issue.provenance ? entryByFingerprint.get(issue.provenance.fingerprint) : undefined;
     if (!entry || seenTexts.has(entry.text)) continue;
-    // 条款原文 → 投标人口吻（关键分句逐字保留；空白折叠与检测端 normalize 同口径——行首枚举
-    // 前缀一并保留：分句锚点含原文枚举，剥离会破坏字面落位）
+    // 条款原文 → 投标人口吻（关键分句逐字保留；空白折叠与检测端 normalize 同口径——C8 S1 起
+    // 行首枚举前缀随 bidderVoiceClauseText 统一剥离：检测端 voice 分句通道同函数同源剥离，
+    // 插入物与判定侧形态严格一致，条款号不再泄漏进正文）
     const material = bidderVoiceClauseText(entry.text).replace(/\s+/gu, '').trim();
     if (!material) continue;
-    if (material.length >= 24 && normalizedMarkdown.includes(material)) continue;
+    const signature = insertionSignature(material);
+    if (attempted.has(signature)) continue;
+    if (signature.length >= INSERTION_SIGNATURE_MIN_CHARS && markdownSignature.includes(signature)) {
+      attempted.add(signature);
+      continue;
+    }
+    const rejection = insertionMaterialRejection(material);
+    if (rejection) {
+      attempted.add(signature);
+      rejectedDetails.push(`【${entry.category}】形态闸拒插（${rejection}）：${material.slice(0, 40)}${material.length > 40 ? '…' : ''}`);
+      continue;
+    }
     seenTexts.add(entry.text);
+    attempted.add(signature);
     const assignment = input.requirementAssignments.find(item => item.entry.text === entry.text);
     records.push({ entry, chapterTitle: assignment?.chapterTitle || '', material });
   }
-  if (records.length === 0) return noop;
+  if (records.length === 0) {
+    return { markdown: input.markdown, insertedCount: 0, rejectedCount: rejectedDetails.length, details: rejectedDetails };
+  }
   let markdown = input.markdown;
   const paragraphsByChapter = new Map<string, string[]>();
   for (const record of records) {
@@ -317,9 +395,10 @@ export async function applyRequirementTailClosure(input: {
   const verified = tenderRequirementResponseGaps(records.map(record => record.entry), markdown).filter(gap => gap.satisfied).length;
   const details = [
     ...records.map(record => `【${record.entry.category}】${record.chapterTitle || '文末'}：${record.material.slice(0, 48)}${record.material.length > 48 ? '…' : ''}`),
+    ...rejectedDetails,
     ...(verified < records.length ? [`未确认落位 ${records.length - verified} 条（由终门禁照常复核）`] : []),
   ];
-  return { markdown, insertedCount: records.length, details };
+  return { markdown, insertedCount: records.length, rejectedCount: rejectedDetails.length, details };
 }
 
 /** r11 链尾收口循环上限（r10 实机 #3 机制归因：单次收口插入补写文本后句集变化引发语义采样重洗，
@@ -336,10 +415,15 @@ export const MAX_TAIL_CLOSURE_ROUNDS = 3;
  * rebuildFinalMarkdown 从章 drafts 重拼成稿把插入全部回退——r23 实测「一级建造师」等 5 条补写阶段记录
  * success 而终稿零踪迹、终检重新检出直坠终门禁；由 pipeline 在最后一次净变更点之后、终门禁之前再调用，
  * 与 runSurfaceDeterministicCleans / replayBlueprintCitationNumericFixes 同范式）。
+ * C8 S1：跨轮幂等（attemptedSignatures 在循环内跨轮传递「已插入/已拒插」签名——插入过的
+ * 不重插）；形态闸拒插素材并入 details 显性记录（拒插不为零成本静默，残留由终门禁照常复核）。
  */
 export async function replayRequirementTailClosure(session: FinalizeSession): Promise<void> {
   if (!session.tenderRequirements?.extracted) return;
   let totalInserted = 0;
+  let totalRejected = 0;
+  // C8 S1 跨轮幂等：本重放内「已插入/已拒插」签名集合跨轮传递（插入过/拒插过的不重试）
+  const attemptedSignatures = new Set<string>();
   const tailDetails: string[] = [];
   let residualCount = 0;
   for (let closureRound = 1; closureRound <= MAX_TAIL_CLOSURE_ROUNDS; closureRound += 1) {
@@ -349,17 +433,24 @@ export async function replayRequirementTailClosure(session: FinalizeSession): Pr
       requirementAssignments: session.requirementAssignments,
       signal: session.signal,
       diagnostics: session.generationDiagnostics,
+      attemptedSignatures,
     });
-    if (tailClosure.insertedCount === 0) break;
+    totalRejected += tailClosure.rejectedCount;
+    tailDetails.push(...tailClosure.details);
+    if (tailClosure.insertedCount === 0) {
+      // C8 S1：零插入即断链前取当前终检残留数（拒插记录需正确的 stage 状态与残留注记）
+      residualCount = requirementResponseBlockers(session).length;
+      break;
+    }
     session.finalMarkdown = tailClosure.markdown;
     await session.recomputeFinalValidationBundle();
     totalInserted += tailClosure.insertedCount;
-    tailDetails.push(...tailClosure.details);
     residualCount = requirementResponseBlockers(session).length;
     if (residualCount === 0) break;
   }
-  if (totalInserted > 0) {
-    const tailClosureStage = displayStage({ type: 'validation', roleId: 'requirement-tail-closure', status: residualCount === 0 ? 'success' : 'failed', message: `招标要求响应链尾终局收口：${totalInserted} 条残留要求以投标人口吻确定性补写落位${residualCount > 0 ? `（残留 ${residualCount} 条由终门禁照常复核）` : ''}`, details: tailDetails }, { subtitle: '评审后兜底' });
+  if (totalInserted > 0 || totalRejected > 0) {
+    const gateNote = totalRejected > 0 ? `，${totalRejected} 条素材未过质量闸（拒插，显性记录）` : '';
+    const tailClosureStage = displayStage({ type: 'validation', roleId: 'requirement-tail-closure', status: residualCount === 0 ? 'success' : 'failed', message: `招标要求响应链尾终局收口：${totalInserted} 条残留要求以投标人口吻确定性补写落位${gateNote}${residualCount > 0 ? `（残留 ${residualCount} 条由终门禁照常复核）` : ''}`, details: tailDetails }, { subtitle: '评审后兜底' });
     upsertProgressStage(session.progressStages, tailClosureStage);
     upsertProgressStage(session.finalGateRepairStages, tailClosureStage);
   }

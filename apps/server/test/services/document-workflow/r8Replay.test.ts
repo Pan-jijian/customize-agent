@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import {
   resourceConsistencyIssues,
   crossSectionNumericConflictIssues,
@@ -7,22 +7,24 @@ import {
   selfUnderminingCandidateIssues,
 } from '../../../src/services/document-workflow/integrity/detectors/detectors';
 
-const md = readFileSync('/Users/pan/Desktop/codeing/customize-agent/.dbg/r8-final.md', 'utf8');
+// 快照资产缺失时（.dbg 不入库场景）md 级用例整组跳过；豁免正则用例资产无关恒运行
+const FIXTURE = '/Users/pan/Desktop/codeing/customize-agent/.dbg/r8-final.md';
+const md = existsSync(FIXTURE) ? readFileSync(FIXTURE, 'utf8') : '';
 
 describe('r8 repro', () => {
-  it('resourceConsistencyIssues (#5 修复后应零报)', () => {
+  it.skipIf(!md)('resourceConsistencyIssues (#5 修复后应零报)', () => {
     const issues = resourceConsistencyIssues(md);
     console.log('RESOURCE ISSUES:', issues.length);
     for (const i of issues) console.log(' -', i.message.slice(0, 220));
     expect(issues.filter(i => i.message.includes('262') || i.message.includes('56'))).toHaveLength(0);
   });
-  it('crossSectionNumericConflictIssues (#6/#7 修复后应零报)', () => {
+  it.skipIf(!md)('crossSectionNumericConflictIssues (#6/#7 修复后应零报)', () => {
     const issues = crossSectionNumericConflictIssues(md);
     console.log('CROSS SECTION:', issues.length);
     for (const i of issues) console.log(' -', i.message.slice(0, 220));
     expect(issues.filter(i => i.message.includes('灭火器') || i.message.includes('自然村'))).toHaveLength(0);
   });
-  it('ambiguousEitherOrIssues (#8 修复后应零报)', () => {
+  it.skipIf(!md)('ambiguousEitherOrIssues (#8 修复后应零报)', () => {
     const issues = ambiguousEitherOrIssues(md);
     console.log('AMBIGUOUS:', issues.length);
     for (const i of issues) console.log(' -', i.message.slice(0, 220));
@@ -44,7 +46,7 @@ describe('r8 repro', () => {
     expect(exempt.test('专项设计文件尚未完成，待后续补充')).toBe(false);
     expect(exempt.test('本项目未采用行业认定的新技术、新工艺、新设备、新材料')).toBe(false);
   });
-  it('selfUnderminingCandidateIssues（r8 正文，语义模型可用时）', async () => {
+  it.skipIf(!md)('selfUnderminingCandidateIssues（r8 正文，语义模型可用时）', async () => {
     try {
       const issues = await selfUnderminingCandidateIssues(md);
       console.log('SELF:', issues.length);

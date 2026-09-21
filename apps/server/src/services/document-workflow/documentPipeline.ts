@@ -31,6 +31,9 @@ import { stageSectionAlignmentSweep } from './finalize/repairRounds/sectionAlign
 import { stageTemplatingSweep } from './finalize/repairRounds/templatingSweep';
 import { stageDuplicateThemeMerge } from './finalize/repairRounds/duplicateThemeMerge';
 import { stageDeliveryStructureClosure } from './finalize/repairRounds/deliveryStructureClosure';
+import { stageSentencePatternSweep } from './finalize/repairRounds/sentencePatternSweep';
+import { stageDuplicateSentenceCollapse } from './finalize/repairRounds/duplicateSentenceCollapse';
+import { stageTemplatingTailReplay } from './finalize/repairRounds/templatingTailReplay';
 import { stageFinalGate } from './finalize/finalGate';
 import { stageHealthDiagnosis } from './finalize/healthDiagnosis';
 
@@ -63,8 +66,8 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // → planned-section-final → commercial-strip → table-deterministic-repair → numeric-verification
   // → requirement-response-repair → requirement-verification → content-depth-repair → control-loop-repair → professional-chain-repair
   // → post-review-surface → terminology-strip → regulation-number-typo → quotation-balance-repair
-  // → basis-regulations-repair → dangerous-applicability-repair → auto-spec-gate-repair → toc-consistency → length-compression-repair → fact-distribution-round
-  // → table-caption-repair → table-arithmetic-repair → empty-section-sweep → section-alignment-sweep → templating-sweep → duplicate-theme-merge → delivery-structure-closure
+  // → basis-regulations-repair → basis-regulations-cross-repair → dangerous-applicability-repair → auto-spec-gate-repair → toc-consistency → length-compression-repair → fact-distribution-round
+  // → table-caption-repair → table-arithmetic-repair → empty-section-sweep → section-alignment-sweep → templating-sweep → duplicate-theme-merge → delivery-structure-closure → sentence-pattern-sweep → duplicate-sentence-collapse → templating-tail-replay
   //（顺序快照测试锁定；新增修复轮必须同时更新声明表）
   // 方案 2.3：全维度评审轮（qingtian-full-review）已删除——九维检出全部由注册表检测器/写作执行器覆盖
   // （含 S1 块级六类执行器），该轮历史实测检出 12 处/修复 0 处，无独有检出项
@@ -174,6 +177,29 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // markdown-only 收口，位于最后净变更点（前序 markdown-only 重放）之后、终门禁之前——
   // 终门禁所检 = 交付所存 = 收口后成稿
   await stageDeliveryStructureClosure(session);
+  // C8 S3 句模复读链尾收口（F 通道：修复链覆盖断层归因——句模修复仅写作期 stage 60，finalize 链
+  // 无重放；tail closure 等 markdown-only 插入物晚于全部 draft-mutating 轮，templating-sweep 扫章
+  // drafts 看不到插入物 → 写作期残留 7/13/36 处至终稿反增 13/14/46 处）：链尾确定性剥离
+  //「施工按以下顺序组织：」类宣告引导句（stripSentencePatternAnnouncements，与检测端
+  // form-announcement 族单源判定——列表自承载全部信息，引导语删除无损）；残余承载式句由密度
+  // 命中线 sentencePatternThreshold（检测/修复目标/评分/复检四端单源）放行，超线残差仍由终检
+  // blocker 复核。markdown-only，位于 delivery-structure-closure 之后、标点终局收口之前——
+  // 终门禁所检 = 交付所存 = 收口后成稿
+  await stageSentencePatternSweep(session);
+  // C8 S5 U 通道句级复读坍塌链尾收口（uniqueness 0.59 第一约束归因：重复句 excess 主体为
+  //「上述/相关/有关＋泛对象词」泛化归口句复读与同章完全复读，句模链路覆盖不到）：完全重复句
+  // 保首次删后续（同章复读一律坍塌、跨章复读仅首现句命中泛化归口帧者坍塌，跨章业务句保留），
+  // 与 uniqueness 评分单源消费 duplicateSentenceOccurrences；markdown-only，位于
+  // sentence-pattern-sweep 之后、标点终局收口之前——终门禁所检 = 交付所存 = 收口后成稿
+  await stageDuplicateSentenceCollapse(session);
+  // C8 S6 A' 对象错位通道（templating-sweep 扫章 drafts 而 markdown-only 插入物只写 finalMarkdown：
+  // s28m' 实测插入物 6 探针 drafts 全 false / markdown 全 true——stage「无重复段落残留」为 drafts
+  // 视角假通过；且链尾各 markdown-only 轮删句后可能新生重复段）：链尾 markdown 版 templating 重放
+  //——finalMarkdown 按 `## ` 行级切章构造伪 chapters，复用 templating-sweep 同源三函数
+  //（templatePrefixTargets → stripZeroInfoSloganSentences + 逐章 stripDuplicateParagraphs）。
+  // markdown-only，位于 duplicate-sentence-collapse 之后、标点终局收口之前——
+  // 终门禁所检 = 交付所存 = 收口后成稿
+  await stageTemplatingTailReplay(session);
   // r28h 链尾标点终局收口（r28h2/s28h2 实机归因）：交付结构收口（超长段落切分）与前序链尾
   // 追加块（补写/删除类）仍可能带回标点叠用残留（「。。」句段拼接、「、、」并列删除），
   // round-2 链无二次消费点直坠终门禁——同源修复器在终门禁前最后收口（终门禁所检 = 交付所存）

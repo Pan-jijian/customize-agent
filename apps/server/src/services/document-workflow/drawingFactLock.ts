@@ -16,6 +16,7 @@
  */
 import { extractKeyFactLines } from './evidence';
 import { chapterRelevanceTokens, extractSpecTokens } from './billFactLock';
+import { stableHash } from './utils';
 import type { DocumentEvidence } from './types';
 
 export interface DrawingFactLockGroup {
@@ -40,8 +41,16 @@ export interface DrawingFactLock {
 
 /** 图纸类证据判定：processingType 标注（图纸 kind 映射）或文件名/小节题含图纸类词 */
 const DRAWING_FILE_RE = /dwg|dxf|图纸|施工图|设计图|总平面|平面图|立面图|剖面图|大样图|详图|cad/iu;
+/** 图纸衍生文档（目录/清单类，C3-6-2 分母治理）：内容为图纸名称列表而非设计事实，
+ * 其 token（表格框架/列名残片）正文永不可能引用——计入分母即永不可达的隐形分母
+ * （r28l 实测「图纸目录.xls」token 全为 col2..col10，引用率恒 50% 卡死）。
+ * 判据锚定 basename 的文档类型词（跨项目通用，非项目专有名词）；仅按文件名判定不按全路径
+ * （目录路径段可能含「图纸」目录名，不得误伤真实图纸） */
+const DRAWING_DERIVED_FILE_RE = /图纸目录|设计目录|图纸清单|目录表/u;
 
 function isDrawingEvidence(item: DocumentEvidence, fileProcessingByPath?: Map<string, string>): boolean {
+  const basename = item.filePath.split('/').pop() || item.filePath;
+  if (DRAWING_DERIVED_FILE_RE.test(basename)) return false;
   const processing = item.processingType || fileProcessingByPath?.get(item.filePath) || '';
   if (processing === 'drawing') return true;
   return DRAWING_FILE_RE.test(`${item.filePath} ${item.sectionTitle || ''}`);
@@ -60,9 +69,19 @@ function normalizeToken(value: string) {
   return value.replace(/\s+/gu, '').replace(/：/gu, ':').toLowerCase();
 }
 
+/** 表格列名残片 token（Excel 解析产物 col2/COL10 形态，C3-6-2 提纯）：表格框架非设计事实，
+ * 正文写作永不含此形态——入池即判定噪音（r28l 图纸目录实测 9 个 token 全为 colN 形态） */
+const TABLE_COLUMN_TOKEN_RE = /^col\d+$/u;
+/** 尺寸对拆分残片 token（「18x18x3」榨出 x18，「420x594」榨出 x594，C3-6-2 提纯）：
+ * 正文写作引用完整尺寸对（18x18），不引用拆分残片——残片命中判定无意义
+ * （注意：完整尺寸对 ^\d+x\d+$ 如 18x18/390x190 为真实规格 token，不在提纯范围） */
+const DIMENSION_FRAGMENT_TOKEN_RE = /^x\d+$/u;
+
 /**
  * 事实行 token 提取（正文落位验收锚点）：规格 token（单位数值/C30/DN100/Φ150/尺寸对）+
- * 规格代号 + 配比 + 图集编号；归一化后长度 ≥3 且非纯数字（短通用 token 如「4m」不参与判定）。
+ * 规格代号 + 配比 + 图集编号；归一化后长度 ≥3 且非纯数字（短通用 token 如「4m」不参与判定）；
+ * C3-6-2 提纯：表格列名残片（colN）与尺寸对拆分残片（xNNN）滤除——两类形态无设计事实语义，
+ * 入池只会稀释判定质量或制造永不可达 token。
  */
 export function extractDrawingFactTokens(line: string): string[] {
   const rawTokens = [
@@ -73,7 +92,8 @@ export function extractDrawingFactTokens(line: string): string[] {
   ];
   return [...new Set(rawTokens
     .map(normalizeToken)
-    .filter(token => token.length >= 3 && !/^\d+$/u.test(token)))];
+    .filter(token => token.length >= 3 && !/^\d+$/u.test(token)
+      && !TABLE_COLUMN_TOKEN_RE.test(token) && !DIMENSION_FRAGMENT_TOKEN_RE.test(token)))];
 }
 
 /** 每图纸事实行上限（防单份超大图纸占满锁内存；行按重要性已排序，截断保头部） */
@@ -155,10 +175,28 @@ function lineRelevanceScore(line: string, tokens: string[]): number {
   return tokens.reduce((sum, token) => sum + (line.includes(token) ? 1 : 0), 0);
 }
 
+/** 深注入图纸数（C3-6-3 注入扩容）：相关性 top-N 份按 perDrawingMinLines 行深注入（保做法细节），
+ * 其余份进入单行保底层——图纸数超出预算容量时，首段深注入只覆盖头部，中尾部靠覆盖段散列保底 */
+const DEEP_INJECTION_GROUPS = 6;
 /**
- * 渲染图纸事实锁注入文本（B-T3 图纸行直读通道）：按章节相关性排序事实行后渲染，
+ * 相关性段预算份额（C3-6-3：含深段；余量分配给旋转覆盖段）。
+ * 历史缺陷：保底循环按相关性序逐份 push，预算被前 ~22 份（每份 3 行）耗尽——118 份图纸仅 22 份
+ * 获注入（s28l 实测 96 份从未注入，29 条未引用中 20 条从未获注入）；预算 8000 字符 vs 全份保底
+ * 1 行需 17470 字符（均值 148 字符/行），无法全量保底——改为「相关性段 + 跨章旋转覆盖段」双段：
+ * 每章相关性档吃到 55% 预算，其余 45% 按「稳定序 × 章节 hash 旋转」逐份 1 行散列注入，
+ * 各章旋转起点不同使全量图纸跨章获得注入机会（目标 90% 引用率的分母覆盖前提）。
+ */
+const RELEVANCE_STAGE_SHARE = 0.55;
+
+/**
+ * 渲染图纸事实锁注入文本（B-T3 图纸行直读通道，C3-6-3 三段式扩容）：按章节相关性排序事实行后渲染，
  * 每份图纸保底行保证各图纸均有进入正文的机会（引用率验收 ≥1 处/份的前提），
- * 数据不经检索召回与注入截断直接进入写作提示词。
+ * 数据不经检索召回与注入截断直接进入写作提示词。三段结构：
+ * ① 深段：相关性 top-DEEP_INJECTION_GROUPS 份 × perDrawingMinLines 行（本章核心图纸深注入）；
+ * ② 相关性段：其余份 × 1 行（该份本章相关性首行），两段合计至 RELEVANCE_STAGE_SHARE 预算；
+ * ③ 旋转覆盖段：全份按稳定序（sourceFile 字典序）以章节标题 hash 旋转起点逐份 1 行，至预算尽
+ *   （每章起点不同 → 各份图纸跨章获得注入机会，图纸总数超出预算容量时的覆盖率保障）；
+ * ④ 全局补足：两段后仍有预算（小池场景）时按「章节相关性 → 图纸序 → 行序」填满。
  */
 export function renderDrawingFactLockText(lock: DrawingFactLock, chapterTitle: string, opts: { sections?: string[]; maxChars?: number; perDrawingMinLines?: number } = {}): string {
   if (!lock || lock.groups.length === 0) return '';
@@ -167,7 +205,7 @@ export function renderDrawingFactLockText(lock: DrawingFactLock, chapterTitle: s
   const maxChars = Math.max(1, opts.maxChars ?? defaultMaxChars);
   const perDrawingMinLines = Math.max(1, opts.perDrawingMinLines ?? 3);
   const tokens = chapterRelevanceTokens(chapterTitle, opts.sections || []);
-  // 每图纸内部按相关性降序（同分保持原序）；保底行 = 每图纸前 N 行，其余行进入全局补足池
+  // 每图纸内部按相关性降序（同分保持原序）
   const scoredGroups = lock.groups.map(group => ({
     group,
     ranked: group.factLines
@@ -186,10 +224,24 @@ export function renderDrawingFactLockText(lock: DrawingFactLock, chapterTitle: s
     lines.push(rendered);
     total += rendered.length + 1;
   };
-  for (const { group, ranked } of scoredGroups) {
+  // ① 深段 + ② 相关性段（合计预算 = RELEVANCE_STAGE_SHARE）
+  const relevanceBudget = Math.max(1, Math.floor(maxChars * RELEVANCE_STAGE_SHARE));
+  for (const { group, ranked } of scoredGroups.slice(0, DEEP_INJECTION_GROUPS)) {
     for (const item of ranked.slice(0, perDrawingMinLines)) pushLine(item.line, group.sourceFile);
   }
-  // 全局补足：所有行按「章节相关性 → 图纸序 → 行序」排序填入剩余预算
+  for (const { group, ranked } of scoredGroups.slice(DEEP_INJECTION_GROUPS)) {
+    if (total >= relevanceBudget) break;
+    if (ranked[0]) pushLine(ranked[0].line, group.sourceFile);
+  }
+  // ③ 旋转覆盖段：稳定序 × 章节 hash 旋转起点（起点随章确定且可复现；各章旋转覆盖互补）
+  const stable = [...scoredGroups].sort((left, right) => (left.group.sourceFile < right.group.sourceFile ? -1 : left.group.sourceFile > right.group.sourceFile ? 1 : 0));
+  const offset = stable.length > 0 ? parseInt(stableHash(`drawing-coverage:${chapterTitle}`).slice(0, 8), 16) % stable.length : 0;
+  for (let step = 0; step < stable.length; step += 1) {
+    if (total >= maxChars) break;
+    const { group, ranked } = stable[(offset + step) % stable.length]!;
+    if (ranked[0]) pushLine(ranked[0].line, group.sourceFile);
+  }
+  // ④ 全局补足：所有行按「章节相关性 → 图纸序 → 行序」排序填入剩余预算（小池两段后有余量时生效）
   const remaining = scoredGroups
     .flatMap(({ group, ranked }) => ranked.map(item => ({ ...item, sourceFile: group.sourceFile })))
     .sort((a, b) => b.score - a.score || a.index - b.index);
@@ -207,8 +259,8 @@ export function renderDrawingFactLockText(lock: DrawingFactLock, chapterTitle: s
   ].join('\n');
 }
 
-/** 正文归一化（与 token 同口径：去全部空白 + 全角冒号转半角 + 小写） */
-function normalizeBody(markdown: string) {
+/** 正文归一化（与 token 同口径：去全部空白 + 全角冒号转半角 + 小写；C3-6-4 起导出供修复轮复检共源） */
+export function normalizeDrawingMatchText(markdown: string) {
   return markdown.replace(/\s+/gu, '').replace(/：/gu, ':').toLowerCase();
 }
 
@@ -218,7 +270,7 @@ function normalizeBody(markdown: string) {
  */
 export function drawingFactPlacement(lock: DrawingFactLock, markdown: string): { referenced: DrawingFactLockGroup[]; unreferenced: DrawingFactLockGroup[]; rate: number } {
   if (!lock || lock.groups.length === 0) return { referenced: [], unreferenced: [], rate: 1 };
-  const normalized = normalizeBody(markdown);
+  const normalized = normalizeDrawingMatchText(markdown);
   const referenced: DrawingFactLockGroup[] = [];
   const unreferenced: DrawingFactLockGroup[] = [];
   for (const group of lock.groups) {

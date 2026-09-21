@@ -5,9 +5,12 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  SENTENCE_PATTERN_FAMILIES,
+  SENTENCE_PATTERN_MIN_REPEATS,
   SKELETON_FINGERPRINTS,
   classifyFlowForms,
   coreTitleName,
+  countSentencePatternHits,
   countSkeletonFingerprint,
   fixFlowFormRepetition,
   fixSentenceLikeHeadingSplit,
@@ -22,9 +25,13 @@ import {
   nextFlowForm,
   plannedTitleMatchKey,
   primaryFlowForm,
+  sentencePatternRepeatIssues,
+  sentencePatternRepairTargets,
+  sentencePatternThreshold,
   skeletonFingerprintIssues,
   skeletonFingerprintRepairTargets,
   splitSentenceLikeHeading,
+  stripSentencePatternAnnouncements,
   templatedLabelIssues,
   titleIntegrityIssues,
   titleRepairTargets,
@@ -771,5 +778,164 @@ describe('fixSentenceLikeHeadingSplit（句化标题切分确定性修复）', (
     const result = fixSentenceLikeHeadingSplit(md, PLANNED);
     expect(result.fixedCount).toBe(1);
     expect(result.markdown).toContain('#### 2.11.3 公厕机电安装工程\n\n集中在马老郢等自然村进行改造施工。');
+  });
+});
+
+describe('sentencePattern*（句模聚类复读：C4 D3 检测/修复目标同源）', () => {
+  /** 完整链样本：先…再…随后…最后（≥3 连接词——探针 F1e 同口径；2 连接词短链不计数防误伤） */
+  const chain = (i: number) => `第${i}段砌筑渠道施工先开挖基槽并夯实槽底，再浇筑C15混凝土垫层，随后砌筑渠身并抹面，最后回填两侧土方并压实。`;
+
+  it('正样本：完整顺序链 6 句 → blocker 命中（sequence-chain）', () => {
+    const markdown = Array.from({ length: 6 }, (_, i) => chain(i + 1)).join('\n');
+    const issues = sentencePatternRepeatIssues(markdown);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ level: 'error', severity: 'blocker', category: 'style' });
+    expect(issues[0].message).toContain('多段顺序词链');
+    expect(issues[0].message).toContain('6 处');
+    expect(issues[0].suggestion).toContain('保留全文前 5 处');
+  });
+
+  it('反样本：仅 2 连接词的短链（先…再…最后）不计数——防误伤', () => {
+    const short = (i: number) => `第${i}段先清理基层浮土，再铺筑垫层拌合料，最后验收移交。`;
+    const markdown = Array.from({ length: 6 }, (_, i) => short(i + 1)).join('\n');
+    expect(sentencePatternRepeatIssues(markdown)).toEqual([]);
+  });
+
+  it('正样本：完成即转入 / 验收衔接 / 资料闭环 三族各自命中', () => {
+    const afterCompletion = Array.from({ length: 6 }, (_, i) => `第${i + 1}段管道安装完成后进行水压试验，试验压力为0.6MPa。`);
+    const acceptance = Array.from({ length: 6 }, (_, i) => `第${i + 1}分项验收合格后方可进入下道工序施工。`);
+    const closedLoop = Array.from({ length: 6 }, (_, i) => `第${i + 1}道工序检测合格后报监理复验并形成记录闭环。`);
+    expect(sentencePatternRepeatIssues(afterCompletion.join('\n'))[0].message).toContain('完成即转入式');
+    expect(sentencePatternRepeatIssues(acceptance.join('\n'))[0].message).toContain('验收衔接式');
+    expect(sentencePatternRepeatIssues(closedLoop.join('\n'))[0].message).toContain('资料闭环式');
+  });
+
+  it('正样本：形式宣告式（施工按以下顺序组织：/ 工序按编号步骤组织：）→ blocker 命中', () => {
+    const markdown = Array.from({ length: 6 }, (_, i) => `第${i + 1}工作包施工按以下顺序组织：`).join('\n');
+    const issues = sentencePatternRepeatIssues(markdown);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('形式宣告式');
+    const numbered = Array.from({ length: 6 }, (_, i) => `第${i + 1}工作包工序按编号步骤组织：`).join('\n');
+    expect(sentencePatternRepeatIssues(numbered)[0].message).toContain('形式宣告式');
+  });
+
+  it('阈值：5 句不命中、第 6 句起命中（SENTENCE_PATTERN_MIN_REPEATS 单源）', () => {
+    const family = SENTENCE_PATTERN_FAMILIES.find(item => item.id === 'sequence-chain')!;
+    const five = Array.from({ length: 5 }, (_, i) => chain(i + 1)).join('\n');
+    expect(countSentencePatternHits(five, family)).toBe(5);
+    expect(sentencePatternRepeatIssues(five)).toEqual([]);
+    const six = [...five.split('\n'), chain(6)].join('\n');
+    expect(sentencePatternRepeatIssues(six)).toHaveLength(1);
+    expect(SENTENCE_PATTERN_MIN_REPEATS).toBe(6);
+  });
+
+  it('防误伤：标题行/表格行/短碎片/单点多样表达 → 零命中', () => {
+    const markdown = [
+      '#### 3.1 先开挖基槽再浇筑垫层随后砌筑最后回填的施工顺序安排',
+      '| 先开挖 | 再浇筑 | 随后砌筑 | 然后养护 | 最后回填 |',
+      '先挖。再填。随后整。',
+      '管道安装完成后进行水压试验，试验压力0.6MPa。',
+      '防水层验收合格后方可进入保护层施工。',
+      '隐蔽工程验收后形成验收记录归档。',
+    ].join('\n');
+    expect(sentencePatternRepeatIssues(markdown)).toEqual([]);
+  });
+
+  it('修复目标：保留额度 5 处按章序消耗、每章至多 4 句、跨族去重归首族', () => {
+    const chapter1 = ['## 第一章 主体结构', '', ...Array.from({ length: 4 }, (_, i) => chain(i + 1))].join('\n');
+    const chapter2 = ['## 第二章 装饰装修', '', ...Array.from({ length: 4 }, (_, i) => chain(i + 5))].join('\n');
+    const targets = sentencePatternRepairTargets([chapter1, chapter2].join('\n'));
+    expect(targets).toHaveLength(1);
+    expect(targets[0].chapterTitle).toContain('第二章');
+    expect(targets[0]).toMatchObject({ patternId: 'sequence-chain', totalCount: 8, cap: 5 });
+    expect(targets[0].sentences).toHaveLength(3);
+    // 跨族去重：同句双命中（顺序链 + 形式宣告）检测双族命中，修复目标只归首族
+    const dual = (i: number) => `第${i}工作包施工作业按以下顺序组织实施：先开挖基槽，再浇筑垫层，随后砌筑渠身，然后养护，最后回填。`;
+    const dualMarkdown = ['## 第一章 施工方案', '', ...Array.from({ length: 6 }, (_, i) => dual(i + 1))].join('\n');
+    expect(sentencePatternRepeatIssues(dualMarkdown)).toHaveLength(2);
+    expect(sentencePatternRepairTargets(dualMarkdown).map(target => target.patternId)).toEqual(['sequence-chain']);
+  });
+
+  it('三端同源：检测 message 计数 = 单族计数 = 修复目标 totalCount', () => {
+    const family = SENTENCE_PATTERN_FAMILIES.find(item => item.id === 'sequence-chain')!;
+    const markdown = ['## 第一章 施工方案', '', ...Array.from({ length: 7 }, (_, i) => chain(i + 1))].join('\n');
+    expect(countSentencePatternHits(markdown, family)).toBe(7);
+    expect(sentencePatternRepeatIssues(markdown)[0].message).toContain('7 处');
+    expect(sentencePatternRepairTargets(markdown)[0].totalCount).toBe(7);
+  });
+});
+
+/**
+ * C8 S3（F/C 通道）：①句模宣告引导句确定性剥离（链尾 markdown-only 收口，检测定位=修复定位）；
+ * ②命中线密度归一（max(6, ceil(正文字数/5000)) = 2.0 处/万字）——绝对计数 6 于长文误伤自然语式
+ * （r28m' 6.5 万字 8 处判误报 vs s28m' 21 万字 46 处判真复读），修复后 s28m' 残留 38 处（1.82/万）通过。
+ */
+describe('C8 S3 句模链尾收口（stripSentencePatternAnnouncements + 阈值密度化）', () => {
+  it('sentencePatternThreshold：底线 6 + 每 5000 字上浮 1（校准锚点 r28m’/s28m’ 处/万字）', () => {
+    expect(sentencePatternThreshold('')).toBe(6);
+    expect(sentencePatternThreshold('甲'.repeat(30000))).toBe(6);
+    expect(sentencePatternThreshold('甲'.repeat(30001))).toBe(7);
+    // r28m’ 6.5 万字：阈值 13；自然语式 1.23 处/万字（8 处）通过
+    const r28mPrime = sentencePatternThreshold('甲'.repeat(65000));
+    expect(r28mPrime).toBe(13);
+    expect(8).toBeLessThan(r28mPrime);
+    // s28m’ 21 万字：阈值 42；修复前 2.20 处/万字（46 处）命中、S3① 剥离后 1.82 处/万字（38 处）通过
+    const s28mPrime = sentencePatternThreshold('甲'.repeat(210000));
+    expect(s28mPrime).toBe(42);
+    expect(46).toBeGreaterThanOrEqual(s28mPrime);
+    expect(38).toBeLessThan(s28mPrime);
+  });
+
+  it('密度归一端到端：同一 7 处复读，短文档命中、加长后（阈值 8）通过', () => {
+    const chain = (i: number) => `第${i}段砌筑渠道施工先开挖基槽并夯实槽底，再浇筑C15混凝土垫层，随后砌筑渠身并抹面，最后回填两侧土方并压实。`;
+    const markdown = Array.from({ length: 7 }, (_, i) => chain(i + 1)).join('\n');
+    expect(sentencePatternThreshold(markdown)).toBe(6);
+    expect(sentencePatternRepeatIssues(markdown)).toHaveLength(1);
+    // 同 7 处复读 + 长文填充（总字数 >35000 → 阈值 8）：密度不足判误报 → 零命中
+    const padded = [markdown, '', '甲'.repeat(35000)].join('\n');
+    expect(sentencePatternThreshold(padded)).toBe(8);
+    expect(sentencePatternRepeatIssues(padded)).toEqual([]);
+  });
+
+  it('剥离：整行仅宣告句 → 删行 + 紧邻空行压缩（列表自承载全部信息，删除无损）', () => {
+    const markdown = ['## 第一章 施工方案', '', '施工按以下顺序组织：', '', '- 场地平整与测量放线', '- 基础工程施工'].join('\n');
+    const result = stripSentencePatternAnnouncements(markdown);
+    expect(result.removedCount).toBe(1);
+    expect(result.removedSentences[0]).toBe('施工按以下顺序组织：');
+    // 删行后紧邻空行一并压缩：标题与列表间保留单一空行
+    expect(result.markdown).toBe(['## 第一章 施工方案', '', '- 场地平整与测量放线', '- 基础工程施工'].join('\n'));
+  });
+
+  it('剥离：行内末句宣告 → 仅剥末句、前文保留（前驱句以「。」结尾，不做标点修补）', () => {
+    const markdown = ['测量放线已完成并经复核。施工按以下编号步骤组织：', '', '- 步骤一：复核基准点'].join('\n');
+    const result = stripSentencePatternAnnouncements(markdown);
+    expect(result.removedCount).toBe(1);
+    expect(result.markdown).toContain('测量放线已完成并经复核。\n');
+    expect(result.markdown).not.toContain('施工按以下编号步骤组织');
+  });
+
+  it('族词形变体（作业×下列 / 工序×以下）同样剥离；剥离后重放零变更', () => {
+    const markdown = ['## 第一章 施工组织', '', '作业按下列步骤展开：', '', '工序按以下次序排列：', '', '- 内容项'].join('\n');
+    const result = stripSentencePatternAnnouncements(markdown);
+    expect(result.removedCount).toBe(2);
+    expect(result.markdown).toBe(['## 第一章 施工组织', '', '- 内容项'].join('\n'));
+    const again = stripSentencePatternAnnouncements(result.markdown);
+    expect(again.removedCount).toBe(0);
+    expect(again.markdown).toBe(result.markdown);
+  });
+
+  it('防误伤：自承载表述（句后有实际内容）/标题行/表格行 → 零剥离且原样返回', () => {
+    const markdown = [
+      '施工按以下顺序组织：先搭设围挡，再布设排水，最后硬化场地。',
+      '',
+      '施工按以下顺序组织：详见附表一。',
+      '',
+      '| 施工按以下顺序组织： |',
+      '',
+      '# 施工按以下顺序组织：',
+    ].join('\n');
+    const result = stripSentencePatternAnnouncements(markdown);
+    expect(result.removedCount).toBe(0);
+    expect(result.markdown).toBe(markdown);
   });
 });

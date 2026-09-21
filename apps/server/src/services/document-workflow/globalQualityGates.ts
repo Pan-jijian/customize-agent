@@ -23,9 +23,10 @@ import { difficultyCountermeasureReport, fillerDensityReport, scanTemplatePrefix
 import { missingWorkPackageSkeletonTitles, stripEmptyWorkPackageHeadings, stripTablesInSection, workPackageSkeletonTitles } from './chapterPostProcessing';
 import { DIVISION_SECTION_RE } from './writingSpec';
 import { majorContentGovernanceIssues, perPackageContentElementIssues } from './constructionOrgQualityRules';
-import { flowFormRepairTargets, isStructuralLabelTitle, skeletonFingerprintRepairTargets, titleRepairTargets } from './templatingGovernance';
-import { bodyTableDismantleIssue, isBodyTableForbidden, type BidCompositionSpec } from './bidComposition';
+import { flowFormRepairTargets, isStructuralLabelTitle, sentencePatternRepairTargets, skeletonFingerprintRepairTargets, titleRepairTargets } from './templatingGovernance';
+import { bodyTableDismantleIssue, isBodyFigureForbidden, isBodyTableForbidden, unplannedBodyTableIssue, type BidCompositionSpec } from './bidComposition';
 import { countMarkdownTables, extractGeneratedSections, extractMarkdownTableTextBlocks } from './markdownComposer';
+import { normalizeGeneratedChapterTitle } from './outline';
 import { nearSubsectionTitleMatch, normalizeSubsectionTitleForDedup, sectionHeadingTitleText, WORK_PACKAGE_SECTION_RE } from './utils';
 import { renumberSectionHeadings } from './structureIntegrityRules';
 
@@ -162,18 +163,25 @@ interface DismantleBodyTablesInput {
 }
 
 /**
- * 暗标拆表闭环（标书编制规格 bodyTablePolicy=forbidden）：正文残留 Markdown 表格改写为段落式连贯叙述。
+ * 正文拆表闭环（C1 双口径）：
+ * ① 正文禁表（bodyTablePolicy=forbidden，招标显式禁表句）：全量拆表——正文残留表格改写为段落式叙述；
+ * ② 允许口径（章级授权，scope 传入）：仅拆「未列入表格授权计划的章」的表格——无计划章出现表格违反
+ *    章级授权（写作 LLM 自设表格；授权章 = 有表格计划/静态声明/图类承载指令的章，与终检门禁同源口径）。
  * 与补表闭环同构反演：检测与反向门禁同口径（countMarkdownTables 分隔线行计数），
  * 修复=表格块原文锚点直连改写（extractMarkdownTableTextBlocks 精确摘录，LLM 不复述只输出段落式改写），
  * P12 回滚保护同补表（表数不降反升即回滚保留修复前正文）；残留转终检反向门禁阻断，不自行兜底。
  */
-async function dismantleBodyTables(input: DismantleBodyTablesInput): Promise<{ tableFixApplied: boolean }> {
+async function dismantleBodyTables(input: DismantleBodyTablesInput, scope?: { plannedChapterKeys: Set<string> }): Promise<{ tableFixApplied: boolean }> {
   const { chapterDraftsFinal, template, repairPromptTexts, requirement, signal, generationDiagnostics, progressStages, emitProgress, withProgressHeartbeat, bidComposition } = input;
+  const unplannedTargets = (chapter: DocumentDraftChapter) => !scope || !scope.plannedChapterKeys.has(normalizeGeneratedChapterTitle(chapter.title));
   const targets = chapterDraftsFinal
+    .filter(unplannedTargets)
     .map(chapter => ({ chapter, tableCount: countMarkdownTables(chapter.content), blocks: extractMarkdownTableTextBlocks(chapter.content) }))
     .filter(item => item.tableCount > 0);
   if (targets.length === 0) return { tableFixApplied: false };
-  upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'table-execution-repair', status: 'running', message: `暗标拆表修复：${targets.length} 个章节正文残留表格（招标暗标要求正文纯文字）` }, { subtitle: '暗标拆表修复' }));
+  const repairLabel = scope ? '无计划表格修复' : '正文拆表修复';
+  const scopeReason = scope ? '本章未列入系统表格计划（正文表格须来自系统表格计划，不得自设）' : '招标正文禁表（显式禁表句）';
+  upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'table-execution-repair', status: 'running', message: `${repairLabel}：${targets.length} 个章节正文残留表格（${scopeReason}）` }, { subtitle: repairLabel }));
   emitProgress(chapterDraftsFinal);
   let appliedCount = 0;
   const failedDetails: string[] = [];
@@ -188,10 +196,11 @@ async function dismantleBodyTables(input: DismantleBodyTablesInput): Promise<{ t
         const repaired = await withProgressHeartbeat(() => measureGenerationStep(generationDiagnostics, `body-table-dismantle:${chapter.id}`, () => repairChapterByQuality({
           template,
           chapter: { id: chapter.id, title: chapter.title, content: chapter.content, evidence: chapter.evidence || [], missingFacts: chapter.missingFacts || [], sections: chapter.sections },
-          issues: [bodyTableDismantleIssue(tableCount)],
+          issues: [scope ? unplannedBodyTableIssue(tableCount) : bodyTableDismantleIssue(tableCount)],
           promptTexts: repairPromptTexts,
           requirement,
-          forbidDrawingImages: true,
+          // 绘图禁令分流：forbidden 拆表（正文禁表口径）保持禁图；允许口径章级拆表按 bodyFigurePolicy
+          forbidDrawingImages: scope ? isBodyFigureForbidden(bidComposition) : true,
           bidComposition,
           diagnostics: generationDiagnostics,
           signal,
@@ -228,8 +237,8 @@ async function dismantleBodyTables(input: DismantleBodyTablesInput): Promise<{ t
     }
   });
   // 收口：残留表格数清零时才 success；残留转终检反向门禁（bid-composition-body-table blocker），不自行兜底
-  const residual = chapterDraftsFinal.reduce((sum, chapter) => sum + countMarkdownTables(chapter.content), 0);
-  upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'table-execution-repair', status: residual > 0 ? 'failed' : 'success', message: residual > 0 ? `暗标拆表修复：${appliedCount} 章已改写，正文仍有 ${residual} 处表格残留（终检反向门禁拦截）` : `暗标拆表修复：${appliedCount} 章已改写，正文表格清零`, details: failedDetails }, { subtitle: '暗标拆表修复' }));
+  const residual = chapterDraftsFinal.filter(unplannedTargets).reduce((sum, chapter) => sum + countMarkdownTables(chapter.content), 0);
+  upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'table-execution-repair', status: residual > 0 ? 'failed' : 'success', message: residual > 0 ? `${repairLabel}：${appliedCount} 章已改写，${scope ? '未授权章' : '正文'}仍有 ${residual} 处表格残留（终检门禁拦截）` : `${repairLabel}：${appliedCount} 章已改写，${scope ? '未授权章表格清零' : '正文表格清零'}`, details: failedDetails }, { subtitle: repairLabel }));
   emitProgress(chapterDraftsFinal);
   return { tableFixApplied: appliedCount > 0 };
 }
@@ -238,7 +247,8 @@ async function dismantleBodyTables(input: DismantleBodyTablesInput): Promise<{ t
  * 表格执行率确定性核验：表格计划（治理决策）必须真实落为 markdown 表格；
  * 执行率显著不足的章节进入定向补表修复闭环（单轮，失败即放弃），保证表格数量与计划一致。
  * 返回 tableFixApplied 供调用侧判断补表后去重是否触发（未落地时正文未变，重复执行去重无意义）。
- * 暗标禁表（bodyTablePolicy=forbidden）：补表闭环反转为拆表闭环（正文残留表格改写为段落式叙述）。
+ * 正文禁表（bodyTablePolicy=forbidden，显式禁表句）：补表闭环反转为全量拆表（正文残留表格改写为段落式叙述）；
+ * 允许口径：无计划章自设表格先拆除（C1 章级授权）后，再按计划缺口补表。
  */
 export async function repairTableExecutionGaps(input: {
   effectiveChapters: DocumentTemplateChapter[];
@@ -251,17 +261,26 @@ export async function repairTableExecutionGaps(input: {
   progressStages: DocumentExecutionStage[];
   emitProgress: EmitProgressFn;
   withProgressHeartbeat: WithProgressHeartbeatFn;
-  /** 标书编制规格（暗标禁表）：补表闭环反转为拆表闭环 */
+  /** 标书编制规格（正文禁表/允许）：forbidden 反转全量拆表；允许口径执行章级授权拆表 */
   bidComposition?: BidCompositionSpec;
 }): Promise<{ tableFixApplied: boolean }> {
   const { effectiveChapters, chapterDraftsFinal, template, repairPromptTexts, requirement, signal, generationDiagnostics, progressStages, emitProgress, withProgressHeartbeat } = input;
-  // 暗标正文禁表（招标编制要求）：不补表，改为拆表（表格承载数据改写为段落式连贯叙述）
+  // 正文禁表（显式禁表句）：不补表，改为全量拆表（表格承载数据改写为段落式连贯叙述）
   if (isBodyTableForbidden(input.bidComposition)) {
     return dismantleBodyTables(input);
   }
+  // C1 章级授权：无计划章正文表格先行拆除（写作 LLM 自设表格违反授权制；授权章 = 有表格计划/静态
+  // 声明/图类承载指令的章，与终检门禁 bodyCompositionTableIssues 同源口径）；拆表发生在终验兜底
+  // 插入（insertRequiredTable）之前，不存在「误拆必需表格」风险
+  const plannedChapterKeys = new Set(
+    effectiveChapters
+      .filter(chapter => (chapter.tablePlans?.length || 0) > 0 || (chapter.tableSections?.length || 0) > 0 || (chapter.diagramRequirements?.length || 0) > 0)
+      .map(chapter => normalizeGeneratedChapterTitle(chapter.title)),
+  );
+  const unplannedDismantle = await dismantleBodyTables(input, { plannedChapterKeys });
   let tableGaps = tablePlanExecutionGaps(effectiveChapters, chapterDraftsFinal);
   // 补表 patch 是否真正落地（供补表后去重的触发判断：未落地时正文未变，重复执行去重无意义）
-  let tableFixApplied = false;
+  let tableFixApplied = unplannedDismantle.tableFixApplied;
   if (tableGaps.length > 0) {
     // 4.17.8 每章单轮修复：补表修复只跑一轮，失败即放弃（残留缺口转导出门禁）——
     // 2 轮循环与首轮失败重试是修复 token 主力军的组成部分（同一章节缺表重复消耗全文上下文）
@@ -392,7 +411,7 @@ export async function repairTemplatingIssues(input: {
   progressStages: DocumentExecutionStage[];
   emitProgress: EmitProgressFn;
   withProgressHeartbeat: WithProgressHeartbeatFn;
-  /** 标书编制规格（暗标禁表）：修复链与写作链同口径 */
+  /** 标书编制规格（正文表格口径：表格计划/禁表/禁图证据）：修复链与写作链同口径 */
   bidComposition?: BidCompositionSpec;
 }): Promise<{ templatingFixApplied: boolean }> {
   const { chapterDraftsFinal, template, repairPromptTexts, requirement, signal, generationDiagnostics, progressStages, emitProgress, withProgressHeartbeat, bidComposition } = input;
@@ -410,15 +429,19 @@ export async function repairTemplatingIssues(input: {
     // 标题残缺/句化——LLM 锚点直连改写（修复定位 = 检测定位）
     const skeletonTargets = skeletonFingerprintRepairTargets(fullMarkdown);
     const flowTargets = flowFormRepairTargets(fullMarkdown);
+    // C4 D3 句模聚类复读目标：同模式句超量（顺序词链/完成即转入/验收衔接/资料闭环式）逐句差异改写
+    // （检测端 sentencePatternRepeatIssues 同源判定——历史缺陷：句模复读无修复目标，裸奔直坠终检）
+    const patternTargets = sentencePatternRepairTargets(fullMarkdown);
     const titleTargets = titleRepairTargets(fullMarkdown);
     // D-T7 ①：模板化前缀句（「本节/本章将…」元话语导语）修复目标——检测端 formalStyleIssues
     // 同源判定（scanTemplatePrefixSentences 句池 + isTemplatePrefixSentence 词首词表）
     const prefixTargets = templatePrefixTargets(chapterDraftsFinal);
     const needsSkeletonFix = skeletonTargets.length > 0;
     const needsFlowFix = flowTargets.length > 0;
+    const needsPatternFix = patternTargets.length > 0;
     const needsTitleFix = titleTargets.length > 0;
     const needsPrefixFix = prefixTargets.length > 0;
-    if (!needsFillerFix && !needsDifficultyFix && !needsSkeletonFix && !needsFlowFix && !needsTitleFix && !needsPrefixFix) break;
+    if (!needsFillerFix && !needsDifficultyFix && !needsSkeletonFix && !needsFlowFix && !needsPatternFix && !needsTitleFix && !needsPrefixFix) break;
     // C2 句级定点治理：零信息纯口号句（semantic 通道 + 零信息硬闸）先走确定性删除——
     // 删除是无损净化（不承载可核查信息）且无 LLM 随机性；删除后正文与快照为本轮回滚基线，
     // LLM 修复变差回滚时保留删除成果（删除不参与回滚，F2 判定语义逐字保持）；
@@ -453,9 +476,10 @@ export async function repairTemplatingIssues(input: {
       const difficulty = difficultyByChapter.filter(item => item.chapter.id === chapter.id).map(item => ({ text: item.text, missingAttribution: item.missingAttribution, missingTarget: item.missingTarget }));
       const frames = skeletonTargets.filter(target => chapterOwnsTarget(chapter, target.chapterTitle));
       const flows = flowTargets.filter(target => chapterOwnsTarget(chapter, target.chapterTitle));
+      const patterns = patternTargets.filter(target => chapterOwnsTarget(chapter, target.chapterTitle));
       const titles = titleTargets.filter(target => chapterOwnsTarget(chapter, target.chapterTitle));
-      return sentences.length > 0 || prefixSentences.length > 0 || difficulty.length > 0 || frames.length > 0 || flows.length > 0 || titles.length > 0
-        ? [{ chapter, sentences, prefixSentences, difficulty, frames, flows, titles }]
+      return sentences.length > 0 || prefixSentences.length > 0 || difficulty.length > 0 || frames.length > 0 || flows.length > 0 || patterns.length > 0 || titles.length > 0
+        ? [{ chapter, sentences, prefixSentences, difficulty, frames, flows, patterns, titles }]
         : [];
     });
     if (targets.length === 0) {
@@ -473,6 +497,7 @@ export async function repairTemplatingIssues(input: {
       needsDifficultyFix ? `重难点双达标 ${(difficulty.ratio * 100).toFixed(0)}%` : '',
       needsSkeletonFix ? `骨架指纹 ${skeletonTargets.length} 组` : '',
       needsFlowFix ? `工序形式 ${flowTargets.length} 处` : '',
+      needsPatternFix ? `句模复读 ${patternTargets.length} 处` : '',
       needsTitleFix ? `标题缺陷 ${titleTargets.length} 处` : '',
     ].filter(Boolean).join('、');
     upsertProgressStage(progressStages, displayStage({ type: 'llm_review', roleId: 'templating-repair', status: 'running', message: `模板化修复第 ${round + 1} 轮：${repairDimension}（${targets.length} 章）` }, { subtitle: '模板化修复' }));
@@ -502,6 +527,11 @@ export async function repairTemplatingIssues(input: {
         parts.push(`第 ${anchorIndex} 条目标原文是小节标题，其所在小节「${flow.blockTitle}」的工序顺序表达当前为【${flow.currentForm}】形式且与相邻小节同形式：将该小节的工序顺序表达改写为【${flow.targetForm}】形式，内容与数值保持不变（工艺参数不得删减）。`);
         anchorIndex += 1;
       }
+      for (const pattern of target.patterns) {
+        const indices = pattern.sentences.map(() => { const current = anchorIndex; anchorIndex += 1; return current; });
+        // C4：同模式句复读逐句差异改写——保留额度已由检测端按章序扣除（改写方向不附示例，示例即模板化源头）
+        parts.push(`第 ${indices.join('、')} 条目标原文是同一句式模版在全篇复读的句子（该句式全篇 ${pattern.totalCount} 处，全篇保留额度 ${pattern.cap} 处）：逐句改写为自然多样表达（变换句式结构与连接词组织，或拆分为多句；各句改写方向须彼此不同，禁止集中复用同一替换句式），保持原句全部工序顺序、数值与验收事实不变。`);
+      }
       for (const title of target.titles) {
         parts.push(`第 ${anchorIndex} 条目标原文是小节标题（${title.reason}）：将该小节标题重命名为完整表达本小节内容的正式名称，正文内容不变；禁止使用“施工概况/施工流程/施工方法”等结构标签词充当标题。`);
         anchorIndex += 1;
@@ -518,7 +548,7 @@ export async function repairTemplatingIssues(input: {
         diagnostics: generationDiagnostics,
         signal,
         patchGuard: repairPatchGuard('templating-repair', generationDiagnostics),
-        anchorTexts: [...target.sentences, ...target.prefixSentences, ...target.difficulty.map(item => item.text), ...target.frames.flatMap(frame => frame.sentences), ...target.flows.map(flow => flow.blockTitle), ...target.titles.map(title => title.title)],
+        anchorTexts: [...target.sentences, ...target.prefixSentences, ...target.difficulty.map(item => item.text), ...target.frames.flatMap(frame => frame.sentences), ...target.flows.map(flow => flow.blockTitle), ...target.patterns.flatMap(pattern => pattern.sentences), ...target.titles.map(title => title.title)],
         maxTokens: 6000,
         // F2 套话重写需要项目事实支撑：证据预算专用放大（默认 1500 字符最小集不足以支撑
         // 60 条套话句具体化重写，重写后仍是套话的根源之一）
@@ -532,8 +562,9 @@ export async function repairTemplatingIssues(input: {
       diagnostics: generationDiagnostics,
       // 修复前指标 = 循环开头对同一正文的检测值（避免重复同源复检；与 recheck 计算口径同源）；
       // 确定性删除是纯收益不计入回滚判定（占比已先降），LLM 修复把指标推回高于轮初值才判变差；
-      // 第 6 位为模板化前缀句全文计数（scanTemplatePrefixSentences，与 recheck 同口径）
-      beforeMetrics: [filler.ratio, difficulty.ratio, skeletonTargets.length, flowTargets.length, titleTargets.length, scanTemplatePrefixSentences(fullMarkdown).length],
+      // 第 6 位为模板化前缀句全文计数（scanTemplatePrefixSentences，与 recheck 同口径）；
+      // 第 7 位为句模复读修复目标数（sentencePatternRepairTargets，C4 同口径）
+      beforeMetrics: [filler.ratio, difficulty.ratio, skeletonTargets.length, flowTargets.length, titleTargets.length, scanTemplatePrefixSentences(fullMarkdown).length, patternTargets.length],
       apply: async () => {
         const results = await Promise.allSettled(targets.map(target => repairOne(target)));
         results.forEach((result, index) => {
@@ -552,11 +583,11 @@ export async function repairTemplatingIssues(input: {
         emitProgress(chapterDraftsFinal);
         return chapterDraftsFinal.map(chapter => chapter.content).join('\n\n');
       },
-      // 同源复检：修复后全文重算套话句占比 + 重难点双达标率 + 模板化前缀句计数
+      // 同源复检：修复后全文重算套话句占比 + 重难点双达标率 + 模板化前缀句/句模复读计数
       recheck: async (content) => {
         const recheckFiller = await fillerDensityReport(content);
         const recheckDifficulty = await difficultyCountermeasureReport(content);
-        return [recheckFiller.ratio, recheckDifficulty.ratio, skeletonFingerprintRepairTargets(content).length, flowFormRepairTargets(content).length, titleRepairTargets(content).length, scanTemplatePrefixSentences(content).length];
+        return [recheckFiller.ratio, recheckDifficulty.ratio, skeletonFingerprintRepairTargets(content).length, flowFormRepairTargets(content).length, titleRepairTargets(content).length, scanTemplatePrefixSentences(content).length, sentencePatternRepairTargets(content).length];
       },
       // F2 双指标抵偿 + 治理指标不回退：套话占比上升 >1% 且重难点双达标未提升 >1% → 回滚；
       // 骨架指纹/工序形式/标题缺陷/模板化前缀计数总数上升 → 回滚（改写引入新模板化残留不可接受，前后同口径计数）
@@ -586,12 +617,14 @@ export async function repairTemplatingIssues(input: {
     const finalDifficulty = await difficultyCountermeasureReport(finalMarkdown);
     const finalSkeletons = skeletonFingerprintRepairTargets(finalMarkdown);
     const finalFlows = flowFormRepairTargets(finalMarkdown);
+    const finalPatterns = sentencePatternRepairTargets(finalMarkdown);
     const finalTitles = titleRepairTargets(finalMarkdown);
     const finalPrefixes = scanTemplatePrefixSentences(finalMarkdown);
-    const converged = finalFiller.ratio < 0.1 && (!finalDifficulty.heavyTemplated || finalDifficulty.countermeasures === 0) && finalSkeletons.length === 0 && finalFlows.length === 0 && finalTitles.length === 0 && finalPrefixes.length === 0;
+    const converged = finalFiller.ratio < 0.1 && (!finalDifficulty.heavyTemplated || finalDifficulty.countermeasures === 0) && finalSkeletons.length === 0 && finalFlows.length === 0 && finalPatterns.length === 0 && finalTitles.length === 0 && finalPrefixes.length === 0;
     const templateResidue = [
       finalSkeletons.length > 0 ? `骨架指纹 ${[...new Set(finalSkeletons.map(item => `${item.fingerprintLabel}×${item.totalCount}`))].join('、')}` : '',
       finalFlows.length > 0 ? `工序形式相邻重复 ${finalFlows.length} 处` : '',
+      finalPatterns.length > 0 ? `句模复读 ${[...new Set(finalPatterns.map(item => `${item.patternLabel}×${item.totalCount}`))].join('、')}` : '',
       finalTitles.length > 0 ? `标题缺陷 ${finalTitles.length} 处` : '',
       finalPrefixes.length > 0 ? `模板化前缀句 ${finalPrefixes.length} 处` : '',
     ].filter(Boolean).join('；');
@@ -621,7 +654,7 @@ export async function enforceWorkPackageSkeletons(input: {
   progressStages: DocumentExecutionStage[];
   emitProgress: EmitProgressFn;
   withProgressHeartbeat: WithProgressHeartbeatFn;
-  /** 标书编制规格（暗标禁表）：修复链与写作链同口径 */
+  /** 标书编制规格（正文表格口径：表格计划/禁表/禁图证据）：修复链与写作链同口径 */
   bidComposition?: BidCompositionSpec;
 }): Promise<{ skeletonFixApplied: boolean }> {
   const { chapterDraftsFinal, projectContext, template, repairPromptTexts, requirement, signal, generationDiagnostics, progressStages, emitProgress, withProgressHeartbeat, bidComposition } = input;
@@ -964,6 +997,23 @@ export function mergeDuplicateThematicSections(chapterDraftsFinal: DocumentDraft
         return heading ? [{ section: item.section, index: item.index, heading }] : [];
       });
       const unique = located.filter((item, index) => located.findIndex(other => other.heading.line === item.heading.line) === index);
+      // C8 S4-② 数组并发去重（s28m' 机械章实锤）：同桶多条规划条目（本体 + 「（二）（三）…」
+      // 后缀拆分）经近名匹配全部命中同一 H3 行时，unique 化后仅剩首条 → 此前直接 break →
+      // 数组残留后缀条目、正文=规划=目录三源不一致，duplicate-theme-merge 每轮重报空转。
+      // 同组仅保留与 H3 行精确对应的条目（无精确者取行序首条），其余后缀条目从规划数组删除
+      //（正文本无对应行，零内容改动）；后续轮次照常消费 unique ≥2 的真重复对。
+      const lineCollision = new Map<number, typeof located>();
+      for (const item of located) lineCollision.set(item.heading.line, [...(lineCollision.get(item.heading.line) || []), item]);
+      const collision = [...lineCollision.values()].find(items => items.length > 1);
+      if (collision) {
+        const keepItem = collision.find(item => item.heading.normalized === normalizeSectionTitleForGap(item.section)) || collision[0];
+        const droppedIndexes = collision.filter(item => item !== keepItem).map(item => item.index);
+        chapter.sections = rawSections.filter((_, index) => !droppedIndexes.includes(index));
+        mergedCount += 1;
+        changedInChapter += 1;
+        details.push(`「${collision.filter(item => item !== keepItem).map(item => item.section).join('、')}」与「${keepItem.section}」同节对齐去重（第 ${chapterIndex + 1} 章）`);
+        continue;
+      }
       if (unique.length < 2) break;
       unique.sort((a, b) => a.heading.line - b.heading.line);
       const keep = unique[0];
@@ -1120,7 +1170,7 @@ export async function enforcePlannedSectionCompleteness(input: {
   /** 修复轮调用方（postReviewSurface）传入：事件双写落点——finalStages=executionStages 快照(早于修复轮)+本数组，
    * 单写 progressStages 在持久化 executionStages 中不可见；生成期调用不传，行为不变 */
   finalGateRepairStages?: DocumentExecutionStage[];
-  /** 标书编制规格（暗标禁表）：修复链与写作链同口径 */
+  /** 标书编制规格（正文表格口径：表格计划/禁表/禁图证据）：修复链与写作链同口径 */
   bidComposition?: BidCompositionSpec;
 }): Promise<{ plannedSectionFixApplied: boolean }> {
   const { chapterDraftsFinal, template, repairPromptTexts, requirement, signal, generationDiagnostics, progressStages, emitProgress, withProgressHeartbeat, finalGateRepairStages, bidComposition } = input;
@@ -1264,7 +1314,7 @@ export async function runGlobalConsistencyReviewLoop(input: {
   blueprintData?: BlueprintData;
   /** B1 清单事实锁（4.27.0 A1/A2）：参数口径冲突/规格错位裁决的清单锚点（缺失时裁决器恒无锚留 LLM） */
   billFactLock?: BillFactLock;
-  /** 标书编制规格（暗标禁表/禁图）：跨章一致性修复与内部修复链同口径 */
+  /** 标书编制规格（正文表格/图片口径）：跨章一致性修复与内部修复链同口径 */
   bidComposition?: BidCompositionSpec;
 }): Promise<{ issues: string[]; dedupRan: boolean }> {
   const { chapterDraftsFinal, template, reviewPromptTexts, repairPromptTexts, requirement, signal, projectContext, generationDiagnostics, preliminaryFactsModel, scopeConflicts, progressStages, emitProgress, withProgressHeartbeat, blueprintData, billFactLock, bidComposition } = input;
@@ -1499,6 +1549,13 @@ export async function runGlobalConsistencyReviewLoop(input: {
           // 历史缺陷：劳动力矛盾/设备数量矛盾等无法定位章节，检测空转永不进修复循环）
           const quotedHit = [...issue.matchAll(/“([^”]{6,80})”/gu)].some(match => normalizedChapterContent.includes(match[1].replace(/\s+/gu, '')));
           if (quotedHit) return true;
+          // C5 设备台数冲突定位（r28l/s28l 实机死链修复）：质量校验族台数矛盾消息用直角引号包裹
+          // 设备名（「高清网络球形摄像机」配置台数出现互相矛盾的取值 8、33），取值为裸数字无单位
+          // （「8、33」无台/辆后缀）——上文六手段全落空致修复任务从未派发（摄像机 8/33 对峙连续
+          // 两轮零改善实锤，报告协议触发根因专项）。引号内实体词（≥2 字）出现在本章正文即关联，
+          // 与 quotedHit 同口径扩引号形态（“”/「」兼容）；「配置台数」语境后缀限定防短词全域误命中
+          const equipmentCountHit = issue.match(/[“「]([^”」]{2,24})[”」]\s*配置台数/u)?.[1];
+          if (equipmentCountHit && normalizedChapterContent.includes(equipmentCountHit.replace(/\s+/gu, ''))) return true;
           return [...issue.matchAll(/(\d[\d,，.]*)\s*(?:人|台|日|个|次|天|月|套|具|处|项|条)/gu)].some(match => normalizedChapterContent.includes(match[0].replace(/\s+/gu, '')));
         });
         return related.length > 0 ? [{ chapter, related }] : [];
@@ -1532,6 +1589,14 @@ export async function runGlobalConsistencyReviewLoop(input: {
                     // 无锚形态 LLM 无资料口径可依易空转（r5 实测修复轮后仍残留）——给出确定性决胜规则：
                     // 冲突描述按全文出现顺序列出各口径，首现口径锁定为唯一口径，消除自由裁量
                     ? '本冲突无权威资料口径可依：请保留冲突描述中列出的第一个口径（全文首现口径），将本章中该概念其余口径的数值表述统一为与首现口径一致；只改数值表述，不得改动动作词、句式与其余内容，不得引入新的数值。'
+                    : /配置台数出现互相矛盾的取值/u.test(issue)
+                    // C5 台数矛盾指令特化（r28l/s28l 实机）：台数消息只列出裸数字取值、无资料口径，
+                    // 默认指令「按资料口径修正」无依可依（LLM 空转）；与参数多口径同源的确定性决胜
+                    // 规则——冲突描述按全文出现顺序列出取值（生成端 scanEquipmentCountClaims 顺序
+                    // 收集，首值即正文首现），首现口径锁定为全项目总量口径。分项保守护栏（s28l
+                    // 道闸机「共6套其中4套+1套」总数-分项实机）：「其中 N 套」分项与清单独立条目
+                    // 台数属合法分层，保留但须注明与总量关系，防把分项改写成总量
+                    ? '本冲突无权威资料口径可依：请保留冲突描述中列出的第一个取值（全文首现口径）作为该设备的全项目总量，将本章中该设备台数的其余全项目口径统一为一值；「其中 N 套」类分项序列或清单独立条目台数可保留，但须注明与全项目总量的关系；只改台数表述，不得改动设备名称、动作词与其余内容，不得引入新的数值。'
                     : '请严格按冲突描述中给出的资料口径修正本章对应表述，不得引入新的数值；与资料口径一致的既有表述（含分层/子项数值）不得改动；同一材料多种规格按所属部位/分部分项分别使用，禁止全文统一为一种规格。';
               return `${issue}；${repairInstruction}`;
             }),

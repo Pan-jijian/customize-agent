@@ -77,7 +77,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
       progressStages: session.global.progressStages, emitProgress: session.global.emitProgress, withProgressHeartbeat: session.global.withProgressHeartbeat,
       blueprintData: session.blueprint.integratedBlueprint?.validation.passed ? session.blueprint.integratedBlueprint.data : undefined,
       billFactLock: session.blueprint.billFactLock,
-      // 标书编制规格（暗标禁表/禁图）：跨章一致性修复与内部修复链同口径
+      // 标书编制规格（正文表格/图片口径）：跨章一致性修复与内部修复链同口径
       bidComposition: session.understanding.bidComposition,
     });
     globalConsistencyIssues = reviewed.issues;
@@ -108,7 +108,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     effectiveChapters: session.planning.effectiveChapters, chapterDraftsFinal: session.chapterLoop.chapterDraftsFinal, template: session.prepare.template, repairPromptTexts: session.prepare.repairPromptTexts,
     requirement: session.global.input.requirement, signal: session.global.input.signal,
     generationDiagnostics: session.planning.generationDiagnostics, progressStages: session.global.progressStages, emitProgress: session.global.emitProgress, withProgressHeartbeat: session.global.withProgressHeartbeat,
-    // 暗标禁表：补表闭环反转为拆表闭环（正文残留表格改写为段落式叙述）
+    // 正文禁表（bodyTablePolicy=forbidden）：补表闭环反转为拆表闭环（正文残留表格改写为段落式叙述）
     bidComposition: session.understanding.bidComposition,
   });
 
@@ -136,6 +136,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
     chapterScopedContext: session.planning.chapterScopedProjectContext,
     promptBindings: session.prepare.promptBindings, promptDocumentRules: session.prepare.promptDocumentRules,
     projectUnderstanding: session.prepare.projectUnderstanding, projectContext: session.planning.projectContext, projectRoot: session.prepare.projectRoot, projectId: session.prepare.projectId, readiness: session.prepare.readiness,
+    // C6 交付报告类（P5）：launchTask 以 diversitySeed=documentId 传入，终门禁三件套报告以此命名落盘
+    documentId: input.diversitySeed,
     factExtractionPromptTexts: session.prepare.factExtractionPromptTexts,
     blueprintData: session.blueprint.integratedBlueprint?.validation.passed ? session.blueprint.integratedBlueprint.data : undefined,
     bidComposition: session.understanding.bidComposition,

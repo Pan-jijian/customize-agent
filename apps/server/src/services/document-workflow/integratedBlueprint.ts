@@ -36,7 +36,7 @@ import type { BlueprintBuildDiagnostics, BlueprintMeta, BuildIntegratedBlueprint
 
 export * from './integratedBlueprint/types';
 export { resolveBillOfQuantities, deriveQuantitiesFromBoq, extractRedLineFacts, extractVillageCount, deriveSpecAuthoritiesFromBoq, extractContractFromFacts, extractBasisRegulations, extractLocationFromFacts, renderBasicFactsForBlueprint } from './integratedBlueprint/parse';
-export { deriveLaborFromBoq, deriveEquipmentFromBoq, deriveMaterialsPlanFromBoq, deriveMilestonesFromBoq, deriveInspectionBatchesFromBoq, deriveEarthworkBalanceFromBoq, deriveTempUtilitiesFromBoq, deriveConstructionDeployment, deriveKeyDifficulties, buildBlueprintData } from './integratedBlueprint/derive';
+export { deriveLaborFromBoq, deriveEquipmentFromBoq, deriveMaterialsPlanFromBoq, deriveMilestonesFromBoq, deriveInspectionBatchesFromBoq, deriveEarthworkBalanceFromBoq, deriveTempUtilitiesFromBoq, deriveConstructionDeployment, deriveKeyDifficulties, deriveTestInstruments, deriveSchedule, deriveTempLand, buildBlueprintData } from './integratedBlueprint/derive';
 export { extractDecisionLockEntries, decisionLockCategoryMeta, matchDecisionCategory, locateDecisionOptionAnchor, decisionMentionNegated, buildBlueprintDecisionLock } from './integratedBlueprint/decisionLock';
 export { buildBlueprintOutline, buildWorkPackageFromBoqSection, fallbackWorkPackagesFromExisting, fallbackStructureForSections, buildChapterStructureFromBlueprint, estimateChapterMinFeasibleWords } from './integratedBlueprint/outline';
 export type { PlannedChapterSubPoint, PlannedChapterBlock, PlannedChapterStructure } from './integratedBlueprint/capacity';

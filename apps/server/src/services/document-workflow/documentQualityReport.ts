@@ -1,13 +1,16 @@
 import { buildTenderBidScores, buildTenderBidTemplatingReport, MANDATORY_MODULE_QUERIES } from './tenderBidScoring';
 import { collectFigurePlaceholderSpecs, figureCoverage, tablePlanExecutionGaps } from './constructionOrgTablePlan';
 import { drawingFactPlacement, type DrawingFactLock } from './drawingFactLock';
-import { tableCaptionCoverage } from './markdownComposer';
+import { bodyCompositionTableIssues, tableCaptionCoverage } from './markdownComposer';
 import { scanBillExplicitDispositions } from './billFactLock';
 import { appendixEntryCarried } from './composeAppendices';
 import { tenderRequirementResponseGaps } from './tenderRequirements';
 import { documentTextLength } from './budget';
 import { professionalDepthTotal, professionalScoreTargetLine } from './qualityValidation';
 import { countTableArithmeticFindings } from './integrity/detectors/detectors';
+import { buildEvaluationCriteriaAttainmentAudit } from './evaluationCriteriaMapping';
+import { auditBasisRegulationsCross } from './basisRegulationsCross';
+import { QUALITY_REPORT_CALIBER, SCORING_CALIBRATION_VERSION } from './scoringCalibration';
 import type { AuthorityAuditReport } from './authorityAudit';
 import type { ProfessionalDepthClassifier } from './professionalDepthClassifier';
 import type { BidAppendixEntry, BidCompositionSpec } from './bidComposition';
@@ -28,7 +31,8 @@ import type {
  * ⑤防通胀：历史缺陷样本（r28f）在诚实口径下 <75（校准套件固化）。
  * 低雷同性在评审逻辑中是触发式否决项（与公开模板重合度超 30% 触发雷同判定），不作为线性权重维度，
  * 而是对加权结果做乘数修正（uniqueness 低于 90 分开始拉低 overall）。
- * 双模式感知：bidComposition.bidType 决定结构呈现口径（明标=表计划逐表对账+图位+题注；暗标=附表区承载率+正文禁表合规）。
+ * 双模式感知：bidComposition 结构口径（明标=表计划逐表对账+图位+题注；暗标=附表区承载率+正文表格合规——
+ * 显式禁表句按表格行数、允许口径（C1 证据判定）按章级授权，与终检门禁同源）。
  * 降级原则：任一构成输入缺失（无要求模型/无编制规格/无表计划/无审计源）→ 对应分量「不可用」显式降级
  * （不计不扣、不在 summary 显示、权重按可用集合两级重归一），不伪造满分、不制造惩罚。
  * 内部质量门禁（error 级：事实安全/污染/结构缺陷）与评分分离，继续通过 blockingIssues 收敛交付置信度。
@@ -47,14 +51,16 @@ export const QUALITY_DIMENSION_WEIGHTS = {
 /** 要求实体响应构成权重：①锚点全命中率（respond 类逐条对账）②强制模块覆盖 */
 export const REQUIREMENT_PART_WEIGHTS = { anchors: 0.85, modules: 0.15 } as const;
 
-/** 结构呈现落实构成权重（明标口径：表计划执行率 + 图位覆盖率 + 正文题注覆盖率；暗标口径：附表区承载率 + 正文禁表合规） */
+/** 结构呈现落实构成权重（明标口径：表计划执行率 + 图位覆盖率 + 正文题注覆盖率；暗标显式禁表口径 bodyTablePolicy=forbidden：附表区承载率 + 正文禁表合规；
+ * 暗标允许口径（C1）：附表区承载率 + 表计划执行率 + 正文表格授权合规 + 题注覆盖率） */
 export const STRUCTURE_PART_WEIGHTS = { execution: 0.45, figure: 0.35, caption: 0.2, appendix: 0.75, bodyCompliance: 0.25 } as const;
 
 /** 数据锚定构成权重：①BOQ 有效行落位率 ②参数义务满足率 ③图纸事实引用率 ④数字溯源（无主数值审计） */
 export const DATA_ANCHOR_PART_WEIGHTS = { boq: 0.4, parameters: 0.3, drawing: 0.15, authority: 0.15 } as const;
 
-/** 合规与规范构成权重：①自伤表述 ②占位符 ③篇幅达标 ④表内算术自洽 */
-export const COMPLIANCE_PART_WEIGHTS = { selfHarm: 0.3, placeholder: 0.25, length: 0.2, tableConsistency: 0.25 } as const;
+/** 合规与规范构成权重：①自伤表述 ②占位符 ③篇幅达标 ④表内算术自洽 ⑤编制依据↔正文双向对账（C5 P6；
+ * 目标态五分量全 100 → 维度 100，95 目标态构造不变） */
+export const COMPLIANCE_PART_WEIGHTS = { selfHarm: 0.25, placeholder: 0.2, length: 0.15, tableConsistency: 0.2, regulation: 0.2 } as const;
 
 /** 事实完整与一致性构成权重：①事实一致性对账 ②规格/名称/合计绑定冲突 ③关键事实落位率 */
 export const FACT_INTEGRITY_PART_WEIGHTS = { reconciliation: 0.6, binding: 0.2, keyFacts: 0.2 } as const;
@@ -66,6 +72,9 @@ export const ACCURACY_ERROR_PENALTY = 20;
 export const COMPLIANCE_HIT_PENALTY = 25;
 export const LENGTH_HIT_PENALTY = 50;
 export const TABLE_CONSISTENCY_HIT_PENALTY = 20;
+
+/** 编制依据对账缺口扣分（每处缺口 20，下限 0；计数源 = auditBasisRegulationsCross 与检测器同源） */
+export const REGULATION_GAP_PENALTY = 20;
 
 /** 数字溯源扣分（无主数值审计三桶缺口每处 5 分，下限 0） */
 export const AUTHORITY_GAP_PENALTY = 5;
@@ -79,6 +88,9 @@ const FACT_CONSISTENCY_CATEGORY = 'fact_consistency';
 
 /** 事实一致性「绑定」子集消息特征：规格/名称/合计值绑定错位 */
 const ACCURACY_BINDING_RE = /规格-数值绑定|名称-数值绑定|合计值/u;
+
+/** 编制依据对账缺口消息锚（C5 P6）：缺口由合规维度·编制依据分量单源计数，事实一致性对账不双计 */
+const REGULATION_GAP_MESSAGE_RE = /编制依据对账缺口/u;
 
 /** 合规检查消息锚（A-F 批次确定性检测器，与修复轮同源）：自伤表述 / 占位符 / 篇幅 /（表自洽直算） */
 const COMPLIANCE_MESSAGE_RES = {
@@ -131,7 +143,7 @@ function buildBillPlacementAudit(markdown: string, boqRowTraces: BoqRowTrace[]):
     : undefined;
 }
 
-/** 暗标正文禁表合规：正文区（第一个附表标题之前）表格行计数；附表清单为空时全文即正文。
+/** 正文禁表合规（显式禁表句口径）：正文区（第一个附表标题之前）表格行计数；附表清单为空时全文即正文。
  * 正文出现表格本属 F-T3 硬门禁（阻断修复），评分再计一遍形成双保险（合规硬项不豁免）。 */
 function bodyTableViolationCount(markdown: string, plan: BidAppendixEntry[]): number {
   let start = -1;
@@ -143,8 +155,10 @@ function bodyTableViolationCount(markdown: string, plan: BidAppendixEntry[]): nu
   return body.match(/^\s*\|/gmu)?.length || 0;
 }
 
-/** 结构呈现落实（模式感知）：明标=表计划执行率 + 图位覆盖率 + 正文题注覆盖率；
- * 暗标=附表区承载率（appendixPlan 逐项内容级承载判定）+ 正文禁表合规。禁表时题注/图位不适用自动跳过。 */
+/** 结构呈现落实（模式感知 + C1 正文表格口径证据判定）：明标=表计划执行率 + 图位覆盖率 + 正文题注覆盖率；
+ * 暗标=附表区承载率（appendixPlan 逐项内容级承载判定）+ 正文表格合规——显式禁表句（forbidden）按正文表格行数，
+ * 允许口径（allowed）按章级授权（未授权章表格违规，与终检门禁 bodyCompositionTableIssues 同源）+ 表执行率 + 题注覆盖率；
+ * 暗标禁图时图位不适用自动跳过。 */
 function structurePart(input: {
   markdown: string;
   mode: QualityMode;
@@ -160,12 +174,35 @@ function structurePart(input: {
       const carried = plan.filter(entry => appendixEntryCarried(markdown, entry)).length;
       parts.push({ weight: STRUCTURE_PART_WEIGHTS.appendix, value: (carried / plan.length) * 100, detail: `附表承载 ${carried}/${plan.length}` });
     }
-    const violations = bodyTableViolationCount(markdown, plan);
-    parts.push({
-      weight: STRUCTURE_PART_WEIGHTS.bodyCompliance,
-      value: Math.max(0, 100 - violations * COMPLIANCE_HIT_PENALTY),
-      detail: violations > 0 ? `正文禁表 违规 ${violations} 处` : '正文禁表合规',
-    });
+    if (bidComposition?.bodyTablePolicy === 'forbidden') {
+      const violations = bodyTableViolationCount(markdown, plan);
+      parts.push({
+        weight: STRUCTURE_PART_WEIGHTS.bodyCompliance,
+        value: Math.max(0, 100 - violations * COMPLIANCE_HIT_PENALTY),
+        detail: violations > 0 ? `正文禁表 违规 ${violations} 处` : '正文禁表合规',
+      });
+    } else {
+      // 允许口径（C1）：表格按系统表格计划输出——表执行率 + 未授权章表格合规（暗标禁图，图位不适用）
+      const plannedTotal = (effectiveChapters || []).reduce((sum, chapter) => sum + (chapter.tablePlans?.length || 0), 0);
+      if (plannedTotal > 0 && effectiveChapters) {
+        const missing = tablePlanExecutionGaps(effectiveChapters, chapters).reduce((sum, gap) => sum + gap.plans.length, 0);
+        const executed = Math.max(0, plannedTotal - missing);
+        parts.push({ weight: STRUCTURE_PART_WEIGHTS.execution, value: (executed / plannedTotal) * 100, detail: `表执行 ${executed}/${plannedTotal}` });
+      }
+      const plannedTitles = (effectiveChapters || [])
+        .filter(chapter => (chapter.tablePlans?.length || 0) > 0 || (chapter.tableSections?.length || 0) > 0 || (chapter.diagramRequirements?.length || 0) > 0)
+        .map(chapter => chapter.title);
+      const unplanned = bodyCompositionTableIssues(markdown, { bodyTableForbidden: false, plannedChapterTitles: plannedTitles }).length;
+      parts.push({
+        weight: STRUCTURE_PART_WEIGHTS.bodyCompliance,
+        value: Math.max(0, 100 - unplanned * COMPLIANCE_HIT_PENALTY),
+        detail: unplanned > 0 ? `正文未授权表格 违规 ${unplanned} 处` : '正文表格授权合规',
+      });
+      const caption = tableCaptionCoverage(markdown, false);
+      if (caption.total > 0) {
+        parts.push({ weight: STRUCTURE_PART_WEIGHTS.caption, value: (caption.captioned / caption.total) * 100, detail: `题注 ${caption.captioned}/${caption.total}` });
+      }
+    }
     return weighParts(parts);
   }
   const parts: Array<ScorePart & { weight: number }> = [];
@@ -247,25 +284,42 @@ async function professionalDepthPart(chapters: DocumentDraftChapter[], classifie
 }
 
 /** 合规与规范：自伤/占位符/篇幅按检测器 issue 计数扣分（消息锚与修复轮单源），表内算术自洽按
- * C-T3 确定性直算（countTableArithmeticFindings 与修复轮同源）；四项恒可算，无降级路径。 */
+ * C-T3 确定性直算（countTableArithmeticFindings 与修复轮同源），编制依据↔正文双向对账按 C5 P6
+ * 审计单源计数（auditBasisRegulationsCross 与检测器/修复轮同判定，每处缺口扣 20）；
+ * 无编制依据区段（零声明条目）时编制依据分量显式降级不计不扣，其余四项恒可算。 */
 function compliancePart(issues: ValidationIssue[], markdown: string): ScorePart {
   const countMatching = (re: RegExp) => issues.filter(issue => re.test(issue.message)).length;
   const selfHarm = countMatching(COMPLIANCE_MESSAGE_RES.selfHarm);
   const placeholder = countMatching(COMPLIANCE_MESSAGE_RES.placeholder);
   const length = countMatching(COMPLIANCE_MESSAGE_RES.length);
   const tableFindings = countTableArithmeticFindings(markdown);
+  const regulationAudit = auditBasisRegulationsCross(markdown);
+  const declaredGaps = regulationAudit.declaredNotUsed.length;
+  const usedGaps = regulationAudit.usedNotDeclared.length;
+  const hasBasisDeclarations = regulationAudit.stats.declaredCodes + regulationAudit.stats.declaredNames > 0;
+  const regulationPart: ScorePart & { weight: number } = hasBasisDeclarations
+    ? {
+        weight: COMPLIANCE_PART_WEIGHTS.regulation,
+        value: Math.max(0, 100 - (declaredGaps + usedGaps) * REGULATION_GAP_PENALTY),
+        detail: declaredGaps + usedGaps > 0
+          ? `编制依据缺口 ${declaredGaps + usedGaps} 处（声明未用 ${declaredGaps}/引用未声明 ${usedGaps}）`
+          : '编制依据对账 0 缺口',
+      }
+    : { weight: COMPLIANCE_PART_WEIGHTS.regulation, value: null };
   return weighParts([
     { weight: COMPLIANCE_PART_WEIGHTS.selfHarm, value: Math.max(0, 100 - selfHarm * COMPLIANCE_HIT_PENALTY), detail: selfHarm > 0 ? `自伤 ${selfHarm} 处` : '自伤 0' },
     { weight: COMPLIANCE_PART_WEIGHTS.placeholder, value: Math.max(0, 100 - placeholder * COMPLIANCE_HIT_PENALTY), detail: placeholder > 0 ? `占位符 ${placeholder} 处` : '占位符 0' },
     { weight: COMPLIANCE_PART_WEIGHTS.length, value: Math.max(0, 100 - length * LENGTH_HIT_PENALTY), detail: length > 0 ? `篇幅超限 ${length} 条` : '篇幅达标' },
     { weight: COMPLIANCE_PART_WEIGHTS.tableConsistency, value: Math.max(0, 100 - tableFindings * TABLE_CONSISTENCY_HIT_PENALTY), detail: tableFindings > 0 ? `表内不自洽 ${tableFindings} 处` : '表自洽 100%' },
+    regulationPart,
   ]);
 }
 
 /** 事实完整与一致性：对账（fact_consistency 冲突）+ 绑定类冲突 + 关键事实落位率（C-T7，招标人/工期/
- * 造价口径）；关键事实审计缺失时该分量降级不计不扣 */
+ * 造价口径）；编制依据对账缺口（C5 P6）由合规维度·编制依据分量单源计数，此处不从对账重复计（防双计）；
+ * 关键事实审计缺失时该分量降级不计不扣 */
 function factIntegrityPart(issues: ValidationIssue[], keyFactPlacementAudit: DocumentQualityReport['keyFactPlacementAudit']): ScorePart {
-  const factErrors = issues.filter(issue => issue.level === 'error' && issue.category === FACT_CONSISTENCY_CATEGORY);
+  const factErrors = issues.filter(issue => issue.level === 'error' && issue.category === FACT_CONSISTENCY_CATEGORY && !REGULATION_GAP_MESSAGE_RE.test(issue.message));
   const bindingErrors = factErrors.filter(issue => ACCURACY_BINDING_RE.test(issue.message));
   const parts: Array<ScorePart & { weight: number }> = [
     {
@@ -310,6 +364,8 @@ export async function buildDocumentQualityReport(input: {
   authorityAuditReport?: AuthorityAuditReport;
   /** 专业深度语义分类器（round-14 本地 bge 恒可用）：章级 12 分制达标率判定源，缺失时分量降级不计不扣 */
   professionalDepthClassifier?: ProfessionalDepthClassifier;
+  /** 招标评分表条目（C0-3 评分细则映射层）：逐条三态承接判定与专家视角模拟分判定源，缺失/为空时不输出 */
+  evaluationCriteriaItems?: string[];
   /** 单测注入的嵌入实现（替代本地模型），生产环境不传 */
   embedDocuments?: (texts: string[]) => Promise<number[][]>;
 }): Promise<DocumentQualityReport> {
@@ -380,6 +436,10 @@ export async function buildDocumentQualityReport(input: {
   const deliveryProbability = Math.max(0, Math.min(99, Math.round(overall - Math.min(DELIVERY_PENALTY_CAP, blockingIssues * DELIVERY_BLOCKING_PENALTY))));
   const target = input.knowledgeCoverage.score >= 95 ? 95 : 85;
   const templating = await buildTenderBidTemplatingReport(input.markdown, input.embedDocuments);
+  // C0-3 评分细则映射层：招标评分表逐条 → 检测目标（内容级三态判定），专家视角模拟分与六维并列展示
+  const evaluationCriteriaAttainment = input.evaluationCriteriaItems && input.evaluationCriteriaItems.length > 0
+    ? await buildEvaluationCriteriaAttainmentAudit({ items: input.evaluationCriteriaItems, markdown: input.markdown, embedDocuments: input.embedDocuments })
+    : undefined;
 
   // 对照表与要求实体响应同源：responded = 锚点对账 satisfied（comply 类不属文本响应验收域，恒 responded）
   const requirementChecklist: DocumentRequirementChecklistItem[] | undefined = checklistEntries.length > 0
@@ -391,7 +451,11 @@ export async function buildDocumentQualityReport(input: {
     : undefined;
 
   const modeNote = mode === 'unknown' ? '；⚠ 标书类型未判定（按明标口径）——暗标项目须核对招标文件后重跑' : '';
-  const summary = `交付置信度 ${deliveryProbability}% / 目标 ${target}%，综合评分 ${overall}/100（${[...dimensions.map(dimension => `${dimension.label} ${dimension.score}`), `低雷同性 ${scores.uniqueness}`].join('、')}）${modeNote}`;
+  // C0-5/C0-7：口径版本与主从关系显性标注（本报告=交付主尺；招标六项/专业分七维为从属口径）
+  const attainmentNote = evaluationCriteriaAttainment
+    ? `；评分细则模拟 ${evaluationCriteriaAttainment.simulatedScore}%（met ${evaluationCriteriaAttainment.met} / partial ${evaluationCriteriaAttainment.partial} / missing ${evaluationCriteriaAttainment.missing}）`
+    : '';
+  const summary = `交付置信度 ${deliveryProbability}% / 目标 ${target}%，综合评分 ${overall}/100（${[...dimensions.map(dimension => `${dimension.label} ${dimension.score}`), `低雷同性 ${scores.uniqueness}`].join('、')}）${modeNote}${attainmentNote}；评分口径 ${SCORING_CALIBRATION_VERSION}（主尺）`;
   return {
     overall,
     deliveryProbability,
@@ -405,11 +469,13 @@ export async function buildDocumentQualityReport(input: {
     parameterUsageAudit: input.parameterUsageAudit,
     keyFactPlacementAudit: input.keyFactPlacementAudit,
     templating,
+    caliber: QUALITY_REPORT_CALIBER,
+    evaluationCriteriaAttainment,
     summary,
     actions: deliveryProbability >= target && blockingIssues === 0
       ? ['已达到当前质量目标，建议保持事实口径和导出前复核。']
       : [
-          '按对齐评分口径补齐短板维度：要求实体响应补锚点全命中（核心词与数字参数逐条落位）、结构呈现补图表落位、数据锚定补 BOQ/参数/图纸/无主数值溯源、专业深度按章补六维薄弱项、合规与规范清理自伤与占位符并压缩超限篇幅、事实一致性补关键事实落位与数值对账。',
+          '按对齐评分口径补齐短板维度：要求实体响应补锚点全命中（核心词与数字参数逐条落位）、结构呈现补图表落位、数据锚定补 BOQ/参数/图纸/无主数值溯源、专业深度按章补六维薄弱项、合规与规范清理自伤与占位符并压缩超限篇幅且编制依据与正文双向对齐、事实一致性补关键事实落位与数值对账。',
           '系统需优先修复阻断问题、扩大本地知识库检索、补抽结构化事实，并将未落位事实写入对应章节。',
         ],
   };

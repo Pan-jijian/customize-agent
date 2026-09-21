@@ -99,6 +99,55 @@ describe('enforceFiveElementClosureBoost（五要素闭合链尾补强）', () =
   it('段内全为标题/表题行时跳过本段不补（结构行零风险）', () => {
     expect(enforceFiveElementClosureBoost('#### 6.2.3 苗木栽植成活与养护及成品保护措施落实情况')).toBeNull();
   });
+
+  it('C2 防护①：引用块（图件说明）整块跳过——补句不拼入「>」说明块', () => {
+    const note = '> **图件说明**：本附表以施工进度网络图（或以横道图）形式表达，标明计划开工日期、竣工日期及各关键日期节点。';
+    expect(enforceFiveElementClosureBoost(note)).toBeNull();
+    const markdown = `${ZERO_HIT_BLOCK}\n\n${note}`;
+    const result = enforceFiveElementClosureBoost(markdown);
+    expect(result?.fixedCount).toBe(1);
+    expect(result?.markdown).toContain(note);
+  });
+
+  it('C2 防护②：附表区整区跳过——数据表/图件说明/骨架说明不被补句污染', () => {
+    const note = '> **图件说明**：本附表以施工进度网络图形式表达，工序逻辑与工期安排与本施工组织设计进度计划一致。';
+    const markdown = [
+      ZERO_HIT_BLOCK,
+      '',
+      '## 附表四 计划开、竣工日期和施工进度网络图',
+      '',
+      note,
+      '',
+      '| 工序 | 持续天数 |',
+      '| --- | --- |',
+      '| 主体施工 | 180 |',
+      '',
+      '## 附表六 临时用地表',
+      '',
+      '| 用途 | 面积（平方米） |',
+      '| --- | --- |',
+      '| 材料堆放场 | 800 |',
+    ].join('\n');
+    const result = enforceFiveElementClosureBoost(markdown);
+    // 仅附表区外的零要素块被补；附表区零变化
+    expect(result?.fixedCount).toBe(1);
+    expect(result?.markdown).toContain(note);
+    expect(result?.markdown).toContain('| 主体施工 | 180 |');
+    expect(result?.markdown).toContain('| 材料堆放场 | 800 |');
+  });
+
+  it('C2 防护③：段末行是图题行时补句上移正文行（图题行零污染；r28l「图4-3 网络图+补强句」形态根治）', () => {
+    const body = '网络计划按关键线路组织流水作业，各工序按节点时间衔接推进，确保总工期满足合同要求。';
+    const markdown = [body, '图4-3 网络图'].join('\n');
+    const result = enforceFiveElementClosureBoost(markdown);
+    expect(result).not.toBeNull();
+    const lines = (result?.markdown || '').split('\n');
+    expect(lines[0]!.startsWith(body)).toBe(true);
+    expect(lines[0]!.length).toBeGreaterThan(body.length);
+    expect(lines[1]).toBe('图4-3 网络图');
+    // 段内全为图题行（含已污染粘连行）时跳过本段不补（防追加污染）
+    expect(enforceFiveElementClosureBoost('图4-3 网络图相关内容纳入施工组织设计与作业流程管理')).toBeNull();
+  });
 });
 
 describe('enforceFiveElementClosureBoost D-T6 ③ 长段防护（拼接后超 370 字符放弃补写）', () => {

@@ -478,7 +478,7 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
     docSystemPrefix('你是章节局部修复专家。只返回 JSON patch，不返回完整章节，不重写无问题内容。'),
     repairTypeInstruction(repairType),
     input.forbidDrawingImages ? '图片类资料只作为文本事实来源，禁止插入图片或 Markdown 图片语法。' : '',
-    // 标书编制规格（暗标正文禁表/禁图片/身份禁语）：修复链与写作链同口径，防修复轮把表格/图片/身份标记改回来
+    // 标书编制规格（正文表格口径/禁图片/身份禁语）：修复链与写作链同口径，防修复轮把表格/图片/身份标记改回来
     bidCompositionWritingRules(input.bidComposition),
     anchorMode
       ? ['系统已提供需要改写/删除的目标原文清单（按序号对应）。目标原文已从正文精确摘录，你只需逐条输出改写后的替换文本；replacement 只输出改写后的正文内容，禁止复述或修改目标原文以外的任何内容。如某条目标原文当前已不存在或无需修改，跳过该条不输出。',
@@ -489,7 +489,7 @@ export async function repairChapterByQuality(input: { template: DocumentTemplate
       : '每个 patch 必须能通过 originalText 或 targetStart/targetEnd 在原章节中唯一定位；replacement 只替换该局部片段。',
     '只修复列出的问题，不得整章重写，不得删除无问题小节，不得改变一级/二级章节结构。',
     '如某条修复的本质是删除（删除污染小节/来源罗列句/资格内容），replacement 直接输出空字符串 ""（系统按删除语义处理锚点/原文区间）；改写类修复不得输出空字符串。',
-    // 暗标正文禁表：修复指令不得引导补表（与 bidCompositionWritingRules 消解口径一致）
+    // 正文禁表（bodyTablePolicy=forbidden，招标显式禁表句）：修复指令不得引导补表（与 bidCompositionWritingRules 同口径）
     isBodyTableForbidden(input.bidComposition) ? '' : '如问题涉及缺少正式表格，replacement 必须包含 Markdown 表名、表头、分隔线和至少一行数据；不得只写“见下表”或空表。',
     '如问题涉及缺失关键词/要素（缺词补写类），选取相关小节最后一个完整句子作为 originalText，replacement 为该句加补充句，保证定位唯一；不得因“原文找不到该关键词”而放弃产出 patch。',
     '如问题涉及提示词要求的关键词或禁用内容，只在相关段落自然补齐或替换，不得堆砌关键词。',

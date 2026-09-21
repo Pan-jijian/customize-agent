@@ -203,7 +203,7 @@ export function projectBasicInfoTableMarkdown(facts: DocumentFact[], existingMar
   return ['**项目基本信息表**', '', '| 信息项 | 内容 |', '|---|---|', ...rows.map(row => `| ${row[0]} | ${row[1]} |`)].join('\n');
 }
 
-/** 项目基本信息段落式渲染（暗标正文禁表：同数据源转文字列表，数值口径不变） */
+/** 项目基本信息段落式渲染（正文禁表口径：同数据源转文字列表，数值口径不变） */
 export function projectBasicInfoProseMarkdown(facts: DocumentFact[], existingMarkdown = '', fullMarkdown = existingMarkdown) {
   const rows = projectBasicInfoRows(facts, existingMarkdown, fullMarkdown);
   return ['**项目基本信息**', '', ...rows.map(row => `- ${row[0]}：${row[1]}`)].join('\n');
@@ -336,7 +336,7 @@ function removeRedundantFormalTables(content: string) {
  * （项目名称/招标人等标签行占比达标）或三列序号表（序号|项目名称|内容参数）。
  * 编制依据表（依据类别|主要文件及标准）、工程概况信息表等专业表格不在标签集内天然豁免，
  * 消除旧正则跨空行贪婪连坐删除聚合块（H4 子小节）内其他表格的缺陷。
- * bodyTableForbidden（暗标正文禁表）：同时清理段落式「**项目基本信息** + - 标签：值」旧块（重建前清旧）。 */
+ * bodyTableForbidden（正文禁表口径）：同时清理段落式「**项目基本信息** + - 标签：值」旧块（重建前清旧）。 */
 
 function removeProjectBasicInfoTableBlocks(content: string, bodyTableForbidden = false) {
   const lines = content.split('\n');
@@ -389,7 +389,7 @@ function removeProjectBasicInfoTableBlocks(content: string, bodyTableForbidden =
 }
 
 export function normalizeProjectBasicInfoTable(content: string, facts: DocumentFact[], options?: { bodyTableForbidden?: boolean }) {
-  // 暗标正文禁表：项目基本信息以段落式列表呈现（同数据源，数值口径不变）
+  // 正文禁表口径：项目基本信息以段落式列表呈现（同数据源，数值口径不变）
   const prose = options?.bodyTableForbidden === true;
   content = removeRedundantFormalTables(content);
   if (!/项目基本信息|项目概况|工程概况|招标范围/u.test(content)) return removeDuplicateProjectBasicInfoBlocks(normalizeBareMarkdownTables(stripProvenanceTableColumns(content)));

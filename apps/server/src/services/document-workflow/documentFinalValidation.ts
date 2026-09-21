@@ -13,6 +13,7 @@ import { buildSemanticSimilarity } from './semanticSimilarity';
 import { normalizeChapterTitleLine, requirementAcceptanceIssues, tenderRequirementCheckItems, tenderRequirementSemanticQuery } from './tenderRequirements';
 import { internalTerminologyAnchorIssues } from './internalTerminologyAnchors';
 import { parameterConceptConflictIssues } from './parameterConceptConflicts';
+import { parameterObligationUsageIssues } from './chapterParameterFacts';
 import type { BillFactLock } from './billFactLock';
 import type { DrawingFactLock } from './drawingFactLock';
 import { constructionSystemCoverageIssues } from './constructionSystemCoverage';
@@ -25,8 +26,9 @@ import type { BlueprintData } from './integratedBlueprint';
 import { blueprintEquipmentAuthorities, blueprintLaborPeakAuthority, blueprintPhaseLaborAuthorities, blueprintQuantityGroupAuthorities } from './authorityIndex';
 import { det, detSafe } from './detectorFixerRegistry';
 import { structureIntegrityIssues } from './structureIntegrityRules';
-import { flowFormRepeatIssues, skeletonFingerprintIssues, templatedLabelIssues, titleIntegrityIssues } from './templatingGovernance';
+import { flowFormRepeatIssues, sentencePatternRepeatIssues, skeletonFingerprintIssues, templatedLabelIssues, titleIntegrityIssues } from './templatingGovernance';
 import { factReconciliationIssues } from './factReconciliation';
+import { basisRegulationsCrossIssues } from './basisRegulationsCross';
 import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplate, DocumentTemplateChapter, NumericScopeConflict, PromptBinding, PromptDocumentRuleSet, TenderRequirementModel, ValidationIssue } from './types';
 
 /**
@@ -125,9 +127,9 @@ export async function buildStandardFinalValidationIssues(input: {
   professionalDepthClassifier: ProfessionalDepthClassifier;
   /** 一体化蓝图参数桶（生成前锁定口径）：蓝图引用冲突终检兑底（实时 finalMarkdown 重跑，替除生成阶段全卷快照） */
   blueprintData?: BlueprintData;
-  /** 标书编制规格：正文禁表（暗标纯文字口径）——缺表类门禁豁免与正文残留表格反向阻断依据 */
+  /** 标书编制规格：正文禁表（招标显式禁表句）——缺表类门禁豁免与正文残留表格反向阻断依据 */
   bodyTableForbidden?: boolean;
-  /** 标书编制规格：正文禁图（暗标纯文字口径）——正文残留图片/图件占位反向阻断依据（F-T3） */
+  /** 标书编制规格：正文禁图（暗标/招标禁图片证据）——正文残留图片/图件占位反向阻断依据（F-T3） */
   bodyFigureForbidden?: boolean;
   /** 标书编制规格：投标人身份禁语（暗标）——正文身份标记零容忍终检依据（F-T3） */
   identityMarksForbidden?: boolean;
@@ -250,6 +252,10 @@ export async function buildStandardFinalValidationIssues(input: {
     ...det('flow-form-repeat', () => flowFormRepeatIssues(input.markdown)),
     // WS4 骨架指纹复读（由技术负责人组织 / 合格后方可 / 验收合格后 各全文 ≤2 次 + 4.40 d5e 变体形态单形态 ≤8 次，round-2 确定性兜底同源清零）
     ...det('skeleton-fingerprint', () => skeletonFingerprintIssues(input.markdown)),
+    // C4 句模聚类复读（D3 检测器扩面）：同模式句 ≥6 次即命中（多段顺序词链/完成即转入/验收衔接/
+    // 资料闭环式/形式宣告式），语义套话原型不覆盖的结构句式复读改由本通道判定；修复轮 repairTemplatingIssues
+    // 消费同源句模修复目标（检测定位=修复定位）
+    ...det('sentence-pattern-repeat', () => sentencePatternRepeatIssues(input.markdown)),
     // Q8 叠词重复表述（L1 封闭结构提取 + 确定性去重）
     ...det('repeated-word', () => repeatedWordIssues(input.markdown)),
     // Q3 商务条款数据入正文（商务词封闭集确定性 + 变体弱词语义复核，徽光阁实测暂列金额 60 万入正文）
@@ -276,6 +282,10 @@ export async function buildStandardFinalValidationIssues(input: {
     // 十度实测缺陷：编制依据法规/规范四段式（国家法规、地方性法规、验收规范、招标文件法规）LLM 偶发漏写，
     // 交付前确定性兑底（法规/条例/规范由写作模型自行列写，本检测只兑底具体条目存在），漏写即 error 进修复轮
     ...det('basis-regulations-coverage', () => basisRegulationsCoverageIssues(input.markdown, input.blueprintData)),
+    // C5 一致性类（P6）：编制依据↔正文双向对账（声明未用/用了未声明逐条带证据）——
+    // coverage 查条目存在性（五类各自 ≥1），本检测查双向引用一致性（缺口独立成 blocker/warning，
+    // 修复轮 basis-regulations-cross-repair 同源消费；区段/匹配原语与修复端单源）
+    ...det('basis-regulations-cross', () => basisRegulationsCrossIssues(input.markdown)),
     // 十度实测缺陷：资源章工种构成人数/机械台数/同名多规格材料拆分数量 LLM 自行分配与蓝图权威漂移，
     // 交付前确定性兑底（保守口径只比对「名称后紧邻数字+单位」形态），漂移即 error 进修复轮
     ...det('resource-breakdown-consistency', () => resourceBreakdownConsistencyIssues(input.markdown, input.blueprintData)),
@@ -314,7 +324,13 @@ export async function buildStandardFinalValidationIssues(input: {
     ...det('min-chapter-section', () => minChapterSectionIssues(input.chapters)),
     // Q11 事实落位（关键参数抽查）：字面匹配 + 本地 bge 语义兜底
     ...await det('precise-fact-usage', () => preciseFactUsageIssues(input.markdown, input.factsModel, input.chapters)),
-    // Q1 清单落位：字面匹配 + 本地 bge 语义兜底，落位率 <60% 升 error 进修复循环
+    // C3-4 可靠参数义务落位（参数池净化后义务满足率 <90% → error）：与报告出口 parameterUsageAudit.rate /
+    // 修复出口 assignMissingParameterChapters 同源（classifyParameterUsage）——此前参数义务缺口仅在关键参数
+    // blocker 存在时随轮消费（挂靠缺口，s28l 关键池达标其余额 94 条零消费直坠终门禁）
+    ...det('parameter-obligation-usage', () => parameterObligationUsageIssues(input.markdown, input.factsModel, input.chapters)),
+    // Q1 清单落位（C3-5 单源化）：行识别/豁免/落位判定消费 buildBoqRowTraces（与报告出口同源），
+    // 字面三通道（首段 12/整名 12/编码 8）+ 本地 bge 语义兜底，有效行处置率 <90% 升 error（provenance
+    // 锚定 'boq-placement' 供修复轮消费；历史挂靠缺口：17 轮修复无一消费直坠终门禁）
     ...await det('boq-placement', () => boqPlacementIssues(input.markdown, input.chapters, input.factsModel)),
     // Q5 施工阶段划分口径（L1 提取阶段划分句 + bge 语义聚类互异簇 → error）
     ...await det('stage-phrasing', () => stagePhrasingIssues(input.markdown)),
@@ -327,8 +343,17 @@ export async function buildStandardFinalValidationIssues(input: {
     ...det('prompt-example-leak', () => promptExampleLeakIssues(input.markdown, input.promptBindings)),
     ...det('degenerate-content', () => degenerateContentIssues(input.markdown, input.chapters)),
     ...det('planned-auto-spec-gate', () => plannedAutoSpecGateIssues(input.markdown, input.template)),
-    // 暗标正文禁表（标书编制规格）：缺表类门禁豁免（正文缺表不再缺陷）+ 残留表格反向阻断（正文纯文字，图表仅限文末附表区）
-    ...det('bid-composition-body-table', () => bodyCompositionTableIssues(input.markdown, input.bodyTableForbidden)),
+    // 正文表格授权门禁（标书编制规格 C1 证据驱动口径）：
+    // ① 显式禁表句（bodyTableForbidden）：正文残留任何表格即 blocker；
+    // ② 允许口径（默认）：未列入表格授权计划的章出现表格即 blocker——授权章 = 有表格计划/静态表格
+    //    声明/图类承载指令的章（表格须来自系统计划，不得自设）；提示词必需表格按表名豁免（兜底插入防拆）
+    ...det('bid-composition-body-table', () => bodyCompositionTableIssues(input.markdown, {
+      bodyTableForbidden: input.bodyTableForbidden,
+      plannedChapterTitles: (input.effectiveChapters?.length ? input.effectiveChapters : input.template.chapters)
+        .filter(chapter => (chapter.tablePlans?.length || 0) > 0 || (chapter.tableSections?.length || 0) > 0 || (chapter.diagramRequirements?.length || 0) > 0)
+        .map(chapter => chapter.title),
+      requiredTableTitles: input.promptDocumentRules?.requiredTables || [],
+    })),
     // F-T3 暗标正文禁图（标书编制规格）：残留图片/图件占位反向阻断（确定性剥离链的终检兜底）
     ...det('bid-composition-body-figure', () => bodyCompositionFigureIssues(input.markdown, input.bodyFigureForbidden)),
     // F-T3 暗标身份禁语零容忍终检（identityMarksForbidden）：业绩/获奖表述与证书编号类自我标识即 blocker

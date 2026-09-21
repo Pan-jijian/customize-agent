@@ -72,11 +72,12 @@ function reportFixture(
   return buildDocumentQualityReport({ markdown: '# 正文', chapters: CHAPTERS, issues, knowledgeCoverage, factTraces: TRACES, ...extra });
 }
 
-/** 暗标产物形态：正文纯文字 + 文末附表区（附表 H2 标题与 appendixPlan.title 同名） */
+/** 正文禁表口径（bodyTablePolicy=forbidden）产物形态：正文纯文字 + 文末附表区（附表 H2 标题与 appendixPlan.title 同名；
+ * C2 承载口径：表类须 ≥2 条真实数据行） */
 const BLIND_MARKDOWN = [
   '# 正文', '',
   '## 附表一 拟投入本标段的主要施工设备表', '',
-  '| 序号 | 设备名称 |', '| --- | --- |', '| 1 | 挖掘机 |',
+  '| 序号 | 设备名称 |', '| --- | --- |', '| 1 | 挖掘机 |', '| 2 | 自卸汽车 |',
 ].join('\n');
 const BLIND_SPEC: BidCompositionSpec = {
   bidType: 'blind', bodyTablePolicy: 'forbidden', bodyFigurePolicy: 'forbidden',
@@ -311,10 +312,11 @@ describe('结构呈现落实（模式感知，v3）', () => {
     expect(report.deliveryProbability).toBe(95);
     expect(report.passed).toBe(true);
     expect(report.summary).not.toContain('标书类型未判定');
+    expect(report.summary).toContain('quality-caliber-c5.0');
   });
 
   it('暗标：正文出现表格按违规处数扣分（2 处 → 87.5 → 88）', async () => {
-    const markdown = '# 正文\n\n| 序号 | 名称 |\n| --- | --- |\n\n## 附表一 拟投入本标段的主要施工设备表\n\n| 序号 | 设备名称 |\n| --- | --- |\n| 1 | 挖掘机 |';
+    const markdown = '# 正文\n\n| 序号 | 名称 |\n| --- | --- |\n\n## 附表一 拟投入本标段的主要施工设备表\n\n| 序号 | 设备名称 |\n| --- | --- |\n| 1 | 挖掘机 |\n| 2 | 自卸汽车 |';
     // structure = (100*0.75 + 50*0.25) / 1.0 = 87.5；weighted = (27 + 13.125 + 10 + 10) / 0.65 = 92.5 → 93
     const report = await reportFixture([], KNOWLEDGE_HIGH, makeScores(), {
       markdown, bidComposition: BLIND_SPEC,
@@ -330,6 +332,16 @@ describe('结构呈现落实（模式感知，v3）', () => {
       markdown, bidComposition: BLIND_SPEC,
     });
     expect(dimensionOf(report, 'structure')).toMatchObject({ score: 25, detail: '附表承载 0/1、正文禁表合规' });
+  });
+
+  it('C2 暗标：骨架说明块 / 单行数据不计承载（须 ≥2 条真实数据行）', async () => {
+    // 反样本①：骨架缺口说明 + 空表头 → 0/1；反样本②：单数据行（<2）→ 0/1；structure = (0*0.75 + 100*0.25) / 1.0 = 25
+    const skeleton = '# 正文\n\n## 附表一 拟投入本标段的主要施工设备表\n\n> 本表为拟投入设备配置，按招标文件规定的表头格式编制。\n\n| 序号 | 设备名称 |\n| --- | --- |';
+    const singleRow = '# 正文\n\n## 附表一 拟投入本标段的主要施工设备表\n\n| 序号 | 设备名称 |\n| --- | --- |\n| 1 | 挖掘机 |';
+    for (const markdown of [skeleton, singleRow]) {
+      const report = await reportFixture([], KNOWLEDGE_HIGH, makeScores(), { markdown, bidComposition: BLIND_SPEC });
+      expect(dimensionOf(report, 'structure')).toMatchObject({ score: 25, detail: '附表承载 0/1、正文禁表合规' });
+    }
   });
 });
 
@@ -442,6 +454,58 @@ describe('合规与规范（v3）', () => {
   it('全净时四项满分', async () => {
     const report = await reportFixture([], KNOWLEDGE_HIGH, makeScores(), { markdown: '# 正文\n\n纯文字说明。' });
     expect(dimensionOf(report, 'compliance')).toMatchObject({ score: 100, detail: '自伤 0、占位符 0、篇幅达标、表自洽 100%' });
+  });
+
+  // C5 P6：编制依据↔正文双向对账分量（权重 0.2，每处缺口扣 20；计数源 auditBasisRegulationsCross 与检测器同源）
+  const CROSS_GAP_MARKDOWN = [
+    '# 第一章 工程概况',
+    '### 1.1 编制依据',
+    '依据《室外排水设计规范》（GB 50013-2006）编制。',
+    '## 第二章 施工方案',
+    '管道敷设按《建筑地基基础工程施工质量验收标准》（GB 50202-2018）执行。',
+  ].join('\n');
+  const CROSS_ALIGNED_MARKDOWN = [
+    '# 第一章 工程概况',
+    '### 1.1 编制依据',
+    '依据《室外排水设计规范》（GB 50013-2006）编制。',
+    '## 第二章 施工方案',
+    '管道敷设按《室外排水设计规范》（GB 50013-2006）执行。',
+  ].join('\n');
+
+  it('C5 P6：编制依据缺口按处扣分（声明未用 1 + 引用未声明 1 → 60 → 合规 92）', async () => {
+    // regulation = 100 − 2×20 = 60；compliance = 100×0.8 + 60×0.2 = 92；weighted = (27 + 9.2 + 10) / 0.5 = 92.4 → 92
+    const report = await reportFixture([], KNOWLEDGE_HIGH, makeScores(), { markdown: CROSS_GAP_MARKDOWN });
+    expect(dimensionOf(report, 'compliance')).toMatchObject({
+      score: 92,
+      detail: '自伤 0、占位符 0、篇幅达标、表自洽 100%、编制依据缺口 2 处（声明未用 1/引用未声明 1）',
+    });
+    expect(report.overall).toBe(92);
+  });
+
+  it('C5 P6：编制依据与正文一一对应时该分量满分', async () => {
+    const report = await reportFixture([], KNOWLEDGE_HIGH, makeScores(), { markdown: CROSS_ALIGNED_MARKDOWN });
+    expect(dimensionOf(report, 'compliance')).toMatchObject({
+      score: 100,
+      detail: '自伤 0、占位符 0、篇幅达标、表自洽 100%、编制依据对账 0 缺口',
+    });
+    expect(report.overall).toBe(94);
+  });
+
+  it('C5 P6：编制依据区段存在但零可提取条目时该分量显式降级（不计不扣）', async () => {
+    const markdown = ['# 第一章 工程概况', '### 1.1 编制依据', '本节说明编制依据的基本情况。', '## 第二章 施工方案', '按设计要求施工。'].join('\n');
+    const report = await reportFixture([], KNOWLEDGE_HIGH, makeScores(), { markdown });
+    expect(dimensionOf(report, 'compliance')).toMatchObject({ score: 100, detail: '自伤 0、占位符 0、篇幅达标、表自洽 100%' });
+  });
+
+  it('C5 P6：编制依据缺口在事实一致性对账不双计（阻断计数仍生效）', async () => {
+    // factIntegrity 仅由对账+绑定构成 = 100（缺口消息被排除）；delivery 仍按 error 阻断收敛：92 − 3 = 89
+    const issues: ValidationIssue[] = [
+      { level: 'error', category: 'fact_consistency', message: '编制依据对账缺口：正文引用《建筑地基基础工程施工质量验收标准》（GB 50202-2018）未列入编制依据小节', suggestion: '' },
+    ];
+    const report = await reportFixture(issues, KNOWLEDGE_HIGH, makeScores(), { markdown: CROSS_GAP_MARKDOWN });
+    expect(dimensionOf(report, 'factIntegrity')).toMatchObject({ score: 100, detail: '对账零冲突、绑定零冲突' });
+    expect(dimensionOf(report, 'compliance')).toMatchObject({ score: 92 });
+    expect(report.deliveryProbability).toBe(89);
   });
 });
 
@@ -577,6 +641,7 @@ function makeTemplatingReport() {
     level: 'light' as const, fillerRatio: 0, fillerSentences: 0, totalSentences: 1,
     vagueHitCount: 0, vaguePhrases: [], duplicateSentenceRate: 0, crossProjectResidue: [],
     difficultyCountermeasureRatio: 1, difficultyBothCount: 1, difficultyCountermeasures: 1, difficultyHeavyTemplated: false,
+    sentencePatternHits: [],
   };
 }
 

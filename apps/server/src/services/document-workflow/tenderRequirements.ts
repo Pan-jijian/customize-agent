@@ -18,6 +18,7 @@ import type { SemanticSimilarityFn } from './semanticSimilarity';
 import { isBidDisciplineSentence, isBidEvaluationRuleText, stableHash, systemConstraintLine } from './utils';
 import { isBidderQualificationText, isContractProcedureClause } from './evidenceContentSafety';
 import { docSystemPrefix } from './markdownComposer';
+import { classifyPoolNoiseText, POOL_CONSTRAINT_WORD_RE, POOL_NOISE_RULE_SOURCES } from './poolNoise';
 
 /**
  * 招标要求层（全量条款穷举范式，取代旧 10 字段「必提清单」归纳式提取）。
@@ -618,8 +619,9 @@ export interface TenderClauseJudgmentResult {
   retriedBatches: number;
 }
 
-/** 条款实现约束词（碎片形态复核用）：含任一即视为有实质语义的短句，保留交判定层处理 */
-const CLAUSE_CONSTRAINT_WORD_RE = /(?:确保|保证|达到|满足|符合|不低于|不超过|不得|禁止|严禁|必须|应当|须|应按|执行|遵守|落实|实施|采用|提供|提交|出具|配备|设置|建立|安装|配置|负责|完成|参加|组织|验收|检测|检验|控制|管理|保护|防止|杜绝|承诺|响应|要求|规定|标准|等级|目标|措施|方案|制度|计划|工期|质量|安全)/u;
+/** 条款实现约束词（碎片形态复核用）：含任一即视为有实质语义的短句，保留交判定层处理；与池噪声判定的
+ * 「无约束词」守卫同源（poolNoise.POOL_CONSTRAINT_WORD_RE，单源防口径分裂） */
+const CLAUSE_CONSTRAINT_WORD_RE = POOL_CONSTRAINT_WORD_RE;
 
 /** 碎片形态判定（判定层兼底闸）：≤10 字、无数字、无约束谓词的残片（折行半句/表格残片/跨页断句，
  *  如「认使用时限。」「币）。」）不构成独立要求（宁缺毋假）；含数字（参数）或约束词的短句保留 */
@@ -640,6 +642,11 @@ function clauseFragmentLike(text: string): boolean {
  * ④ 投标程序与表单（本表填报说明/投标文件响应程序/拟派承诺/拟分包情况表）——投标文件格式要求；
  * ⑤ 勾选表单行（条款首部带编号前缀的「☑」填报项，如「☑本工程采用商品砼」「1.2 ☑本工程采用商品砼」）
  *    ——工程信息填报非义务条款；行首 8 字符内限编号/括号/顿点类前缀，正文中间出现的 ☑ 不命中。
+ *
+ * D6 池净化扩围（s28l/r28l 实机归因）：图纸图签栏/清单行列坐标/PDF 目录点串行/OCR 表格残片/编号粘连
+ * ——解析产物结构噪声混入要求池后永久无法锚定正文（锚点命中率被人为拉低且误导修复方向），
+ * 与参数池同源判定（poolNoise.classifyPoolNoiseText）。命中条目在判定层以 reason='noise' 出池（只出池
+ * 不删档：保留在 excluded 审计数组），上层据类别对账。
  */
 export function isRequirementPoolNoiseClause(text: string): boolean {
   const normalized = text.trim().replace(/\s+/gu, '');
@@ -651,6 +658,8 @@ export function isRequirementPoolNoiseClause(text: string): boolean {
   if (/投标文件(?:应|须|应当)[^。；]{0,40}(?:响应|作出响应|包含|包括)/u.test(normalized)) return true;
   if (/我方拟派|无在岗项目|拟分包项目情况表/u.test(normalized)) return true;
   if (/^[（(、.．\d]{0,8}☑/u.test(normalized)) return true;
+  // D6 表格噪声（图签/坐标/目录行/残片/粘连，与参数池同源单源判定）
+  if (classifyPoolNoiseText(normalized)) return true;
   return false;
 }
 
@@ -763,7 +772,9 @@ export async function judgeTenderClauses(
       // r28h M10 池纯度扩围：答疑澄清/履约考核惩奖/质量保修/投标程序表单/勾选表单行属程序与澄清信息，
       // 非施组响应义务（单项目未响应条目分型实测：该四类形态占未响应 2/3 以上），LLM 漏判时本地纠正
       if (isRequirementPoolNoiseClause(clause.text)) {
-        excluded.push({ text: clause.text, source: formatClauseSource(clause), reason: 'non_requirement' });
+        // D6 表格噪声（图签/坐标/目录行/残片）单独记 reason='noise' 供净化审计；其余程序类沿用 non_requirement
+        const noiseCategory = classifyPoolNoiseText(clause.text);
+        excluded.push({ text: clause.text, source: formatClauseSource(clause), reason: noiseCategory ? 'noise' : 'non_requirement' });
         return;
       }
       if (isCommercialScopeClause(clause.text)) {
@@ -901,6 +912,10 @@ const CACHE_JUDGE_FINGERPRINT_SOURCES: ReadonlyArray<unknown> = [
   isDocumentReferenceOnlyClause,
   isDocumentReferenceTerm,
   isRequirementPoolNoiseClause,
+  // D6 池噪声（表格噪声形态：图签/坐标/目录行/残片/粘连）——判据函数 + 形态正则表 + 约束词守卫
+  classifyPoolNoiseText,
+  POOL_NOISE_RULE_SOURCES,
+  POOL_CONSTRAINT_WORD_RE,
   isCommercialScopeClause,
   COMMERCIAL_SCOPE_RE,
   COMMERCIAL_TECHNICAL_RESCUE_RE,
@@ -1044,7 +1059,9 @@ export function tenderRequirementsWritingRules(model: TenderRequirementModel | u
   return `【招标要求全局口径红线（全文档适用）】\n${lines.map((line, index) => `${index + 1}. ${line}`).join('\n')}\n${systemConstraintLine('以上为系统提取的招标要求全局口径：本段提示词文字本身（编号、括号说明等元话语）禁止复述进正文')}`;
 }
 
-/** 本章要求分片渲染（写作注入用）：蓝图分配的本章责任要求全量（不截断），按 policy 标注处理方式 */
+/** 本章要求分片渲染（写作注入用）：蓝图分配的本章责任要求全量（不截断），按 policy 标注处理方式。
+ * 显性响应类附锚点全清单（collectRequirementAnchors 单源，与验收/修复缺口反馈同口径）：
+ * 写作时即按锚点逐字落位（生成侧治本），消除「写作漏锚点 → 检测报缺口 → 修复轮补写」的多数回路。 */
 export function renderChapterRequirementSlice(entries: TenderRequirementEntry[]): string {
   if (entries.length === 0) return '';
   const policyLabel: Record<TenderRequirementPolicy, string> = {
@@ -1053,20 +1070,24 @@ export function renderChapterRequirementSlice(entries: TenderRequirementEntry[])
   };
   const lines = entries.map(entry => {
     const source = entry.sources.find(item => item.file)?.file;
-    return `- [${policyLabel[entry.policy]}] ${entry.text}${source ? `（来源：${source}）` : ''}`;
+    // 锚点全清单仅对显性响应类附（遵守类不做文本落位验收）；行首缩进标注「必须逐字落位」受系统约束元话语红线保护
+    const anchors = entry.policy === 'respond' ? collectRequirementAnchors(entry) : [];
+    const anchorLine = anchors.length > 0 ? `\n  └ 必须逐字落位：${anchors.join('、')}` : '';
+    return `- [${policyLabel[entry.policy]}] ${entry.text}${source ? `（来源：${source}）` : ''}${anchorLine}`;
   });
   return [
     '【本章必须处理的招标要求（蓝图分配全量，逐条响应/遵守；零处理即评标失分）】',
     ...lines,
-    systemConstraintLine('以上为系统提取的招标要求原文：实质内容（奖项名称/等级指标/数字参数）必须显性落位；本段提示词文字本身（编号、括号说明等元话语）禁止复述进正文'),
+    systemConstraintLine('以上为系统提取的招标要求原文：实质内容（奖项名称/等级指标/数字参数）必须显性落位；「必须逐字落位」为系统验收锚点清单，其文字禁止复述进正文；本段提示词文字本身（编号、括号说明等元话语）禁止复述进正文'),
   ].join('\n');
 }
 
-/** A-T1 结构/呈现要求分片渲染（章级写作指令）：明标=以图/表形态呈现 ××；暗标=正文不得出图表，
- * 以完整文字承载并指向文末附表区（形态由附表区兑现）。
+/** A-T1 结构/呈现要求分片渲染（章级写作指令）：明标=以图/表形态呈现 ××；
+ * 正文禁表口径（bodyTableForbidden，显式禁表句）=正文不得出表格/图片实体，以完整文字承载并指向文末附表区；
+ * 禁图允许表口径（bodyFigureForbidden，暗标常态 C1）=表格/框图照常落实，图类以文字框图/表格式时间轴承载+图题行，禁止图片。
  * B-T1：图/框图（diagram）补齐形态声明——内容以文字框图/时间轴承载，结束处输出规范图题行「图 X-X 图名」；
  * B-T2：org_chart 补「项目管理机构与岗位职责」专项指令（组织架构说明 + 框图承载 + 岗位责任矩阵，零实名数据）。 */
-export function renderChapterStructureSlice(items: TenderStructureRequirement[], options: { blind?: boolean } = {}): string {
+export function renderChapterStructureSlice(items: TenderStructureRequirement[], options: { bodyTableForbidden?: boolean; bodyFigureForbidden?: boolean } = {}): string {
   if (items.length === 0) return '';
   const formLabels: Record<TenderStructureForm, string> = {
     diagram: '图（网络图/横道图/平面布置图类）',
@@ -1075,24 +1096,26 @@ export function renderChapterStructureSlice(items: TenderStructureRequirement[],
     chart_text: '文字结合图表',
   };
   const orgChartPlainHint = '：正文须含「项目管理机构与岗位职责」专项内容——组织架构说明（层级设置、隶属关系、部门与岗位构成）+ 文字框图承载（列出全部岗位与层级关系）+ 岗位责任矩阵（各岗位职责、分工与协作关系）；严禁出现人员姓名、证书编号、身份证号等实名数据（人员实名信息属商务册职责，正文仅写岗位与职责体系）';
-  const orgChartBlindHint = '：正文须含「项目管理机构与岗位职责」专项内容——组织架构说明（层级设置、隶属关系、部门与岗位构成）及分岗位的职责分工与协作关系；严禁出现人员姓名、证书编号、身份证号等实名数据（人员实名信息属商务册职责，正文仅写岗位与职责体系）';
+  const orgChartTextOnlyHint = '：正文须含「项目管理机构与岗位职责」专项内容——组织架构说明（层级设置、隶属关系、部门与岗位构成）及分岗位的职责分工与协作关系；严禁出现人员姓名、证书编号、身份证号等实名数据（人员实名信息属商务册职责，正文仅写岗位与职责体系）';
   const plainHint = (form: TenderStructureForm): string => {
     if (form === 'diagram') return '：以文字框图或表格式时间轴承载全部内容要点，内容结束处另起一行输出规范图题行（格式「图 X-X 图名」，X-X 为章序号与本章图序号，图名即要素名），图题行独立成行、不附加任何说明文字';
     if (form === 'org_chart') return orgChartPlainHint;
     if (form === 'table') return '：以 Markdown 表格输出，表头字段按要素构成设置并覆盖全部构成项';
     return '';
   };
-  if (options.blind) {
+  if (options.bodyTableForbidden) {
     return [
-      '【本章必须落实的呈现要求（招标明文规定呈现形态，暗标口径）】',
-      ...items.map(item => `- 招标要求以「${formLabels[item.form]}」呈现「${item.element}」：暗标正文不得出现任何表格/图片，须以完整文字描述${item.element}的组成与运作（图文形态由文末附表区承载，正文可自然指向附表）${item.form === 'org_chart' ? orgChartBlindHint : ''}`),
+      '【本章必须落实的呈现要求（招标明文规定呈现形态，正文禁表口径）】',
+      ...items.map(item => `- 招标要求以「${formLabels[item.form]}」呈现「${item.element}」：招标正文禁表（显式禁表句），不得出现任何表格/图片，须以完整文字描述${item.element}的组成与运作（图文形态由文末附表区承载，正文可自然指向附表）${item.form === 'org_chart' ? orgChartTextOnlyHint : ''}`),
       systemConstraintLine('以上为招标明文的呈现形态要求：正文以文字完整承载内容，禁止任何图表实体与内部话术（如“由编制人绘制”）'),
     ].join('\n');
   }
   return [
     '【本章必须落实的呈现要求（招标明文规定呈现形态，缺失即评标失分）】',
     ...items.map(item => `- 须以「${formLabels[item.form]}」呈现「${item.element}」（呈现形态与要素均来自招标明文，不得省略）${plainHint(item.form)}`),
-    systemConstraintLine('以上为招标明文的呈现形态要求：对应图/表/框图必须在本章正文落实，内容使用资料事实，禁止编造'),
+    options.bodyFigureForbidden
+      ? systemConstraintLine('以上为招标明文的呈现形态要求：对应表格/框图必须在本章正文落实（内容使用资料事实，禁止编造）；招标要求正文不得出现图片，图类以文字框图/表格式时间轴与图题行承载，禁止插入图片或图件占位')
+      : systemConstraintLine('以上为招标明文的呈现形态要求：对应图/表/框图必须在本章正文落实，内容使用资料事实，禁止编造'),
   ].join('\n');
 }
 
@@ -1386,13 +1409,36 @@ const ANCHOR_ALTERNATIVE_JSON_SCHEMA: DocumentJsonSchema = {
  * （如"省级或国家级奖项""A、B、C任选一项"）时，部分锚点命中不算部分响应；
  * 并列承诺/金额+奖项共存条款（"确保黄山杯，支付300万元"）必须全部锚点命中。
  * 分类调用失败时保守判定非或选型（宁报部分响应不漏检——评标失分风险大于多余修复成本）。
+ * 分批执行（D6 消费面扩容后部分响应候选可达 100+ 条，单批超 maxTokens 会静默缺号）：
+ * 40 条/批并发 3 路，按全局下标合并；批失败保守判非或选型。
  */
+const ALTERNATIVE_BATCH_SIZE = 40;
+
 async function classifyAnchorAlternativeClauses(
   items: Array<{ text: string; missingAnchors: string[] }>,
   options: { signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics } = {},
 ): Promise<Map<number, boolean>> {
   const trimmed = items.filter(item => item.text.trim());
   if (trimmed.length === 0) return new Map();
+  const batches: Array<Array<{ text: string; missingAnchors: string[] }>> = [];
+  for (let index = 0; index < trimmed.length; index += ALTERNATIVE_BATCH_SIZE) {
+    batches.push(trimmed.slice(index, index + ALTERNATIVE_BATCH_SIZE));
+  }
+  const outcomes = await mapWithConcurrency(batches, 3, batch => classifyAnchorAlternativeBatch(batch, options));
+  const judged = new Map<number, boolean>();
+  outcomes.forEach((batchResult, batchIndex) => {
+    batchResult.forEach((alternative, indexInBatch) => {
+      judged.set(batchIndex * ALTERNATIVE_BATCH_SIZE + indexInBatch, alternative);
+    });
+  });
+  return new Map(trimmed.map((_, index) => [index, judged.get(index) ?? false]));
+}
+
+/** 单批判定（批内下标返回，合并由 classifyAnchorAlternativeClauses 负责） */
+async function classifyAnchorAlternativeBatch(
+  items: Array<{ text: string; missingAnchors: string[] }>,
+  options: { signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics } = {},
+): Promise<boolean[]> {
   const raw = await callDocumentLlmJson<{ results?: Array<{ index?: number; alternative?: boolean }> }>(
     [
       docSystemPrefix('你是招标要求条款锚点关系判定器。'),
@@ -1401,7 +1447,7 @@ async function classifyAnchorAlternativeClauses(
       '- alternative=false：条款锚点必须全部满足（并列承诺、金额与奖项共存条款），缺任一锚点即部分响应',
       '只输出 JSON，不得输出其他内容。',
     ].join('\n'),
-    trimmed.map((item, index) => `${index + 1}. 条款：${item.text}\n   未命中锚点：${item.missingAnchors.join('、') || '（无）'}`).join('\n'),
+    items.map((item, index) => `${index + 1}. 条款：${item.text}\n   未命中锚点：${item.missingAnchors.join('、') || '（无）'}`).join('\n'),
     {
       maxTokens: 1000,
       temperature: 0,
@@ -1411,12 +1457,12 @@ async function classifyAnchorAlternativeClauses(
       taskKind: 'structuredGeneration',
     },
   );
-  if (!raw?.results?.length) return new Map(trimmed.map((_, index) => [index, false]));
+  if (!raw?.results?.length) return items.map(() => false);
   const judged = new Map<number, boolean>();
   for (const entry of raw.results) {
     if (typeof entry.index === 'number') judged.set(entry.index, entry.alternative === true);
   }
-  return new Map(trimmed.map((_, index) => [index, judged.get(index) ?? false]));
+  return items.map((_, index) => judged.get(index) ?? false);
 }
 
 /**
@@ -1441,35 +1487,73 @@ function normalizePercent(text: string): string {
   return text.replace(/％/gu, '%');
 }
 
+/** 锚点比较变体归一（C8 S4-⑤）：招标条款锚点（coreTerms LLM 概括）与正文写作存在四类合法
+ * 变体差异，字面 includes 遇变体即假 miss（s28m' 六条部分响应实锤：质量保修「施工场地的
+ * 清理」、人员管理「"钉钉"系统」/「考勤、考核」、绿化「"五一"前」、考核「90分以下为不合格」、
+ * 保修（养护）期括号注释——条款锚点与正文互为变体时锚点率与响应判定双失真）：
+ * ①引号类包裹（「钉钉」系统 vs 钉钉系统；《监理月报》vs 监理月报）；
+ * ②顿号/逗号插入（考勤、考核 vs 考勤考核）；
+ * ③结构助词/系词「的、为」省略（施工场地的清理 vs 施工场地清理；90分以下为不合格 vs 90分以下不合格）；
+ * ④括号注释省略（对竣工保修（养护）期内 vs 对竣工保修期内）。
+ * 两侧同源归一（锚点/分句侧与正文 haystack 侧同函数）后比较，防口径分裂；判定入口
+ * normalizedMarkdown 保持不变（原文命中优先），变体 haystack 由调用方一次归一传入（性能单源）。 */
+function normalizeAnchorCompareText(text: string): string {
+  return text
+    .replace(/[「」『』“”"'`《》]/gu, '')
+    .replace(/[、，,]/gu, '')
+    .replace(/[的为]/gu, '')
+    .replace(/（[^）]*）|\([^)]*\)/gu, '');
+}
+
+/** 变体通道命中（锚点/分句共用）：归一后 ≥2 字且未坍缩过半（|变体|×2 ≥ |原文|）才比对——
+ * 防「钢筋（HRB400）」类含括号锚点剥成「钢筋」后在任意语境误命中（假阴性防线）；范围数字
+ * 锚点（0.25-0.5m 类）不依赖变体通道，仍走 anchorHit 内的两端数字判定。 */
+function anchorVariantHit(text: string, variantMarkdown: string): boolean {
+  const variant = normalizeAnchorCompareText(text);
+  if (variant.length < 2 || variant.length * 2 < text.length) return false;
+  return variantMarkdown.includes(variant);
+}
+
 /**
  * 锚点等价命中判定（r8 实机 #4 复核）：「0.25-0.5m宽」类范围复合锚点，正文写作
  * 「0.25～0.5m」「0.25~0.5m」或省后缀「预留0.25-0.5m」时字面 includes 因连接符/
  * 后缀差异失配 → 假部分响应。范围锚点降级为「两端数字均出现即命中」（范围数字组合
- * 巧合概率极低）；非范围锚点维持字面包含（不放宽）。
+ * 巧合概率极低）；非范围锚点维持字面包含 + C8 S4-⑤ 变体通道（见 normalizeAnchorCompareText）。
  */
-function anchorHit(anchor: string, normalizedMarkdown: string): boolean {
+function anchorHit(anchor: string, normalizedMarkdown: string, variantMarkdown: string): boolean {
   if (normalizedMarkdown.includes(anchor)) return true;
+  if (anchorVariantHit(anchor, variantMarkdown)) return true;
   const range = anchor.match(/(\d+(?:\.\d+)?)\s*[-–—~～至]\s*(\d+(?:\.\d+)?)/u);
   if (!range) return false;
   return normalizedMarkdown.includes(range[1]) && normalizedMarkdown.includes(range[2]);
 }
 
 /**
- * 条款锚点覆盖判定（300万缺失根治）：条款内全部关键锚点（每个 coreTerms 专有名词、每个"数字+单位"、
- * 每个具名奖项/等级）必须各自字面命中正文。字面兜底保留（黄山杯实测 bge 0.50 < 0.6 被误报零响应），
- * 升级为锚点全覆盖：全部命中才算完全响应，部分命中报"部分响应"定向补写缺失锚点。
+ * 条款锚点全清单（写作卡下发 / 覆盖判定 / 修复缺口反馈单源）：条款内全部关键锚点——
+ * ① coreTerms 专有名词（≥2 字；引用性词过滤——文号/行政文件名不作锚点，正文按制度应用写不逐字复现；
+ *    含数字复合词分解——「一次性成活率95%」→「一次性成活率」+「95%」，正文自然写作常被数量词分隔，
+ *    整串字面匹配假 miss）；
+ * ② 「数字+单位」组合（纯数字不作锚点；「N.N项」编号切片守卫）；
+ * ③ 具名奖项/等级（stripAwardLeadVerb 剥离前导动词）。
  */
-function requirementAnchorCoverage(
+export function collectRequirementAnchors(
   item: { text: string; coreTerms: string[] },
-  normalizedMarkdown: string,
   options?: { skipNumericAnchors?: boolean },
-): { total: number; hit: string[]; missing: string[] } {
+): string[] {
   const text = normalizePercent(item.text.replace(/\s+/gu, ''));
   const anchors = new Set<string>();
-  // 专有名词：coreTerms 全部作为锚点（长度≥2；「或/及」条款的锚点必要性由 LLM 或选型判定兜底）
+  // 专有名词：coreTerms 全部作为锚点（长度≥2；引用性词过滤；含数字复合词分解）
   for (const term of item.coreTerms) {
     const clean = normalizePercent(term.replace(/\s+/gu, ''));
-    if (clean.length >= 2) anchors.add(clean);
+    if (clean.length < 2) continue;
+    if (isDocumentReferenceTerm(clean)) continue;
+    const compound = clean.match(/^(.*?)(\d+(?:\.\d+)?(?:%|％)?)$/u);
+    if (compound && compound[1].length >= 2) {
+      anchors.add(compound[1]);
+      anchors.add(compound[2]);
+      continue;
+    }
+    anchors.add(clean);
   }
   // 数字参数：每个"数字+单位"组合都是独立锚点（纯数字不作锚点；单位词表限工程条款常用单位）。
   // 商务条款（保证金金额/付款时限/违约金利率）的数字参数不强制落位技术标正文，skipNumericAnchors 跳过
@@ -1488,26 +1572,57 @@ function requirementAnchorCoverage(
     const award = stripAwardLeadVerb(match[0]);
     if (/^[\u4e00-\u9fa5]{2,7}$/u.test(award)) anchors.add(award);
   }
+  return [...anchors];
+}
+
+/**
+ * 条款锚点覆盖判定（300万缺失根治）：条款内全部关键锚点（每个 coreTerms 专有名词、每个"数字+单位"、
+ * 每个具名奖项/等级）必须各自字面命中正文。字面兜底保留（黄山杯实测 bge 0.50 < 0.6 被误报零响应），
+ * 升级为锚点全覆盖：全部命中才算完全响应，部分命中报"部分响应"定向补写缺失锚点。
+ * 锚点集合构建单源（collectRequirementAnchors，与写作卡下发同源）。
+ */
+function requirementAnchorCoverage(
+  item: { text: string; coreTerms: string[] },
+  normalizedMarkdown: string,
+  variantMarkdown: string,
+  options?: { skipNumericAnchors?: boolean },
+): { total: number; hit: string[]; missing: string[] } {
+  const anchors = collectRequirementAnchors(item, options);
   const hit: string[] = [];
   const missing: string[] = [];
   for (const anchor of anchors) {
-    (anchorHit(anchor, normalizedMarkdown) ? hit : missing).push(anchor);
+    (anchorHit(anchor, normalizedMarkdown, variantMarkdown) ? hit : missing).push(anchor);
   }
-  return { total: anchors.size, hit, missing };
+  return { total: anchors.length, hit, missing };
 }
 
 /**
  * 条款原文分句兜底（B 闭环终收尾 4.27.1）：锚点判定用 coreTerms（LLM 概括短语）与正文抄写句
  * （「按招标文件要求：<条款原文>」）存在词面错位——分句兜底：条款去括号举例后按标点切分为实质分句
  * （≥6 字符），全部分句字面落位正文 = 原文抄写 = 完全响应。防误放行：全部分句命中才放行。
+ * C8 S1 死锁兜底：去括号后全部分句均 <6 字符被下限滤除时（短条款「（9）发现脏、差，有缺损。」
+ * → [发现脏/差/有缺损] 全滤）此前 total=0 → clauseSatisfied 三通道恒假 → 链尾收口每轮判残留
+ * 每轮重插（r28m' 三连重复根因）——以去引号整体文本为唯一分句（仍要求连续字面落位，零放水；
+ * 整体仍 <6 字符时维持 total=0，插入侧由形态闸拒插短素材显性记录）。
  */
-function clauseSegmentCoverage(text: string, normalizedMarkdown: string): { total: number; missing: string[] } {
+function clauseSegmentCoverage(text: string, normalizedMarkdown: string, variantMarkdown: string): { total: number; missing: string[] } {
   const withoutParenthetical = normalizePercent(text).replace(/（[^）]*）|\([^)]*\)/gu, '');
   const segments = withoutParenthetical
     .split(/[，。；、,;\n]/u)
     .map(segment => segment.replace(/[「」“”"'`\s]/gu, '').trim())
     .filter(segment => segment.length >= 6);
-  const missing = segments.filter(segment => !normalizedMarkdown.includes(segment));
+  if (segments.length === 0) {
+    const whole = withoutParenthetical.replace(/[「」“”"'`\s]/gu, '').trim();
+    if (whole.length >= 6) {
+      // C8 S4-⑤：分句整体比较同样接入变体通道（正文括号注释省略/引号顿号差异）
+      const wholeHit = normalizedMarkdown.includes(whole) || anchorVariantHit(whole, variantMarkdown);
+      return { total: 1, missing: wholeHit ? [] : [whole] };
+    }
+  }
+  // C8 S4-⑤：分句比较接入变体通道——条款侧已剥括号，正文侧保留括号时（「对竣工保修（养护）
+  // 期内…」vs 分句「对竣工保修期内…」）此前必假 miss（s28m' 全通道失败实锤）；变体通道
+  // 同源归一覆盖括号/引号/顿号/「的为」四类差异，未命中原文时再比对变体
+  const missing = segments.filter(segment => !normalizedMarkdown.includes(segment) && !anchorVariantHit(segment, variantMarkdown));
   return { total: segments.length, missing };
 }
 
@@ -1521,7 +1636,14 @@ function clauseSegmentCoverage(text: string, normalizedMarkdown: string): { tota
  */
 export function bidderVoiceClauseText(text: string): string {
   return text
-    .replace(/[☑☐☒√✓✔×✗■●◼⊠]\s*/gu, '')
+    .replace(/[☑☐☒√✓✔■●◼⊠]\s*/gu, '')
+    // C8 S1：「×」仅剥离独立符号位（勾选/叉选标记），保留数字间乘法形态（「4000×3200」）——
+    // 全量剥离曾使 voice 素材与正文「×/*」变体互相失配、查重漏网重复插入（r28m' 放大器之一）
+    .replace(/(?<![\d])\s*[×✗]\s*(?![\d])/gu, '')
+    // C8 S1 行首枚举前缀剥离：「（9）」「2.」「6.5.35.」「14、」「一、」——条款号随提取进入素材，
+    // 不剥离则补写句把条款号带进正文（r28m' L1616 等实录）。检测端 voice 分句通道与补写素材
+    // 同用本函数（同源剥离），插入物与判定侧形态严格一致；「2.5米」类小数前缀由数字前瞻保护不剥离
+    .replace(/^\s*(?:[（(]\s*\d{1,3}\s*[)）]|(?:\d{1,3}(?:\.\d{1,3}){0,3})[.、,，](?=[\u4e00-\u9fff（(])|(?:[一二三四五六七八九十]{1,3})[、.，,](?=[\u4e00-\u9fff（(]))/u, '')
     .replace(/投标人本单位|承包人本单位/gu, '本公司')
     .replace(/本招标项目/gu, '本项目')
     .replace(/(?:承包人|发包人)认为视同/gu, '视为')
@@ -1535,12 +1657,12 @@ export function bidderVoiceClauseText(text: string): string {
  * 历史缺陷（重复补写根因）：各补写器判定口径不一致——stage5 写入的 voice 补写句
  * 在终检「锚点全覆盖」口径下不可见 → 重复补写。各端共用本谓词：检测放行、补写幂等严格同源。
  */
-function clauseSatisfied(item: { text: string; coreTerms: string[] }, normalizedMarkdown: string): boolean {
-  const coverage = requirementAnchorCoverage(item, normalizedMarkdown);
+function clauseSatisfied(item: { text: string; coreTerms: string[] }, normalizedMarkdown: string, variantMarkdown: string): boolean {
+  const coverage = requirementAnchorCoverage(item, normalizedMarkdown, variantMarkdown);
   if (coverage.total > 0 && coverage.missing.length === 0) return true;
-  const segmentCoverage = clauseSegmentCoverage(item.text, normalizedMarkdown);
+  const segmentCoverage = clauseSegmentCoverage(item.text, normalizedMarkdown, variantMarkdown);
   if (segmentCoverage.total > 0 && segmentCoverage.missing.length === 0) return true;
-  const voiceCoverage = clauseSegmentCoverage(bidderVoiceClauseText(item.text), normalizedMarkdown);
+  const voiceCoverage = clauseSegmentCoverage(bidderVoiceClauseText(item.text), normalizedMarkdown, variantMarkdown);
   if (voiceCoverage.total > 0 && voiceCoverage.missing.length === 0) return true;
   return false;
 }
@@ -1555,9 +1677,11 @@ export function tenderRequirementResponseGaps(
   markdown: string,
 ): Array<{ entry: TenderRequirementEntry; hit: string[]; missing: string[]; satisfied: boolean }> {
   const normalized = normalizePercent(markdown.replace(/\s+/gu, ''));
+  // C8 S4-⑤ 变体 haystack 一次归一（与判定侧同源，防口径分裂；修复轮复检与检测端共用本口径）
+  const variant = normalizeAnchorCompareText(normalized);
   return entries.map(entry => {
-    const coverage = requirementAnchorCoverage(entry, normalized);
-    return { entry, hit: coverage.hit, missing: coverage.missing, satisfied: clauseSatisfied(entry, normalized) };
+    const coverage = requirementAnchorCoverage(entry, normalized, variant);
+    return { entry, hit: coverage.hit, missing: coverage.missing, satisfied: clauseSatisfied(entry, normalized, variant) };
   });
 }
 
@@ -1590,6 +1714,8 @@ export async function requirementAcceptanceIssues(input: {
   if (input.entries.length === 0) return issues;
   const markdown = input.markdown;
   const normalized = normalizePercent(markdown.replace(/\s+/gu, ''));
+  // C8 S4-⑤ 变体 haystack 一次归一（全文 20 万字级，逐锚点归一开销不可接受；与修复轮复检同源）
+  const variant = normalizeAnchorCompareText(normalized);
   // 六项词面兜底：「扬尘治理六个百分百」体系基准条款语义稀释误报——正文已逐项落位六项措施词面
   // （100%围挡/覆盖/冲洗/硬化/密闭运输）时判响应，与 sixHundredPercentCoverageIssues 词面兜底同源。
   const DUST_SIX_LEXICAL: Array<RegExp> = [
@@ -1617,22 +1743,18 @@ export async function requirementAcceptanceIssues(input: {
       if (score > bestSimilarity) bestSimilarity = score;
     }
     if (bestSimilarity >= 0.6) {
-      // 语义命中仅证明主题已响应；条款内金额参数仍须逐锚点字面落位（「支付300万元」零落位静默漏检）
-      const moneyAnchors = new Set<string>();
-      for (const moneyMatch of entry.text.matchAll(/(?:\d+(?:\.\d+)?\s*(?:万元|亿元|元))/giu)) moneyAnchors.add(moneyMatch[0].replace(/\s+/gu, ''));
-      if (moneyAnchors.size > 0) {
-        const missingMoney = [...moneyAnchors].filter(anchor => !normalized.includes(anchor));
-        if (missingMoney.length > 0) {
-          const coverage = requirementAnchorCoverage(entry, normalized);
-          partialResponseCandidates.push({ item: entry, kind, bestSimilarity, hit: coverage.hit, missing: coverage.missing });
-          continue;
-        }
+      // 语义命中仅证明主题已响应：条款内锚点仍须逐条落位（dangling 修复——语义放行但锚点缺失此前静默，
+      // 报告锚点率与修复链消费面分裂：s28l 138 条 unsatisfied 中多数即此类）；或/及条款由 LLM 判定兜底放行
+      if (clauseSatisfied(entry, normalized, variant)) continue;
+      const coverage = requirementAnchorCoverage(entry, normalized, variant);
+      if (coverage.total > 0) {
+        partialResponseCandidates.push({ item: entry, kind, bestSimilarity, hit: coverage.hit, missing: coverage.missing });
       }
       continue;
     }
     // 字面锚点兜底升级 + 分句兜底 + voice 通道：共享谓词 clauseSatisfied——三通道任一完全命中即已响应
-    if (clauseSatisfied(entry, normalized)) continue;
-    const coverage = requirementAnchorCoverage(entry, normalized);
+    if (clauseSatisfied(entry, normalized, variant)) continue;
+    const coverage = requirementAnchorCoverage(entry, normalized, variant);
     if (coverage.hit.length > 0) {
       // 部分响应候选：锚点部分命中，「或/及」条款由 LLM 批量判定兜底防误报
       partialResponseCandidates.push({ item: entry, kind, bestSimilarity, hit: coverage.hit, missing: coverage.missing });
@@ -1657,13 +1779,15 @@ export async function requirementAcceptanceIssues(input: {
     );
     for (const [candidateIndex, candidate] of partialResponseCandidates.entries()) {
       if (alternatives.get(candidateIndex)) continue;
+      // C8 S4-⑤：hit 为空时不得输出「已命中“”」空名单（s28m' 考核条款实录）——如实只报缺失项
+      const hitText = candidate.hit.length > 0 ? `已命中“${candidate.hit.join('、')}”，` : '';
       issues.push({
         level: 'error',
         severity: 'blocker',
         category: 'structure',
         owner: 'llm',
         repairability: 'llm_repairable',
-        message: `招标要求部分响应：${candidate.kind}“${candidate.item.text}”已命中“${candidate.hit.join('、')}”，但缺少“${candidate.missing.join('、')}”（最佳语义相似度 ${candidate.bestSimilarity.toFixed(2)}）`,
+        message: `招标要求部分响应：${candidate.kind}“${candidate.item.text}”${hitText}但缺少“${candidate.missing.join('、')}”（最佳语义相似度 ${candidate.bestSimilarity.toFixed(2)}）`,
         suggestion: `条款内全部关键数据与奖项必须逐项显性响应：在对应章节补写“${candidate.missing.join('、')}”对应内容（缺一即部分响应）。`,
         provenance: { detectorId: 'requirements-coverage', fingerprint: stableHash(candidate.item.text) },
       });

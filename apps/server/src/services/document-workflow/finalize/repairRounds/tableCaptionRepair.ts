@@ -18,7 +18,7 @@ import { completeTitlelessTableTitles, extractTitlelessTableBlocks } from '../..
 import type { FinalizeSession } from '../finalizeSession';
 
 export async function stageTableCaptionRepair(session: FinalizeSession): Promise<void> {
-  // 暗标正文禁表（标书编制规格 bodyTablePolicy=forbidden）：表格本不应存在（拆表轮已处理），题名补全不适用
+  // 正文禁表（bodyTablePolicy=forbidden，显式禁表句）：表格本不应存在（拆表轮已处理），题名补全不适用
   if (isBodyTableForbidden(session.bidComposition)) return;
   const countTitleless = (content: string) => extractTitlelessTableBlocks(content).length;
   const beforeTotal = session.finalChapterDrafts.reduce((sum, chapter) => sum + countTitleless(chapter.content), 0);
