@@ -29,8 +29,6 @@ export function isCriticalSectionTitle(title: string) {
 export const MAJOR_CONTENT_SECTION_RE = new RegExp(DEFAULT_WRITING_SPEC.majorContentSection, 'u');
 export const DIVISION_SECTION_RE = new RegExp(DEFAULT_WRITING_SPEC.divisionSection, 'u');
 
-/** 分部分项工序标签（工艺流程/施工流程 两种写法兼容）：仅作为内容要素判定的可选形式之一，非强制标签 */
-export const DIVISION_PROCESS_LABEL_RE = new RegExp(DEFAULT_WRITING_SPEC.divisionProcessLabel, 'u');
 
 // ═══════ 专项写法规则（迁自 chapterGeneration 硬编码提示词，单点化） ═══════
 

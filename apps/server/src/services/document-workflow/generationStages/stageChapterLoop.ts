@@ -20,7 +20,7 @@ import { chapterSectionFactUsageIssues } from '../chapterReview';
 import { retrieveWebEvidence } from '../webResearchService';
 import { buildChapterReadinessPlan } from '../chapterReadiness';
 import { buildCrossChapterDutyDeclaration } from '../chapterDutyDeclaration';
-import { WRITING_INTEGRITY_CONSTRAINTS } from '../documentWritingTaskBrief';
+import { chapterFocusRule, WRITING_INTEGRITY_CONSTRAINTS } from '../documentWritingTaskBrief';
 import { chapterTaskPromptForPlannedStructure, planChapterTask } from '../agentPlanner';
 import { throttleAgentWorkflowNodes } from '../agentWorkflow';
 import { governEvidenceValues, renderScopeOverrideAnchors } from '../factGovernance';
@@ -37,7 +37,7 @@ import { buildChapterFactCoverageContext, buildPlannedChapterContent, capFactCov
 import { isBodyFigureForbidden, isBodyTableForbidden } from '../bidComposition';
 import type { PlannedChapterContentInput, PlannedChapterContentResult } from '../chapterGeneration';
 import { chapterCompletionStatus, chapterGenerationTargets, compactChapterQueries, finalizeChapterContentQuality, optimizeChapterEvidence, preselectSemanticCandidates, resolveChapterPromptExecution, retrieveSectionEvidence, semanticEvidenceText, stripBidDisciplineSentencesSemantic } from '../documentGeneratorHelpers';
-import { alignChapterContentToBlueprint, buildChapterStructureFromBlueprint, chapterBlueprintAuthoritiesNeeded, chapterBlueprintAuthorityGaps, findBlueprintChapter, renderBlueprintMustCiteValues } from '../integratedBlueprint';
+import { alignChapterContentToBlueprint, blueprintDataForChapterInjection, fillAuthorityPlaceholders, buildChapterStructureFromBlueprint, chapterBlueprintAuthoritiesNeeded, chapterBlueprintAuthorityGaps, findBlueprintChapter, renderBlueprintMustCiteValues } from '../integratedBlueprint';
 import type { BlueprintAuthorityId, PlannedChapterStructure } from '../integratedBlueprint';
 import { blueprintPhaseLaborAuthorities } from '../authorityIndex';
 import { fixPhaseLaborValues } from '../documentIntegrityChecks';
@@ -216,7 +216,13 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
           source: 'basic-fact-cache',
         })));
     }
-    const plannedMaterialEvidence = resumedContent ? [] : await retrievePlannedMaterialEvidence({ manager: session.understanding.manager, projectRoot: session.prepare.projectRoot, chapter, plan, profile: session.prepare.projectMaterialProfile, scopedFilePaths, scopedMaterialRoots: session.prepare.materialScope.selectedMaterialRoots, limitPerQuery: Math.min(session.understanding.requestedEvidencePerChapter, 10), signal: session.global.input.signal }).catch(() => []);
+    const plannedMaterialEvidence = resumedContent ? [] : await retrievePlannedMaterialEvidence({ manager: session.understanding.manager, projectRoot: session.prepare.projectRoot, chapter, plan, profile: session.prepare.projectMaterialProfile, scopedFilePaths, scopedMaterialRoots: session.prepare.materialScope.selectedMaterialRoots, limitPerQuery: Math.min(session.understanding.requestedEvidencePerChapter, 10), signal: session.global.input.signal }).catch((error: unknown) => {
+      // 降级治理：失败 ≠ 无命中（原 `.catch(() => [])` 让调用异常表现为「计划材料证据为空」）
+      session.planning.generationDiagnostics.evidence.retrievalFailures = (session.planning.generationDiagnostics.evidence.retrievalFailures ?? 0) + 1;
+      session.planning.generationDiagnostics.llm.lastError = `计划材料证据召回失败（${chapter.title}）：${error instanceof Error ? error.message : String(error)}`;
+      console.error(`[gen] 计划材料证据召回失败（${chapter.title}）`, error);
+      return [];
+    });
     rawEvidence.push(...plannedMaterialEvidence);
     const matchedRoleContexts: Array<{ fact: never }> = [];
     if (session.planning.chapterIntentClassifier.needsBasicFacts(chapter.title)) rawEvidence.push(...session.understanding.safeProjectBasicEvidence.map(item => ({ ...item, chapterId: chapter.id, source: 'pinned-evidence' })));
@@ -259,6 +265,12 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       const webResult = await retrieveWebEvidence({ config: session.prepare.webAccessConfig, chapterId: chapter.id, chapterTitle: chapter.title, sectionTitles: chapter.sections || [], runtimeRules: session.prepare.runtimePromptRules, localFacts: [...session.understanding.preliminaryFactsModel.project, ...session.understanding.preliminaryFactsModel.schedule, ...session.understanding.preliminaryFactsModel.quality, ...session.understanding.preliminaryFactsModel.safety, ...session.understanding.preliminaryFactsModel.resources, ...session.understanding.preliminaryFactsModel.preciseFacts], signal: session.global.input.signal });
       session.understanding.webResearchReport.queries.push(...webResult.queries);
       session.understanding.webResearchReport.filteredCount += webResult.filtered + webResult.evidence.length;
+      // 降级治理：联网检索**失败**与「被噪声过滤」分列——原实现（webResearchService）把请求异常
+      // 计入 filtered，网络全挂会被读成「过滤掉了 N 条低质结果」。此处把失败计数同样上报。
+      if (webResult.failedQueries > 0) {
+        session.understanding.webResearchReport.failedCount = (session.understanding.webResearchReport.failedCount ?? 0) + webResult.failedQueries;
+        session.planning.generationDiagnostics.llm.lastError = `联网检索失败 ${webResult.failedQueries} 次（${chapter.title}）：${webResult.failures.slice(0, 3).join('；')}`;
+      }
     }
     const sampledEvidence = resumedContent ? [] : sampleProjectMaterialEvidence({ project: session.understanding.project, chapter, plan, profile: session.prepare.projectMaterialProfile, scopedFilePaths, highRisk: rolePoolRisk.highRisk });
     if (sampledEvidence.length > 0) scopedEvidence.push(...sampledEvidence);
@@ -358,10 +370,24 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
           return summary ? `【本章必须覆盖的清单分部分项全景（下列专有分项逐项写入正文施工方法，不得只写道路/铺装/绿化等大类而遗漏清单独有分项）】\n${summary}` : '';
         })()
       : '';
-    const roleContext = [graphRoleHint, chapterRequirementContext, chapterStructureContext, forcedSectionContext, dutyDeclaration, sixHundredPercentContext, scopeOverrideAnchors.length ? `【数据口径强制约束】${scopeOverrideAnchors.join('；')}` : '', ...WRITING_INTEGRITY_CONSTRAINTS, plan?.writingGoal, plan?.mustCover?.length ? `本章必须覆盖：${plan.mustCover.join('、')}` : '', plan?.mustUseMaterialKinds?.length ? `本章优先使用资料类型：${plan.mustUseMaterialKinds.join('、')}` : '', boqCoverageContext, ...parameterLines, ...billTaskLines, billLockText, drawingLockText].filter(Boolean).join('\n');
+    // G 线 P1-9：恢复逐章写作任务书注入。此前整体不注入（注释称与 plan 语义重叠），但 plan 的
+    // mustCover 主要来自模板 sections 与图谱匹配，**不含** REQUIREMENTS 侧最稀缺的那批要求知识。
+    // 结果是：写作端看不到「危大工程辨识清单逐项完整 / 应急预案八部分结构 / 扬尘治理六个百分百
+    // 逐项落位 / 四节一环保量化指标 / 农民工工资专用账户」等硬要求，必然先不写、再由检测器抓、
+    // 再靠修复轮补 —— 而修复轮没有知识库通道，只能改写已有文字，补不进缺失的要求响应。
+    const focusRule = chapterFocusRule(chapter.title);
+    const chapterFocusContext = focusRule
+      ? `【本章写作重点】${focusRule.goal}\n【本章必须覆盖（逐项落位，缺一即判未响应）】\n${focusRule.mustCover.map(item => `- ${item}`).join('\n')}`
+      : '';
+    const roleContext = [chapterFocusContext, graphRoleHint, chapterRequirementContext, chapterStructureContext, forcedSectionContext, dutyDeclaration, sixHundredPercentContext, scopeOverrideAnchors.length ? `【数据口径强制约束】${scopeOverrideAnchors.join('；')}` : '', ...WRITING_INTEGRITY_CONSTRAINTS, plan?.writingGoal, plan?.mustCover?.length ? `本章必须覆盖：${plan.mustCover.join('、')}` : '', plan?.mustUseMaterialKinds?.length ? `本章优先使用资料类型：${plan.mustUseMaterialKinds.join('、')}` : '', boqCoverageContext, ...parameterLines, ...billTaskLines, billLockText, drawingLockText].filter(Boolean).join('\n');
     const chapterPromptExecution = resolveChapterPromptExecution(session.prepare.promptPlan, chapter);
     if (session.prepare.promptPlan.writerPrompts.length > 0 && !chapterPromptExecution.primaryWriter) throw new Error(`${displayChapterTitle(chapter.title)} 写作主控提示词未进入章节生成阶段`);
-    const chapterPromptTexts = [chapterPromptExecution.promptTexts, session.prepare.generationControlPrompt].filter(Boolean).join('\n\n');
+    // G 线 P1-10：运行时规则并入写作提示词。`runtimeRulesText`（由用户提示词抽取的禁写项/必需表/
+    // 必需关键词，含 requirement 语义解析产出的强制要求清单）此前只进审查与修复提示词
+    // （reviewPromptTexts / factExtractionPromptTexts），而写作端只拿到「绑定提示词原文 + 控制提示词」——
+    // 用户明确配置的禁写项与必需项在写作时**对模型不可见**，必然先违规、再由检测器抓、再靠修复改写。
+    // 这与「从源头不产出」的写作侧单源原则相悖，故并入。
+    const chapterPromptTexts = [chapterPromptExecution.promptTexts, session.prepare.generationControlPrompt, session.prepare.runtimeRulesText].filter(Boolean).join('\n\n');
     const chapterPromptDetails = chapterPromptExecution.promptDetails.length ? chapterPromptExecution.promptDetails : ['未绑定章节写作提示词'];
     const chapterFactNeeds = buildChapterFactNeeds({ template: session.prepare.template, chapter, spec: session.prepare.documentSpec, profile: session.prepare.domainProfile, promptTexts: chapterPromptTexts, requirement: session.global.input.requirement, plan: plan ? { requiredContents: plan.mustCover, evidenceNeeds: Object.values(plan.evidenceQueries).flat() } : undefined });
     let resolvedFactNeeds = resolveChapterFactNeeds({ needs: chapterFactNeeds, factsModel: session.understanding.preliminaryFactsModel, evidence: scopedEvidence, profile: session.prepare.domainProfile, excludedEvidenceKeys: session.understanding.excludedEvidenceKeys });
@@ -398,7 +424,14 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
         session.global.emitProgress();
       }
       // P1-4：缺失事实与必需事实需求并入同一次深召回（原两次调用查询集高度重叠，合并后每章深召回查询数约降 40%）
-      const deepEvidence = await retrieveDeepChapterEvidence({ manager: session.understanding.manager, projectRoot: session.prepare.projectRoot, chapter, scopedFilePaths, scopedMaterialRoots: session.prepare.materialScope.selectedMaterialRoots, fileRoleByPath: session.understanding.fileRoleByPath, fileProcessingByPath: session.understanding.fileProcessingByPath, requiredNeeds: [...new Set([...missingFacts, ...requiredMissingNeeds])], extraClues: session.prepare.requirementSemantics?.factClues || [], highRisk: rolePoolRisk.highRisk || requiredMissingNeeds.length > 0, signal: session.global.input.signal }).catch(() => []);
+      const deepEvidence = await retrieveDeepChapterEvidence({ manager: session.understanding.manager, projectRoot: session.prepare.projectRoot, chapter, scopedFilePaths, scopedMaterialRoots: session.prepare.materialScope.selectedMaterialRoots, fileRoleByPath: session.understanding.fileRoleByPath, fileProcessingByPath: session.understanding.fileProcessingByPath, requiredNeeds: [...new Set([...missingFacts, ...requiredMissingNeeds])], extraClues: session.prepare.requirementSemantics?.factClues || [], highRisk: rolePoolRisk.highRisk || requiredMissingNeeds.length > 0, signal: session.global.input.signal }).catch((error: unknown) => {
+        // 降级治理：失败 ≠ 命中 0 条。原 `.catch(() => [])` 让调用异常在 UI 上显示为「命中 0 条」，
+        // 而深召回是写作证据的主来源之一——基础设施故障被读成「资料里没有」。
+        session.planning.generationDiagnostics.evidence.retrievalFailures = (session.planning.generationDiagnostics.evidence.retrievalFailures ?? 0) + 1;
+        session.planning.generationDiagnostics.llm.lastError = `章深度召回失败（${chapter.title}）：${error instanceof Error ? error.message : String(error)}`;
+        console.error(`[gen] 章深度召回失败（${chapter.title}）`, error);
+        return [];
+      });
       deepEvidenceCount = deepEvidence.length;
       // P2-B 双通道覆盖度观测：深召回通道注入条数
       const channelDiag = session.planning.generationDiagnostics.evidence;
@@ -428,7 +461,12 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     }
     // P1-4：合并深召回后仍有必需事实缺口时做一次轻量补充（原第二次深召回，highRisk 强制；仅当新 needs 出现时触发）
     if (requiredMissingNeeds.length > 0 && scopedFilePaths.length > 0) {
-      const mergedSupplementalEvidence = await retrieveDeepChapterEvidence({ manager: session.understanding.manager, projectRoot: session.prepare.projectRoot, chapter, scopedFilePaths, scopedMaterialRoots: session.prepare.materialScope.selectedMaterialRoots, fileRoleByPath: session.understanding.fileRoleByPath, fileProcessingByPath: session.understanding.fileProcessingByPath, requiredNeeds: requiredMissingNeeds, extraClues: session.prepare.requirementSemantics?.factClues || [], highRisk: true, signal: session.global.input.signal }).catch(() => []);
+      const mergedSupplementalEvidence = await retrieveDeepChapterEvidence({ manager: session.understanding.manager, projectRoot: session.prepare.projectRoot, chapter, scopedFilePaths, scopedMaterialRoots: session.prepare.materialScope.selectedMaterialRoots, fileRoleByPath: session.understanding.fileRoleByPath, fileProcessingByPath: session.understanding.fileProcessingByPath, requiredNeeds: requiredMissingNeeds, extraClues: session.prepare.requirementSemantics?.factClues || [], highRisk: true, signal: session.global.input.signal }).catch((error: unknown) => {
+        session.planning.generationDiagnostics.evidence.retrievalFailures = (session.planning.generationDiagnostics.evidence.retrievalFailures ?? 0) + 1;
+        session.planning.generationDiagnostics.llm.lastError = `必需事实补充召回失败（${chapter.title}）：${error instanceof Error ? error.message : String(error)}`;
+        console.error(`[gen] 必需事实补充召回失败（${chapter.title}）`, error);
+        return [];
+      });
       // P2-B 双通道覆盖度观测：轻量补充（required-fact-evidence）注入条数
       const channelDiag = session.planning.generationDiagnostics.evidence;
       channelDiag.retrievedEvidenceInjected = (channelDiag.retrievedEvidenceInjected ?? 0) + mergedSupplementalEvidence.length;
@@ -596,7 +634,12 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
           // 定向反馈携带（initialFeedback）：失败块单块重写 attempt=0 即注入上一轮缺陷原文（缺失要点点名等）——
           // 历史缺陷：无反馈的隔离重写从零生成，极易复现同一漏点（4.44 丰乐镇工期章 2 块全失败于气候要点）
           buildPlannedChapterContent({ ...buildInput, targetWords: block.targetWords, maxWords: Math.ceil(block.targetWords * 1.1), initialFeedback: retryFeedback }, { blocks: [block], coveredSections: [], fallbackSections: [] })
-            .catch(() => undefined)
+            .catch((error: unknown) => {
+              // 降级治理：原实现丢弃异常对象 ⇒ 章阻断可见但**失败原因不可定位**（LLM 异常/超时/解析失败无差别）
+              session.planning.generationDiagnostics.llm.lastError = `失败块定向重写异常（${chapter.title}）：${error instanceof Error ? error.message : String(error)}`;
+              console.error(`[gen] 失败块定向重写异常（${chapter.title}）`, error);
+              return undefined;
+            })
         ));
         const merged = [...sections];
         // C7 对冲接纳痕迹回退链：重写轮仍失败时收集失守块（重写轮末轮痕迹优先——更接近收敛的尝试；
@@ -660,7 +703,13 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
           chapterTaskStage.message = `${chapterTaskResult.task.sections.filter(item => item.ready).length}/${chapterTaskResult.task.sections.length} 条细目任务就绪（已规划为 ${plannedStructure.blocks.length} 个主题块）`;
         }
         session.global.emitProgress(session.global.chapterDrafts);
-        const plannedBuildInput: PlannedChapterContentInput = { template: session.prepare.template, chapter, evidence, missingFacts, promptTexts: plannedPromptTexts, projectContext: session.planning.chapterScopedProjectContext(chapter), skeletonProjectContext: session.planning.projectContext, requirement: session.global.input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, bidComposition: session.understanding.bidComposition, factCoverageContext, compactProjectContext: true, scopedProjectContext: true, blueprintData: session.blueprint.integratedBlueprint?.validation.passed ? session.blueprint.integratedBlueprint.data : undefined, blueprintChapter: chapterBlueprintSlice, blueprintMustCiteHint, sectionEvidenceProvider: sectionEvidenceForChapter, onSectionProgress: onSectionProgressForCheckpoint, diagnostics: session.planning.generationDiagnostics, signal: session.global.input.signal };
+        const plannedBuildInput: PlannedChapterContentInput = { template: session.prepare.template, chapter, evidence, missingFacts, promptTexts: plannedPromptTexts, projectContext: session.planning.chapterScopedProjectContext(chapter), skeletonProjectContext: session.planning.projectContext, requirement: session.global.input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, bidComposition: session.understanding.bidComposition, factCoverageContext, compactProjectContext: true, scopedProjectContext: true, // G 线 P1-5：蓝图数据**按域下发**——原为「validation.passed ? data : undefined」的全有全无：
+          // 任一校验未过即整套蓝图都不注入，于是「劳动力不可用」会连带掐断进度/清单/图纸等
+          // 完全可用的权威，章级损失被放大成篇级损失。现按 authorityAvailability 逐域过滤，
+          // 不可用域清零、其余照常；整体 passed=false 时仍不注入（该校验失败含清单缺失等
+          // 全域性缺口，见 validate.ts 的零权威骨架蓝图防护）。
+          blueprintData: blueprintDataForChapterInjection(session.blueprint.integratedBlueprint),
+          blueprintChapter: chapterBlueprintSlice, blueprintMustCiteHint, sectionEvidenceProvider: sectionEvidenceForChapter, onSectionProgress: onSectionProgressForCheckpoint, diagnostics: session.planning.generationDiagnostics, signal: session.global.input.signal };
         const plannedFirst = await session.global.withProgressHeartbeat(() => measureGenerationStep(session.planning.generationDiagnostics, `chapter-planned-block-draft:${chapter.id}`, () =>
           buildPlannedChapterContent(plannedBuildInput, plannedStructure)
         ));
@@ -700,6 +749,18 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       // B3 确定性对齐：章节成稿后，must_cite+strict 槽位数值与蓝图章切片不一致时按蓝图回填
       // （只替换数字本身、不动句式）；未引用缺口进观测交由跨章一致性审查兑底。
       // 对齐覆盖主题块成稿路径（C1 管线收敛后章节成稿唯一路径）；蓝图未覆盖本章时跳过
+      // G 线 P2-1 占位符填充：**必须先于写后对齐**——先由权威层把 `{{AUTH:<path>}}` 填成真值，
+      // 写后对齐才有值可对；顺序反了会让对齐面对占位符文本做正则替换，行为不可预期。
+      // 失效模式已设计为降级：模型不写占位符 ⇒ 本步 no-op，正文与历史完全一致。
+      // 未决（path 无权威值）与畸形 token 一律**保留原样**并上报——不静默删除（P2-2 口径）。
+      if (llmContent && session.blueprint.integratedBlueprint) {
+        const fill = fillAuthorityPlaceholders(llmContent, session.blueprint.integratedBlueprint.data);
+        if (fill.filled.length > 0) llmContent = fill.markdown;
+        if (fill.unresolved.length > 0 || fill.malformed.length > 0) {
+          session.understanding.missingItems.push(`${chapter.title}：权威占位符未决 ${fill.unresolved.length} 处（${fill.unresolved.slice(0, 4).join('、')}）${fill.malformed.length > 0 ? `；畸形 ${fill.malformed.length} 处` : ''}`);
+          session.planning.generationDiagnostics.llm.lastInfo = `权威占位符未决：${chapter.title} ${fill.unresolved.length} 处无权威值、${fill.malformed.length} 处畸形（均保留原样，不静默删除）`;
+        }
+      }
       if (llmContent && chapterBlueprintSlice && session.blueprint.integratedBlueprint) {
         const aligned = alignChapterContentToBlueprint(llmContent, chapterBlueprintSlice, session.blueprint.integratedBlueprint.data);
         if (aligned.fixed.length > 0) {

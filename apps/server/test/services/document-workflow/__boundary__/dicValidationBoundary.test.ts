@@ -324,8 +324,9 @@ describe('qualityReportIssues', () => {
   it('未通过 issue', () => {
     const r = qualityReportIssues({"passed":false,"deliveryProbability":60,"target":80,"overall":0.6,"summary":"","scores":{"completeness":0.6,"specificity":0.6,"compliance":0.6,"executability":0.6,"normalization":0.6,"uniqueness":0.6},"actions":["补齐短板","修复阻断"]});
     expect(r.length).toEqual(1);
-    expect(r[0]?.level).toEqual("info");
-    expect(r[0]?.message).toEqual("交付置信度未达目标：60% / 80%");
+    // G 线 P0-1：主尺未达标从 info 升为 error + blocker（此前在数据结构上永远进不了阻断集）
+    expect(r[0]?.level).toEqual("error");
+    expect(r[0]?.message).toEqual("交付置信度未达目标：60% / 80%（综合评分 0.6/100）");
     expect(r[0]?.suggestion).toEqual("补齐短板 修复阻断");
   });
   it('actions 空数组', () => {

@@ -47,7 +47,7 @@ describe('修复轮顺序快照（变更必须显式改快照并附理由）', (
     ]);
   });
 
-  it('LLM_PATCH_REPAIR_ROUNDS 18 轮顺序快照（P11 全链接入的登记载体）', () => {
+  it('LLM_PATCH_REPAIR_ROUNDS 21 轮顺序快照（P11 全链接入的登记载体）', () => {
     expect(LLM_PATCH_REPAIR_ROUNDS.map(round => round.id)).toEqual([
       'fact-landing',
       'table-repair',
@@ -56,6 +56,9 @@ describe('修复轮顺序快照（变更必须显式改快照并附理由）', (
       'workpackage-skeleton-repair',
       'planned-section-repair',
       'global-consistency-repair',
+      'cross-project-value-copy-repair',
+      'requirement-response-repair',
+      'numeric-verification',
       'quotation-balance-repair',
       'content-depth-repair',
       'control-loop-repair',
@@ -72,13 +75,16 @@ describe('修复轮顺序快照（变更必须显式改快照并附理由）', (
 
   it('LLM 修复轮 anchoredTo 检测器锚定不变（修复定位=检测定位契约）', () => {
     expect(LLM_PATCH_REPAIR_ROUNDS.map(round => ({ id: round.id, anchoredTo: round.anchoredTo }))).toEqual([
-      { id: 'fact-landing', anchoredTo: 'important-unplaced-facts' },
+      { id: 'fact-landing', anchoredTo: 'fact-coverage' },
       { id: 'table-repair', anchoredTo: 'table-quality' },
-      { id: 'table-execution-repair', anchoredTo: 'table-plan-execution' },
-      { id: 'templating-repair', anchoredTo: 'templating-filler' },
-      { id: 'workpackage-skeleton-repair', anchoredTo: 'workpackage-skeleton' },
-      { id: 'planned-section-repair', anchoredTo: 'planned-section-completeness' },
-      { id: 'global-consistency-repair', anchoredTo: 'global-consistency-review' },
+      { id: 'table-execution-repair', anchoredTo: 'bid-composition-body-table' },
+      { id: 'templating-repair', anchoredTo: 'construction-org-generic-language' },
+      { id: 'workpackage-skeleton-repair', anchoredTo: 'construction-org-division-section' },
+      { id: 'planned-section-repair', anchoredTo: 'writer-missing-section' },
+      { id: 'global-consistency-repair', anchoredTo: 'cross-chapter-consistency' },
+      { id: 'cross-project-value-copy-repair', anchoredTo: 'cross-project-value-copy' },
+      { id: 'requirement-response-repair', anchoredTo: 'requirements-coverage' },
+      { id: 'numeric-verification', anchoredTo: 'authority-audit-gap' },
       { id: 'quotation-balance-repair', anchoredTo: 'punctuation-artifact' },
       { id: 'content-depth-repair', anchoredTo: 'critical-section-depth' },
       { id: 'control-loop-repair', anchoredTo: 'construction-org-control-loop' },

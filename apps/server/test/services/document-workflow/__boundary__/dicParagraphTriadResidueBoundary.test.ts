@@ -310,9 +310,9 @@ describe('X4 计划工期字段：格式与聚合', () => {
     const md = '| 计划工期 | 工期延误 |\n| 计划工期 | 罚款处理 |';
     expect(basicInfoScheduleFieldIssues(md)).toHaveLength(2);
   });
-  it('X4-14 3 行违约 → slice(0,2) 截断 2 条', () => {
+  it('上限治理：X4-14 3 行违约 → slice(0,2) 不再截断 2 条（全量 3 条）', () => {
     const md = '| 计划工期 | 工期延误 |\n| 计划工期 | 罚款处理 |\n| 计划工期 | 解除合同 |';
-    expect(basicInfoScheduleFieldIssues(md)).toHaveLength(2);
+    expect(basicInfoScheduleFieldIssues(md)).toHaveLength(3);
   });
   it('X4-15 一行两违约词 → 1 条', () => {
     const issues = basicInfoScheduleFieldIssues('| 计划工期 | 工期延误且罚款处理 |');

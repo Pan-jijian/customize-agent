@@ -10,10 +10,11 @@ import { buildProjectMaterialSummary } from '../document-core/projectMaterialSer
 import { resolveTemplateMaterialRoles } from '../document-core/materialRoleResolver';
 import { evaluateDocumentReadiness } from '../document-validation/documentReadinessService';
 import type { DocumentTemplate, ProjectBinding, PromptBinding } from './types';
-import { templateProjectBindings } from './projectMaterialProfile';
+import { templateProjectBindings, inferMaterialKind } from './projectMaterialProfile';
 import { isUsableKnowledgeFile, type KnowledgeFile } from './agentWorkflow';
 import { charsPerPageForSettings, explicitLengthTargets } from './budget';
 import { tuningProfile } from './tuningProfile';
+import { extractExplicitOutlineFromSources } from './outline';
 
 export type PromptExecutionCategory = 'writer' | 'chapter' | 'extraction' | 'formatting' | 'reference';
 
@@ -274,16 +275,6 @@ export function getDocumentTemplate(templateId: string): DocumentTemplate | unde
   return listDocumentTemplates().find(template => template.id === templateId);
 }
 
-/** 获取指定版本的模版溯源信息（不保留历史内容快照，仅用于溯源展示） */
-export function getTemplateAtVersion(templateId: string, reqVersion: number): { template: DocumentTemplate; history: Array<{ version: number; timestamp: number; summary: string }>; currentVersion: number } | undefined {
-  const template = getDocumentTemplate(templateId);
-  if (!template) return undefined;
-  const currentVersion = template.version || 1;
-  const clampedVersion = Math.max(1, Math.min(reqVersion, currentVersion));
-  const history = (template.changeLog || []).filter(e => e.version <= clampedVersion);
-  return { template: { ...template, version: clampedVersion }, history, currentVersion };
-}
-
 export function saveDocumentTemplate(template: DocumentTemplate): DocumentTemplate {
   const sanitized = sanitizeTemplate(template);
   const existing = readCustomTemplates().find(item => item.id === sanitized.id);
@@ -312,6 +303,9 @@ export function saveDocumentTemplate(template: DocumentTemplate): DocumentTempla
   return versioned;
 }
 
+/** 占位章标题（G 线 P1-11）：只写文档类型名、不含实际章节语义的容器章 */
+const PLACEHOLDER_CHAPTER_TITLE_RE = /^(?:施工组织设计|技术标|投标文件|施工方案|技术方案)$/u;
+
 export async function validateDocumentTemplateRun(templateId: string, projectRoot = getProjectRoot(), options: { requirement?: string } = {}) {
   const template = getDocumentTemplate(templateId);
   const issues: Array<{ level: 'error' | 'warning'; message: string }> = [];
@@ -326,6 +320,10 @@ export async function validateDocumentTemplateRun(templateId: string, projectRoo
       config: undefined,
     };
   }
+  // G 线 P1-11 章节结构前置校验：模板是章节规划的**唯一来源**（无显式大纲时按模板逐章成稿），
+  // 故「只有一章」或「唯一一章是占位容器」的模板会直接产出无结构的文档，
+  // 而此前这类模板**合法通过**——原校验只查角色配置与资料绑定，不查章节结构本身。
+  const templateChapters = template.chapters || [];
   const promptRoles = listDocumentRoles('prompt');
   const configId = defaultProjectRoleConfigIdForTemplate(template);
   const config = projectRoleConfigForTemplate(template);
@@ -342,6 +340,38 @@ export async function validateDocumentTemplateRun(templateId: string, projectRoo
   const materialFilePaths = expandProjectBindings(projectBindings, files);
   if (projectBindings.length === 0) issues.push({ level: 'error', message: '模板未绑定项目资料包，请先选择需要参与生成的项目文件夹。' });
   else if (materialFilePaths.length === 0) issues.push({ level: 'error', message: '模板绑定的项目资料包不存在或没有可用索引文件，请重新选择项目资料包。' });
+  // G 线 P0-10 四源齐备前置断言：施工组织设计的事实全部来自四源（招标/清单/图纸/补疑），
+  // 缺源时必须**明确失败并说清缺什么**，而不是写出一份「看起来完整、实则无依据」的文档
+  // （此前的缺失告警只在项目画像里，且补疑缺失连告警都没有）。
+  // 口径：招标/清单/图纸缺一即阻断；补疑缺失为告警（并非每个项目都发答疑澄清）。
+  if (materialFilePaths.length > 0) {
+    const kindCount = new Map<string, number>();
+    const kindSamples = new Map<string, string[]>();
+    for (const filePath of materialFilePaths) {
+      const { kind } = inferMaterialKind(filePath);
+      kindCount.set(kind, (kindCount.get(kind) ?? 0) + 1);
+      const samples = kindSamples.get(kind) ?? [];
+      if (samples.length < 3) samples.push(path.basename(filePath));
+      kindSamples.set(kind, samples);
+    }
+    const describe = (kind: string) => {
+      const count = kindCount.get(kind) ?? 0;
+      return count > 0 ? `${count} 份（${(kindSamples.get(kind) ?? []).join('、')}${count > 3 ? ' 等' : ''}）` : '**缺失**';
+    };
+    const requiredSources: Array<{ kind: string; label: string; hint: string }> = [
+      { kind: 'tender_document', label: '招标文件', hint: '缺招标文件则编制规格、评审要求与响应锚点无从提取，要求实体响应（权重 0.30）无判定对象' },
+      { kind: 'bill_of_quantities', label: '工程量清单', hint: '缺清单则工程量/规格/资源计划类权威值全部不可推导，蓝图不可用' },
+      { kind: 'drawing', label: '图纸/设计资料', hint: '缺图纸则施工方法、专业接口与构造做法无依据，针对性章无法成稿' },
+    ];
+    const coverageText = `招标 ${describe('tender_document')}｜清单 ${describe('bill_of_quantities')}｜图纸 ${describe('drawing')}｜补疑 ${describe('addendum')}`;
+    const missing = requiredSources.filter(source => (kindCount.get(source.kind) ?? 0) === 0);
+    for (const source of missing) {
+      issues.push({ level: 'error', message: `资料不齐备：未识别到${source.label}。${source.hint}。请补充后重新索引再生成。（当前资料构成：${coverageText}）` });
+    }
+    if ((kindCount.get('addendum') ?? 0) === 0) {
+      issues.push({ level: 'warning', message: `未识别到补疑/答疑澄清资料（若本项目确无答疑可忽略）。当前资料构成：${coverageText}` });
+    }
+  }
   let previewMaterialSummary;
   if (template) {
     previewMaterialSummary = buildProjectMaterialSummary(resolvedProjectRoot, {
@@ -372,6 +402,31 @@ export async function validateDocumentTemplateRun(templateId: string, projectRoo
     issues.push(...notIndexedWarnings);
   }
   const resolvedPrompts = readPromptContents(promptBindings);
+  // G 线 P1-11 章节结构前置校验（**必须放在这里**：提示词解析之后才算得出显式大纲）。
+  //
+  // 关键前提：**显式大纲会整份替换模板章节**（stagePrepare：`hasExplicitOutline` 时
+  // `template.chapters = explicitPromptChapters`）。此时模板只作载体（outputTitle/角色配置/资料绑定），
+  // 章节结构由**用户需求或提示词里的大纲**提供——单章占位模板是该工作流的**正常形态**
+  //（丰乐镇模板即如此：1 章占位，大纲在提示词里）。
+  // `generate.ts` 对 `level:'error'` 直接 422 且**生成根本不启动**，故本校验绝不能误伤该形态。
+  // 大纲来源与 stagePrepare **逐字同源**（两路：用户需求 + 写作/章节提示词角色）。
+  const outlineSourceTexts = [
+    { text: options.requirement || '', source: '用户需求' },
+    // 取全部提示词内容（`readPromptContents` 的返回形状不含 category，无法按写作/章节过滤）。
+    // 这是**超集**——只会让「有显式大纲」更容易成立，方向安全（本校验绝不误挡生成）。
+    { text: resolvedPrompts.map(prompt => prompt.content).join('\n'), source: '提示词角色' },
+  ];
+  const outlineChapters = extractExplicitOutlineFromSources(outlineSourceTexts.map(item => ({ ...item, strict: true })));
+  const hasExplicitOutlineSource = outlineChapters.length >= 2;
+  if (!hasExplicitOutlineSource && templateChapters.length < 2) {
+    issues.push({ level: 'error', message: `模板章节结构不足且未提供显式大纲：当前 ${templateChapters.length} 章。请在模板中补充章节（至少 2 章，如「编制依据」+ 各类措施章），或在用户需求/提示词中给出显式大纲（章数 ≥ 2）。` });
+  } else if (!hasExplicitOutlineSource && templateChapters.every(chapter => (chapter.sections?.length ?? 0) === 0 && PLACEHOLDER_CHAPTER_TITLE_RE.test((chapter.title || '').trim()))) {
+    issues.push({ level: 'error', message: '模板全部章节均为占位容器且未提供显式大纲（无小节且标题为文档类型名）；请补充章节与小节，或在用户需求/提示词中给出显式大纲。' });
+  }
+  if (hasExplicitOutlineSource && templateChapters.length < 2) {
+    // 显式告知（非阻断）：模板章节将被大纲整份替换，用户应知情
+    issues.push({ level: 'warning', message: `模板章节将被显式大纲覆盖：模板 ${templateChapters.length} 章 → 大纲 ${outlineChapters.length} 章（大纲来源：用户需求或写作/章节提示词角色）` });
+  }
   const configuredPromptRoleIds = new Set(config?.promptRoles.map(item => item.roleId) || []);
   for (const item of config?.promptRoles || []) {
     const role = promptRoles.find(candidate => candidate.id === item.roleId);
@@ -542,15 +597,6 @@ export function violatesConfiguredChapterTitleForbiddenFilter(title: string, tem
     if (filter.minLength && title.length < filter.minLength) return true;
     if (filter.maxLength && title.length > filter.maxLength) return true;
     return filter.forbiddenPatterns.some(pattern => matchesTextPattern(title, pattern));
-  });
-}
-
-export function violatesConfiguredChapterTitleFilter(title: string, template: DocumentTemplate) {
-  return configuredChapterTitleFilters(template).some(filter => {
-    if (filter.minLength && title.length < filter.minLength) return true;
-    if (filter.maxLength && title.length > filter.maxLength) return true;
-    if (filter.forbiddenPatterns.some(pattern => matchesTextPattern(title, pattern))) return true;
-    return filter.requiredPatterns.length > 0 && !filter.requiredPatterns.some(pattern => matchesTextPattern(title, pattern));
   });
 }
 

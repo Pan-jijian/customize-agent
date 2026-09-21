@@ -753,7 +753,7 @@ describe('C-T2 buildNumericTraceFindings / numericTraceabilityIssues（反查与
   });
 });
 
-describe('C-T2 demoteUnsourcedNumericTokens 链尾改定性（可删类删除+保护+幂等）', () => {
+describe('C-T2 demoteUnsourcedNumericTokens（G 线 P2-2 停用：不以删除数值通过门禁）', () => {
   const boqModel = () => factsModel([], [], [{
     tableType: '清单',
     headers: ['序号', '项目编码', '项目名称', '工程量', '单位'],
@@ -761,58 +761,25 @@ describe('C-T2 demoteUnsourcedNumericTokens 链尾改定性（可删类删除+�
     sourceFile: '清单.xlsx',
   }]);
 
-  it('真未溯源可删项删除改定性 + details + 幂等', () => {
+  // 原实现在此断言「未溯源数值被删除改定性、details 逐条列出、并列顿号清理、题注编号豁免」等 ——
+  // 那是**用删除通过门禁**：交付物看上去干净，实际是「本来该有数据的地方被抹掉」，
+  // 且修复链无知识库通道、补不进新材料，删除成了它唯一能收敛的动作。
+  // 现口径：保留数值与「无主数值审计」blocker，由交付门禁按「未达交付标准」处理。
+
+  it('停用后不再删除未溯源数值（返回 null，markdown 原样）', () => {
     const fix = demoteUnsourcedNumericTokens({ markdown: '栽植色带90m²，按设计标高整地。铺种草皮80m²。', factsModel: boqModel() });
-    expect(fix).toBeTruthy();
-    expect(fix!.fixedCount).toBe(2);
-    expect(fix!.markdown).toContain('栽植色带，按设计标高整地。');
-    expect(fix!.markdown).toContain('铺种草皮。');
-    expect(fix!.details).toHaveLength(2);
-    expect(demoteUnsourcedNumericTokens({ markdown: fix!.markdown, factsModel: boqModel() })).toBeNull();
+    expect(fix).toBeNull();
   });
 
-  it('r28h 归因：并列数值删除后连续顿号与悬接「等」清理（「按3m、4m、5m 等」→「按3m等」）', () => {
-    // r28h2 实测：「3m」受「按」字尾保护，并列项「4m」「5m」删除后残留「、、」+「、等」
-    // 直坠终门禁（punctuationArtifactIssues）；tidyRemovalArtifacts 扩围后收敛（幂等可重放）
-    const fix = demoteUnsourcedNumericTokens({ markdown: '宽度按3m、4m、5m 等设计路幅控制。', factsModel: boqModel() });
-    expect(fix).toBeTruthy();
-    expect(fix!.fixedCount).toBe(2);
-    expect(fix!.markdown).toContain('宽度按3m等设计路幅控制。');
-    expect(fix!.markdown).not.toContain('、、');
-    expect(fix!.markdown).not.toContain('、等');
-    expect(demoteUnsourcedNumericTokens({ markdown: fix!.markdown, factsModel: boqModel() })).toBeNull();
+  it('幂等：重复调用同样返回 null，不产生任何改写', () => {
+    const call = () => demoteUnsourcedNumericTokens({ markdown: '栽植色带90m²。', factsModel: boqModel() });
+    expect(call()).toBeNull();
+    expect(call()).toBeNull();
   });
 
-  it('删除前保护：量词/比较/维度/符号字尾与时间温度类不删除', () => {
-    const md = '每座90m²，壁厚5mm，间距1.2m，不少于3台，整改3天，升温5℃。';
-    expect(demoteUnsourcedNumericTokens({ markdown: md, factsModel: boqModel() })).toBeNull();
-  });
-
-  it('r28h 归因：题注编号前导豁免（「表3-4 道路结构层…」的「4 道」是表序段不删除）', () => {
-    // r28h2 实测：「表3-4 道路…」的「4 道」被判未溯源数值+单位（道）删除 →「表3-路…」残缺编号
-    // 直坠终检 table-caption blocker；M4a 题注前缀豁免后不删，正文「安排4道工序」类数值照删（行为不扩大）
-    const caption = '表3-4 道路结构层主要物资投入计划表\n\n| 物资名称 | 规格型号 | 单位 |';
-    expect(demoteUnsourcedNumericTokens({ markdown: caption, factsModel: boqModel() })).toBeNull();
-    const body = demoteUnsourcedNumericTokens({ markdown: '安排4道工序流水施工。', factsModel: boqModel() });
-    expect(body).toBeTruthy();
-    expect(body!.markdown).toBe('安排工序流水施工。');
-  });
-
-  it('语料已溯源的数值不被删除（保护合法引用）', () => {
-    expect(demoteUnsourcedNumericTokens({ markdown: '栽植色带9.6m²。', factsModel: boqModel() })).toBeNull();
-  });
-
-  it('r28j M22：小节编号尾「.」保护（「#### 7.1.1 道路…」「### 3.1 道路…」的「1 道」不删除）', () => {
-    // r28j 终稿实锤：「#### 7.1.1 道路作业面安全防护」→「#### 7.1.路…」、「### 3.1 道路结构层物资」
-    // →「### 3.路…」——左窗口尾「.」不在保护表，编号末段+标题首字「1 道」被误删
-    const md = '#### 7.1.1 道路作业面安全防护\n本节针对道路作业面落实安全防护措施。\n### 3.1 道路结构层物资\n| 物资名称 | 单位 |';
-    expect(demoteUnsourcedNumericTokens({ markdown: md, factsModel: boqModel() })).toBeNull();
-  });
-
-  it('r28j M22：「图9-2」类题注编号保护 + 正文真删不误保护', () => {
-    expect(demoteUnsourcedNumericTokens({ markdown: '详见图9-2 项目效果图与节点大样。', factsModel: boqModel() })).toBeNull();
-    const body = demoteUnsourcedNumericTokens({ markdown: '铺装4道工序流水施工。', factsModel: boqModel() });
-    expect(body).toBeTruthy();
-    expect(body!.markdown).toBe('铺装工序流水施工。');
+  it('含标题表序段的正文同样不改写（原「编号豁免」逻辑随停用一并失效）', () => {
+    const fix = demoteUnsourcedNumericTokens({ markdown: '表3-4 道路结构层按3m、4m、5m 等分层摊铺。', factsModel: boqModel() });
+    expect(fix).toBeNull();
   });
 });
+

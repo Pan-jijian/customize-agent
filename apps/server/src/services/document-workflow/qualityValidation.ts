@@ -111,10 +111,27 @@ function classifyValidationIssue(issue: ValidationIssue): ValidationIssue {
   return { ...issue, severity: 'suggestion', repairability: 'not_repair_needed', category: 'style', owner: 'system' };
 }
 
-function isHardExportBlockingIssue(issue: ValidationIssue) {
+/**
+ * **阻断口径单源**（G 线 P0-7）：报告与门禁消费同一个出口。
+ *
+ * 此前有两套同名口径：报告的 `blockingIssues` 数「所有 error 级问题」，
+ * 而终门禁 `isHardExportBlockingIssue` 是白名单子集——两者是集合包含关系却同名，
+ * 于是「报告说 12 项阻断、门禁说 3 项」这类自相矛盾无法从数据结构上排除。
+ *
+ * 现口径统一到**门禁侧**（更严、且是真正决定能否交付的那个）：
+ * 报告的综合扣分与门禁的放行判定从此不可能分歧。
+ * 变更点：report.deliveryProbability 的扣分基数由「所有 error」变为「门禁阻断集」
+ * ⇒ 部分历史报告的分数会变（更贴近实际交付判定），按 P3-5 递增口径版本。
+ */
+export function classifyBlockingIssue(issue: ValidationIssue) {
   const governedIssue = classifyValidationIssue(issue);
   if (governedIssue.severity !== 'blocker') return false;
   if (governedIssue.level === 'error' && governedIssue.severity === 'blocker' && /placeholder|source|style|format|structure/u.test(String(governedIssue.category || ''))) return true;
+  // G 线 P0-1 交付资格判定直通：主尺未达标是**最上游的交付判定**，显式直通而非依赖默认
+  // category 归类 —— 本函数下方有多条按 message 的放行项（目录与正文 / 生成后事实反查失败 /
+  // 规划小节正文过短 / 事实一致性冲突：项目名称 / 证据使用覆盖率偏低 等），显式直通可确保
+  // 交付判定不会被后续新增的排除规则顺手豁免。
+  if (governedIssue.level === 'error' && governedIssue.severity === 'blocker' && /交付置信度未达目标/u.test(issue.message)) return true;
   // 4.19 危大闭环新检查器直通：危大分级/支护形式/设备进场的确定性判定（category=fact_consistency）
   // 消息锚点为三组新检查器专用前缀，不影响历史 fact_consistency 消息的白名单把关（宁漏报不误报）
   if (governedIssue.level === 'error' && governedIssue.category === 'fact_consistency' && /危大工程判定缺失|超危大工程判定缺失|支护形式与资料矛盾|支护形式未落地|设备进场时间荒谬|设备进场工序倒挂/u.test(issue.message)) return true;
@@ -135,7 +152,11 @@ function isHardExportBlockingIssue(issue: ValidationIssue) {
   if (/事实一致性冲突：项目名称/u.test(issue.message)) return false;
   if (/跨章一致性|专业评分不足|专业缺口|泛化套话|缺少关键线路|缺少材料验收|缺少风险识别|缺少进场/u.test(issue.message)) return issue.level === 'error' && !/证据使用覆盖率偏低|章节逻辑依赖不足|文档交付评分报告/u.test(issue.message);
   if (!isExportBlockingIssue(issue)) return false;
-  if (/章节审查|最终质量审查|正文篇幅明显低于目标|正文存在空泛占位表达|结构化事实读取不足|正文可能未显式覆盖|仅包含文件类型和占位符|不在本次招标范围内/u.test(issue.message)) return false;
+  // G 线 P0-5：内容充足性信号恢复硬阻断。此前「正文篇幅明显低于目标 / 正文存在空泛占位表达 /
+  // 结构化事实读取不足 / 正文可能未显式覆盖 / 仅包含文件类型和占位符」被显式豁免出阻断集，
+  // 而它们正是「素材不足却照常交付」的直接表现——按验收基准（素材不足必须明确失败、不产出
+  // 降级内容），这五项一律阻断。仅保留流程阶段名与范围声明的放行。
+  if (/章节审查|最终质量审查|不在本次招标范围内/u.test(issue.message)) return false;
   return true;
 }
 
@@ -279,12 +300,22 @@ export function innovationTechCoverageIssues(markdown: string, outlineChapters: 
   return issues;
 }
 
+/**
+ * 门禁硬判定项（G 线 P0-2）：checklist 里**不依赖 issues 集合**的确定性判据。
+ *
+ * 其余项（no_errors / structured_precision / no_project_contamination / numeric_consistency）
+ * 的判定本身就走 issues，已由 blockingIssues 覆盖；manual_postprocess 为人工兜底项，按设计不阻断。
+ * 本清单只列「checklist 独有、且必须参与 passed 判定」的项 —— 缺了它们，
+ * 检索全空 / 事实全空 / 正文含「资料未提供」占位时门禁仍会通过。
+ */
+const GATING_CHECKLIST_KEYS: readonly string[] = ['basic_facts', 'source_traceability', 'chapter_evidence', 'no_missing_content'];
+
 export function buildExportGate(issues: ValidationIssue[], factsModel: DocumentFactsModel, chapters: DocumentDraftChapter[]): ExportGateResult {
   const governedIssues = issues.map(classifyValidationIssue);
   // 人工兜底项豁免（F4）：封面/页眉/页脚/附图等后期人工完善的内容不作为导出门禁阻断项，
   // 修复循环同样不消费预算处理该类缺陷；仅在 checklist 中展示供人工跟进
   const MANUAL_POSTPROCESS_ISSUE_RE = /封面|页眉|页脚|附图|图片引用|CAD图|示意图|插图/u;
-  const hardBlockingIssues = governedIssues.filter(issue => issue.level === 'error' && isHardExportBlockingIssue(issue) && !MANUAL_POSTPROCESS_ISSUE_RE.test(issue.message));
+  const hardBlockingIssues = governedIssues.filter(issue => issue.level === 'error' && classifyBlockingIssue(issue) && !MANUAL_POSTPROCESS_ISSUE_RE.test(issue.message));
   const manualPostprocessIssues = governedIssues.filter(issue => issue.level === 'error' && MANUAL_POSTPROCESS_ISSUE_RE.test(issue.message));
   // V2 批3 门禁升级（宁缺毋假）：category 白名单 → 黑名单式全量阻断——凡通过 isHardExportBlockingIssue
   // 的 error（含 category 直通与消息白名单校准后的残留）一律硬阻断，不再按旧 category 白名单
@@ -299,13 +330,29 @@ export function buildExportGate(issues: ValidationIssue[], factsModel: DocumentF
     { key: 'structured_precision', label: '结构化精确参数已使用', passed: factsModel.preciseFacts.length < PRECISE_FACT_MIN_TOKEN_COUNT || issues.every(issue => issue.level !== 'error' || !EXPORT_GATE_PRECISION_ISSUE_RE.test(issue.message)) },
     { key: 'chapter_evidence', label: '章节均具备证据', passed: chapters.every(chapter => chapter.evidence.length > 0) },
     { key: 'no_missing_content', label: '无资料未提供章节', passed: chapters.every(chapter => !chapter.content.includes('资料未提供')) },
-    { key: 'no_project_contamination', label: '无项目污染和事实一致性阻断', passed: !issues.some(issue => issue.level === 'error' && EXPORT_GATE_PROJECT_CONTAMINATION_RE.test(issue.message) && isHardExportBlockingIssue(issue)) },
+    { key: 'no_project_contamination', label: '无项目污染和事实一致性阻断', passed: !issues.some(issue => issue.level === 'error' && EXPORT_GATE_PROJECT_CONTAMINATION_RE.test(issue.message) && classifyBlockingIssue(issue)) },
     // 数字级口径不一致（建设规模/估算价/工期与资料不符）属低级错误，导出门禁必须拦截
-    { key: 'numeric_consistency', label: '跨章数值口径与资料一致', passed: !issues.some(issue => issue.level === 'error' && /跨章一致性冲突|跨章一致性缺口|跨章一致性复核/u.test(issue.message) && isHardExportBlockingIssue(issue)) },
+    { key: 'numeric_consistency', label: '跨章数值口径与资料一致', passed: !issues.some(issue => issue.level === 'error' && /跨章一致性冲突|跨章一致性缺口|跨章一致性复核/u.test(issue.message) && classifyBlockingIssue(issue)) },
     // 人工兜底项：封面/页眉/页脚/附图由后期人工完善，不阻断导出，仅展示跟进
     { key: 'manual_postprocess', label: `封面/页眉页脚/附图等 ${manualPostprocessIssues.length} 项由后期人工完善（不阻断导出）`, passed: true, message: manualPostprocessIssues.length ? manualPostprocessIssues.slice(0, 5).map(issue => issue.message).join('；') : undefined },
   ];
-  return { passed: blockingIssues.length === 0, blockingIssues, checklist };
+  // G 线 P0-2 门禁接线：checklist 里不依赖 issues 的确定性判据必须参与 passed 判定，
+  // 并把未通过项转成显式阻断项（而非只展示）。此前 `passed` 只看 blockingIssues，于是
+  // 「章节均具备证据」「无资料未提供章节」「基础事实齐全」「事实具备来源追踪」四项只展示、
+  // 不判定 —— 检索全空、事实全空、正文含「资料未提供」占位时，门禁照常 passed: true。
+  const checklistBlockers: ValidationIssue[] = checklist
+    .filter(item => GATING_CHECKLIST_KEYS.includes(item.key) && !item.passed)
+    .map(item => ({
+      level: 'error' as const,
+      severity: 'blocker' as const,
+      category: 'evidence_coverage' as const,
+      repairability: 'manual_review' as const,
+      owner: 'user' as const,
+      message: `交付门禁未通过：${item.label}`,
+      suggestion: '该项由资料完备度决定，非正文改写可解：请补齐知识库对应资料并重新生成。',
+    }));
+  const allBlockingIssues = [...blockingIssues, ...checklistBlockers];
+  return { passed: allBlockingIssues.length === 0, blockingIssues: allBlockingIssues, checklist };
 }
 
 export function fallbackEvaluatorForRule(rule: AutoDocumentSpecGateRule): GateRuleEvaluator {
@@ -2746,24 +2793,17 @@ export function plannedAutoSpecGateIssues(markdown: string, template: DocumentTe
   let minTables = 0;
   for (const gate of gates) {
     minTables = Math.max(minTables, gate.minTables || 0);
-    for (const item of gate.requiredTexts) if (!markdown.includes(item)) issues.push({ level: 'warning', message: `配置要求缺少必要内容：${item}`, suggestion: '请按当前模板匹配的专业规则补齐必要内容。' });
+    // G 线 P1-15：配置必需要素（requiredTexts）是**用户刚性要求**，此前只判 warning ⇒
+    // 进不了硬门禁，用户配了「必须出现 XX」却拿不到任何阻断反馈。升级为 error 后：
+    // ① 进入阻断集；② 由锚定本检测器的 auto-spec-gate-repair 轮定向补写
+    //（补不进的残留即硬门禁失败——这正是「刚性要求」应有的语义）。
+    for (const item of gate.requiredTexts) if (!markdown.includes(item)) issues.push({ level: 'error', message: `配置要求缺少必要内容：${item}`, suggestion: '请按当前模板匹配的专业规则补齐必要内容。' });
     for (const item of gate.forbiddenTexts) if (containsForbiddenText(markdown, item)) issues.push({ level: 'error', message: `配置要求不得出现：${item}`, suggestion: '请根据当前模板匹配的专业规则清理正文污染内容。' });
   }
   if (MARKDOWN_TOP_HEADING_RE.test(markdown)) issues.push({ level: 'error', message: '正式正文存在 Markdown 标题符号 #', suggestion: '导出正文应去除 Markdown 标题符号，保留正式标题文字。' });
-  if (minTables && tableCount < minTables) issues.push({ level: 'warning', message: `配置要求正式表格不足：${tableCount}/${minTables}`, suggestion: '如用户提示词或章节内容要求表格，应按项目资料补充对应表格本体。' });
+  // G 线 P1-15：同理升级为 error —— minTables 是用户在配置里写死的表格数量下限
+  if (minTables && tableCount < minTables) issues.push({ level: 'error', message: `配置要求正式表格不足：${tableCount}/${minTables}`, suggestion: '如用户提示词或章节内容要求表格，应按项目资料补充对应表格本体。' });
   return issues;
-}
-
-/** 模板命中的 autoSpecGates 禁止词列表：供确定性修复链在写入正文前过滤、并兜底清除残留出现 */
-export function autoSpecGateForbiddenTexts(template: DocumentTemplate): string[] {
-  const text = `${template.name} ${template.category} ${template.outputTitle} ${template.description}`;
-  const forbidden = new Set<string>();
-  for (const gate of readEngineeringDocumentConfig().autoSpecGates) {
-    if (templateMatchesAutoSpecGate(text, gate.templateMatchers)) {
-      for (const item of gate.forbiddenTexts) if (item) forbidden.add(item);
-    }
-  }
-  return [...forbidden];
 }
 
 /** 模板命中的 autoSpecGates 必要术语列表：Final Gate 确定性补写用，保证施组标准术语（编制依据/主要施工材料等）一定出现在正文 */

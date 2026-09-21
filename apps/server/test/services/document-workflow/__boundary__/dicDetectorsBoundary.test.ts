@@ -91,9 +91,11 @@ describe('A1 fabricatedStartDateIssues 编造开工日期', () => {
     const issues = fabricatedStartDateIssues('2026年3月1日开工，2026年3月1日竣工。', factsOf({}));
     expect(issues).toHaveLength(2);
   });
-  it('A1 超过 3 处截断 slice(0,3)', () => {
+  it('A1 上限治理：四处未溯源日期全量产出（原实现截断为 3 条）', () => {
+    // 检测器截断 = 门禁漏报：第 4 条起既不进 issue、也不进修复轮、也不进终门禁报告。
+    // 修复义务不该被「防刷屏」截断——截断只属于展示层。
     const md = '2026年3月1日。2026年4月1日。2026年5月1日。2026年6月1日。';
-    expect(fabricatedStartDateIssues(md, factsOf({}))).toHaveLength(3);
+    expect(fabricatedStartDateIssues(md, factsOf({}))).toHaveLength(4);
   });
   it('A1 fieldName+value 拼接提取资料日期', () => {
     const facts = factsOf({ project: [factOf({ fieldName: '计划开工日期', value: '2026年3月1日' })] });
@@ -187,9 +189,9 @@ describe('A2 fieldValueMismatchIssues 字段-数值错配', () => {
   it('A2 正文占地面积表述不匹配检测标签 → 不报', () => {
     expect(fieldValueMismatchIssues('本项目占地面积50000㎡。', siteBuildingFacts())).toEqual([]);
   });
-  it('A2 超过 3 处截断 slice(0,3)', () => {
+  it('A2 上限治理：四处字段-数值错配全量产出（原实现截断为 3 条）', () => {
     const md = '总建筑面积50000㎡。总建筑面积50000㎡。总建筑面积50000㎡。总建筑面积50000㎡。';
-    expect(fieldValueMismatchIssues(md, siteBuildingFacts())).toHaveLength(3);
+    expect(fieldValueMismatchIssues(md, siteBuildingFacts())).toHaveLength(4);
   });
 });
 
@@ -221,9 +223,9 @@ describe('A3 areaArithmeticIssues 面积算术一致性', () => {
     const md = '地上30000㎡，地下10000㎡，总建筑面积50000㎡。地上20000㎡，地下10000㎡，总建筑面积35000㎡。';
     expect(areaArithmeticIssues(md)).toHaveLength(2);
   });
-  it('A3 超过 3 处截断 slice(0,3)', () => {
+  it('A3 上限治理：四处面积算术矛盾全量产出（原实现截断为 3 条）', () => {
     const md = '地上30000㎡，地下10000㎡，总建筑面积50000㎡。'.repeat(4);
-    expect(areaArithmeticIssues(md)).toHaveLength(3);
+    expect(areaArithmeticIssues(md)).toHaveLength(4);
   });
 });
 
@@ -504,9 +506,9 @@ describe('B9 模式5 总工日量级自洽', () => {
   it('B9 无峰值 → 不报', () => {
     expect(resourceConsistencyIssues('共计20000个工日。总工期90天。')).toEqual([]);
   });
-  it('B9 全问题集截断 slice(0,5)', () => {
+  it('B9 上限治理：五组矛盾组全量产出（原实现截断为 5 条，实报 10 条）', () => {
     const md = '投入20人，班组甲8人＋班组乙6人=27人。投入20人，班组丙8人＋班组丁6人=27人。投入20人，班组戊8人＋班组己6人=27人。投入20人，班组庚8人＋班组辛6人=27人。投入20人，班组壬8人＋班组癸6人=27人。';
-    expect(resourceConsistencyIssues(md)).toHaveLength(5);
+    expect(resourceConsistencyIssues(md)).toHaveLength(10);
   });
 });
 
@@ -785,7 +787,7 @@ describe('D1 dangerousListConsistencyIssues 危大清单一致性', () => {
     ].join('\n');
     expect(dangerousListConsistencyIssues(md)).toEqual([]);
   });
-  it('D1 超过3处两两差异截断 slice(0,3)', () => {
+  it('D1 上限治理：两两差异全量产出（原实现截断为 3 条，实报 6 条）', () => {
     const md = [
       '## 危大工程辨识清单',
       '1. 深基坑工程',
@@ -800,7 +802,7 @@ describe('D1 dangerousListConsistencyIssues 危大清单一致性', () => {
       '1. 深基坑工程',
       '2. 拆除工程',
     ].join('\n');
-    expect(dangerousListConsistencyIssues(md)).toHaveLength(3);
+    expect(dangerousListConsistencyIssues(md)).toHaveLength(6);
   });
   it('D1 标题紧邻标题（清单标题行直接相邻）第三清单不漏检', () => {
     const md = [
@@ -1140,7 +1142,7 @@ describe('E1 paragraphOpeningRepeatIssues 段首机械重复', () => {
     ].join('\n');
     expectBlockIssue(paragraphOpeningRepeatIssues(md), '段首固定开场机械重复');
   });
-  it('E1 超过3组截断 slice(0,3)', () => {
+  it('E1 上限治理：重复组全量产出（原实现截断为 3 条，实报 4 条）', () => {
     const md = [
       OPENING, OPENING, OPENING,
       '本工程严格执行安全生产责任制度并落实到位。',
@@ -1153,7 +1155,7 @@ describe('E1 paragraphOpeningRepeatIssues 段首机械重复', () => {
       '环境保护措施按方案要求逐项落实到位执行。',
       '环境保护措施按方案要求逐项落实到位执行。',
     ].join('\n');
-    expect(paragraphOpeningRepeatIssues(md)).toHaveLength(3);
+    expect(paragraphOpeningRepeatIssues(md)).toHaveLength(4);
   });
 });
 
@@ -1329,9 +1331,9 @@ describe('E6 selfUnderminingCandidateIssues 自伤表述候选', () => {
     const md = '专项设计文件尚未完成，相关内容待后续补充。\n专项设计文件尚未完成，相关内容待后续补充。';
     expect(await selfUnderminingCandidateIssues(md)).toHaveLength(1);
   });
-  it('E6 超过3条截断 slice(0,3)', async () => {
+  it('E6 上限治理：自伤候选全量产出（原实现截断为 3 条，实报 4 条）', async () => {
     const md = '专项设计文件尚未完成，待后续补充。\n评分指标存在缺口尚未明确。\n依据承诺函后续跟踪完善事项。\n专项设计文件内容尚未完成。';
-    expect(await selfUnderminingCandidateIssues(md)).toHaveLength(3);
+    expect(await selfUnderminingCandidateIssues(md)).toHaveLength(4);
   });
   it('E6 分号分句各自判定', async () => {
     const md = '专项设计文件尚未完成，待后续补充；评分指标存在缺口尚未明确。';

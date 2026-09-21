@@ -643,6 +643,76 @@ function toArrayBuffer(buffer: Buffer): ArrayBuffer {
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
 }
 
+/**
+ * ONNX Runtime session 的 intra-op 线程数分档（实测驱动的**无损**提速）。
+ *
+ * 三个 session（检测 / 识别 / 方向分类）的模型体量与最优线程数差异极大，而 paddleocr 不暴露
+ * session 配置，走的是 ORT 默认（≈物理核数）。实测（10 核 macOS，A2 图纸切片 200DPI）：
+ * 默认时进程占用 7.4 核、每片 322ms，其中大量时间消耗在线程自旋而非有效计算；
+ * 分档为 det=4 / rec=4 / ori=1 后每片 254ms（**1.27×**），进程占用降到 3.9 核，
+ * 且**逐切片识别文本与默认配置逐字节一致**。ori 是 1MB 的方向分类小模型，给满线程纯属浪费。
+ *
+ * 分档只在单路执行时有意义：实测多实例并行（2/3/4/5 路）在任意线程配比下都不优于单路
+ * （0.78~1.16×），因为 ORT 的 intra-op 线程池已把有效计算吃满，再加路数只是互相争抢。
+ */
+const OCR_SESSION_THREADS_DEFAULT = { det: 4, rec: 4, ori: 1 } as const;
+
+export interface OcrSessionThreads {
+  det: number;
+  rec: number;
+  ori: number;
+}
+
+/**
+ * 解析线程分档配置（`CUSTOMIZE_KB_OCR_THREADS="det=4,rec=4,ori=1"`）。
+ * 非法/缺失项保留默认值：任一档位写错都不影响其余档位，也不影响识别质量。
+ * `off`/`default`/`0` = 关闭分档，完全回到 ORT 默认线程（排障与 A/B 对照用）。
+ */
+export function resolveOcrSessionThreads(raw: string | undefined = process.env.CUSTOMIZE_KB_OCR_THREADS): OcrSessionThreads | undefined {
+  if (raw && ['off', 'default', 'none', '0'].includes(raw.trim().toLowerCase())) return undefined;
+  const resolved: OcrSessionThreads = { ...OCR_SESSION_THREADS_DEFAULT };
+  if (!raw) return resolved;
+  for (const part of raw.split(',')) {
+    const [rawKey, rawValue] = part.split('=');
+    const key = rawKey?.trim().toLowerCase();
+    if (key !== 'det' && key !== 'rec' && key !== 'ori') continue;
+    const value = Number(rawValue?.trim());
+    if (Number.isFinite(value) && value > 0) resolved[key] = Math.floor(value);
+  }
+  return resolved;
+}
+
+/**
+ * 按模型 buffer **引用**给各 session 注入 intra-op 线程数，返回包装后的 ort 模块。
+ *
+ * 用引用相等而非模型文件大小/调用顺序来识别模型：库的三个 create 调用原样透传我们传入的
+ * ArrayBuffer（paddleocr 的 initialize() 直接 `InferenceSession.create(modelBuffer)`），
+ * 因此换模型代次（v5↔v6）、换 preset 都不会失配。
+ * 认不出的 buffer（库新增 session 等）按原样创建，不做任何假设。
+ */
+export function withOcrSessionThreads(
+  ort: Record<string, unknown>,
+  plan: Array<{ modelBuffer: ArrayBuffer | undefined; intraOpNumThreads: number }>,
+): Record<string, unknown> {
+  const InferenceSession = ort?.InferenceSession as { create?: (...args: unknown[]) => unknown } | undefined;
+  if (!InferenceSession || typeof InferenceSession.create !== 'function') return ort;
+  const threadsByBuffer = new Map<ArrayBuffer, number>();
+  for (const item of plan) {
+    if (item.modelBuffer) threadsByBuffer.set(item.modelBuffer, item.intraOpNumThreads);
+  }
+  const wrapped = new Proxy(InferenceSession, {
+    get(target, prop, receiver) {
+      if (prop !== 'create') return Reflect.get(target, prop, receiver);
+      return (model: unknown, options?: Record<string, unknown>) => {
+        const intraOpNumThreads = threadsByBuffer.get(model as ArrayBuffer);
+        if (intraOpNumThreads === undefined) return (target as any).create(model, options);
+        return (target as any).create(model, { ...(options ?? {}), intraOpNumThreads });
+      };
+    },
+  });
+  return { ...ort, InferenceSession: wrapped };
+}
+
 type PaddleOcrServiceLike = {
   recognize(input: { width: number; height: number; data: Uint8Array }, options?: unknown): Promise<unknown>;
   processRecognition(recognition: unknown, options?: unknown): { text?: string; confidence?: number; lines?: Array<Array<{ text?: string; confidence?: number; box?: unknown }>> };
@@ -836,7 +906,7 @@ export class PaddleOcrJsProvider implements OcrProvider {
     if (!PaddleOcrService || typeof PaddleOcrService.createInstance !== 'function') {
       throw new Error('paddleocr 包缺少 PaddleOcrService.createInstance');
     }
-    const ort = await resolveAndImport('onnxruntime-node');
+    const rawOrt = await resolveAndImport<Record<string, unknown>>('onnxruntime-node');
     const detModel = fs.readFileSync(selection.detFile);
     const recModel = fs.readFileSync(selection.recFile);
     // 字典末行是空格字符（模型把空格识别为最后一类），trimEnd 会误删；只去掉尾随空行
@@ -845,25 +915,47 @@ export class PaddleOcrJsProvider implements OcrProvider {
     // 因此这里主动校验并把差异写进告警（模型目录里混放了不同代次的字典时最容易踩到）
     this.verifyDictionaryMatchesPreset(paddleMod, selection, dictLines.length);
 
+    // buffer 具名持有：线程分档按**引用相等**识别 session（见 withOcrSessionThreads）
+    const detBuffer = toArrayBuffer(detModel);
+    const recBuffer = toArrayBuffer(recModel);
+    let orientationBuffer: ArrayBuffer | undefined;
     const options: Record<string, unknown> = {
-      ort,
+      ort: rawOrt,
       modelPreset: selection.preset,
-      detection: { modelBuffer: toArrayBuffer(detModel) },
-      recognition: { modelBuffer: toArrayBuffer(recModel), charactersDictionary: dictLines },
+      detection: { modelBuffer: detBuffer },
+      recognition: { modelBuffer: recBuffer, charactersDictionary: dictLines },
     };
     // 方向分类（= PaddleOCR use_angle_cls）：检测裁剪与识别之间纠正 0°/180° 文本。
     // 只纠正 0°/180°，不覆盖 90° 竖排；模型缺失时整体仍然可用，只是没有这项增强。
     if (selection.orientationFile) {
       try {
+        orientationBuffer = toArrayBuffer(fs.readFileSync(selection.orientationFile));
         options.textlineOrientation = {
-          modelBuffer: toArrayBuffer(fs.readFileSync(selection.orientationFile)),
+          modelBuffer: orientationBuffer,
           threshold: ORIENTATION_THRESHOLD,
         };
       } catch (error) {
         this.pushWarning(`方向分类模型加载失败（${error instanceof Error ? error.message : String(error)}），已跳过方向纠正`);
       }
     }
-    return PaddleOcrService.createInstance(options);
+
+    const threads = resolveOcrSessionThreads();
+    if (threads) {
+      options.ort = withOcrSessionThreads(rawOrt, [
+        { modelBuffer: detBuffer, intraOpNumThreads: threads.det },
+        { modelBuffer: recBuffer, intraOpNumThreads: threads.rec },
+        { modelBuffer: orientationBuffer, intraOpNumThreads: threads.ori },
+      ]);
+    }
+    try {
+      return await PaddleOcrService.createInstance(options);
+    } catch (error) {
+      // 线程分档注入失败（库/运行时校验口径变化等）绝不能连坐引擎选择：provider 的 recognize
+      // 兜底是降级 tesseract.js（识别质量明显更差），一个提速优化不该把主引擎弄丢。
+      if (options.ort === rawOrt) throw error;
+      this.pushWarning(`OCR 线程分档注入失败（${error instanceof Error ? error.message : String(error)}），已回退默认线程重建`);
+      return PaddleOcrService.createInstance({ ...options, ort: rawOrt });
+    }
   }
 
   /**

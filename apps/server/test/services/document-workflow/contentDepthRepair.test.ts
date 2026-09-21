@@ -20,6 +20,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@/services/document-workflow/rolePipeline', () => ({
   repairChapterByQuality: vi.fn(),
   repairPatchGuard: vi.fn(() => undefined),
+  // G 线 P2-4：修复动作计量改为经 rolePipeline 统一出口，mock 需提供同名 no-op
+  recordRepairActions: vi.fn(),
 }));
 
 import { repairChapterByQuality } from '@/services/document-workflow/rolePipeline';

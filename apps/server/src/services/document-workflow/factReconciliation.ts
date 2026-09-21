@@ -1315,8 +1315,11 @@ function scanNameBindings(markdown: string, authority: ReconciliationAuthority, 
 
 // ═══════════════════════════ 汇总出口 ═══════════════════════════
 
-/** 单规则 issue 上限（防极端文档爆量；合计去重后总上限 60） */
-const MAX_ISSUES = 60;
+// 上限治理：原 `MAX_ISSUES = 60`（去重后 break）已删除。
+// 该上限的后果不是「报告短一点」：本检测器里含 11 处 severity:'blocker'，
+// 被截掉的条目**不进 documentFinalValidation → 不阻断交付、不进暂停清单**，
+// 即「门禁因报告上限而放行」。防爆量属展示层职责（报告分类汇总），
+// 不得以截断检测结果实现。
 
 /**
  * D4 数值对账六类检测器（终检 standard-final 组）：
@@ -1341,7 +1344,6 @@ export function factReconciliationIssues(input: FactReconciliationInput): Valida
     if (seen.has(key)) continue;
     seen.add(key);
     deduped.push(issue);
-    if (deduped.length >= MAX_ISSUES) break;
   }
   return deduped;
 }

@@ -25,7 +25,12 @@ const CHAPTER_FOCUS_RULES: Array<{ pattern: RegExp; goal: string; mustCover: str
   { pattern: /工资|劳务|实名/u, goal: '覆盖劳务实名制与农民工工资保障闭环', mustCover: ['建筑工人实名制管理（实名登记率 100%、实名制管理平台考勤）', '农民工工资专用账户与银行代发（专用账户开设、按月足额代发、工资保证金）', '考勤与工资支付台账', '工伤保险办理与参保信息管理（作业人员工伤保险按项目参保、参保信息纳入实名制管理、工伤事故申报处置流程）'] },
 ];
 
-function chapterFocusRule(chapterTitle: string) {
+/**
+ * 章标题 → 该章的写作重点规则（G 线 P1-9 导出：写作端逐章注入 roleContext）。
+ * 规则里承载的是**最稀缺的要求知识**（危大辨识清单逐项完整、应急预案八部分、扬尘六个百分百、
+ * 四节一环保量化指标、农民工工资专用账户…），此前只进 UI 展示与事后审查，写作端看不到。
+ */
+export function chapterFocusRule(chapterTitle: string) {
   return CHAPTER_FOCUS_RULES.find(rule => rule.pattern.test(chapterTitle));
 }
 

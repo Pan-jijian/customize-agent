@@ -178,8 +178,11 @@ describe('C8 评分口径版本锁定', () => {
   const calibrationSrc = read('scoringCalibration.ts');
 
   it('常量递增 c8.0 + C8 批次注释与变更点显性记录（防口径漂移归因误判）', () => {
-    expect(calibrationSrc).toContain("export const SCORING_CALIBRATION_VERSION = 'quality-caliber-c8.0';");
+    // G 线 P3-5：P3 尺子修订（uniqueness 改门槛 / 目标固定 95）递增口径版本 → c9.0
+    expect(calibrationSrc).toContain("export const SCORING_CALIBRATION_VERSION = 'quality-caliber-c9.2';");
+    // C8 批次行是该类口径的历史记录（保持 c8.0 不变）；P3 修订按约定新增 C9 批次行
     expect(calibrationSrc).toContain('C8 批次 = quality-caliber-c8.0');
+    expect(calibrationSrc).toContain('C9 批次 = quality-caliber-c9.0 → c9.1');
     expect(calibrationSrc).toContain('评分口径变更点：');
   });
 

@@ -44,8 +44,8 @@ describe('V1 开工日期伪造：已知日期豁免', () => {
   it('V1 资料无日期时进度类上下文不豁免 → 1 条', () => {
     expect(fabricatedStartDateIssues('进度计划节点：主体封顶2025年9月1日。', emptyModel)).toHaveLength(1);
   });
-  it('V1 4 处伪造日期 → slice(0,3) 截断 3 条', () => {
-    expect(fabricatedStartDateIssues('2025年1月1日。2025年2月1日。2025年3月1日。2025年4月1日。', emptyModel)).toHaveLength(3);
+  it('上限治理：V1 4 处伪造日期 → slice(0,3) 不再截断 3 条（全量 4 条）', () => {
+    expect(fabricatedStartDateIssues('2025年1月1日。2025年2月1日。2025年3月1日。2025年4月1日。', emptyModel)).toHaveLength(4);
   });
   it('V1 message 含伪造日期', () => {
     const issues = fabricatedStartDateIssues('计划于2025年6月1日开工。', emptyModel);
@@ -88,8 +88,8 @@ describe('V2 字段-数值错配：占地面积误标建筑面积', () => {
   it('V2 正文「占地面积1000㎡」不匹配正文标签正则 → 0 条', () => {
     expect(fieldValueMismatchIssues('总占地面积1000㎡。', siteModel)).toHaveLength(0);
   });
-  it('V2 4 处错配 → slice(0,3) 3 条', () => {
-    expect(fieldValueMismatchIssues('单体建筑面积1000㎡。总建筑面积1000㎡。建筑面积1000㎡。建筑面积1000㎡。', siteModel)).toHaveLength(3);
+  it('上限治理：V2 4 处错配 → slice(0,3) 3 条（全量 4 条）', () => {
+    expect(fieldValueMismatchIssues('单体建筑面积1000㎡。总建筑面积1000㎡。建筑面积1000㎡。建筑面积1000㎡。', siteModel)).toHaveLength(4);
   });
   it('V2 message 含正确建筑值', () => {
     const issues = fieldValueMismatchIssues('单体建筑面积1000㎡。', siteModel);

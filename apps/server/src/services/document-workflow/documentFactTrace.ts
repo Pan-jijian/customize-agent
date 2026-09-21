@@ -894,25 +894,16 @@ export function demoteUnsourcedNumericTokens(input: {
   markdown: string;
   factsModel: DocumentFactsModel;
 }): { markdown: string; fixedCount: number; details: string[] } | null {
-  const candidates = buildNumericTraceFindings(input.markdown, input.factsModel)
-    .filter(finding => {
-      if (!DELETABLE_UNIT_RE.test(finding.normalizedToken)) return false;
-      const leftWindow = input.markdown.slice(Math.max(0, finding.index - 8), finding.index);
-      if (DEMOTE_LEFT_GUARD_RE.test(leftWindow)) return false;
-      // r28h M4a：题注编号前导豁免（「表3-4 道路…」的「4 道」是题注表序段，删除即毁编号）
-      return !CAPTION_NUMBER_PREFIX_RE.test(leftWindow);
-    })
-    // 逆序替换（从文末向前——替换不改动更早位置的索引）
-    .sort((left, right) => right.index - left.index);
-  if (candidates.length === 0) return null;
-  let next = input.markdown;
-  const details: string[] = [];
-  for (const finding of candidates) {
-    // 位置校验（原文不一致即跳过——防外部变更导致错删）
-    if (next.slice(finding.index, finding.index + finding.token.length) !== finding.token) continue;
-    next = `${next.slice(0, finding.index)}${next.slice(finding.index + finding.token.length)}`;
-    details.push(`删除未溯源数值「${finding.token.replace(/\s+/gu, '')}」改定性：${finding.sentence.replace(/\s+/gu, ' ').slice(0, 40)}`);
-  }
-  if (details.length === 0) return null;
-  return { markdown: tidyRemovalArtifacts(next), fixedCount: details.length, details };
+  // G 线 P2-2：**停用本修复器**（不再以「删除数值」通过门禁）。
+  //
+  // 原实现把未溯源的数值 token 直接删除、改成定性表述，从而让「无主数值审计」的 blocker 消失。
+  // 这是**用删除通过门禁**，而不是补齐权威值 —— 交付物看上去干净了，实际是「本来该有数据的地方
+  // 被抹掉」。与验收基准（要么产出 95+ 的完整文档，要么明确失败并说清缺什么）直接冲突：
+  // 删数值把「缺权威值」这一事实从交付物里抹掉，用户再也看不到缺口在哪。
+  // 且修复链本就没有知识库通道（finalize/repairRounds 零检索），物理上补不进新材料，
+  // 删除是它唯一「能收敛」的动作 —— 收敛压力全部走删除路径正是这个结构性原因。
+  //
+  // 现口径：保留数值与 blocker，让该文档按「未达交付标准」处理；补齐权威值属资料/配置侧动作。
+  void input;
+  return null;
 }

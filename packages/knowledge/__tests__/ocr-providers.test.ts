@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { createOcrProvider, PaddleOcrJsProvider, TesseractJsProvider, reflowOcrRegionsByColumns, type OcrRegion } from '../src/extraction/ocr-providers.js';
+import { createOcrProvider, PaddleOcrJsProvider, TesseractJsProvider, reflowOcrRegionsByColumns, resolveOcrSessionThreads, withOcrSessionThreads, type OcrRegion } from '../src/extraction/ocr-providers.js';
 import { MIN_ONNX_BYTES, PADDLE_MODEL_FILES } from '../src/extraction/paddle-model-select.js';
 
 // ─── 设置 ────────────────────────────────────────────────────
@@ -124,6 +124,104 @@ describe('PaddleOcrJsProvider 推理 smoke', () => {
     expect(result.text).toContain('通信排管工程设计说明');
     expect(result.confidence).toBeGreaterThan(0.8);
   }, 120_000);
+});
+
+// ─── ONNX session 线程分档（无损提速的注入点，见 withOcrSessionThreads 注释） ───
+
+describe('resolveOcrSessionThreads', () => {
+  it('未配置时返回实测默认分档 det=4 / rec=4 / ori=1', () => {
+    expect(resolveOcrSessionThreads('')).toEqual({ det: 4, rec: 4, ori: 1 });
+  });
+
+  it('off/default/none/0 关闭分档（回到 ORT 默认线程，供排障与 A/B 对照）', () => {
+    for (const raw of ['off', 'DEFAULT', ' none ', '0']) {
+      expect(resolveOcrSessionThreads(raw)).toBeUndefined();
+    }
+  });
+
+  it('按 det/rec/ori 覆盖，未提到的档位保留默认', () => {
+    expect(resolveOcrSessionThreads('rec=8')).toEqual({ det: 4, rec: 8, ori: 1 });
+    expect(resolveOcrSessionThreads('det=2, rec=2 ,ori=2')).toEqual({ det: 2, rec: 2, ori: 2 });
+  });
+
+  it('非法项逐项忽略：拼错一档不影响其余档位，也不会整体失效', () => {
+    expect(resolveOcrSessionThreads('det=abc,rec=6')).toEqual({ det: 4, rec: 6, ori: 1 });
+    expect(resolveOcrSessionThreads('de=3,rec=-1,ori=0')).toEqual({ det: 4, rec: 4, ori: 1 });
+  });
+
+  it('小数向下取整（传给 ORT 的必须是整数）', () => {
+    expect(resolveOcrSessionThreads('det=3.9')).toEqual({ det: 3, rec: 4, ori: 1 });
+  });
+
+  it('默认读取 CUSTOMIZE_KB_OCR_THREADS 环境变量', () => {
+    process.env.CUSTOMIZE_KB_OCR_THREADS = 'det=6';
+    try {
+      expect(resolveOcrSessionThreads()).toEqual({ det: 6, rec: 4, ori: 1 });
+    } finally {
+      delete process.env.CUSTOMIZE_KB_OCR_THREADS;
+    }
+  });
+});
+
+describe('withOcrSessionThreads', () => {
+  /** 假 ort：记录每次 create 的入参与选项，不真正建 session */
+  const makeOrt = () => {
+    const created: Array<{ model: unknown; options: Record<string, unknown> | undefined }> = [];
+    class FakeInferenceSession {
+      static async create(model: unknown, options?: Record<string, unknown>) {
+        created.push({ model, options });
+        return { model };
+      }
+    }
+    return { ort: { Tensor: class Tensor {}, InferenceSession: FakeInferenceSession }, created };
+  };
+
+  it('按 buffer 引用识别 session 并注入线程数，未识别的 buffer 原样创建', async () => {
+    const det = new ArrayBuffer(8);
+    const rec = new ArrayBuffer(8);
+    const ori = new ArrayBuffer(8);
+    const unknown = new ArrayBuffer(8);
+    const { ort, created } = makeOrt();
+    const wrapped = withOcrSessionThreads(ort as never, [
+      { modelBuffer: det, intraOpNumThreads: 4 },
+      { modelBuffer: rec, intraOpNumThreads: 4 },
+      { modelBuffer: ori, intraOpNumThreads: 1 },
+    ]);
+
+    await (wrapped.InferenceSession as typeof FakeInferenceSession).create(det, { graphOptimizationLevel: 'all' });
+    await (wrapped.InferenceSession as typeof FakeInferenceSession).create(rec);
+    await (wrapped.InferenceSession as typeof FakeInferenceSession).create(ori);
+    await (wrapped.InferenceSession as typeof FakeInferenceSession).create(unknown);
+
+    // 原有选项保留，仅追加线程数
+    expect(created[0]!.options).toEqual({ graphOptimizationLevel: 'all', intraOpNumThreads: 4 });
+    expect(created[1]!.options).toEqual({ intraOpNumThreads: 4 });
+    expect(created[2]!.options).toEqual({ intraOpNumThreads: 1 });
+    // 库新增 session / 其他调用方传入的 buffer：不注入、不改动
+    expect(created[3]!.options).toBeUndefined();
+  });
+
+  it('Tensor 等其余成员原样透出', () => {
+    const { ort } = makeOrt();
+    const wrapped = withOcrSessionThreads(ort as never, []);
+    expect(wrapped.Tensor).toBe(ort.Tensor);
+  });
+
+  it('方向分类模型缺失时该档位不参与注入', async () => {
+    const det = new ArrayBuffer(8);
+    const { ort, created } = makeOrt();
+    const wrapped = withOcrSessionThreads(ort as never, [
+      { modelBuffer: det, intraOpNumThreads: 4 },
+      { modelBuffer: undefined, intraOpNumThreads: 1 },
+    ]);
+    await (wrapped.InferenceSession as typeof ort.InferenceSession).create(det);
+    expect(created[0]!.options).toEqual({ intraOpNumThreads: 4 });
+  });
+
+  it('ort 模块形状不认识时原样返回（不抛异常、不改行为）', () => {
+    const odd = { Tensor: class Tensor {} } as never;
+    expect(withOcrSessionThreads(odd, [])).toBe(odd);
+  });
 });
 
 // ─── OCR 分栏重排（多栏正文页重排 / 表格页拦截 / 内容保全兜底） ───

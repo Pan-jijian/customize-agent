@@ -370,10 +370,19 @@ export const BLUEPRINT_JSON_SCHEMA: DocumentJsonSchema = {
         project: { type: 'object', required: true, properties: { name: { type: 'string', required: true, minLength: 1 }, scope: { type: 'string', required: true }, works: { type: 'array', required: true, items: { type: 'string' } } } },
         contract: { type: 'object', required: true, properties: { totalDays: { type: 'number', required: true }, qualityStandard: { type: 'string', required: true }, pricingFile: { type: 'string', required: true } } },
         milestones: { type: 'array', required: true, minItems: 1, items: { type: 'object' } },
+        // G 线 P1-6：空**权威**拒绝——`quantities` 此前只要类型对就通过（空对象也合法），
+        // 于是「零权威骨架蓝图」能在 schema 层蒙混过关，下游据 authorityAvailability 认为齐备、
+        // 写作层拿不到任何值。工程量恒派生自清单，空即代表派生未发生，故用 minProperties 拒绝。
+        //
+        // **未**对 equipment / materialsPlan 施加 minItems：实测（dicBlueprintLaborPrecision
+        // 边界用例）仅含单一土方条目的合法项目这两项本就为空，加了会把「小但真实」的项目
+        // 一并挡在门外；而零权威骨架已由 P0-6 的「0. 清单源可用性」检查独立拦下，
+        // 此处不必叠加第二道——叠加的代价是误伤，收益仅是重复拦截。
         resources: { type: 'object', required: true, properties: { labor: { type: 'object', required: true }, equipment: { type: 'array', required: true } } },
         materialsPlan: { type: 'array', required: true },
         redLineFacts: { type: 'array', required: true },
-        quantities: { type: 'object', required: true },
+        // quantities 是 Record（键为工程量名），无原生 minItems ⇒ 用 minProperties 拒绝空对象
+        quantities: { type: 'object', required: true, minProperties: 1 },
         keyDifficulties: { type: 'array', required: true, minItems: 1 },
         composition: { type: 'object' },
       },

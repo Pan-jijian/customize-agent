@@ -372,21 +372,12 @@ export function constructionOrgProfessionalChainIssues(input: { markdown: string
     }
     return issues;
   }
-  // 无章结构回退（旧口径全文级判定，向后兼容：非文档管线调用/单测直调）
-  const context = normalize(documentText);
-  for (const type of Object.keys(PROCESS_CHAINS) as Array<Exclude<ConstructionOrgProjectType, 'general'>>) {
-    const rule = PROCESS_CHAINS[type];
-    const chainHits = rule.chain.filter(node => chainNodeHit(node, context));
-    const explicitlyMatched = new RegExp(rule.label, 'u').test(input.markdown) || chainHits.length >= 3;
-    if (!explicitlyMatched) continue;
-    const forbiddenHits = rule.forbidden.filter(token => context.includes(normalize(token)));
-    if (forbiddenHits.length >= 2) {
-      issues.push({ level: 'warning', message: `疑似${rule.label}内容混入不匹配工序：${forbiddenHits.join('、')}`, suggestion: rule.prompt });
-    }
-    if (chainHits.length < Math.min(3, rule.chain.length)) {
-      issues.push({ level: 'warning', message: `${rule.label}工序链覆盖不足：仅识别到 ${chainHits.map(chainNodeLabel).join('、') || '未识别到关键工序'}`, suggestion: rule.prompt });
-    }
-  }
+  // 上限治理 · 旧代码清理：原「无章结构回退（旧口径全文级判定，向后兼容）」整段已删除。
+  // 理由：①**生产不可达**——唯一生产调用点 documentFinalValidation 恒传 input.chapters
+  //（= finalChapterDrafts），而 documentPipeline 在 chapterDrafts 为空时已先行抛错；
+  // ②它产出的 issue **既无 chapterId 也无 provenance**（对照上方生产分支带 provenance.detectorId），
+  // 属于注册表里反复指认的「按 provenance 过滤的补写轮消费不到」的孤儿形态——
+  // 留着它只会制造无人消费的问题。
   return issues;
 }
 

@@ -317,7 +317,9 @@ export function renderBasicFactsForBlueprint(canonical: CanonicalFactModel): str
     .filter(fact => Boolean(fact && fact.label && fact.value))
     .sort((left, right) => (right.priority || 0) - (left.priority || 0));
   if (entries.length === 0) return '';
-  return entries.slice(0, 60).map(fact => {
+  // 上限治理：**不截断**（原 slice(0,60)：第 61 条起基本事实不进蓝图文本 ⇒ 永不成为锚点/must_cite，
+  // 而蓝图是全局数值权威）。输出是提示词文本，规模由 token 预算控制。
+  return entries.map(fact => {
     // 蓝图输入源头清洗：值尾部编号粘连（PDF 编号串行残留）截断到干净段，
     // 防止「90日历天2.9招标范围：…」污染总工期/合同估算价提取（信息表污染同源根因）
     const value = String(fact.value);

@@ -132,11 +132,11 @@ describe('W1 危大清单：多清单矩阵与截断', () => {
     const md = '## 危大工程辨识清单\n1.深基坑工程\n2.模板工程\n## 危大工程辨识清单\n1.深基坑工程\n2.脚手架工程\n## 危大工程辨识清单\n1.深基坑工程\n2.起重吊装工程';
     expect(dangerousListConsistencyIssues(md)).toHaveLength(3);
   });
-  it('W1-20 四清单 6 对候选 → slice(0,3) 截断为 3 条', () => {
+  it('上限治理：W1-20 四清单 6 对候选 → slice(0,3) 不再截断为 3 条（全量 6 条）', () => {
     const md = ['深基坑工程', '模板工程', '脚手架工程', '起重吊装工程'].map(
       extra => `## 危大工程辨识清单\n1.深基坑工程\n2.${extra}`,
     ).join('\n');
-    expect(dangerousListConsistencyIssues(md)).toHaveLength(3);
+    expect(dangerousListConsistencyIssues(md)).toHaveLength(6);
   });
   it('W1-21 长标题 message 截断 title 前30字', () => {
     const longTitle = '危大工程辨识清单'.repeat(4);
@@ -194,10 +194,10 @@ describe('W2 段首重复：计数与指纹', () => {
     const md = Array.from({ length: 3 }, () => `${'1234567890123456'}甲乙。`).join('\n\n');
     expect(paragraphOpeningRepeatIssues(md)).toEqual([]);
   });
-  it('W2-8 4种指纹各3段 → slice(0,3) 截断为 3 条', () => {
+  it('上限治理：W2-8 4种指纹各3段 → slice(0,3) 不再截断为 3 条（全量 4 条）', () => {
     const make = (ch: string) => Array.from({ length: 3 }, () => `${ch.repeat(19)}。`).join('\n\n');
     const md = [make('施'), make('工'), make('安'), make('全')].join('\n\n');
-    expect(paragraphOpeningRepeatIssues(md)).toHaveLength(3);
+    expect(paragraphOpeningRepeatIssues(md)).toHaveLength(4);
   });
 });
 

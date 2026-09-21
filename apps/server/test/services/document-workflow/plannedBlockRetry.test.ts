@@ -18,6 +18,25 @@ import type { PlannedChapterBlock, PlannedChapterStructure } from '@/services/do
 import type { DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter } from '@/services/document-workflow/types';
 import type * as LlmClientModule from '@/services/document-workflow/llmClient';
 
+/**
+ * 本地语义模型（块级质检扫描器依赖）——单测环境不可用，按本仓既有约定注入确定性嵌入。
+ *
+ * 注意：本 mock **不是**在「让失败的质检通过」。块级模板化/归因量化扫描器若抛错，
+ * chapterGeneration 现已按「质检未完成 ⇒ 不放行」处理（原实现是静默放行），
+ * 故测试环境缺模型会让所有块被正确判为未通过。这里替换的是**模型**（生产环境存在），
+ * 使质检真正跑起来——而不是把异常重新吞掉。
+ */
+const stubEmbed = async (texts: string[]): Promise<number[][]> => texts.map(text => {
+  const vector = new Array(64).fill(0);
+  for (const char of text) vector[char.codePointAt(0)! % 64] += 1;
+  const norm = Math.hypot(...vector) || 1;
+  return vector.map(value => value / norm);
+});
+vi.mock('@customize-agent/knowledge', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return { ...actual, LocalTransformersEmbeddingProvider: class { embedDocuments = stubEmbed; } };
+});
+
 vi.mock('@/services/document-workflow/llmClient', async () => {
   const actual = await vi.importActual<typeof LlmClientModule>('@/services/document-workflow/llmClient');
   return { ...actual, callDocumentLlm: vi.fn(), callDocumentLlmJson: vi.fn() };

@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolveAndImport, resolvePackage } from './module-resolver.js';
 import { createOcrProvider, type OcrProvider, type OcrRecognizeOptions, type OcrResult } from './ocr-providers.js';
 import { PADDLE_DETECTION_MAX_SIDE_PX, buildPaddleRecognizeOptions } from './paddle-model-select.js';
-import { planTiles, recognizeWithTiling, shouldTilePage } from './ocr-tiling.js';
+import { planTiles, recognizeWithTiling, shouldTilePage, type RgbPixels } from './ocr-tiling.js';
 import { applyOcrMisreadCorrections, decodeTextBuffer, filterOcrGraphicNoiseLines, hasForeignScriptGarbledText, normalizeSymbolicPua, restoreLatin1MojibakeAsGbk } from './text-encoding.js';
 import { extractEmbeddedOfficeImages } from './office-embedded-images.js';
 import { detectSmartTableHeader } from './table-header-detect.js';
@@ -94,7 +94,48 @@ export function layoutCadAnnotations(annotations: CadAnnotation[]): string[] {
   }
   if (current.length > 0) paragraphs.push(current.join('\n'));
 
-  return [...paragraphs, ...unpositioned.map(item => item.text)];
+  // 注意：paragraphs 的每个元素是**多行字符串**（段落内已 join('\n')），故须逐段内按行合并，
+  // 只对顶层数组做合并会漏掉段落内部的碎片（这正是本修复第一版的缺陷）。
+  return [
+    ...paragraphs.map(paragraph => mergeSingleCharRuns(paragraph.split('\n')).join('\n')),
+    ...mergeSingleCharRuns(unpositioned.map(item => item.text)),
+  ];
+}
+
+/**
+ * 连续单字符行合并（G 线 P2-11）。
+ *
+ * **实测依据**（巢湖终态库 1730 个 cad chunk / 49,426 行）：单字符行 3,978 = 8.0%，
+ * 其中「连续 ≥3 的整串」1,894 行（3.8%），是**被逐字符拆成独立实体**的真实文本 ——
+ * `NINGBO` 拆成 `N|I|N|G|B|O`、`有限公司` 拆成 `有|限|公|司`；这些实体因 y 坐标略有差异
+ * 未能落进同一行聚类，于是每个字各占一行。
+ *
+ * **为什么是合并而不是删除**：本仓刚走完「解析丢数据」专项，检索语料里一律不做删除式治理
+ * ——`NINGBO` 合并回一个词后至少可被检索到，删掉就永久失去。至于剩余 4.2% 的**孤立**单字符行
+ * （以孤立大写字母 `A` 为主，实测上下文是电气图例表的列值/解析残渣），删除它们虽能进一步降噪，
+ * 但属删除式治理且有丢真数据风险，**本函数不处理**，留待产品侧决定。
+ *
+ * 阈值取 3：两字以内的小串可能是合法的短标注（如 `1`、`2` 这类行号/编号），
+ * 三字及以上才基本可判定为被拆碎的词。
+ */
+function mergeSingleCharRuns(lines: string[]): string[] {
+  const output: string[] = [];
+  let run: string[] = [];
+  const flush = (): void => {
+    if (run.length >= 3) output.push(run.join(''));
+    else output.push(...run);
+    run = [];
+  };
+  for (const line of lines) {
+    if ([...line].length === 1) {
+      run.push(line);
+      continue;
+    }
+    flush();
+    output.push(line);
+  }
+  flush();
+  return output;
 }
 
 /** 单条标注类 DXF 实体的成对解析结果：(组码, 值) 按文档顺序保留 */
@@ -146,8 +187,45 @@ const CAD_INTERNAL_LINE_RE = /^(?:TDb\w+|AcDb[\w:]+|\$AUDIT_BAD_\w+|[A-F0-9]{8,}
 const CAD_C1_CONTROL_RE = /[\u0080-\u009F]/gu;
 /** AutoCAD 控制码：%%c=Φ、%%d=°、%%p=±、%%132 等数字码=Φ，统一解码为可读符号 */
 const CAD_CONTROL_CODE_RE = /%%(?:c|d|p|\d{2,3})/giu;
+/**
+ * AutoCAD MTEXT 行内格式码（G 线 P2-7）：统一形态为「反斜杠 + 码字母 + 参数 + 分号」——
+ * `\A1;` 对齐 / `\pxqc;` 段落 / `\H2.5x;` 字高 / `\W1.2;` 宽度因子 / `\C256;` 颜色 /
+ * `\fSimSun|b0|i0|c134|p2;` 字体组（通常裹在 `{}` 内）。
+ *
+ * 实测（巢湖 21 张图纸终态库）1730 个 cad chunk 中 738 个残留此类转义码，样本形如
+ * `{\fSimSun|b0|i0|c134|p2;建设单位}`。危害是双重的：既污染检索词面（「建设单位」被拼成
+ * `{\fSimSun|b0…;建设单位}`，关键词命中率下降），又会被 `isLikelyGarbledCadText` 的
+ * 「符号占比 > 0.35」规则判为乱码而**整行丢弃**——真标注被吞，用户看到的是图纸内容缺失。
+ *
+ * 码字母限定为 MTEXT 规范定义集（A/C/F/H/Q/S/T/W/p），比宽泛的 `[A-Za-z]` 安全得多：
+ * 后者会把 `\path\to;` 这类反斜杠路径段整段吃掉。**残留风险已知**：形如 `C:\temp\a;`
+ * 的路径仍可能被 `\a;` 段命中——但图纸语料里反斜杠路径与「反斜杠+单字母+分号」共现
+ * 极罕见，而格式码残留是实测 738/1730 的普遍问题，取舍明确。
+ */
+const CAD_MTEXT_CODE_RE = /\\(?:[ACFHQSTW]|p)[^;\\{}]*;/giu;
+/** MTEXT 段落分隔符 \P（等价换行）：**必须在行切分之前**消费，否则段落边界被抹成空格粘连 */
+const CAD_MTEXT_PARAGRAPH_RE = /\\P/gu;
+/** MTEXT 无参开关码：\L 下划线开/关、\O 上划线开/关、\K 倾斜开/关、\~ 不换行空格 */
+const CAD_MTEXT_TOGGLE_RE = /\\[LlOoKk~]/gu;
+/** MTEXT 分组花括号：格式组剥离后残留的外壳（成对出现，直接去壳即可） */
+const CAD_MTEXT_BRACE_RE = /[{}]/gu;
 const CAD_DOMAIN_SIGNAL_RE = /工程|项目|施工|建筑|结构|装饰|电气|给排水|消防|暖通|平面|立面|剖面|节点|详图|材料|尺寸|标高|轴线|图层|门窗|墙|地面|顶面|照明|配电|弱电|空调|卫生间|楼梯|屋面|基础|柱|梁|板|图号|设计|说明|轴|电|井|土|夯/u;
 /** 图纸兜底解析可读字符（汉字/字母/数字）的最低总量，低于该值视为无字符数据，不入库 */
+/**
+ * DXF 标注实体提取上限（G 线 P0-8）。超出即**显式记账 + 告警**，不再静默截断。
+ * 历史值 5000 从未带截断标记，而 contentCoverage 仍报正常覆盖 —— 实测 21 个 CAD 文件中
+ * 7 个恰好等于 5000（确定性截断），用户看不到内容被砍。
+ * 取值依据：全语料 22 个 DWG 实测最大实体数 21,452，30,000 留出余量使当前语料零截断；
+ * 上限本身保留（防超大图纸撑爆内存），触顶时按下方逻辑记账并告警。
+ */
+const CAD_TEXT_ENTITY_LIMIT = 30_000;
+
+/**
+ * 图纸「有字符数据」的绝对下限。**注意：绝对字符数不是「图纸解析是否有效」的判据** ——
+ * 实测的残破图纸形态是「648 字符 / 1 个切片 / 源文件 9.4MB」，远高于任何合理绝对门槛。
+ * 识别有效解析需要**产出比**（入库字符 / 源文件字节），属记账与产出比门禁范畴（见 U 线），
+ * 此处不引入无效阈值以免制造「看起来有门禁其实拦不住」的假保护。
+ */
 const MIN_CAD_CHARACTER_DATA = 32;
 const OCR_NATIVE_NOISE_PATTERNS = [/^Image too small to scale!!/u, /^Line cannot be recognized!!$/u];
 /** 渲染目录里的页面几何 sidecar（pt/mm），用于大幅面切片判定 */
@@ -170,6 +248,84 @@ const TILE_RECALL_MIN_AREA = 8;
 const TILE_RECALL_BOX_SCORE = 0.4;
 /** 切片页的识别行置信度阈值，默认 0.5；与上面两项必须同时放宽才有效 */
 const TILE_RECALL_REC_SCORE = 0.35;
+
+/**
+ * 大幅面图纸页的「文本层稀疏」上限（可见字符数）。
+ *
+ * 用途：识别「文本层只有图签栏、正文在矢量图形里」的图纸页。CAD 导出 PDF 的图签栏
+ * （项目名/设计院/签名栏/著作权声明）约 200~350 可见字符，而真实文字页数百到数千。
+ *
+ * 为什么单靠页均密度不够：`hasUsablePdfText` 的页均密度保护只对 `pageCount > 1` 生效，
+ * 而**单张出图**（一张 A2/A3 一个文件）是最常见的图纸形态 —— 实测舒城 14/14 图纸 PDF
+ * 全是单页，全部绕过保护，判「文本层足够」后 OCR 永不启动，入库只有图签栏。
+ * 实测同一份 A2 图纸：文本层 345 字符 → 强制 OCR 后 1,452 字符（4.2×），
+ * 且拿到的是真内容（划线规格、石材做法、材料编号、房间名、标高）而非图签栏。
+ */
+const SHEET_PAGE_MAX_VISIBLE_CHARS = 500;
+
+/**
+ * RTF `\ansicpg<nnn>` 代码页 → TextDecoder 编码标签。
+ * 只列本领域实际会遇到的代码页；未收录者回落到通用编码探测（UTF-8 → GBK）。
+ * 中文环境以 936（GBK）为主，繁体 950（Big5）、日文 932、韩文 949 一并覆盖，
+ * 避免「换一个语种就整类丢正文」。
+ */
+const RTF_CODE_PAGE_ENCODING: Record<number, string> = {
+  936: 'gbk',
+  950: 'big5',
+  932: 'shift_jis',
+  949: 'euc-kr',
+  1252: 'windows-1252',
+  65001: 'utf-8',
+};
+
+/**
+ * 按标签深度配平提取 OOXML 中 `w:p` / `w:tbl` 的**完整**元素。
+ *
+ * 为什么不能用非贪婪正则 `<(w:p|w:tbl)[\s>][\s\S]*?<\/\1>`：段落内若嵌有文本框
+ * （`w:txbxContent` 里是一个完整的内层 `w:p`），匹配会在**内层** `</w:p>` 处收尾 ——
+ * 外层段落被截断，且 `matchAll` 的扫描指针跳过其后半段，**该段后半的正文永久丢失**；
+ * 文本框内的文字本身也不会被单独提取。实测形态：
+ * `<w:p>前文甲…<w:txbxContent><w:p>框内乙</w:p></w:txbxContent>…后文丙</w:p>`
+ * 旧实现只得到「前文甲框内乙」，「后文丙」消失且无任何告警。
+ *
+ * 深度配平后外层元素完整取出，其内部 `w:t` 按文档顺序自然拼出「前文甲框内乙后文丙」。
+ */
+export function extractTopLevelOoxmlElements(xml: string, tags: readonly string[] = ['w:p', 'w:tbl']): Array<{ tag: string; xml: string }> {
+  const result: Array<{ tag: string; xml: string }> = [];
+  const opener = new RegExp(`<(${tags.join('|')})(?:\\s[^>]*)?/?>`, 'gu');
+  let cursor = 0;
+  while (cursor < xml.length) {
+    opener.lastIndex = cursor;
+    const open = opener.exec(xml);
+    if (!open) break;
+    const tag = open[1]!;
+    const start = open.index;
+    // 自闭合元素自身即完整元素
+    if (open[0].endsWith('/>')) {
+      result.push({ tag, xml: open[0] });
+      cursor = opener.lastIndex;
+      continue;
+    }
+    // 从该标签起做同名标签的深度配平
+    const scanner = new RegExp(`<${tag}(?:\\s[^>]*)?/?>|</${tag}>`, 'gu');
+    scanner.lastIndex = opener.lastIndex;
+    let depth = 1;
+    let end = -1;
+    let match: RegExpExecArray | null;
+    while ((match = scanner.exec(xml))) {
+      if (match[0].startsWith('</')) {
+        depth -= 1;
+        if (depth === 0) { end = scanner.lastIndex; break; }
+      } else if (!match[0].endsWith('/>')) {
+        depth += 1;
+      }
+    }
+    if (end < 0) break;   // 标签未闭合：文档损坏，停止提取
+    result.push({ tag, xml: xml.slice(start, end) });
+    cursor = end;
+  }
+  return result;
+}
 
 /** KV 声明行（R#C# 列名: 值）的值折叠：单元格内换行折叠为单空格（Excel Alt+Enter 换行
  *  会把「R3C5 项目特征描述: 第一段\n第二段」拆成两行，行级 KV 结构破坏、
@@ -318,6 +474,8 @@ export class ContentExtractor {
 
   private extractReadableFragments(value: string): string[] {
     return value
+      // G 线 P2-7：MTEXT 段落符先于行切分转真换行，保住段落边界（否则被拆成空格粘连成一行）
+      .replace(CAD_MTEXT_PARAGRAPH_RE, '\n')
       .replace(/[^\p{L}\p{N}\p{P}\p{S}\s]/gu, '\n')
       .split(/[\r\n]+/u)
       .map(line => this.cleanCadReadableText(line))
@@ -327,6 +485,12 @@ export class ContentExtractor {
   private cleanCadReadableText(value: string): string {
     return value
       .replace(CAD_C1_CONTROL_RE, ' ')
+      // G 线 P2-7：先剥 MTEXT 带参格式码，再剥无参开关码与分组花括号
+      //（带参码要求以 `;` 收尾，故 `\L` 这类无参码不会被它误吃，两步无顺序耦合；
+      //  段落符 \P 已由调用方在行切分前消费，此处不再处理）
+      .replace(CAD_MTEXT_CODE_RE, '')
+      .replace(CAD_MTEXT_TOGGLE_RE, '')
+      .replace(CAD_MTEXT_BRACE_RE, '')
       .replace(CAD_CONTROL_CODE_RE, code => (code.toLowerCase() === '%%d' ? '°' : code.toLowerCase() === '%%p' ? '±' : 'Φ'))
       .replace(CAD_INTERNAL_TOKEN_RE, '')
       .replace(/\b(?:LINE|LWPOLYLINE|POLYLINE|INSERT|HATCH|CIRCLE|ARC|DIMENSION|TEXT|MTEXT)\b/giu, '')
@@ -371,27 +535,33 @@ export class ContentExtractor {
     // 超长无句读行：二进制误读产生的长连续乱码（常混入个别汉字/数字触发域信号豁免，
     // 因此只认中文句读，数字/单位不再豁免）
     if (chars.length > 400 && !/[\u3002\uFF0C\uFF1B\uFF1A\u3001、，。；：]/.test(compact)) return true;
-    // 行内短片段周期性重复（Ml+Ml+Ml、AM~AM~BM~BM、M|¶M|¶、2dA+2dA+2dA）：
-    // 正常标注不会让同一 2-4 字符片段在一行内重复出现，二进制误读则产生大量循环模式
+    // 行内短片段周期性重复（Ml+Ml+Ml、AM~AM~BM~BM、2dA+2dA+2dA）：二进制误读产生的循环模式。
+    // 收窄为两个必要条件，否则会大量误杀真实图纸数据：
+    // ① 仅限**无汉字**行——真循环模式是 Latin/符号串；含汉字行里的条款编号（4.4.2、12.2.2、2.3.3）
+    //    会让重复的数字在「短片段自身长度」这个极小分母上触发判据（实测 8 条正常中文条款被误杀）。
+    // ② 重复片段不能是**纯数字**——800*800*800、1000*1000*800/450、700*800*800/450 这类尺寸标注
+    //    本就是循环数字，是图纸真实数据；二进制误读吐的是高熵混合串，不会只产生纯数字循环。
     const shortTokens = compact.split(/[^\p{L}\p{N}]+/u).filter(token => token.length >= 1 && token.length <= 4);
-    if (shortTokens.length >= 3 && chars.length >= 8 && !hasDomainSignal) {
+    if (shortTokens.length >= 3 && chars.length >= 8 && !hasDomainSignal && cjk === 0) {
       const tokenFreq = new Map<string, number>();
       for (const token of shortTokens) tokenFreq.set(token, (tokenFreq.get(token) ?? 0) + 1);
-      let repeatedChars = 0;
-      for (const [token, count] of tokenFreq) {
-        if (count >= 2) repeatedChars += token.length * count;
-      }
-      if (repeatedChars / Math.max(1, shortTokens.join('').length) >= 0.4) return true;
+      const repeatedTokens = [...tokenFreq].filter(([, count]) => count >= 2);
+      const repeatedChars = repeatedTokens.reduce((sum, [token, count]) => sum + token.length * count, 0);
+      const onlyNumericRepeats = repeatedTokens.length > 0 && repeatedTokens.every(([token]) => /^\d+$/u.test(token));
+      if (!onlyNumericRepeats && repeatedChars / Math.max(1, shortTokens.join('').length) >= 0.4) return true;
     }
-    // 短行内同一汉字高频重复（摁䭚摁譚摁譚摁、耀U耀W耀Y耀）：正常标注不会在
-    // 14 字符以内的行里让重复汉字占比超过 60%
-    const hanChars = chars.filter(char => /[\p{Script=Han}]/u.test(char));
-    if (hanChars.length >= 4 && chars.length <= 14) {
-      const hanFreq = new Map<string, number>();
-      for (const char of hanChars) hanFreq.set(char, (hanFreq.get(char) ?? 0) + 1);
-      const repeatedHan = hanChars.filter(char => (hanFreq.get(char) ?? 0) >= 2).length;
-      if (repeatedHan / hanChars.length >= 0.6) return true;
-    }
+    // 短行内字符表塌缩（摁䭚摁譚摁譚摁：7 字只有 3 个不同字）：二进制误读的循环产物。
+    // 判据是「不同字符数 / 行长度」而非「重复汉字占比」——中文自然重复用字很多
+    // （「电动伸缩门或电动移门」8/9、「阀门(带阀门井)」6/8、「规定性指标性能性指标」7/10），
+    // 但字符表不会塌缩到六成以下；旧判据用重复占比，把上述正常标注全部误杀（实测 22 处
+    // 去重 11 条全部是正常中文）。此行与上面的「汉字-Latin-汉字交叉混排」互补：
+    // 后者管交叉混排，前者管同表循环，故不能依赖后者兜底（摁䭚摁譚摁譚摁 无 Latin，
+    // 且生僻字占比 1/7 低于「CJK 扩展区生僻字」的 0.2 门槛）。
+    const distinctCharRatio = new Set(chars).size / chars.length;
+    // 数字占比高的行豁免：800*800*800、1000*1000*800/450 的字符表同样「塌缩」，
+    // 但那是重复的尺寸数字，属图纸真实数据而非二进制误读
+    const digitShare = digits / chars.length;
+    if (cjk >= 1 && chars.length >= 6 && chars.length <= 14 && digitShare < 0.3 && distinctCharRatio < 0.6) return true;
     // Latin-1 扩展字符（¡-ÿ 区）密集行：中文图纸标注几乎不用这些字符，
     // 二进制误读（GBK/CP1252 混读）会批量产生
     const latinExtended = chars.filter(char => /[\u00A0-\u02AF\u1E00-\u1EFF]/u.test(char)).length;
@@ -458,6 +628,8 @@ export class ContentExtractor {
       .join('');
     if (file.category !== 'cad') return normalized.replace(/\n{3,}/gu, '\n\n');
     return normalized
+      // G 线 P2-7：同上，MTEXT 段落符先转真换行再逐行清洗
+      .replace(CAD_MTEXT_PARAGRAPH_RE, '\n')
       .split(/\r?\n/u)
       .map(line => this.cleanCadReadableText(line))
       .filter(line => line && !CAD_INTERNAL_LINE_RE.test(line) && !this.isLikelyGarbledCadText(line))
@@ -486,10 +658,18 @@ export class ContentExtractor {
       const converted = await this.tryConvertDwgToDxf(file.absolutePath);
       if (converted?.dxfText) {
         const parsed = await this.extractDxf(file, converted.dxfText, { ...metadata, extractionMode: converted.tool, convertedFrom: 'dwg', professionalConversionUsed: true });
-        parsed.warnings.push(...converted.warnings);
-        return parsed;
+        // DXF 路径确实拿到字符数据才收工。转换器「成功」但输出无可读字符时（残缺/加密 DWG、
+        // 转换器只吐结构不吐标注、代理对象图元），继续走下面的内置二进制兜底 —— 兜底路径带
+        // GBK 还原，往往还能救回图纸标注。旧实现只要 dxfText 非空就 return，**兜底永不触发**：
+        // 实测一份含 GBK 中文标注的 DWG 被判「无字符数据不入库」，而兜底本可完整还原出标注。
+        if (parsed.metadata.contentCoverage !== 'cad_no_extractable_text') {
+          parsed.warnings.push(...converted.warnings);
+          return parsed;
+        }
+        warnings.push(...converted.warnings, 'DWG→DXF 转换成功但未提取到字符数据，继续尝试内置二进制兜底抽取');
+      } else {
+        warnings.push(...(converted?.warnings ?? ['未检测到可用 DWG→DXF 转换器，使用内置图纸可读文本抽取']));
       }
-      warnings.push(...(converted?.warnings ?? ['未检测到可用 DWG→DXF 转换器，使用内置图纸可读文本抽取']));
     }
 
     if (file.format === 'autocad' && ext === '.dxf') {
@@ -655,7 +835,12 @@ export class ContentExtractor {
     // 图层/块名同样走 GBK 还原：中文图层名（「轴线」「标注」）在 DWG→DXF 后与标注文本
     // 是同一类码位直出乱码，不还原会被 isUsableCadName 整批判为乱码而丢失
     const layers = this.matchAll(raw, /(?:^|\r?\n)\s*8\s*\r?\n([^\r\n]+)/gu).map(restoreLatin1MojibakeAsGbk).filter(value => this.isUsableCadName(value)).slice(0, 300);
-    const textEntities = this.extractDxfTextAnnotations(raw).slice(0, 5000);
+    // G 线 P0-8：取消 5000 实体硬顶的**静默**截断。历史值 5000 是「总量保护」，但没有任何截断
+    // 标记，而 contentCoverage 仍报正常覆盖 —— 实测 21 个 CAD 文件中 7 个恰好等于 5000
+    // （确定性截断），用户看不到内容被砍。现口径：上限显著提高，且一旦触顶必须显式记账 + 告警。
+    const allTextEntities = this.extractDxfTextAnnotations(raw);
+    const textEntities = allTextEntities.slice(0, CAD_TEXT_ENTITY_LIMIT);
+    const truncatedEntities = allTextEntities.length - textEntities.length;
     const blocks = this.matchAll(raw, /(?:^|\r?\n)\s*2\s*\r?\n([^\r\n]+)/gu).map(restoreLatin1MojibakeAsGbk).filter(value => this.isUsableCadName(value)).slice(0, 300);
     const entityTypes = this.matchAll(raw, /(?:^|\r?\n)\s*0\s*\r?\n([A-Z][A-Z0-9_]+)/gu).slice(0, 1200);
     const uniqueLayers = Array.from(new Set(layers));
@@ -664,6 +849,12 @@ export class ContentExtractor {
     metadata.layerCount = uniqueLayers.length;
     metadata.layerNames = uniqueLayers.slice(0, 80);
     metadata.textEntityCount = textEntities.length;
+    // G 线 P0-8：触顶必须显式记账 —— 此前 5000 上限静默截断且 contentCoverage 仍报正常覆盖
+    if (truncatedEntities > 0) {
+      metadata.truncatedAt = CAD_TEXT_ENTITY_LIMIT;
+      metadata.annotationTotal = allTextEntities.length;
+      warnings.push(`图纸标注实体 ${allTextEntities.length} 条超过单文件上限 ${CAD_TEXT_ENTITY_LIMIT}，已截断 ${truncatedEntities} 条，入库内容不完整`);
+    }
     metadata.blockCount = uniqueBlocks.length;
     metadata.blockNames = uniqueBlocks.slice(0, 80);
     metadata.entityTypeCount = uniqueEntityTypes.length;
@@ -702,7 +893,14 @@ export class ContentExtractor {
     // 类型汇总已在 CAD DXF 汇总行体现，此处只保留图纸真实文字（图名/说明/尺寸标注值），
     // 并按坐标重建行/段落结构（总说明类多实体文本恢复为连续段落，防碎片化入库）
     const fileName = path.basename(file.relativePath);
-    const annotations = texts.filter(item => item.text && item.text.trim().length > 0);
+    // G 线 P2-7：MTEXT 段落符 \P 在此转真换行——两条 CAD 出口（DXF 语义层 / 兜底解析）都经由
+    // 本函数，故这是段落边界唯一的共同消费点。转成换行而非留到逐行清洗处理，是因为
+    // cleanCadReadableText 末尾的 `\s+`→空格 会把换行折叠掉、段落被无分隔粘连成一行。
+    // 实测三种形态：原样残留 `\P`（转义码污染检索词面）→ 拆成独立标注（被 layoutCadAnnotations
+    // 按坐标重建成连续段落，仍粘连）→ **保留换行**（段落如实分行，总说明类多段文本结构得以保持）。
+    const annotations = texts
+      .filter(item => item.text && item.text.trim().length > 0)
+      .map(item => ({ ...item, text: item.text.replace(CAD_MTEXT_PARAGRAPH_RE, '\n') }));
     if (annotations.length === 0) return [`图纸节点: ${fileName} | 未提取到文字标注`];
     return [`图纸节点: ${fileName}`, ...layoutCadAnnotations(annotations)];
   }
@@ -871,11 +1069,21 @@ export class ContentExtractor {
 
   private extractBinaryReadableFragments(filePath: string): string[] {
     const buffer = fs.readFileSync(filePath);
+    // 编码候选必须覆盖 GBK：DWG 内部的图纸标注常为 GBK 编码，而 utf8 候选会把它们读成
+    // U+FFFD、latin1 候选读成 "¿ò" 形态 —— 两条都会被乱码判定（替换符规则 / gbkMisreadChars
+    // 规则）整条丢弃，结果是**中文标注 0 字入库、只剩 ASCII 碎片**。
+    // 本条与 DXF 实体路径的 restoreLatin1MojibakeAsGbk 是同根因的两条入口，此前只修了后者：
+    // 转换器失败或输出乱码而走内置兜底时，中文仍然全丢。
+    const latin1Text = buffer.toString('latin1');
     const candidates = [
       buffer.toString('utf8'),
       buffer.toString('utf16le'),
       this.swapUtf16Bytes(buffer).toString('utf16le'),
-      buffer.toString('latin1'),
+      latin1Text,
+      // latin1 形态的 GBK 还原（0xBF 0xF2 → "¿ò" → 框架）
+      restoreLatin1MojibakeAsGbk(latin1Text),
+      // 原生 GBK 字节流（utf8 解读出现大量替换符时才是真 GBK，此处直接解一遍由打分排序竞争）
+      new TextDecoder('gbk', { fatal: false }).decode(buffer),
     ];
     return Array.from(new Set(candidates.flatMap(candidate => this.extractReadableFragments(candidate))))
       .filter(value => value.length >= 3 && !/^\d+$/u.test(value))
@@ -1110,7 +1318,11 @@ export class ContentExtractor {
           // 交给 provider 按 filePath 解码，与其在 PDF/栅格路径上的预处理保持一致
           const imgPath = path.join(tmpDir, `img-${index}${image.data.subarray(0, 2).toString('hex') === 'ffd8' ? '.jpg' : '.png'}`);
           fs.writeFileSync(imgPath, image.data);
-          const result = await provider.recognize({ data: new Uint8Array(0), width: image.width, height: image.height, channels: 0, filePath: imgPath });
+          // 与栅格图同路处理：docx/xlsx 内嵌的施工图长边常超检测上限，整图识别会把小号
+          // 标注压没（切片后可恢复）；此前切片只接在 PDF 页路径上，内嵌图一律整图识别。
+          // 用 loadImagePixels 取实际像素尺寸而非文档元数据声明的尺寸，避免两者不一致时切错网格
+          const embeddedPixels = await this.loadImagePixels(imgPath);
+          const result = await this.recognizeRasterImage(provider, embeddedPixels, {}, warnings);
           const text = this.cleanOcrText(result.text);
           if (!text || this.normalizedTextLength(text) < 8) continue;
           sections.push(`## 内嵌图片 ${index + 1}（OCR）\n\n${text}`);
@@ -1179,15 +1391,38 @@ export class ContentExtractor {
 
   private extractRtf(file: ClassifiedFile): { text: string; metadata: Record<string, unknown>; warnings: string[] } {
     const raw = fs.readFileSync(file.absolutePath, 'utf8');
-    const text = raw
-      .replace(/\\'[0-9a-fA-F]{2}/gu, ' ')
+    // RTF 的代码页声明（\ansicpg936 = GBK）。中文 Word/写字板写出的 RTF 以 \ansicpg936 +
+    // \'hh 转义表示全部非 ASCII 字符。旧实现把 \'hh 直接替换成空格 —— **中文正文 100%
+    // 丢失**，且因结果仍含字体表等 ASCII 内容（实测只剩 "SimSun;"）而不触发「未提取到
+    // 正文」告警，整类格式静默失效。
+    const codePage = Number(/\\ansicpg(\d+)/u.exec(raw)?.[1] ?? 0);
+    const encoding = RTF_CODE_PAGE_ENCODING[codePage];
+    // 连续 \'hh 必须整段还原：单字节分别解码会把 GBK 双字节字拆成两个替换符
+    const decodedEscapes = raw.replace(/(?:\\'[0-9a-fA-F]{2})+/gu, run => {
+      const bytes = run.match(/[0-9a-fA-F]{2}/gu) ?? [];
+      const buffer = Buffer.from(bytes.map(hex => Number.parseInt(hex, 16)));
+      // 未声明或未知代码页时交给通用编码探测（UTF-8 → GBK），与本仓其他文本入口同口径
+      if (!encoding) return decodeTextBuffer(buffer).text;
+      try {
+        return new TextDecoder(encoding, { fatal: false }).decode(buffer);
+      } catch {
+        return decodeTextBuffer(buffer).text;
+      }
+    });
+    const text = decodedEscapes
+      // \uNNNN 是 RTF 的 Unicode 转义（现代 Word 优先写这种形态），形如「\u20013?」：
+      // 把主字符与紧随其后用于占位的 ASCII 字符一并消费，避免留下孤立字符污染正文
+      .replace(/\\u(-?\d+)\s?\??/gu, (_match, code: string) => {
+        const value = Number(code);
+        return Number.isFinite(value) && value > 0 ? String.fromCharCode(value) : '';
+      })
       .replace(/\\[a-zA-Z]+-?\d* ?/gu, ' ')
       .replace(/[{}]/gu, ' ')
       .replace(/\s+/gu, ' ')
       .trim();
     return {
       text,
-      metadata: { extractionMode: 'builtin_rtf_text', vectorizable: true, contentCoverage: 'rtf_text' },
+      metadata: { extractionMode: 'builtin_rtf_text', vectorizable: true, contentCoverage: 'rtf_text', rtfCodePage: codePage || undefined },
       warnings: text ? [] : ['RTF 解析未提取到正文，未入库'],
     };
   }
@@ -1388,9 +1623,9 @@ export class ContentExtractor {
     const docXml = await zip.files['word/document.xml']?.async('string');
     if (!docXml) return '';
     
-    // 我们需要按出现顺序提取 paragraph 和 table
-    // 在 xml 中 w:body 的一级子节点通常是 w:p 和 w:tbl
-    const elements = Array.from(docXml.matchAll(/<(w:p|w:tbl)[\s>][\s\S]*?<\/\1>/gu), match => ({ tag: match[1], xml: match[0] }));
+    // 按出现顺序提取 paragraph 和 table（深度配平，见 extractTopLevelOoxmlElements 注释：
+    // 非贪婪正则会在段内文本框的内层 </w:p> 处提前收尾，吞掉该段后半正文）
+    const elements = extractTopLevelOoxmlElements(docXml);
     const lines: string[] = [];
     let tableIndex = 0;
     
@@ -1532,7 +1767,7 @@ export class ContentExtractor {
     }
 
     // 2. 加载图片像素数据
-    let imageData: { data: Uint8Array; width: number; height: number };
+    let imageData: { data: Uint8Array; width: number; height: number; channels: number };
     try {
       imageData = await this.loadImagePixels(file.absolutePath);
       metadata.imageWidth = imageData.width;
@@ -1554,7 +1789,7 @@ export class ContentExtractor {
       metadata.ocrProvider = provider.id;
       warnings.push(...this.ocrProviderWarnings(provider));
 
-      const ocrResult = await provider.recognize(imageData);
+      const ocrResult = await this.recognizeRasterImage(provider, imageData, metadata, warnings);
       const text = ocrResult.text.trim();
 
       if (text) {
@@ -1669,9 +1904,11 @@ export class ContentExtractor {
 
     try {
       const raw = fs.readFileSync(file.absolutePath);
-      const { text: pdfLayerText, garbledPages, emptyGraphicPages, pageCount } = await this.extractPdfText(raw);
+      const { text: pdfLayerText, garbledPages, emptyGraphicPages, sheetPages, pageCount } = await this.extractPdfText(raw);
       let text = pdfLayerText;
-      const ocrCandidatePages = [...new Set([...garbledPages, ...emptyGraphicPages])].sort((a, b) => a - b);
+      // 图纸页与乱码页/空图形页同等对待：三者都是「文本层不可信但正文可取」的形态。
+      // 并入后：文本层整体不足时走全页 OCR；整体尚可时走选择性 OCR 只补这些页
+      const ocrCandidatePages = [...new Set([...garbledPages, ...emptyGraphicPages, ...sheetPages])].sort((a, b) => a - b);
       // 先判定文本层是否可用（页均密度门槛会把“只有图框文字的图纸 PDF”判为不足）；
       // 文本层不足时直接走全页 hybrid OCR，跳过乱码页单独 OCR：
       // 既避免重复 OCR，也避免“garbled provider A dispose 后 hybrid provider B 再建”的双 provider 序列
@@ -1824,6 +2061,12 @@ export class ContentExtractor {
   private hasUsablePdfText(text: string, pageCount?: number): boolean {
     const normalized = text.replace(/\s+/gu, ' ').trim();
     if (normalized.length < Number(process.env.CUSTOMIZE_KB_PDF_TEXT_MIN_CHARS || 80)) return false;
+    // G 线 P0-11（修正上一轮修复的副作用）：图纸页判定**不得**在文档级否定整份文本层。
+    // 此前此处为 `sheetPageCount * 2 >= pageCount → return false`，后果是：招标文件常附大量
+    // 图纸页，一旦图纸页过半，**整本**被判无可用文本层 → 走全页 OCR，已带文本层的页也要重 OCR
+    // 一遍，丢字、丢表结构、丢数字精度（工程量与标高最怕 OCR 错字）。
+    // 现口径改为**页级**：图纸页由 isSparseTextSheetPage 逐页识别并进入 ocrCandidatePages，
+    // 在文本层整体可用的分支里做**选择性 OCR**（有文本层的页直接用，只 OCR 图纸页/乱码页/空图形页）。
     // CAD 导出图纸 PDF 的文本层只有图框/标题栏零星文字（正文为矢量线），多页文档页均密度极低；
     // 这种情况不能算“文本层足够”，否则整本图纸只有几百字符入库、正文全部丢失。
     // 阈值：多页（>1 页）且页均 < 100 可见字符时判不足，转入 hybrid OCR 路径（正常文档页均数百到上千字符不受影响）。
@@ -2068,8 +2311,14 @@ export class ContentExtractor {
       const workerScript = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'render_pdf_pages.py');
       const args = [workerScript, pdfPath, outputDir, String(dpi)];
       if (pages?.length) args.push(pages.join(','));
+      // 上限治理 · 内存：渲染超时**按文件规模自适应**，不再是写死的 60 秒。
+      // 实测缺陷：531 页 / 183MB 的施工图 PDF，PyMuPDF 渲染需 135 秒 —— 60 秒超时把成功路径掐断，
+      // 于是降级到进程内的 pdfjs（逐页 4× 渲染），在 Node 堆里直接 OOM/SIGABRT，**整个索引任务失败**。
+      // 一个写死的超时不该把「本可完成」变成「硬崩溃」。
+      const sizeMb = Math.max(1, Math.floor(fs.statSync(pdfPath).size / 1024 / 1024));
+      const renderTimeoutMs = Math.min(30 * 60_000, Math.max(60_000, sizeMb * 3000));
       spawnSync(python, args, {
-        encoding: 'utf-8', timeout: 60_000, maxBuffer: 1024 * 1024,
+        encoding: 'utf-8', timeout: renderTimeoutMs, maxBuffer: 1024 * 1024,
       });
       // 检查输出文件（即使 Python 非零退出码也可能已渲染部分页面）
       const images: string[] = [];
@@ -2105,12 +2354,39 @@ export class ContentExtractor {
       const raw = fs.readFileSync(file.absolutePath);
       const doc = await pdfjsLib.getDocument({ data: new Uint8Array(raw), verbosity: 0 }).promise;
       const pageCount = doc.numPages;
+      // 上限治理 · 内存：**拒绝而非崩溃**。进程内渲染的页数×像素成本会线性吃满堆
+      //（实测 531 页图纸在 6GB 堆下仍 SIGABRT）。超过阈值时显式返回 null 并告警，
+      // 让上层按「渲染不可用」处理——比让整个索引任务崩掉、库被删到一半好得多。
+      const MAX_IN_PROCESS_RENDER_PAGES = 120;
+      if (pageCount > MAX_IN_PROCESS_RENDER_PAGES) {
+        console.warn(`[extract] PDF 页数 ${pageCount} 超过进程内渲染上限 ${MAX_IN_PROCESS_RENDER_PAGES}，跳过 pdfjs 降级渲染（请确保 PyMuPDF 可用，否则该文件未 OCR）`);
+        await doc.destroy();
+        return null;
+      }
       const images: string[] = [];
       const geometry: Array<{ page: number; widthMm: number; heightMm: number }> = [];
-      const renderScale = 4;
+      /**
+       * 渲染倍率**按像素上限自适应**（上限治理 · 内存）。
+       *
+       * 实测缺陷：固定 `renderScale = 4` 在大幅面工程图纸上会把 A1 页渲染成约 9500×6700 px
+       * ⇒ 单页 canvas ≈257MB（+PNG 缓冲 + sharp 中间态），叠加整份 PDF（183MB 读入后再复制一份
+       * 给 pdfjs）与 pdfjs 文档结构，**解析单份图纸 PDF 峰值 >9GB 后 SIGABRT**
+       *（实测 RSS 3.0 → 7.45 → 8.92GB）。大图纸是工程项目的常态输入，不是异常。
+       *
+       * 现口径：倍率取「默认 4×」与「单页像素不超 MAX_RENDER_PIXELS」两者的较小值，
+       * 且不低于 1×（再低 OCR 会失去可读性）。大幅面页自动降到能容纳的倍率，
+       * 小页面仍享受 4× 清晰度——**不是一刀切降精度**。
+       */
+      const MAX_RENDER_PIXELS = 40_000_000; // ≈ 40MP/页（约 160MB/页 canvas），与 OCR 可读性折中
+      const defaultRenderScale = 4;
 
       for (let i = 1; i <= pageCount; i++) {
         const page = await doc.getPage(i);
+        const unit = page.getViewport({ scale: 1 });
+        const pixelsAtDefault = unit.width * unit.height * defaultRenderScale * defaultRenderScale;
+        const renderScale = pixelsAtDefault > MAX_RENDER_PIXELS
+          ? Math.max(1, defaultRenderScale * Math.sqrt(MAX_RENDER_PIXELS / pixelsAtDefault))
+          : defaultRenderScale;
         const viewport = page.getViewport({ scale: renderScale });
         const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
         const ctx = canvas.getContext('2d');
@@ -2121,15 +2397,22 @@ export class ContentExtractor {
           .removeAlpha().normalize().linear(3.0, -150)
           .withMetadata({ density: 288 }).png().toFile(pngPath);
         images.push(pngPath);
+        // 内存治理：每页显式释放（canvas 的像素缓冲与 pdfjs 页资源都不等 GC —— 大页面上
+        // 一次 GC 延迟就足以把峰值推过堆上限；实测崩溃点正是「逐页渲染、不释放」）
+        page.cleanup();
+        canvas.width = 0;
+        canvas.height = 0;
         // scale=1 的 viewport 是页面 pt 尺寸（1pt = 1/72 inch），与 PyMuPDF 侧口径一致
-        const unitViewport = page.getViewport({ scale: 1 });
+        // （用上面已取的 unit，避免重复调用 getViewport）
         geometry.push({
           page: i,
-          widthMm: (unitViewport.width * 25.4) / 72,
-          heightMm: (unitViewport.height * 25.4) / 72,
+          widthMm: (unit.width * 25.4) / 72,
+          heightMm: (unit.height * 25.4) / 72,
         });
       }
-      this.writePageGeometry(outputDir, 'pdfjs-dist', renderScale * 72, geometry);
+      // 名义渲染 DPI 记录为默认倍率：逐页 mm 尺寸由 scale=1 精确给出（与倍率无关），
+      // 大幅面页按像素上限降倍率后几何仍精确，故此处只作缺失时的折算兜底值。
+      this.writePageGeometry(outputDir, 'pdfjs-dist', defaultRenderScale * 72, geometry);
       await doc.destroy();
       return images.length > 0 ? images : null;
     } catch { return null; }
@@ -2175,6 +2458,49 @@ export class ContentExtractor {
    * 单页 OCR：按页面物理尺寸决定是否切片。切片时逐块识别（块内不做缩放，
    * 等价于检测在原生分辨率上进行），并启用召回档阈值。
    */
+  /**
+   * 栅格图片 OCR：长边超过检测上限（或按 200DPI 折算达到大幅面）时切片识别。
+   *
+   * 为什么必须切片：检测网络会把整图缩放到 `maxSideLength` 以内再送检测，A2 图 200DPI
+   * 即 4678×3309，图上 2.5mm 标注缩完只剩约 4px、检测模型直接看不见（实测整页仅 450 字符、
+   * 切片后可达数千）。切片边长 ≤ 检测上限时块内不发生任何缩放，等价于原生分辨率检测。
+   *
+   * 此前切片只接在 **PDF 页**路径上（`recognizePdfPageOcr`），栅格图片（扫描件、拍照图纸、
+   * Office 内嵌图）一律整图识别 —— 长边 >4000px 的图片小字标注整类丢失，且**零告警**
+   * （`metadata.imageWidth/imageHeight` 有值，但没有任何地方拿它跟切片阈值比较）。
+   */
+  private async recognizeRasterImage(
+    provider: OcrProvider,
+    image: RgbPixels,
+    metadata: Record<string, unknown>,
+    warnings: string[],
+  ): Promise<OcrResult> {
+    const decision = shouldTilePage({
+      widthPx: image.width,
+      heightPx: image.height,
+      maxSidePx: PADDLE_DETECTION_MAX_SIDE_PX,
+      tilePx: TILE_PX,
+      thresholdMm: TILE_TRIGGER_MM,
+    });
+    if (!decision.tile) return provider.recognize(image);
+
+    const plan = planTiles(image.width, image.height, {
+      tilePx: TILE_PX, overlapPx: TILE_OVERLAP_PX, maxTiles: TILE_MAX_PER_PAGE,
+    });
+    const result = await recognizeWithTiling({
+      source: image,
+      tiles: plan.tiles,
+      recognize: (pixels, recognizeOptions) => provider.recognize(pixels, recognizeOptions),
+      options: this.getOcrRecallOptions(),
+    });
+    metadata.ocrTiled = true;
+    metadata.ocrTileCount = plan.tiles.length;
+    if (result.tilesFailed > 0) {
+      warnings.push(`图片切片 OCR 有 ${result.tilesFailed}/${plan.tiles.length} 块识别失败，该区域内容可能缺失`);
+    }
+    return result;
+  }
+
   private async recognizePdfPageOcr(options: {
     provider: OcrProvider;
     imgPath: string;
@@ -2331,12 +2657,15 @@ export class ContentExtractor {
     return width < 8 || height < 8 || width * height < 128;
   }
 
-  private async extractPdfText(buffer: Buffer): Promise<{ text: string; garbledPages: number[]; emptyGraphicPages: number[]; pageCount: number }> {
+  private async extractPdfText(buffer: Buffer): Promise<{ text: string; garbledPages: number[]; emptyGraphicPages: number[]; sheetPages: number[]; pageCount: number }> {
     let pdfjsText = '';
     const garbledPages: number[] = [];
     // 文本层为空但页面存在绘制内容（扫描图页 / CAD 矢量图页）的页码：正文是图形而非文本层，
     // 同样需要选择性 OCR 兜底，否则整页信息完全丢失
     const emptyGraphicPages: number[] = [];
+    // 有文本层但只是图签栏的大幅面图纸页：文本层「非空」掩盖了正文在矢量图形里的事实，
+    // 是单张出图（一个文件一张 A2/A3）时的典型形态，须与 emptyGraphicPages 同等对待
+    const sheetPages: number[] = [];
     let pageCount = 0;
     // 第一层：pdfjs-dist 文本提取（处理压缩内容流、CJK 字体、现代 PDF）
     try {
@@ -2365,7 +2694,15 @@ export class ContentExtractor {
           garbledPages.push(i);
           continue;
         }
+        // 大幅面 + 文本层稀疏 + 页面有绘制内容 → 正文在矢量图形里、文本层只剩图签栏。
+        // 文本仍保留（图签栏含项目名/设计院等信息），同时记入 OCR 候选补回正文
+        if (await this.isSparseTextSheetPage(page, pageText)) sheetPages.push(i);
         pages.push(pageText.trim());
+        // 上限治理 · 内存：**每页显式释放**。`pdfPageHasDrawableContent` 会读 `page.getOperatorList()`，
+        // 而 CAD 导出的矢量图纸单页算子表可达数十万条 —— 531 页图纸 PDF 下，pdfjs 缓存全部算子表
+        // 直接把堆吃穿（实测进程启动后 2 秒内 OOM/SIGABRT，RSS 冲到 8GB+）。`cleanup()` 释放该页的
+        // 算子表与渲染资源，使内存占用回到「单页量级」而非「全文档累计」。
+        try { page.cleanup(); } catch { /* 释放失败不影响提取结果 */ }
       }
       await doc.destroy();
       pdfjsText = pages.join('\n\n').trim();
@@ -2399,17 +2736,17 @@ export class ContentExtractor {
         // pdfjs 已检出乱码页时跳过 pdf-parse 长文本合并：pdf-parse 无法按页过滤同一乱码，
         // 其“更长”的文本往往正是乱码来源；pdfjs 全部页面均为乱码页时返回空文本走 OCR 路径
         if (garbledPages.length === 0) {
-          if (pdfjsText && parseText && this.normalizedTextLength(parseText) > this.normalizedTextLength(pdfjsText) * 1.08) return { text: [pdfjsText, '## PDF 备用解析文本', parseText].join('\n\n'), garbledPages, emptyGraphicPages, pageCount };
-          if (parseText && !pdfjsText) return { text: parseText, garbledPages, emptyGraphicPages, pageCount };
+          if (pdfjsText && parseText && this.normalizedTextLength(parseText) > this.normalizedTextLength(pdfjsText) * 1.08) return { text: [pdfjsText, '## PDF 备用解析文本', parseText].join('\n\n'), garbledPages, emptyGraphicPages, sheetPages, pageCount };
+          if (parseText && !pdfjsText) return { text: parseText, garbledPages, emptyGraphicPages, sheetPages, pageCount };
         } else if (parseText && !pdfjsText) {
-          return { text: '', garbledPages, emptyGraphicPages, pageCount };
+          return { text: '', garbledPages, emptyGraphicPages, sheetPages, pageCount };
         }
       }
     } catch {
       // pdfjs 结果已可用时忽略备用解析器失败
     }
 
-    if (pdfjsText) return { text: pdfjsText, garbledPages, emptyGraphicPages, pageCount };
+    if (pdfjsText) return { text: pdfjsText, garbledPages, emptyGraphicPages, sheetPages, pageCount };
 
     // 第三层：raw regex 回退（未压缩的古老 PDF）
     const raw = buffer.toString('latin1');
@@ -2425,7 +2762,7 @@ export class ContentExtractor {
       })
       .join('')
       .trim();
-    return { text: rawText, garbledPages, emptyGraphicPages, pageCount };
+    return { text: rawText, garbledPages, emptyGraphicPages, sheetPages, pageCount };
   }
 
   /**
@@ -2436,6 +2773,33 @@ export class ContentExtractor {
    * fill=9 eoFill=10 stroke=11 constructPath=22 paintImageMaskXObject=83
    * paintImageMaskXObjectRepeat=84 paintImageXObject=85 paintInlineImageXObject=86 paintSolidColorImageMask=91
    */
+  /**
+   * 判断是否为「文本层只剩图签栏」的大幅面图纸页。
+   *
+   * 三个条件同时成立才判定，缺一不可：
+   * ① 页面长边 ≥ 400mm（A3 及以上，复用切片阈值）—— 文档页是 A4，不会命中；
+   * ② 可见字符数 < SHEET_PAGE_MAX_VISIBLE_CHARS —— 纯文字的大幅面页（长文本海报等）不会命中；
+   * ③ 页面存在绘制内容（矢量描边/图片）—— 印证「正文在图形里」。
+   *
+   * 与 `emptyGraphicPages` 的分工：后者管「文本层为空 + 有图形」，本判据管
+   * 「文本层非空但只有图签栏 + 有图形」。两者共同覆盖图纸 PDF 的全部形态，
+   * 单张出图（一个文件一张 A2/A3）由本判据兜住。
+   */
+  private async isSparseTextSheetPage(page: unknown, pageText: string): Promise<boolean> {
+    const visible = (pageText.match(/[\p{L}\p{N}\p{Script=Han}]/gu) ?? []).length;
+    if (visible >= SHEET_PAGE_MAX_VISIBLE_CHARS) return false;
+    let longSideMm: number;
+    try {
+      const viewport = (page as { getViewport: (options: { scale: number }) => { width: number; height: number } }).getViewport({ scale: 1 });
+      longSideMm = (Math.max(viewport.width, viewport.height) * 25.4) / 72;
+    } catch {
+      // 取不到页面尺寸时保守判否，避免把尺寸未知的页面误判为图纸页
+      return false;
+    }
+    if (longSideMm < TILE_TRIGGER_MM) return false;
+    return this.pdfPageHasDrawableContent(page);
+  }
+
   private async pdfPageHasDrawableContent(page: unknown): Promise<boolean> {
     try {
       const record = page as { getOperatorList?: () => Promise<{ fnArray?: number[] }> };
@@ -2542,8 +2906,15 @@ export class ContentExtractor {
         cursor += 1;
       }
       if (tableRows.length >= 2) {
-        output.push('### PDF 表格区域');
-        output.push(this.toMarkdownTable(tableRows[0]!, tableRows.slice(1)));
+        // G 线 P2-9：PDF 表格接入智能表头检测（与 xlsx / CSV / DOCX 三条路径同源）。
+        // 历史实现无条件把 `tableRows[0]` 当表头——PDF 表格前常有标题行（「表3-1 主要材料表」）
+        // 或被折行规则并入的引导句，把非表头行当表头后真实列名全部丢失，下游按列位的
+        // 行级提取与「R#C# 列名: 值」KV 全部错位（与 xlsx 路径当初的实锤同形）。
+        // 无列关键词的表格由 detectSmartTableHeader 回退 matrix[0]，历史行为不变。
+        const smart = detectSmartTableHeader(tableRows);
+        const titleNote = smart.titleLines.length ? `｜表标题：${smart.titleLines.join(' ')}` : '';
+        output.push(`### PDF 表格区域${titleNote}`);
+        output.push(this.toMarkdownTable(smart.headers, tableRows.slice(smart.headerIndex + 1)));
         index = cursor;
         continue;
       }

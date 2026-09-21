@@ -18,8 +18,14 @@ import { documentLengthOverflow, documentTextLength } from '../../budget';
 import type { FinalizeSession } from '../finalizeSession';
 
 /** 全文压缩收敛轮上限（每轮落地后重判超标；超标消除即提前收敛） */
-const MAX_LENGTH_COMPRESSION_ROUNDS = 2;
-/** 每轮定向修复的章数上限（超额降序取前列；控制单阶段 LLM 调用预算） */
+/**
+ * 上限治理：原 `MAX_LENGTH_COMPRESSION_ROUNDS = 2` × `MAX_CHAPTERS_PER_ROUND = 6` 组合的后果是
+ * **超长章超过 12 个后其余章永不被压缩**（每轮按超额降序取前 6，两轮即止）。
+ * 现改：轮次为**安全上限**（达标即停），章选择加**已尝试轮转**——若前 6 章压不动（超额不降），
+ * 下一轮取未尝试过的章，避免头部恒占名额、尾部永无机会。
+ */
+const MAX_LENGTH_COMPRESSION_ROUNDS = 8;
+/** 每轮定向修复的章数（批量，不是总量上限：未尝试的章由后续轮次继续消费） */
 const MAX_CHAPTERS_PER_ROUND = 6;
 /** 单章超额低于此值不发起压缩（噪声抖动不值得 LLM 调用，且压缩空间不足） */
 const MIN_CHAPTER_COMPRESSION_CHARS = 200;
@@ -56,7 +62,7 @@ function conservationMetrics(content: string, baseline: { headings: Map<string, 
 }
 
 /** 章级超额定位（chapterTargets 单源，正超额降序取前 N）：单章超额 <200 字不入选 */
-function overflowChapterTargets(session: FinalizeSession): Array<{ chapterId: string; chapterTitle: string; currentChars: number; targetChars: number }> {
+function overflowChapterTargets(session: FinalizeSession, attemptedChapters: Set<string> = new Set()): Array<{ chapterId: string; chapterTitle: string; currentChars: number; targetChars: number }> {
   const targets: Array<{ chapterId: string; chapterTitle: string; currentChars: number; targetChars: number }> = [];
   for (const chapter of session.finalChapterDrafts) {
     const targetChars = session.documentBudget.chapterTargets.get(chapter.id) || 0;
@@ -65,9 +71,13 @@ function overflowChapterTargets(session: FinalizeSession): Array<{ chapterId: st
     if (currentChars - targetChars < MIN_CHAPTER_COMPRESSION_CHARS) continue;
     targets.push({ chapterId: chapter.id, chapterTitle: chapter.title, currentChars, targetChars });
   }
-  return targets
-    .sort((left, right) => (right.currentChars - right.targetChars) - (left.currentChars - left.targetChars))
-    .slice(0, MAX_CHAPTERS_PER_ROUND);
+  const sorted = targets.sort((left, right) => (right.currentChars - right.targetChars) - (left.currentChars - left.targetChars));
+  // 饥饿防护：优先取未尝试过的章；全部尝试过后再回落从头（避免已尝试但未改善的章被永久放弃）
+  const fresh = sorted.filter(item => !attemptedChapters.has(item.chapterId));
+  const ordered = fresh.length > 0 ? fresh : sorted;
+  const picked = ordered.slice(0, MAX_CHAPTERS_PER_ROUND);
+  for (const item of picked) attemptedChapters.add(item.chapterId);
+  return picked;
 }
 
 export async function stageLengthCompressionRepair(session: FinalizeSession): Promise<void> {
@@ -83,10 +93,12 @@ export async function stageLengthCompressionRepair(session: FinalizeSession): Pr
   let repairedChapters = 0;
   // 全文长度轨迹（超标初值 + 每轮落地后重判）：阶段消息与诊断展示收敛过程
   const trajectory: number[] = [initialOverflow.currentChars];
+  /** 饥饿防护：本轮批次已尝试压缩的章（跨轮轮转，防头部恒占名额） */
+  const attemptedCompressionChapters = new Set<string>();
   for (let round = 1; round <= MAX_LENGTH_COMPRESSION_ROUNDS; round += 1) {
     const overflow = documentLengthOverflow(session.documentBudget, session.finalMarkdown);
     if (!overflow) break;
-    const targets = overflowChapterTargets(session);
+    const targets = overflowChapterTargets(session, attemptedCompressionChapters);
     if (targets.length === 0) break;
     let appliedThisRound = 0;
     for (const target of targets) {

@@ -79,7 +79,7 @@ export function fabricatedStartDateIssues(markdown: string, factsModel: Document
       suggestion: `删除自行设定的具体日期，统一改写为“以开工令时间为准”；如为进度计划节点日期，必须标注为计划推算节点并保持与总工期一致。`,
     });
   }
-  return issues.slice(0, 3);
+  return issues;
 }
 
 // ── 2. 字段-数值错配检测（R3）：总占地面积值被误标为单体建筑面积等相近槽位 ──
@@ -125,7 +125,7 @@ export function fieldValueMismatchIssues(markdown: string, factsModel: DocumentF
       suggestion: `总占地面积与建筑面积是两个独立字段，必须严格区分：将“${label} ${match[2]}㎡”改为资料数值“${label} ${correctValues}㎡”，总占地面积保持独立表述。`,
     });
   }
-  return issues.slice(0, 3);
+  return issues;
 }
 
 // ── 3. 面积算术一致性（R3 子项）：同一语句内 地上+地下 与 总/单体面积 必须自洽 ──
@@ -152,7 +152,7 @@ export function areaArithmeticIssues(markdown: string): ValidationIssue[] {
       });
     }
   }
-  return issues.slice(0, 3);
+  return issues;
 }
 
 // ── 4. 劳动力口径一致性（R4）：正文“高峰期 X 人”与分阶段明细表最大峰值必须同口径 ──
@@ -534,7 +534,7 @@ export function resourceConsistencyIssues(markdown: string, options?: { laborPea
       );
     }
   }
-  return issues.slice(0, 5);
+  return issues;
 }
 
 // ── 5. 支护体系并存（R6）：放坡喷锚族与灌注桩排桩族两套体系同时成段出现属跨模板拼接断裂 ──
@@ -641,7 +641,7 @@ export function dangerousListConsistencyIssues(markdown: string): ValidationIssu
       });
     }
   }
-  return issues.slice(0, 3);
+  return issues;
 }
 
 // ── 危大排除声明 vs 危大清单表格矛盾（R12，舒城第二轮实测）──
@@ -721,7 +721,7 @@ export function hazardExclusionContradictionIssues(markdown: string): Validation
       });
     }
   }
-  return issues.slice(0, 3);
+  return issues;
 }
 
 // ── 7. 六个百分百逐项覆盖（R8）：扬尘治理六项要求逐项命中，零散措施不等于体系响应 ──
@@ -941,7 +941,7 @@ export function paragraphOpeningRepeatIssues(markdown: string): ValidationIssue[
       suggestion: '同一段首句式只保留首次出现处，其余处按所在章节语境改写为差异化开场，避免模板化套话观感。',
     });
   }
-  return issues.slice(0, 3);
+  return issues;
 }
 
 export function overviewRecapCandidates(markdown: string): { overviewBody: string; sentences: string[] } {
@@ -1256,7 +1256,7 @@ export async function selfUnderminingCandidateIssues(markdown: string): Promise<
       suggestion: '投标文件不得主动暴露“专项设计未完成/指标存在缺口”等短板：改写为正向落实表述（如“按施工图绿色建筑专篇编制专项方案，逐项落实评分项并跟踪验收”）；如属现场条件合理风险描述（地质/管线尚不明确），保留但需配套勘查与应对措施。',
     });
   }
-  return issues.slice(0, 3);
+  return issues;
 }
 
 // ── 11. 叠词重复检测（Q8 前半）：同一双字词紧邻重复（“执行执行”“进行进行”），L1 封闭结构提取 + 确定性去重 ──
@@ -1632,7 +1632,7 @@ export function nodeScheduleConsistencyIssues(markdown: string): ValidationIssue
       suggestion: `关键节点完成时间必须全文唯一：以总进度计划表为准统一“${anchor.label}”节点日期，删除正文/其他表中矛盾的“第N日”表述。`,
     });
   }
-  return issues.slice(0, 4);
+  return issues;
 }
 
 // ── 14. 跨节数值口径冲突（h13）：确定性锚点（材料/设备名称）+ 单位收口数值集合比较。
@@ -2280,7 +2280,7 @@ export function crossSectionNumericConflictIssues(markdown: string): ValidationI
   }
   // 上限 16：十五版真实文档机械四套数字 7 条 + 土方/清底/房屋锚点 3 条超 8 条被截断漏报；
   // 跨节冲突上限提高到 16 防截断（确定性检测零误伤，数量增加不放大修复风险）
-  return issues.slice(0, 16);
+  return issues;
 }
 
 /** 规格 token 类型推断：从权威规格值推导正则，只校验同类型规格（避免「垫层…HRB400 钢筋」误比对混凝土标号） */
@@ -2526,7 +2526,7 @@ export function basicInfoScheduleFieldIssues(markdown: string): ValidationIssue[
       suggestion: '「计划工期」字段应填日历天数值（与招标文件前附表一致）；工期延误违约条款文字应放在工期风险管控章节，不得占用基本信息表字段。',
     });
   }
-  return issues.slice(0, 2);
+  return issues;
 }
 
 // ── 16. 关键设计决策两可表述阻断（h14）：基础/支护等关键设计决策不得以斜杠并列
@@ -2965,7 +2965,7 @@ export function equipmentEntryTimingIssues(markdown: string, factsModel: Documen
       suggestion: `基坑阶段专用设备必须在基坑开挖/支护开始前完成进场与报验：将 ${scan.inverted.map(entry => entry.equipment).join('、')} 的进场日调整为早于基坑支护完成节点（第${scan.pitDone}日）的日期，删除工序倒挂表述。`,
     });
   }
-  return issues.slice(0, 3);
+  return issues;
 }
 
 /** 前置「于/在」虚词并入排除词（复合词素）：虚词属词素成分时不并入替换 span
@@ -3677,7 +3677,7 @@ export async function crossProjectValueCopyIssues(
     if (pairings.length === 0) continue;
     perAuthority.push({ authority: { name: authority.name, value: authority.value, unit: authority.unit }, detail, pairings });
   }
-  if (perAuthority.length === 0) return issues.slice(0, 8);
+  if (perAuthority.length === 0) return issues;
   // 判定层统一过滤（一次批量调用；同内容候选跨检测点缓存复用）：consistent 撤配对，
   // conflict/uncertain 保留进入数学判定
   const candidates: CitationAdjudicationCandidate[] = [];
@@ -3750,7 +3750,7 @@ export async function crossProjectValueCopyIssues(
     }
   }
   // 上限 8：多村项目同值复制可能成簇出现，防刷屏（确定性检测零误伤，数量增加不放大修复风险）
-  return issues.slice(0, 8);
+  return issues;
 }
 
 // ── V5 P4b-2 阶段劳动力声明统一扫描（检测与确定性修复同源单源） ──

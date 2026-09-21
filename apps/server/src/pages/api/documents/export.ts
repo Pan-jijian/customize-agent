@@ -899,14 +899,6 @@ function htmlShell(title: string, body: string, settings?: DocumentExportSetting
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeXml(title)}</title><style>${buildPrintCss(style, monoColor)}</style></head><body>${enhancedBody}</body></html>`;
 }
 
-/** 判断问题是否为阻止导出的严重问题（非警告类问题） */
-function isExportBlockingIssue(issue: { message: string }) {
-  const message = issue.message.trim();
-  // 事实冲突和必需章节缺失属于警告，不阻止导出
-  if (/^(事实冲突|必需章节缺失)：/u.test(message)) return false;
-  return /出现禁用文本\s*(资料未提供|占位|TODO|TBD)|正文包含.*(资料未提供|占位)|图片、地图或附件引用路径明显无效|无效路径|表格语法错误|临时远程生成 URL|提示词全文|内部错误|生成未完成|低于目标页数|低于目标字数|文档预算未达成|正文篇幅低于目标|缺少规划小节|缺少必要的正式表格|正文缺少章节标题/iu.test(message);
-}
-
 function markdownStats(markdown: string) {
   return {
     chars: markdown.trim().length,
@@ -1262,12 +1254,31 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       });
     }
     const exportGate = record?.draft?.exportGate || body.exportGate;
-    // 导出门禁仅作为风险提示，不阻断用户导出
-    const blockingIssues = exportGate?.blockingIssues?.filter(isExportBlockingIssue) || [];
-    const failedChecklist = exportGate?.passed === false && blockingIssues.length === 0 ? [{ message: '导出门禁未通过：存在未完成的检查项' }] : [];
-    const gateIssues = [...blockingIssues, ...failedChecklist];
+    // G 线 P0-3 交付资格判定：导出门禁恢复阻断权。
+    // 此前注释为「导出门禁仅作为风险提示，不阻断用户导出」，结论只写进 X-Export-* 响应头 ——
+    // 而该响应头**没有任何客户端读取**（前端只取 response.blob()），形成「有判定、无消费者」的
+    // 假闭环：最后一道能拦住不合格交付的闸门实际是敞开的。
+    // 现口径：默认阻断（enforceGate !== false）。调用方显式传 false 时放行，但响应头标注
+    // X-Export-Not-Deliverable，由前端在界面上显式呈现「非交付物」，不允许静默通过。
+    //
+    // 同时修掉双重过滤：此前对 blockingIssues 再滤一遍 isExportBlockingIssue（更窄的消息正则），
+    // 与 buildExportGate 使用的 isHardExportBlockingIssue 不是同一口径 —— 导出层看到的阻断集
+    // 会小于门禁层，形成「门禁说不通过、导出层说通过」的分裂。此处直接采用门禁结论（口径单源）。
+    const gateBlockingIssues = exportGate?.blockingIssues || [];
+    const gateFailedChecklist = exportGate?.passed === false && gateBlockingIssues.length === 0 ? [{ message: '导出门禁未通过：存在未完成的检查项' }] : [];
+    const gateIssues = [...gateBlockingIssues, ...gateFailedChecklist];
+    if (gateIssues.length > 0 && body.enforceGate !== false) {
+      return res.status(422).json({
+        error: 'EXPORT_GATE_BLOCKED',
+        message: `导出门禁未通过（${gateIssues.length} 项阻断），文档未达交付标准，已阻止导出。请补齐后重新生成；如确需留档，可选择「仍要导出（非交付物）」。`,
+        issues: gateIssues.slice(0, 20),
+      });
+    }
     res.setHeader('X-Export-Gate-Passed', gateIssues.length === 0 ? 'true' : 'false');
-    if (gateIssues.length > 0) res.setHeader('X-Export-Gate-Issues', encodeURIComponent(JSON.stringify(gateIssues.map(item => item.message).slice(0, 20))));
+    if (gateIssues.length > 0) {
+      res.setHeader('X-Export-Gate-Issues', encodeURIComponent(JSON.stringify(gateIssues.map(item => item.message).slice(0, 20))));
+      res.setHeader('X-Export-Not-Deliverable', 'true');
+    }
     const filename = safeFileName(title);
     // Markdown 格式直接返回文本
     if (format === 'markdown') {

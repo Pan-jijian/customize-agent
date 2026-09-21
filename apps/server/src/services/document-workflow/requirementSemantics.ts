@@ -18,6 +18,15 @@ import { docSystemPrefix } from './markdownComposer';
 
 export interface RequirementSemanticPlan {
   parsed: boolean;
+  /**
+   * G 线 降级治理：**解析失败**（区别于「用户本就没提要求」）。
+   * 用户写在提示词里的强制要求一旦解析失败，原实现返回空计划 ⇒ 既不注入写作、
+   * 也不进核验闭环（requirementVerification 因语义为空「零成本跳过」），
+   * 而文档照常判成功——用户拿到一份「看起来成功」、却没有任何一条他要求的东西的文档，
+   * 且全程无提示。本标记让调用方能把这件事显性上屏。
+   */
+  parseFailed?: boolean;
+  parseFailureReason?: string;
   /** 全文级强制要求（不归属特定章节），逐条短句 */
   globalRequirements: string[];
   /** 章节级强制要求（归属到模板章节，章节名必须与模板一致） */
@@ -117,7 +126,10 @@ export async function parseRequirementSemantics(input: {
       summary: `用户要求解析：全文级 ${globalRequirements.length} 条、章节级 ${chapterRequirements.length} 组、事实线索 ${factClues.length} 条、风格 ${styleRequirements.length} 条`,
     };
   } catch (error) {
-    console.error(`[requirementSemantics] 用户提示词语义解析失败（降级为无结构化要求）：${error instanceof Error ? error.message : String(error)}`);
-    return empty;
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[requirementSemantics] 用户提示词语义解析失败：${message}`);
+    // 显性失败（不再静默降级）：把失败标记带回调用方，由 stagePrepare 置 failed 级 stage——
+    // 「用户强制要求未被解析」必须让用户看见，而不是让文档带着缺口照常判成功。
+    return { ...empty, parseFailed: true, parseFailureReason: message };
   }
 }

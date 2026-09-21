@@ -616,11 +616,6 @@ export interface GreenBenchmarkReport {
   coverage: number;
 }
 
-export function greenBenchmarkCheck(markdown: string): GreenBenchmarkReport {
-  const hits = GREEN_BENCHMARK_CHECKS.filter(check => check.pattern.test(markdown)).map(check => check.name);
-  return { hits: [...hits], coverage: hits.length / GREEN_BENCHMARK_CHECKS.length };
-}
-
 // ── 9. 跨项目内容残留（docx L151：零残留要求） ──
 export const CROSS_PROJECT_RES = [
   /其他项目/u, /其他标段/u, /其他城市/u, /本公司(?:其他|承建)/u,

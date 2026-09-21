@@ -327,9 +327,9 @@ describe('D6 dangerousList 两两差异比较', () => {
     const md = '## 危大清单\n1. 甲\n2. 乙\n## 危大清单\n1. 甲\n2. 丙\n## 危大清单\n1. 丁\n2. 乙';
     expect(dangerousListConsistencyIssues(md).length).toBe(3);
   });
-  it('D6 四份清单两两 6 组只报 3（slice 3）', () => {
+  it('上限治理：D6 四份清单两两 6 组全量报 3（slice 3）（全量 6 条）', () => {
     const md = '## 危大清单\n1. 甲\n2. 乙\n## 危大清单\n1. 甲\n2. 丙\n## 危大清单\n1. 甲\n2. 丁\n## 危大清单\n1. 甲\n2. 戊';
-    expect(dangerousListConsistencyIssues(md).length).toBe(3);
+    expect(dangerousListConsistencyIssues(md).length).toBe(6);
   });
   it('D6 清单内重复项 Set 去重后比较', () => {
     const md = '## 危大清单\n1. 土方开挖\n2. 土方开挖\n3. 基坑支护\n## 危大清单\n1. 土方开挖\n2. 基坑支护';
@@ -511,9 +511,9 @@ describe('F4 nodeSchedule 防误采谱系', () => {
 });
 
 describe('F5 nodeSchedule 报障上限与去重', () => {
-  it('F5 六节点全矛盾只报 4（slice 4）', () => {
+  it('上限治理：F5 六节点全矛盾全量报 4（slice 4）（全量 6 条）', () => {
     const lines = NODE_LABELS.map(([, node]) => `第60日完成${node}。第90日完成${node}。`);
-    expect(nodeScheduleConsistencyIssues(lines.join('\n')).length).toBe(4);
+    expect(nodeScheduleConsistencyIssues(lines.join('\n')).length).toBe(6);
   });
   it('F5 同一 raw 多形态重复扫描去重', () => {
     const md = '第60日完成主体结构封顶。第90日完成主体结构封顶。';

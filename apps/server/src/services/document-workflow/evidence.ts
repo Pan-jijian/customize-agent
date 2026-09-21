@@ -86,6 +86,9 @@ const T0_WHITELIST_FIELD_RE = /项目名称|工程名称|项目编号|招标项�
 /** T0 白名单行值截断上限（防「值截断回源」前的长叙述段型事实行占满 T0 预算） */
 const T0_WHITELIST_LINE_MAX_CHARS = 200;
 
+/** G 线 P1-4：块级调用注入的参数行保底配额（条）。作用见 buildEvidenceLayers 中 demotedFactLines 的注释 */
+const T0_PARAMETER_FALLBACK_LINES = 24;
+
 /** 2.1 单次写作调用证据注入硬顶（字符）：实测 L3 变化段占比 80.6%（目标 ≤50%），证据注入是 L3 大头；
  * B3 放宽至 12000：表格/清单类证据在 T1 内获 4000 字符独立配额（条目级事实数据不再被硬顶截断），
  * 普通证据预算保持原 8000 口径——总硬顶放宽仅为承载表格独立通道，不放大普通证据体积 */
@@ -96,9 +99,11 @@ const DOCUMENT_EVIDENCE_HARD_CAP_CHARS = 12000;
  * 工程量/单位行原样进入写作输入，超出配额部分照旧降级进 T2 目录（零丢失原则不变） */
 const TABLE_EVIDENCE_EXTRA_BUDGET_CHARS = 4000;
 
-/** B3 表格/清单类证据每文件条数放宽上限：普通证据每文件 6 条是多来源覆盖约束，
- * 清单表格单文件条目极多（百行级），6 条上限会把清单条目截断大半；表格类放宽至 30 条 */
-const TABLE_EVIDENCE_PER_FILE_CAP = 30;
+// 上限治理：原 `TABLE_EVIDENCE_PER_FILE_CAP = 30`（表/清单类每文件 30 条）已删除。
+// `selectEvidenceForPrompt` 的第一轮已保证**每文件 ≥1 条**（多来源覆盖公平性），
+// 真正的界是表格字符预算（`tableBudget`）——每文件 30 条是**次级**约束，其后果是
+// 单文件条目极多（清单/图纸真实形态：百行级以上）时第 31 条起不进提示词，
+// 而清单落位实测仅 2048/2782（73.6%），与这类截断同向。现由字符预算统筹，省略项照常计数上报。
 
 /** B3 表格/清单类证据判定：processingType 为表格/清单/结构化数据，或 roleId 带清单标记 */
 function isTableEvidence(item: DocumentEvidence): boolean {
@@ -305,22 +310,17 @@ export function dedupeGlobalEvidence(evidence: DocumentEvidence[]): DocumentEvid
   return [...best.values()].sort((a, b) => b.score - a.score);
 }
 
-export function selectEvidenceByBudget(items: DocumentEvidence[], options: { maxItems?: number; maxChars?: number; preservePinned?: boolean; maxItemsPerFile?: number } = {}, diagnostics?: DocumentGenerationDiagnostics): DocumentEvidence[] {
+export function selectEvidenceByBudget(items: DocumentEvidence[], options: { maxItems?: number; maxChars?: number; preservePinned?: boolean } = {}, diagnostics?: DocumentGenerationDiagnostics): DocumentEvidence[] {
   const maxItems = Number.isFinite(options.maxItems) && options.maxItems! > 0 ? Math.floor(options.maxItems!) : undefined;
   const maxChars = Number.isFinite(options.maxChars) && options.maxChars! > 0 ? Math.floor(options.maxChars!) : undefined;
   // 单文件条目上限默认不限制（全量保留）：大文件（招标文件全文）不再被拆碎，证据完整性优先；
-  // 仅显式传入 maxItemsPerFile 时才启用（兼容存量调用点），pinned 证据始终不受单文件上限约束
-  const maxItemsPerFile = Number.isFinite(options.maxItemsPerFile) && options.maxItemsPerFile! > 0 ? Math.floor(options.maxItemsPerFile!) : undefined;
   const ranked = uniqueEvidence(items, undefined, diagnostics);
   const pinned = options.preservePinned ? ranked.filter(item => item.source === 'pinned-evidence' || item.source === 'bound-file' || item.source === 'required-fact-evidence') : [];
   const normal = ranked.filter(item => !pinned.includes(item));
   const selected: DocumentEvidence[] = [];
-  const perFileCounts = new Map<string, number>();
   let chars = 0;
   const tryPush = (item: DocumentEvidence, priority = false) => {
     if (maxItems && selected.length >= maxItems) return;
-    const fileCount = perFileCounts.get(item.filePath) || 0;
-    if (!priority && maxItemsPerFile !== undefined && fileCount >= maxItemsPerFile) return;
     let content = cleanEvidenceText(item.content);
     // 超长证据（CAD 父块全文等）压缩为关键参数窗口再入池：单条 15 万字全文占满预算会把其他来源证据全部挤出，
     // 且尾部关键参数在后续渲染截断中仍会丢失——入池前压缩保证参数可见且预算留给多文件证据
@@ -330,12 +330,11 @@ export function selectEvidenceByBudget(items: DocumentEvidence[], options: { max
     const nextChars = chars + content.length;
     if (maxChars && selected.length > 0 && nextChars > maxChars) return;
     selected.push({ ...item, content });
-    perFileCounts.set(item.filePath, fileCount + 1);
     chars = nextChars;
   };
   for (const item of pinned) tryPush(item, true);
   for (const item of normal) tryPush(item);
-  // 裁剪量记录：被显式 maxItems/maxChars/maxItemsPerFile 裁掉的条目写入诊断，使预算软限制可观测
+  // 裁剪量记录：被显式 maxItems/maxChars 裁掉的条目写入诊断，使预算软限制可观测
   if (diagnostics) diagnostics.evidence.budgetDropped += Math.max(0, ranked.length - selected.length);
   return selected;
 }
@@ -509,6 +508,8 @@ export function evidencePromptImportance(item: DocumentEvidence, requiredFacts: 
   return score;
 }
 
+/** `perFileCap <= 0` 语义为**不设每文件条数上限**（第二轮由 `maxChars` 字符预算统筹）。
+ * 第一轮的「每文件 top-1」始终执行，故多来源覆盖公平性不受影响。 */
 function selectEvidenceForPrompt<T extends { filePath: string }>(items: T[], maxChars: number | undefined, render: (item: T, index: number) => string, rank: (item: T) => number, perFileCap = 6) {
   const state = { chars: 0, omitted: 0 };
   const selected: string[] = [];
@@ -530,7 +531,7 @@ function selectEvidenceForPrompt<T extends { filePath: string }>(items: T[], max
   for (const item of ranked) {
     if (selectedKeys.has(item)) continue;
     const fileCount = perFile.get(item.filePath) || 0;
-    if (fileCount >= perFileCap) continue;
+    if (perFileCap > 0 && fileCount >= perFileCap) continue;
     const before = selected.length;
     appendWithinBudget(selected, render(item, selected.length), state, maxChars);
     if (selected.length > before) {
@@ -592,13 +593,30 @@ export interface EvidenceLayers {
  */
 export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | undefined, requiredFacts: string[], skipT0 = false, rankBoost?: (item: DocumentEvidence) => number, onlyRankBoosted = false, skipT2Catalog = false): EvidenceLayers {
   const whitelistEnabled = T0_WHITELIST_ENABLED;
-  const allFactLines = skipT0 ? [] : [...new Set(bundle.textEvidence.flatMap(item => extractKeyFactLines(item.content).split('\n').filter(Boolean)))];
+  // G 线 P1-4：`skipT0`（块级调用）此前把 allFactLines **整体清空**，于是白名单外的工艺参数/规范事实行
+  // 在块级 prompt 完全不到达 —— 而块级是唯一能看到「本节相关证据」的地方（章级共享层只带 T0 项目元数据）。
+  // 提示词要求「每千字不少于 2 个量化参数」，模型在本节材料里取不足数时只能按先验补，补出的数值又
+  // 不在权威校验覆盖内（正是数值冲突与编造数值的源头）。
+  // 现口径：skipT0 仍提取参数行并给保底配额；只是不重复注入 T0 项目元数据（那部分由章级共享段承担）。
+  // 事实行与证据片段**同源过滤**：onlyRankBoosted（块级 A2 压缩）时只从块相关命中里提取参数行，
+  // 否则会把未命中块的证据事实也带进块级 prompt —— 那会让 L3 变化段重新膨胀、破坏前缀缓存共享，
+  // 并使块级差异化注入落空。命中为空时与证据片段同样回退全量（不牺牲事实安全）。
+  const rankBoostedEvidence = onlyRankBoosted && rankBoost ? bundle.textEvidence.filter(item => rankBoost(item) > 0) : [];
+  const factSourceEvidence = rankBoostedEvidence.length > 0 ? rankBoostedEvidence : bundle.textEvidence;
+  const allFactLines = [...new Set(factSourceEvidence.flatMap(item => extractKeyFactLines(item.content).split('\n').filter(Boolean)))];
   // 2.1 T0 白名单瘦身：T0 只保留项目级白名单字段行（值截断 200 字符）；白名单外事实行
   // （工艺参数/规范编号等）降级进 T1 文本层前段按相关度排序——降层不删除，完整证据池继续参与检索与校验
-  const t0FactLines = whitelistEnabled
-    ? allFactLines.filter(line => T0_WHITELIST_FIELD_RE.test(line)).map(truncateT0WhitelistLine)
-    : allFactLines;
-  const demotedFactLines = whitelistEnabled ? allFactLines.filter(line => !T0_WHITELIST_FIELD_RE.test(line)) : [];
+  const t0FactLines = skipT0
+    ? []
+    : whitelistEnabled
+      ? allFactLines.filter(line => T0_WHITELIST_FIELD_RE.test(line)).map(truncateT0WhitelistLine)
+      : allFactLines;
+  const demotedCandidates = (whitelistEnabled || skipT0) ? allFactLines.filter(line => !T0_WHITELIST_FIELD_RE.test(line)) : [];
+  // 块级保底配额：块级调用只注入**有限条**高分参数行 —— 全量注入会让 L3 变化段重新膨胀，
+  // 破坏 A2 块级增量压缩（前缀缓存共享的前提）。章级调用不受此限（走 textLayerBudget 全量按预算选）。
+  const demotedFactLines = skipT0
+    ? [...demotedCandidates].sort((a, b) => textImportanceScore(b) - textImportanceScore(a)).slice(0, T0_PARAMETER_FALLBACK_LINES)
+    : demotedCandidates;
   const t0Budget = maxChars ? Math.floor(maxChars * 0.6) : undefined;
   let t0Lines = t0FactLines;
   let t0Trimmed = 0;
@@ -665,7 +683,8 @@ export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | u
       // 表格/清单证据放宽单条截断：多行条目需完整保留（数值列宽+行数远超普通文本段）
       const truncated = body.length > 3000 ? extractKeyParameterWindows(body, 3000) : body;
       return `${readableSourceLabel(item, index)}\n类型：${item.processingType || 'table'}\n章节/片段：${item.sectionTitle?.replace(FILE_NAME_RE, '') || '资料片段'}\n内容（清单/表格行数据：条目名、特征、工程量与单位必须逐项照抄原值，不得改写、不得编造）：\n${truncated}`;
-    }, item => evidencePromptImportance(item, requiredFacts) + (rankBoost ? rankBoost(item) : 0), TABLE_EVIDENCE_PER_FILE_CAP);
+      // 上限治理：perFileCap=0 ⇒ 不设每文件条数上限（由 tableBudget 字符预算统筹；每文件 top-1 公平性仍生效）
+    }, item => evidencePromptImportance(item, requiredFacts) + (rankBoost ? rankBoost(item) : 0), 0);
     tableOmittedItems = tablePrompt.omittedItems;
     if (tablePrompt.lines.length) {
       tableText = `表格/清单原文：\n${tablePrompt.lines.join('\n\n---\n\n')}`;
@@ -699,8 +718,28 @@ export function buildEvidenceLayers(bundle: EvidenceBundle, maxChars: number | u
   // 完整证据不删除：仍参与后续检索与质量校验（零丢失原则不变）。
   const t2ItemsSkipped = skipT2Catalog ? [] : t2Items;
   const t2Lines = t2ItemsSkipped.slice(0, catalogMaxLines).map((item, index) => evidenceCatalogLine(item, index));
+  // 上限治理：超出目录行数的条目**全量列名**。原实现只报「另有 N 条未注入」的数字——
+  // 数字告诉用户「有东西没进来」，但不告诉他「是什么」，写作层也无从知道还有哪些来源可用。
+  // 名字是追溯定位的最小载体（与清单锁、参数清单、BOQ 补写同口径）。
+  // 上限治理：超出目录行数的条目**在有限预算内列出来源名**（原实现只报数字）。
+  // 注意这里**不能**无条件全量列名：真实池可达 3244 条，全量名字 ≈ 64K 字符——既撑爆预算，
+  // 也没人会读 3200 个来源名（那不是「可见性」，是噪声）。故按**独立小预算**列名，
+  // 超出部分保留计数；这是「按预算动态定量」而非「固定截断」。
+  const T2_OMITTED_NAME_BUDGET_CHARS = 1200;
+  const t2Omitted = t2ItemsSkipped.slice(catalogMaxLines);
+  const omittedNames: string[] = [];
+  let omittedNameChars = 0;
+  for (const [index, item] of t2Omitted.entries()) {
+    const label = readableSourceLabel(item, index);
+    if (omittedNameChars + label.length + 1 > T2_OMITTED_NAME_BUDGET_CHARS) break;
+    omittedNames.push(label);
+    omittedNameChars += label.length + 1;
+  }
+  const t2OmittedLine = t2Omitted.length > 0
+    ? `- 另有 ${t2Omitted.length} 条未注入（完整片段仍参与后续检索与质量校验）${omittedNames.length > 0 ? `；其中来源可列部分：${omittedNames.join('、')}${omittedNames.length < t2Omitted.length ? ` 等 ${t2Omitted.length} 条` : ''}` : ''}`
+    : '';
   const t2Text = t2Lines.length
-    ? `【证据目录——未全文注入的片段压缩摘要（按重要性保留前 ${t2Lines.length} 条${t2Items.length > t2Lines.length ? `，另有 ${t2Items.length - t2Lines.length} 条未注入` : ''}；正文可引用摘要内事实，不得编造摘要外的细节；完整片段仍参与后续检索与质量校验）】\n${t2Lines.join('\n')}`
+    ? `【证据目录——未全文注入的片段压缩摘要（按重要性保留前 ${t2Lines.length} 条${t2Items.length > t2Lines.length ? `，另有 ${t2Items.length - t2Lines.length} 条未注入` : ''}；正文可引用摘要内事实，不得编造摘要外的细节；完整片段仍参与后续检索与质量校验）】\n${[...t2Lines, t2OmittedLine].filter(Boolean).join('\n')}`
     : '';
   const omittedChars = t2Items.reduce((sum, item) => sum + ('content' in item ? item.content.length : (item.snippets[0] || '').length), 0);
   const stats: EvidenceLayerStats = {

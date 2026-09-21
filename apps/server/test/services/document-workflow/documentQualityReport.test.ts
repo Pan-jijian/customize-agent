@@ -147,6 +147,29 @@ const WEAK_DIMS = { factuality: true, structure: false, depth: false, executable
 const FULL_DIMS = { factuality: true, structure: true, depth: true, executable: true, specificity: true, consistency: true };
 const FULL_NEEDS = { schedule: true, quality: true, safety: true, resource: true, construction: true };
 const DEPTH_FULL: ProfessionalDepthClassifier = { analyze: async () => ({ dimensions: FULL_DIMS, contentNeeds: FULL_NEEDS, concrete: true, closedLoop: true }) };
+
+/**
+ * 全覆盖输入（G 线 P3-4/P3-1）：六维**全部可计量** ⇒ 权重覆盖 100%，`passed` 才有判定意义。
+ *
+ * 综合分是可用维度的**重归一分**：不可用维度被剔除分母后归一，于是部分计量也会得到很高的
+ * 总分（实测最小夹具只测 3/6 维、权重覆盖 50%，重归一分仍算出 94）。故覆盖率不足时
+ * `passed` 不成立、报告显性打印「本次仅计量 X/6 维、权重覆盖 Y%」。
+ * 本常量供「需要断言 passed=true」的用例复用——只提供部分输入的夹具不应期望达标。
+ */
+const FULL_COVERAGE_EXTRA = {
+  tenderRequirements: REQUIREMENTS,
+  bidComposition: OPEN_SPEC,
+  effectiveChapters: PLANNED_CHAPTERS,
+  boqRowTraces: [{ itemCode: 'A', itemName: '挖一般土方', quantity: '100', unit: 'm3', sourceFile: 'x.xlsx', placed: true }],
+  parameterUsageAudit: { totalParams: 10, usedParams: 10, relevantMissedCount: 0, relevantMissed: [], irrelevantMissedCount: 0, rate: 1 },
+  drawingFactLock: { groups: [{ sourceFile: 'x.dwg', factLines: ['f'], tokens: ['2.5m'] }], usableDrawings: 1, unusableDrawings: 0, totalFacts: 1 },
+  authorityAuditReport: { ...AUTHORITY, derivationGaps: [], processGaps: [], unattributed: [], unregisteredCount: 0 },
+  keyFactPlacementAudit: { specs: 8, placed: 8, unplaced: [], rate: 1 },
+  professionalDepthClassifier: DEPTH_FULL,
+};
+/** 需 ≥800 字才进专业深度评分；保留表格满足表计划执行对账 */
+const fullCoverageChapters: DocumentDraftChapter[] = [{ id: 'ch-1', title: '第一章 编制说明', content: `${FULL_CHUNK}\n\n表5-1 施工设备配置表\n\n| 序号 | 名称 |\n| --- | --- |\n| 1 | 挖掘机 |`, evidence: [], missingFacts: [] }];
+const FULL_COVERAGE_MARKDOWN = '# 正文\n\n现场设置安全生产管理机构，并配备专职安全生产管理人员。建立危险性较大的分部分项工程专项施工方案报审制度。基础埋深 2.5m。\n\n## 施工设备配置\n\n表5-1 施工设备配置表\n\n| 序号 | 名称 |\n| --- | --- |\n| 1 | 挖掘机 |';
 const DEPTH_MIXED: ProfessionalDepthClassifier = {
   analyze: async (text: string) => ({
     dimensions: text.includes('薄弱章') ? WEAK_DIMS : FULL_DIMS, contentNeeds: FULL_NEEDS, concrete: true, closedLoop: true,
@@ -174,11 +197,29 @@ describe('buildDocumentQualityReport 六维加权（v3）', () => {
     expect(dimensionOf(report, 'professionalDepth')).toBeUndefined();
   });
 
-  it('低雷同性低于 90 时对加权结果做乘数修正', async () => {
-    // weighted = 94；uniqueness=45 → 94 * 0.5 = 47
+  it('G 线 P3-4：部分计量的重归一分不得判达标，且报告显性打印计量覆盖面', async () => {
+    // 缺陷：综合分是可用维度的重归一分——不可用维度被剔除分母后归一，于是**只测一半权重
+    // 也能算出很高的总分**（本夹具实测 3/6 维、权重覆盖 50%，重归一分 94），
+    // 而读报告的人无从知道这个 94 只来自一半的尺子。原实现因此允许用重归一分宣告达标。
+    const report = await reportFixture([], KNOWLEDGE_HIGH);
+    expect(report.measurementCoverage).toEqual({ dimensions: 3, totalDimensions: 6, weightRatio: 0.5, sufficient: false });
+    // ① 覆盖率不足 ⇒ 即使分数看着接近目标也不达标
+    expect(report.overall).toBe(94);
+    expect(report.passed).toBe(false);
+    // ② 报告显性打印覆盖面（⚠ 前缀 + 维数 + 权重覆盖），杜绝误读为全面达标
+    expect(report.summary).toContain('⚠ 本次仅计量 3/6 维、权重覆盖 50%');
+    // ③ actions 给出可操作的理由
+    expect(report.actions.some(action => action.includes('重归一分不得作为达标依据'))).toBe(true);
+  });
+
+  it('低雷同性低于门槛判雷同风险（不再对加权结果做乘数修正）', async () => {
+    // G 线 P3-3：overall 只由六维加权构成（weighted = 94），uniqueness 不再乘性压缩总分。
+    // 原口径 `overall = weighted × min(1, uniqueness/90)` 使 overall ≤ 100×(u/90)——
+    // 六维全满分也拿不到 95（实测 s28m u≈74.6 → 理论上限 83）。现将雷同性改为独立否决门槛。
     const report = await reportFixture([], KNOWLEDGE_HIGH, makeScores({ uniqueness: 45 }));
-    expect(report.overall).toBe(47);
-    expect(report.deliveryProbability).toBe(47);
+    expect(report.overall).toBe(94);
+    expect(report.passed).toBe(false);
+    expect(report.actions.join(' ')).toContain('低雷同性');
   });
 
   it('双数收敛：delivery = overall − min(10, blocking×3)（差恒 ≤10）', async () => {
@@ -196,15 +237,7 @@ describe('buildDocumentQualityReport 六维加权（v3）', () => {
     const report = await reportFixture([], KNOWLEDGE_HIGH, makeScores({ uniqueness: 100, moduleCoverageRate: 1 }), {
       markdown,
       chapters: draftWithTable,
-      tenderRequirements: REQUIREMENTS,
-      bidComposition: OPEN_SPEC,
-      effectiveChapters: PLANNED_CHAPTERS,
-      boqRowTraces: [{ itemCode: 'A', itemName: '挖一般土方', quantity: '100', unit: 'm3', sourceFile: 'x.xlsx', placed: true }],
-      parameterUsageAudit: { totalParams: 10, usedParams: 10, relevantMissedCount: 0, relevantMissed: [], irrelevantMissedCount: 0, rate: 1 },
-      drawingFactLock: { groups: [{ sourceFile: 'x.dwg', factLines: ['f'], tokens: ['2.5m'] }], usableDrawings: 1, unusableDrawings: 0, totalFacts: 1 },
-      authorityAuditReport: { ...AUTHORITY, derivationGaps: [], processGaps: [], unattributed: [], unregisteredCount: 0 },
-      keyFactPlacementAudit: { specs: 8, placed: 8, unplaced: [], rate: 1 },
-      professionalDepthClassifier: DEPTH_FULL,
+      ...FULL_COVERAGE_EXTRA,
     });
     expect(report.overall).toBe(100);
     expect(report.deliveryProbability).toBe(99);
@@ -224,7 +257,10 @@ describe('buildDocumentQualityReport 六维加权（v3）', () => {
     expect(report.overall).toBe(100);
     expect(report.deliveryProbability).toBe(97);
     expect(report.passed).toBe(false);
-    expect(report.actions).toHaveLength(2);
+    // G 线 P3-4：本夹具为部分计量（多维降级）⇒ actions 多一条覆盖率告警，
+    // 故按「包含」而非固定条数断言（固定条数会在口径演进时误报）
+    expect(report.actions.some(action => action.includes('阻断'))).toBe(true);
+    expect(report.actions.some(action => action.includes('本次仅计量'))).toBe(true);
   });
 
   it('summary 输出 v3 维度明细与未判定模式标注', async () => {
@@ -310,9 +346,14 @@ describe('结构呈现落实（模式感知，v3）', () => {
     expect(dimensionOf(report, 'structure')).toMatchObject({ score: 100, detail: '附表承载 1/1、正文禁表合规' });
     expect(report.overall).toBe(95);
     expect(report.deliveryProbability).toBe(95);
-    expect(report.passed).toBe(true);
+    // G 线 P3-4：本用例只提供 markdown + bidComposition ⇒ 仅部分维度可计量，
+    // 95 分是**重归一分**（不是全覆盖判定）。覆盖率不足时 passed 不成立 ——
+    // 这正是新口径要挡的「只看分数不看覆盖面」。全覆盖下的达标由
+    //「目标态全满配」用例锁定。
+    expect(report.measurementCoverage?.sufficient).toBe(false);
+    expect(report.passed).toBe(false);
     expect(report.summary).not.toContain('标书类型未判定');
-    expect(report.summary).toContain('quality-caliber-c8.0');
+    expect(report.summary).toContain('quality-caliber-c9.2');
   });
 
   it('暗标：正文出现表格按违规处数扣分（2 处 → 87.5 → 88）', async () => {
@@ -379,7 +420,10 @@ describe('数据锚定（v3）', () => {
         { itemCode: 'B', itemName: '垫层', quantity: '20', unit: 'm3', sourceFile: 'x.xlsx', placed: true },
       ],
     });
-    expect(dimensionOf(report, 'dataAnchor')).toMatchObject({ score: 100, detail: 'BOQ 落位 2/2' });
+    // 降级治理：图纸分量不可用时**显式标注**（原实现静默重归一、维度分被抬高而读者不可见）
+    expect(dimensionOf(report, 'dataAnchor')).toMatchObject({ score: 100 });
+    expect(dimensionOf(report, 'dataAnchor')?.detail).toContain('BOQ 落位 2/2');
+    expect(dimensionOf(report, 'dataAnchor')?.detail).toContain('图纸事实锁不可用');
     expect(report.overall).toBe(96);
   });
 
@@ -387,7 +431,8 @@ describe('数据锚定（v3）', () => {
     const report = await reportFixture([], KNOWLEDGE_HIGH, makeScores(), {
       authorityAuditReport: { ...AUTHORITY, derivationGaps: [], processGaps: [], unattributed: [], unregisteredCount: 0 },
     });
-    expect(dimensionOf(report, 'dataAnchor')).toMatchObject({ score: 100, detail: '无主数值 0 缺口' });
+    expect(dimensionOf(report, 'dataAnchor')).toMatchObject({ score: 100 });
+    expect(dimensionOf(report, 'dataAnchor')?.detail).toContain('无主数值 0 缺口');
   });
 });
 
@@ -620,12 +665,17 @@ describe('知识覆盖目标线与 templating', () => {
     vi.clearAllMocks();
   });
 
-  it('知识覆盖达 95 时目标 95，否则 85', async () => {
-    const high = await reportFixture([], KNOWLEDGE_HIGH, makeScores({ uniqueness: 100, moduleCoverageRate: 1 }));
+  it('目标固定 95（不随知识覆盖度静默降档）', async () => {
+    // G 线 P3-2：原式 `target = coverage >= 95 ? 95 : 85` 会在资料覆盖不足时把达标线降到 85，
+    // 既与「95+ 可交付」错位，又形成「补强知识库反而抬高自己的达标线」的逆向激励。
+    const high = await reportFixture([], KNOWLEDGE_HIGH, makeScores({ uniqueness: 100, moduleCoverageRate: 1 }), {
+      markdown: FULL_COVERAGE_MARKDOWN, chapters: fullCoverageChapters, ...FULL_COVERAGE_EXTRA,
+    });
     expect(high.target).toBe(95);
+    expect(high.measurementCoverage?.sufficient).toBe(true);
     expect(high.passed).toBe(true);
     const low = await reportFixture([], KNOWLEDGE_LOW);
-    expect(low.target).toBe(85);
+    expect(low.target).toBe(95);
   });
 
   it('模板化报告透传到 templating 字段', async () => {
@@ -655,7 +705,9 @@ describe('qualityReportIssues', () => {
     expect(qualityReportIssues(passedReport)).toEqual([]);
   });
 
-  it('未达标产出 info 级问题（不污染缺陷计分）', () => {
+  it('未达标产出 blocker 级问题（交付资格判定，必须进阻断集）', () => {
+    // G 线 P0-1：主尺未达标此前按 info 计入，导致其在数据结构上永远进不了 blockingIssues
+    // （判据首行要求 severity==='blocker'）——「不达标也照常交付」的根因之一。
     const failedReport: DocumentQualityReport = {
       overall: 60, deliveryProbability: 60, target: 85, passed: false,
       scores: makeScores(), templating: makeTemplatingReport(),
@@ -663,7 +715,10 @@ describe('qualityReportIssues', () => {
     };
     const issues = qualityReportIssues(failedReport);
     expect(issues).toHaveLength(1);
-    expect(issues[0].level).toBe('info');
+    expect(issues[0].level).toBe('error');
+    expect(issues[0].severity).toBe('blocker');
+    // 整篇聚合结论不交给 LLM 修复轮（无法单点收敛），归用户决策
+    expect(issues[0].repairability).toBe('manual_review');
     expect(issues[0].message).toContain('60% / 85%');
     expect(issues[0].suggestion).toContain('补齐短板维度');
   });

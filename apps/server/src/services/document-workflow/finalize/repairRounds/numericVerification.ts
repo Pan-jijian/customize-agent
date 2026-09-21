@@ -151,7 +151,9 @@ export async function stageNumericVerification(session: FinalizeSession): Promis
   const chapterSuspects = new Map<string, Array<{ sentence: string; tokens: string[] }>>();
   for (const chapter of session.finalChapterDrafts) {
     const suspects = collectSuspects(chapter.content);
-    if (suspects.length > 0) chapterSuspects.set(chapter.id, suspects.slice(0, 12));
+    // 上限治理：**不截断**（原 slice(0,12)：单章第 13 处起的疑似无来源数值永不进修复指令，
+    // 且每轮重新取前 12 处 ⇒ 头部不下降则尾部永无机会）。指令规模由渲染层按 token 预算控制。
+    if (suspects.length > 0) chapterSuspects.set(chapter.id, suspects);
   }
   const totalSuspects = [...chapterSuspects.values()].reduce((sum, items) => sum + items.length, 0);
   if (totalSuspects === 0) {

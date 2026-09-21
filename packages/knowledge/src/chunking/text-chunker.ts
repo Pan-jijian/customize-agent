@@ -31,7 +31,6 @@ type ChunkCandidate = {
   parentIndex: number;
   childIndex: number;
   rowRange?: string;
-  parentText?: string;
 };
 
 type CodeLanguageConfig = {
@@ -40,18 +39,35 @@ type CodeLanguageConfig = {
   indentSensitive: boolean;
 };
 
+/**
+ * 切片配置：**重叠一律为 0**（用户红线：切片内容不得出现任何重叠与重复数据）。
+ *
+ * 为什么不需要切片级重叠：跨块上下文由**检索期的 parent 展开**承担 —— 命中任一切片后
+ * `expandContext` 展开回父块（父块正文读取时由子切片按 chunk_index 重建）即得到完整上下文，
+ * 不在索引里复制一份。切片级重叠与该机制职能重复，代价却是实打实的：
+ * 实测全库 `kb_chunks` 5,727,249 字符 vs `kb_document_chunks` 3,510,259 = **1.63 倍**，
+ * 其中 63% 是重复内容 —— 索引体积、embedding 计算量、重排候选多样性三处同比例浪费，
+ * 且同一段文字会以多个切片身份占用召回名额。
+ *
+ * 历史口径（已废弃）：旧值按 token 计（document 100 / cad 80 / spreadsheet 120）且实现
+ * 用 `overlapTokens * 4` 折算字符（隐含「4 字符/token」的英文假设，而本仓 BGE WordPiece
+ * 中文实测约 1.15 字符/token），实际重叠达配置意图的 3.5~4 倍。归零后该缺陷不再可达。
+ */
 const DEFAULT_CONFIGS: Record<FileCategory, ChunkConfig> = {
-  document: { maxChunkSize: 800, overlap: 100 },
-  spreadsheet: { maxChunkSize: 1000, overlap: 120 },
+  document: { maxChunkSize: 800, overlap: 0 },
+  spreadsheet: { maxChunkSize: 1000, overlap: 0 },
   image: { maxChunkSize: 512, overlap: 0 },
-  cad: { maxChunkSize: 600, overlap: 80 },
-  code: { maxChunkSize: 1000, overlap: 120 },
-  data: { maxChunkSize: 600, overlap: 80 },
-  web: { maxChunkSize: 800, overlap: 100 },
+  cad: { maxChunkSize: 600, overlap: 0 },
+  code: { maxChunkSize: 1000, overlap: 0 },
+  data: { maxChunkSize: 600, overlap: 0 },
+  web: { maxChunkSize: 800, overlap: 0 },
   diagram: { maxChunkSize: 512, overlap: 0 },
-  archive: { maxChunkSize: 500, overlap: 50 },
-  other: { maxChunkSize: 500, overlap: 50 },
+  archive: { maxChunkSize: 500, overlap: 0 },
+  other: { maxChunkSize: 500, overlap: 0 },
 };
+
+/** 估算「字符/token」比例时的采样长度：与语言无关的 O(1) 估算，避免逐块对整节分词 */
+const OVERLAP_RATIO_SAMPLE_CHARS = 2000;
 
 const RECURSIVE_SEPARATORS = [
   /\n(?=#{1,6}\s)/u,
@@ -114,12 +130,13 @@ export class TextChunker {
 
     sections.forEach((section, parentIndex) => {
       const parentId = `p${parentIndex}`;
+      // 不引入任何跨节重叠：切片内容必须无重复（用户红线）。跨页/跨节的上下文由检索期的
+      // parent 展开承担（父块正文读取时由子切片按 chunk_index 重建），不在索引里复制一份。
       const parts = this.mergeLeadingHeader(this.recursiveSplit(section.text, config.maxChunkSize));
       const merged = this.mergeParts(parts, config.maxChunkSize, config.overlap);
       // 顺序锚定定位（而非从头 indexOf）：图纸/表格类文本存在大量重复标注（如“Φ10@200”、
       // 参数行随章节重复），从头 indexOf(part 前缀) 会命中首次出现的相同文本，导致
-      // start_char 大幅跳变/回退、相邻块出现虚假间隙。lookBehind 回溯窗口覆盖
-      // mergeParts 的 overlap 重叠长度上限，保证重叠块命中真实起点。
+      // start_char 大幅跳变/回退、相邻块出现虚假间隙。
       const offsets = this.chunkPartStartOffsets(section.text, merged, 4096);
       merged.forEach((part, childIndex) => {
         const startChar = section.startChar + (offsets[childIndex] ?? 0);
@@ -133,7 +150,6 @@ export class TextChunker {
           parentId,
           parentIndex,
           childIndex,
-          parentText: section.text, // <=== 记录原始完整的 Section 文本
         });
       });
     });
@@ -173,7 +189,6 @@ export class TextChunker {
           parentIndex,
           childIndex,
           rowRange: this.extractMarkdownTableRowRange(part),
-          parentText: block.text,
         });
       });
       cursor = block.startChar + block.text.length;
@@ -207,7 +222,6 @@ export class TextChunker {
         parentId: `data-0`,
         parentIndex: 0,
         childIndex: index,
-        parentText: text,
       };
     });
   }
@@ -233,7 +247,6 @@ export class TextChunker {
         parentId: `code-${language}-0`,
         parentIndex: 0,
         childIndex: index,
-        parentText: text,
       };
     });
   }
@@ -616,7 +629,6 @@ export class TextChunker {
         startChar: candidate.startChar,
         endChar,
         splitStrategy: 'recursive_parent_child_v2',
-        parentText: candidate.childIndex === 0 ? candidate.parentText : undefined,
       },
     };
   }
@@ -638,7 +650,17 @@ export class TextChunker {
 
   private takeOverlap(text: string, overlapTokens: number): string {
     if (overlapTokens <= 0) return '';
-    const chars = overlapTokens * 4;
+    // 字符数按**实际分词比例**折算，不能写死 ×4：本仓分块器用 BGE WordPiece，
+    // 中文实测 token/字符比 ≈0.87（约 1.15 字符/token），而 ×4 隐含「4 字符/token」的
+    // 英文假设 —— 实际重叠量达配置意图的 3.5~4 倍（cad 配置 80 token → 实取 320 字符
+    // ≈ 278 token，占 600 token 预算的 46%）。
+    // 全库实测：kb_chunks 5,727,249 字符 vs kb_document_chunks 3,510,259 = 1.63 倍，
+    // 其中 63% 是重复内容 —— 索引体积、embedding 计算量、重排候选多样性三处同比例浪费。
+    // 采样前 2000 字符估算比例即可（O(1)/次，避免逐块对整节分词）。
+    const sample = text.length > OVERLAP_RATIO_SAMPLE_CHARS ? text.slice(0, OVERLAP_RATIO_SAMPLE_CHARS) : text;
+    const sampleTokens = this.estimateTokens(sample);
+    const charsPerToken = sampleTokens > 0 ? sample.length / sampleTokens : 4;
+    const chars = Math.max(1, Math.round(overlapTokens * charsPerToken));
     const start = Math.max(0, text.length - chars);
     if (start === 0) return text;
     // 重叠块对齐行边界：字符级切分会把行首切开（「R238C13 COL13: 」被切成「238C13 COL13: 」

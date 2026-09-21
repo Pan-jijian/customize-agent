@@ -27,7 +27,6 @@ import {
   extractLocationFromFacts,
   extractRedLineFacts,
   extractVillageCount,
-  fallbackWorkPackagesFromExisting,
   findBlueprintChapter,
   rebaseCitationAnchorsForChapters,
   renderBlueprintChapterAuthorityCard,
@@ -452,6 +451,8 @@ describe('阶段 D 四道校验（蓝图冻结前门禁）', () => {
     const report = validateBlueprint(blueprint, boq);
     expect(report.passed).toBe(true);
     expect(report.checks.map(check => check.name)).toEqual([
+      // G 线 P0-6 新增第 0 道：清单源可用性（清单不可用即判失败，不以空参数桶冒充可用）
+      '0. 清单源可用性',
       '1. Schema 校验',
       '2. 事实锚定校验',
       '3. 覆盖校验',
@@ -497,7 +498,7 @@ describe('回退路径（任何失败不阻断生成）', () => {
     expect(resolution.warning).toContain('未识别到工程量清单');
   });
 
-  it('buildIntegratedBlueprint 清单解析失败 → 降级空参数桶蓝图（不 throw，校验仍可运行）', () => {
+  it('buildIntegratedBlueprint 清单解析失败 → 蓝图仍构建，但校验明确失败（P0-6：不以空参数桶冒充可用）', () => {
     const blueprint = buildIntegratedBlueprint({
       projectRoot: '/tmp/nonexistent-project',
       boundFilePaths: ['招标文件.pdf'],
@@ -508,13 +509,18 @@ describe('回退路径（任何失败不阻断生成）', () => {
     expect(blueprint.meta.version).toBe('2.0.0');
     expect(blueprint.data.quantities).toEqual({});
     expect(blueprint.diagnostics.warnings.length).toBeGreaterThan(0);
-    expect(blueprint.validation.checks).toHaveLength(5);
+    // G 线 P0-6：清单不可用 → 蓝图校验**明确失败**。此前该路径产出「schema 合法、四项校验全绿、
+    // authorityAvailability 全 true」的零权威骨架蓝图，下游据此认为权威齐备（blueprintActive=true），
+    // 写作层拿不到任何权威值、正文数值只能由模型自产，而用户看不到任何缺口信号。
+    expect(blueprint.validation.checks).toHaveLength(6);
+    expect(blueprint.validation.passed).toBe(false);
+    const boqCheck = blueprint.validation.checks.find(check => check.name === '0. 清单源可用性');
+    expect(boqCheck?.passed).toBe(false);
+    expect(String(boqCheck?.message)).toContain('工程量清单缺失');
   });
 
-  it('fallbackWorkPackagesFromExisting：无有效输入不 throw，返回数组', () => {
-    const packages = fallbackWorkPackagesFromExisting('');
-    expect(Array.isArray(packages)).toBe(true);
-  });
+  // fallbackWorkPackagesFromExisting 已删除：休眠死代码（无生产调用点），且其为 `catch → []`
+  // 的静默回退形态，与「失败必须显性」口径冲突。此处不再保留其用例。
 });
 
 describe('物资计划规格提取（材料型号规格是清单事实数据，丰乐镇材料表编造根因）', () => {

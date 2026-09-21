@@ -145,7 +145,7 @@ export async function generateDocumentDraft(input: { templateId: string; require
     drawingFactLock: session.blueprint.drawingFactLock,
     requirementSemantics: session.prepare.requirementSemantics,
     hasExplicitOutline: session.prepare.hasExplicitOutline, missingItems: session.understanding.missingItems, retrievalCoverageReports: session.understanding.retrievalCoverageReports,
-    failedChapterMessages: session.understanding.failedChapterMessages, webResearchReport: session.understanding.webResearchReport, indexHealth: session.understanding.indexHealth, promptPlan: session.prepare.promptPlan,
+    failedChapterMessages: session.understanding.failedChapterMessages, webResearchReport: session.understanding.webResearchReport, indexHealth: session.understanding.indexHealth,
     globalConsistencyIssues,
     scopeConflicts: session.understanding.canonicalFacts.scopeConflicts,
     writingTaskBrief: session.planning.writingTaskBrief,

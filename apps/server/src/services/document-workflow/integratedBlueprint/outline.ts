@@ -181,27 +181,6 @@ export function buildWorkPackageFromBoqSection(section: string, entries: BoqEntr
   };
 }
 
-/** 阶段 C 回退：现有 parseMajorConstructionPackages 产物直填（蓝图工作包解析失败时启用） */
-export function fallbackWorkPackagesFromExisting(projectContext: string): BlueprintWorkPackage[] {
-  try {
-    const packages = parseMajorConstructionPackages(projectContext);
-    return packages.map(workPackage => ({
-      name: workPackage.name,
-      kind: 'major' as const,
-      quantities: {},
-      processChain: workPackage.process || [],
-      methods: [],
-      params: (workPackage.quantities || []).map(item => ({ key: item, value: item, source: 'boq' as const })),
-      acceptance: workPackage.acceptance || [],
-      standards: [],
-      source: 'fallback' as const,
-      coveredSeqs: [],
-    }));
-  } catch {
-    return [];
-  }
-}
-
 /** 确定性回退结构：蓝图切片不可用时按语义域分组，域内高相似细目合并进同一 H4（每块 ≤6 个 H4）；
  * 块顺序严格保持 inputSections 原顺序（域块取该域首次出现位置）——历史实现把人材机/容器块
  * 无条件前置，推翻了规划层 prioritizeOverviewSections 的调序（第一章 1.1 应为「编制说明与工程概况」） */

@@ -1,5 +1,6 @@
 import * as path from 'node:path';
 import { materialRootsOfFiles } from '@customize-agent/knowledge';
+import { chapterFocusRule } from './documentWritingTaskBrief';
 import { listKnowledgeFiles } from '../knowledge/kbService';
 import type { DocumentEvidence, DocumentTemplate, DocumentTemplateChapter, ProjectBinding, ProjectGraph } from './types';
 import { projectGraphPrompt } from './projectGraph';
@@ -274,7 +275,14 @@ export function buildProjectUnderstanding(template: DocumentTemplate, profile: P
     return {
       chapterId: chapter.id,
       chapterTitle: chapter.title,
-      writingGoal: `围绕”${chapter.title}”组织本项目资料事实，优先体现招标要求、清单工程内容、图纸施工对象和补疑修正口径。`,
+      // G 线 P1-13：逐章写作目标差异化。原实现除章标题外**全章同一句模板串** —— 章节差异化写作
+      // 目标基本空转，正文针对性上限完全落在模板 sections 与图谱匹配上（模板 sections 稀疏时即失控）。
+      // 现将该章的专业写作重点（与写作端 roleContext 注入的 CHAPTER_FOCUS_RULES 同源）并入目标句。
+      writingGoal: (() => {
+        const base = `围绕”${chapter.title}”组织本项目资料事实，优先体现招标要求、清单工程内容、图纸施工对象和补疑修正口径。`;
+        const focus = chapterFocusRule(chapter.title);
+        return focus ? `${base}本章专业写作重点：${focus.goal}。` : base;
+      })(),
       mustUseMaterialKinds,
       evidenceQueries: Object.fromEntries(ALL_KINDS.map(kind => [kind, queriesForKind(chapter, kind)])) as Record<MaterialKind, string[]>,
       mustCover: [...new Set([chapter.purpose, ...(chapter.sections || []), ...chapter.requiredFacts, ...graphWorksForChapter, ...graphMethodsForChapter])].filter(Boolean).slice(0, 24),

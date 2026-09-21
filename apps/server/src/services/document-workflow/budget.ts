@@ -307,3 +307,59 @@ export function documentLengthOverflow(budget: DocumentBudget, markdown: string)
     aimChars: Math.ceil(budget.targetChars * 1.1),
   };
 }
+
+/**
+ * 生成前「证据密度体检」（G 线 P1-14）——**估算资料能支撑的字数下界**，
+ * 低于用户目标时明确失败并给出差额与补料清单（「不接受降级交付」的落点）。
+ *
+ * 为什么必须是**下界**口径：这是一道**前置硬失败**，估高的代价是把本来能交付的项目挡在门外，
+ * 估低只是少拦一次（由后续质检兜底）。故系数取保守值——宁可放过，不可误伤。
+ *
+ * 系数（每单位资料能支撑的正文篇幅，校准用常量，非拍脑袋的最终值）：
+ * - 量化参数 ×100：一个规格/强度/间距类参数进入正文，围绕它写 2~4 句说明是常见形态；
+ * - 清单行 ×60：清单条目落位通常一句话带过（名称+工程量+部位）；
+ * - 图纸事实 ×50：图纸标注（尺寸/做法/材料编号）多为短句引用；
+ * - 基础事实 ×30：项目概况类事实只支撑少量叙述。
+ *
+ * 判定：`supportable < target × DENSITY_MIN_RATIO` 即失败。留 20% 容差是因为
+ * 本估算只覆盖「可量化」部分，不含依赖 LLM 撰写的法规/工艺/管理类通用内容
+ *（那部分按 `isLlmAuthoredFactName` 的口径不参与密度核算）。
+ */
+export const EVIDENCE_DENSITY_MIN_RATIO = 0.8;
+export const EVIDENCE_DENSITY_WEIGHTS = { parameter: 100, boqRow: 60, drawingFact: 50, basicFact: 30 } as const;
+
+export interface EvidenceDensityAssessment {
+  /** 可支撑字数**下界**估算 */
+  supportableWords: number;
+  targetWords: number;
+  /** 差额（target − supportable；≤0 表示足够） */
+  shortfall: number;
+  sufficient: boolean;
+  /** 各来源计数（随诊断输出，便于审计估算过程） */
+  sources: { parameters: number; boqRows: number; drawingFacts: number; basicFacts: number };
+  /** 补料清单（不足时给出的可操作缺口说明） */
+  remediation: string[];
+}
+
+export function assessEvidenceDensity(input: {
+  targetWords: number;
+  parameters: number;
+  boqRows: number;
+  drawingFacts: number;
+  basicFacts: number;
+}): EvidenceDensityAssessment {
+  const w = EVIDENCE_DENSITY_WEIGHTS;
+  const supportableWords = Math.round(
+    input.parameters * w.parameter + input.boqRows * w.boqRow + input.drawingFacts * w.drawingFact + input.basicFacts * w.basicFact,
+  );
+  const targetWords = Math.max(0, Math.round(input.targetWords));
+  const shortfall = targetWords - supportableWords;
+  const sufficient = targetWords === 0 || supportableWords >= targetWords * EVIDENCE_DENSITY_MIN_RATIO;
+  const remediation = sufficient ? [] : [
+    `资料可支撑篇幅下界约 ${supportableWords} 字，低于目标 ${targetWords} 字的 ${Math.round(EVIDENCE_DENSITY_MIN_RATIO * 100)}% 红线，差额约 ${Math.round(shortfall)} 字。`,
+    `量化参数 ${input.parameters} 个（权重 ${w.parameter}/个）、清单行 ${input.boqRows} 行（${w.boqRow}/行）、图纸事实 ${input.drawingFacts} 条（${w.drawingFact}/条）、基础事实 ${input.basicFacts} 条（${w.basicFact}/条）。`,
+    '补料方向（按缺口从大到小）：① 补充工程量清单/ExceL 明细（清单行权重最高且最易补）；② 补充施工图纸（DWG/PDF）以提供图纸事实；③ 补充招标文件技术条款与规范引用以增加量化参数；④ 核对资料包绑定是否覆盖项目全部资料。',
+    '若资料确实无法补足，请下调目标字数至资料可支撑水平，而不是产出篇幅注水、无依据的文档。',
+  ];
+  return { supportableWords, targetWords, shortfall, sufficient, sources: { parameters: input.parameters, boqRows: input.boqRows, drawingFacts: input.drawingFacts, basicFacts: input.basicFacts }, remediation };
+}

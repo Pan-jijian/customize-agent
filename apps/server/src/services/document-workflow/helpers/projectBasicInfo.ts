@@ -51,26 +51,6 @@ export function projectBasicValueFor(facts: DocumentFact[], patterns: RegExp[]) 
   return candidates[0]?.value;
 }
 
-export function repairKnownProjectBasicPlaceholders(content: string, facts: DocumentFact[]) {
-  const candidates = projectBasicFactCandidates(facts);
-  if (candidates.length === 0) return content;
-  let next = content;
-  const valueFor = (patterns: RegExp[]) => projectBasicValueFor(facts, patterns);
-  const replacements: Array<{ label: RegExp; value?: unknown }> = [
-    { label: /计划工期|合同工期|周期要求/u, value: valueFor([/计划工期|合同工期|周期要求|schedule_requirement/u]) },
-    { label: /质量标准|质量目标/u, value: valueFor([/质量标准|quality_standard/u]) },
-    { label: /合同估算价|合同估算价格|投资估算|最高投标限价|招标控制价/u, value: valueFor([/合同估算|投资估算|最高投标限价|招标控制价|project_investment_estimate/u]) },
-    { label: /建设地点/u, value: valueFor([/建设地点|project_location/u]) },
-    { label: /建设规模/u, value: valueFor([/建设规模|project_scale/u]) },
-  ];
-  for (const item of replacements) {
-    const value = cleanInlineFactValue(stringifyFactValue(item.value || ''));
-    if (!value) continue;
-    next = next.replace(new RegExp(`(${item.label.source})(\\s*[|：:]\\s*)(?:资料未明确|系统暂未从知识库确认|项目资料暂未明确)[^|\\n。；;]*`, 'gu'), `$1$2${value}`);
-  }
-  return next;
-}
-
 export function cleanInlineFactValue(value: string) {
   return normalizeOcrFactText(value)
     // 完整页码引用（“PDF 第N页”含“第 5-8 页”范围形态）与正文侧 normalizeTenderSourcePageRefs

@@ -585,6 +585,12 @@ export interface DocumentJsonSchemaField {
   maxLength?: number;
   minItems?: number;
   maxItems?: number;
+  /**
+   * object 型**键数**下限（G 线 P1-6）：Record 形态的权威容器（如 `quantities` 以工程量名为键）
+   * 没有数组长度可判，空对象「类型合法但零权威」——须由本约束拒绝。
+   * 缺此约束时 schema 对空权威**完全无感**，下游据 availability 认为齐备而写作层拿不到值。
+   */
+  minProperties?: number;
   /** array 元素约束 */
   items?: DocumentJsonSchemaField;
   /** object 子字段约束 */
@@ -635,8 +641,13 @@ function validateSchemaField(value: unknown, field: DocumentJsonSchemaField, pat
       items.splice(field.maxItems);
     }
     if (field.items) items.forEach((item, index) => errors.push(...validateSchemaField(item, field.items as DocumentJsonSchemaField, `${path}[${index}]`, truncations)));
-  } else if (field.type === 'object' && field.properties) {
+  } else if (field.type === 'object') {
     const record = value as Record<string, unknown>;
+    if (field.minProperties !== undefined) {
+      const keyCount = Object.keys(record).filter(key => record[key] !== undefined && record[key] !== null).length;
+      if (keyCount < field.minProperties) errors.push(`字段 ${path} 键数不足（期望 ≥${field.minProperties}，得到 ${keyCount}）`);
+    }
+    if (!field.properties) return errors;
     for (const [key, subField] of Object.entries(field.properties)) {
       const subValue = record[key];
       if (subValue === undefined) {

@@ -120,8 +120,8 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
     }
   });
 
-  it('LLM patch 修复轮 18 轮全部带 patchGuard 且锚定检测器存在、guard 检测器 全部 deterministicSafe', () => {
-    expect(LLM_PATCH_REPAIR_ROUNDS).toHaveLength(18);
+  it('LLM patch 修复轮 21 轮全部带 patchGuard 且锚定检测器存在、guard 检测器 全部 deterministicSafe', () => {
+    expect(LLM_PATCH_REPAIR_ROUNDS).toHaveLength(21);
     for (const entry of LLM_PATCH_REPAIR_ROUNDS) {
       expect(entry.kind).toBe('llm-patch');
       expect(entry.patchGuard).toBeDefined();
@@ -146,7 +146,7 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
     }
   });
 
-  it('LLM patch 修复轮 18 轮 id 顺序快照（P11 全链接入登记，变更必须显式改快照并附理由）', () => {
+  it('LLM patch 修复轮 21 轮 id 顺序快照（P11 全链接入登记，变更必须显式改快照并附理由）', () => {
     expect(LLM_PATCH_REPAIR_ROUNDS.map(entry => entry.id)).toEqual([
       'fact-landing',
       'table-repair',
@@ -155,6 +155,9 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
       'workpackage-skeleton-repair',
       'planned-section-repair',
       'global-consistency-repair',
+      'cross-project-value-copy-repair',
+      'requirement-response-repair',
+      'numeric-verification',
       'quotation-balance-repair',
       'content-depth-repair',
       'control-loop-repair',

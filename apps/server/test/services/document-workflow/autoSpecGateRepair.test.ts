@@ -34,6 +34,7 @@ vi.mock('@/services/document-validation/engineeringDocumentConfigService', () =>
 import { repairChapterByQuality } from '@/services/document-workflow/rolePipeline';
 import { FINALIZE_REPAIR_ROUNDS, LLM_PATCH_REPAIR_ROUNDS } from '@/services/document-workflow/detectorFixerRegistry';
 import { stageAutoSpecGateRepair } from '@/services/document-workflow/finalize/repairRounds/autoSpecGateRepair';
+import { plannedAutoSpecGateIssues } from '@/services/document-workflow/qualityValidation';
 import type { FinalizeSession } from '@/services/document-workflow/finalize/finalizeSession';
 
 const repairMock = vi.mocked(repairChapterByQuality);
@@ -81,6 +82,20 @@ function repairResult(content: string) {
 }
 
 describe('auto-spec-gate-repair 链尾接线（防「修复器存在但未接线」回归）', () => {
+
+  it('G 线 P1-15：配置必需要素缺失判 error（用户刚性要求必须进硬门禁）', () => {
+    // 缺陷：requiredTexts/minTables 来自**用户在配置里写死的刚性要求**，此前只判 warning
+    // ⇒ 进不了硬门禁（阻断判据要求 severity==='blocker'），用户配了「必须出现 XX」
+    // 却拿不到任何阻断反馈。升级为 error 后可进阻断集，并由锚定本检测器的
+    // auto-spec-gate-repair 轮定向补写——补不进的残留即硬门禁失败。
+    const issues = plannedAutoSpecGateIssues('# 正文（三术语全缺）', TEMPLATE as never);
+    const required = issues.filter(issue => issue.message.includes('配置要求缺少必要内容'));
+    expect(required.length).toBeGreaterThan(0);
+    for (const issue of required) expect(issue.level).toBe('error');
+    // 禁用词本就是 error（对照：口径一致，不出现「同族两种 severity」）
+    const forbidden = plannedAutoSpecGateIssues('# 正文含 劳动 字样', TEMPLATE as never).filter(issue => issue.message.includes('配置要求不得出现'));
+    for (const issue of forbidden) expect(issue.level).toBe('error');
+  });
   it('FINALIZE_REPAIR_ROUNDS 声明含 auto-spec-gate-repair（basis 之后、toc-consistency 之前），LLM_PATCH_REPAIR_ROUNDS 锚定 planned-auto-spec-gate', () => {
     const rounds = [...FINALIZE_REPAIR_ROUNDS];
     const index = rounds.indexOf('auto-spec-gate-repair');

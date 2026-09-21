@@ -37,7 +37,8 @@ describe('TextChunker 重复文本顺序锚定', () => {
     expect(chunks.length).toBeGreaterThan(1);
     let prevEnd = 0;
     for (const chunk of chunks) {
-      // 每块 startChar 不得回退到已消费区域（不允许 0 重复出现后突然跳变）
+      // 重叠已归零（用户红线：切片不得有重叠/重复数据）⇒ startChar 必须严格不回退。
+      // 回退即 offset 定位缺陷（旧实现曾回退 1455 字符、虚假间隙 9725 字符）
       expect(chunk.startChar).toBeGreaterThanOrEqual(prevEnd);
       expect(chunk.endChar).toBe(chunk.startChar + chunk.text.length);
       // 块间隙只允许分隔符级别（重复文本场景不允许出现 1000+ 字符跳变）
@@ -46,7 +47,7 @@ describe('TextChunker 重复文本顺序锚定', () => {
       }
       prevEnd = chunk.endChar;
     }
-    // 总覆盖：最后一块必须覆盖到文本尾部附近（无遗漏无虚增）
+    // 总覆盖：最后一块必须覆盖到文本尾部附近（无遗漏无虚增）。重叠归零后不得越界
     expect(prevEnd).toBeLessThanOrEqual(text.length);
     expect(prevEnd).toBeGreaterThan(text.length * 0.9);
   });

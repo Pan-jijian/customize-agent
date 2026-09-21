@@ -54,7 +54,7 @@ export async function stageTableCaptionRepair(session: FinalizeSession): Promise
     const instruction = [
       '【表格题名补全】下列表格缺少独立表题行，请为每张表在表格正上方补写一行表题。',
       '表题命名要求：概括该表内容与用途的业务表名（10～24 字），以“表/台账/清单/计划/记录/一览表”等名词结尾；不得使用“表格/数据表/明细”类无信息泛化名。',
-      `缺表题表格原文（只允许在各表正上方补一行表题；严禁修改表头、数据行、表格列数与其余正文，严禁删除表格）：\n${titleless.map(block => block.blockText).join('\n\n').slice(0, 2400)}`,
+      `缺表题表格原文（只允许在各表正上方补一行表题；严禁修改表头、数据行、表格列数与其余正文，严禁删除表格）：\n${titleless.map(block => block.blockText).join('\n\n')}`,
       '以局部 patch 方式输出：每处 patch 只包含新增表题行与必要定位上下文，不得重写其他内容。',
     ].join('\n');
     // 回滚保护（与 table-repair 的「变差回滚」差异点）：本轮修复目标是「无题表数严格下降」——

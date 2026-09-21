@@ -9,6 +9,7 @@ import { DedupEngine } from '../dedup/dedup-engine.js';
 import { RelationshipDetector } from '../dedup/relationship-detector.js';
 import { createEmbeddingProviderFromEnvironment, type EmbeddingProvider } from '../embedding/embedding-provider.js';
 import { LocalReranker } from '../embedding/local-reranker.js';
+import { PARSER_VERSION } from '../extraction/parser-version.js';
 import { ContentExtractor } from '../extraction/content-extractor.js';
 import type { LLMSearchProvider } from '../llm/llm-search-provider.js';
 import { FederationSearch, type FederatedResult, type FederatedSearchItem, type RetrievalWeights, type SearchFilters } from '../search/federation-search.js';
@@ -27,6 +28,35 @@ import { getProjectKbPath, ProjectConfigManager } from './project-config.js';
 const QUERY_EXPANSION_TTL_MS = 10 * 60 * 1000;
 const QUERY_EXPANSION_CACHE_MAX = 256;
 const QUERY_EXPANSION_MAX_CONCURRENCY = 2;
+
+/**
+ * 重排候选的分源保底（G 线 P2-8）——纯函数，便于直接验证选入契约。
+ *
+ * **缺陷**：原实现取 `mergedChildChunks.slice(0, 30)`，纯按融合分截断。低密度来源
+ * （例如只切出 1~2 个切片的补疑/说明文件）在融合分上永远挤不进前 30，**连被重排的机会都没有**——
+ * 它再相关也无从体现，用户侧表现为「某个小文件怎么都检索不到」。重排本应是对候选做精排，
+ * 候选集却已经按同一套分数预先判了死刑。
+ *
+ * **保底规则**：先按分取前 `limit`，再为「尚无任何候选入选的来源文件」各补其最高分切片一条，
+ * 从纯分数**尾部**等量裁剪（高分段不受影响）。保底总量上限 `limit/3`：低密度来源要能被看见，
+ * 但不能反过来把高相关结果挤出候选集。
+ */
+export function diversifiedRerankCandidates<T extends { filePath: string; score: number }>(items: T[], limit: number): T[] {
+  if (limit <= 0 || items.length <= limit) return items;
+  const ranked = [...items].sort((a, b) => b.score - a.score);
+  const selected = ranked.slice(0, limit);
+  const represented = new Set(selected.map(item => item.filePath));
+  const floor: T[] = [];
+  const floorCap = Math.max(1, Math.floor(limit / 3));
+  for (const item of ranked) {
+    if (represented.has(item.filePath)) continue;
+    represented.add(item.filePath);
+    floor.push(item);
+    if (floor.length >= floorCap) break;
+  }
+  if (floor.length === 0) return selected;
+  return [...selected.slice(0, limit - floor.length), ...floor];
+}
 
 export type KnowledgeIndexStage = 'scanning' | 'parsing' | 'chunking' | 'vectorizing' | 'done' | 'error';
 
@@ -218,6 +248,11 @@ export class KnowledgeBaseManager {
         const metadataOnly = this.isMetadataOnlyNonBlocking(file, extraction.metadata);
         diff.skippedFiles.push({ file, reason });
         this.updateJobsForFile(file.relativePath, metadataOnly ? 'SUCCESS' : 'ERROR', 100, reason, metadataOnly ? undefined : reason);
+        // G 线 P2-6：重解析未产出可用内容时，必须清掉该文件的历史分块再落 error 记录。
+        // 此前只改记录（chunkCount=0/status=error），旧块仍留在分块表里被继续检索到——
+        // 记录说「没有内容」、实存却有一整套旧切片，检索侧看到的是过期内容。
+        // 记录本身保留（标 error，变更追踪会据此重试），删的只是分块。
+        this.store.deleteChunksForFile(file.relativePath);
         this.store.upsertRecord({
           relativePath: file.relativePath,
           category: file.category,
@@ -231,7 +266,8 @@ export class KnowledgeBaseManager {
           lastVerifiedAt: now,
           status: metadataOnly ? 'active' : 'error',
           errorMessage: metadataOnly ? undefined : reason,
-          metadataJson: JSON.stringify({ mimeType: file.mimeType, ...extraction.metadata, warnings: extraction.warnings, metadataOnly }),
+          // G 线 P2-6：写入解析器版本戳，使「解析器改进」可自动传播到存量记录（见 parser-version.ts）
+          metadataJson: JSON.stringify({ mimeType: file.mimeType, ...extraction.metadata, warnings: extraction.warnings, metadataOnly, parserVersion: PARSER_VERSION }),
         });
         this.noteCollectionName(collectionName);
         continue;
@@ -344,6 +380,8 @@ export class KnowledgeBaseManager {
           extraction: extraction.metadata,
           warnings: extraction.warnings,
           extractionTimeMs: extraction.extractionTimeMs,
+          // G 线 P2-6：解析器版本戳（解析/清洗产出内容的版本），见 parser-version.ts
+          parserVersion: PARSER_VERSION,
         }),
       });
       this.store.replaceChunks(file.relativePath, chunks, {
@@ -495,7 +533,8 @@ export class KnowledgeBaseManager {
       rerankerName = 'local-heuristic-disabled-reranker';
     } else if (mergedChildChunks.length > 0) {
       const rerankLimit = requestedLimit ? Math.min(30, mergeLimit) : mergedChildChunks.length;
-      const candidates = mergedChildChunks.slice(0, rerankLimit);
+      // G 线 P2-8：候选按「分源保底」选入，而非纯按分截断——否则低密度来源连被重排的机会都没有
+      const candidates = diversifiedRerankCandidates(mergedChildChunks, rerankLimit);
       // 这里使用的是子块自身内容，通常在 500 tokens 左右，不仅相关性判断最准，而且不会超出 Reranker 的 max_length
       const textsToRerank = candidates.map(item => `${item.titlePath ?? item.sectionTitle ?? ''}\n${item.content}`);
       try {
@@ -763,8 +802,8 @@ export class KnowledgeBaseManager {
     }
     this.reportProgress({ stage: 'vectorizing', percent: 85, message: `正在写入 HNSWLib 向量库，共 ${chunks.length} 个切片`, chunkCount: chunks.length });
     if (chunks.length === 0) {
-      const totalChunks = this.getStats().chunkCount;
-      this.store.setMetadata('vector_indexed_chunks', String(totalChunks));
+      // G 线 P0-9：记录**真实向量条数**（此前写 chunkCount，与新鲜度判据同源 → 同义反复）
+      this.store.setMetadata('vector_indexed_chunks', String(this.actualVectorCount()));
       this.store.setMetadata('vector_index_status', 'ready');
       this.store.setMetadata('vector_index_error', '');
       this.store.setMetadata('last_vector_index_at', String(Date.now()));
@@ -785,10 +824,10 @@ export class KnowledgeBaseManager {
       });
       const actualModel = results[0]?.embeddingModel ?? this.embeddingProvider.model;
       const actualDimension = results[0]?.embeddingDimension ?? this.embeddingProvider.dimensions;
-      const totalChunks = this.getStats().chunkCount;
       this.store.setMetadata('embedding_model', actualModel);
       this.store.setMetadata('embedding_dimension', String(actualDimension));
-      this.store.setMetadata('vector_indexed_chunks', String(totalChunks));
+      // G 线 P0-9：真实向量条数（同源自证会让「索引就绪」在向量为空时仍为真）
+      this.store.setMetadata('vector_indexed_chunks', String(this.actualVectorCount()));
       this.store.setMetadata('vector_index_status', 'ready');
       this.store.setMetadata('vector_index_error', '');
       this.store.setMetadata('last_vector_index_at', String(Date.now()));
@@ -1297,6 +1336,23 @@ export class KnowledgeBaseManager {
     }
   }
 
+  /**
+   * 向量库真实条数（各 collection 的已加载文档数之和）—— G 线 P0-9。
+   *
+   * 为什么不能用 `getStats().chunkCount`：`vector_indexed_chunks` 的新鲜度判据是
+   * `indexedChunks === chunkCount`，若写入端也取 chunkCount，两侧同源 ⇒ 恒真，检查退化为
+   * 同义反复 —— 向量整包为 0 也会被判「已就绪」，语义检索静默缺失且永不重建
+   * （实测舒城(2) 素材包 294 文件 / 2,885 块向量为 0，状态仍报 ready）。
+   * 调用方需保证 vectorStores 已加载（ensureAllVectorStores）。
+   */
+  private actualVectorCount(): number {
+    let total = 0;
+    for (const store of this.vectorStores.values()) {
+      try { total += store.getDocumentCount?.() ?? 0; } catch { /* 单个集合读取失败不影响其余统计 */ }
+    }
+    return total;
+  }
+
   private async ensureVectorIndexFresh(chunkCount: number, options: { changedRelativePaths?: string[]; changedCollectionNames?: Set<string>; deletesApplied?: number; rebuild?: boolean } = {}): Promise<void> {
     if (chunkCount === 0) return;
     this.ensureAllVectorStores();
@@ -1308,7 +1364,9 @@ export class KnowledgeBaseManager {
     const status = this.store.getMetadata('vector_index_status');
     const changedRelativePaths = [...new Set(options.changedRelativePaths ?? [])];
     if (changedRelativePaths.length === 0 && options.deletesApplied && status === 'ready') {
-      this.store.setMetadata('vector_indexed_chunks', String(chunkCount));
+      // G 线 P0-9：这里曾直接写 `chunkCount` —— 与新鲜度判据同源，等于用「应该有」冒充「已经有」。
+      // 改为记录真实向量条数；若删除后向量数与切片数不再一致，下一轮 freshness 检查会正确触发重建。
+      this.store.setMetadata('vector_indexed_chunks', String(this.actualVectorCount()));
       this.store.setMetadata('vector_index_status', 'ready');
       this.store.setMetadata('vector_index_error', '');
       this.store.setMetadata('last_vector_index_at', String(Date.now()));
@@ -1320,7 +1378,10 @@ export class KnowledgeBaseManager {
       return;
     }
     if (indexedChunks === chunkCount && status === 'ready') return;
-    if (status === 'pending' || status === 'partial') return;
+    // G 线 P0-9：`pending/partial` 此前直接 return —— 这两个状态**永远不会被任何路径消费**
+    // （defer 模式的待办清单在同步路径不被消费、状态却被提前翻成 ready），于是「待重建」变成
+    // 永久态：实测 6 个测试项目停在 pending 且无 hnsw 目录，既没建也没有任何自动修复路径。
+    // 现口径：非 ready 即重建（重建结束会写入 ready/error，不会无限循环）。
     await this.indexVectors({ rebuild: true });
   }
 

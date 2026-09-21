@@ -2,6 +2,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import { createReadStream } from 'node:fs';
 import * as path from 'node:path';
+import { PARSER_VERSION } from '../extraction/parser-version.js';
 import type { FileClassifier } from '../classification/classifier.js';
 import type { DiffResult } from '../types.js';
 import type { DiskFileStat } from './file-scanner.js';
@@ -56,7 +57,13 @@ export class ChangeTracker {
         || indexed.chunkCount === 0
         || (classified.format === 'pdf' && indexed.chunkCount <= 1)
         || contentCoverage === 'metadata_filename'
-        || extractionMode === 'pdf_metadata_only';
+        || extractionMode === 'pdf_metadata_only'
+        // G 线 P2-6：解析器版本变化即视为需重建。此前判据只覆盖「文件本身变了」与若干
+        // 「明显坏掉」的形态，**解析器改进对存量库完全不可见**——修好图纸格式码剥离、
+        // PDF 表格表头后，旧切片仍带着旧的错误内容，直到文件本身被改动才重解析。
+        // 注：缺该字段的历史记录（首次引入本戳时）一律判为需重建 ⇒ 触发一次性全量重解析，
+        // 这是有意为之，否则本仓前几轮解析修复永远无法自动生效。
+        || metadata.parserVersion !== PARSER_VERSION;
       if (needsReindex) {
         modifiedFiles.push(classified);
         continue;

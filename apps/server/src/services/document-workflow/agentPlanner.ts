@@ -280,7 +280,7 @@ export function planChapterTask(input: { plan: AgentDocumentPlan; chapter: Docum
     let sectionEvidence = input.evidence.filter(item => base.evidenceQueries.some(query => evidenceMatches(item, query))).slice(0, 24);
     let graphNodes = base.requiredGraphNodes.flatMap(query => graphNodeSummary(input.context.baseProjectGraph, query)).slice(0, 12);
     if (degradedSection) {
-      if (sectionEvidence.length === 0) sectionEvidence = input.evidence.slice(0, 24);
+      if (sectionEvidence.length === 0) sectionEvidence = input.evidence;
       if (graphNodes.length === 0) graphNodes = graphNodeSummary(input.context.baseProjectGraph, input.chapter.title).slice(0, 12);
     }
     const issues: ValidationIssue[] = [];
@@ -293,8 +293,10 @@ export function planChapterTask(input: { plan: AgentDocumentPlan; chapter: Docum
     taskId: `chapter-task-${stableHash({ plan: input.plan.planId, chapter: input.chapter.id, evidence: input.evidence.map(item => stableHash({ filePath: item.filePath, content: item.content.slice(0, 120), score: item.score })) }).slice(0, 10)}`,
     chapterId: input.chapter.id,
     title: input.chapter.title,
-    facts: facts.slice(0, 48),
-    evidence: input.evidence.slice(0, 48),
+    // 上限治理：**不截断**（原 facts/evidence 各 slice(0,48)）——规划阶段对资料的覆盖面
+    // 直接决定主题块划分与小节规划的完整性；规模由 LLM 上下文预算处理。
+    facts,
+    evidence: input.evidence,
     graphContext: graphNodeSummary(input.context.baseProjectGraph, input.chapter.title).slice(0, 20).join('\n'),
     sections,
     ready: issues.length === 0,
@@ -311,7 +313,8 @@ export function planChapterTask(input: { plan: AgentDocumentPlan; chapter: Docum
  * 成稿必须遵循主题块结构，不得为每条输入细目单独开设标题（否则会重新碎片化）。
  */
 export function chapterTaskPromptForPlannedStructure(task: AgentChapterTask, structure: PlannedChapterStructure) {
-  const factLines = task.facts.slice(0, 18).map(fact => `- ${fact.key}：${factValue(fact)}${fact.sourceFile ? `（来源：${fact.sourceFile}）` : ''}`).join('\n');
+  // 上限治理：任务卡事实行不截断（原 slice(0,18)）
+  const factLines = task.facts.map(fact => `- ${fact.key}：${factValue(fact)}${fact.sourceFile ? `（来源：${fact.sourceFile}）` : ''}`).join('\n');
   const blockLines = structure.blocks.map((block, blockIndex) => {
     const pointLines = block.subPoints.map(point => (point.sources.length > 1
       ? `  - #### ${point.title}（覆盖评分细目：${point.sources.join('、')}）`

@@ -14,6 +14,7 @@ import { displayStage, upsertProgressStage } from '../progress';
 import { Semaphore, runWithAdaptiveConcurrency } from '../utils';
 import { PROJECT_BASIC_FACT_QUERIES } from '../documentGeneratorHelpers';
 import { tuningProfile } from '../tuningProfile';
+import { assessChapterSupplyDemand, CHAPTER_PARAMETER_DENSITY_PER_1000 } from '../integratedBlueprint/capacity';
 
 export async function stageBlueprint(session: GenerationSession): Promise<void> {
   const avgChapterTarget = Math.round(([...session.planning.documentBudget.chapterTargets.values()].reduce((sum, value) => sum + value, 0) || session.planning.documentBudget.targetChars || 0) / Math.max(1, session.planning.effectiveChapters.length));
@@ -72,7 +73,8 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
         `清单解析：${session.blueprint.integratedBlueprint.diagnostics.boq ? `${session.blueprint.integratedBlueprint.diagnostics.boq.totalEntries} 条目 / ${session.blueprint.integratedBlueprint.diagnostics.boq.villageCount} 村 / 完整性校验${session.blueprint.integratedBlueprint.diagnostics.boq.complete ? '通过' : '未通过'}` : '未解析（见警告）'}`,
         `标书编制规格：${compositionLabel}`,
         `校验链：${session.blueprint.integratedBlueprint.validation.checks.map(check => `${check.name}${check.passed ? '✓' : '✗'}`).join(' / ')}`,
-        ...session.blueprint.integratedBlueprint.diagnostics.warnings.slice(0, 6).map(warning => `警告：${warning}`),
+        // 上限治理：蓝图降级警告**全量上屏**（原 slice(0,6)：第 7 条起用户永远看不到）
+        ...session.blueprint.integratedBlueprint.diagnostics.warnings.map(warning => `警告：${warning}`),
       ],
     }, { subtitle: '一体化蓝图' }));
     session.global.emitProgress();
@@ -98,8 +100,23 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
         session.planning.generationDiagnostics.llm.lastInfo = `清单事实锁：锁定 ${session.blueprint.billFactLock.totalEntries} 条目（完整性校验${session.blueprint.billFactLock.complete ? '通过' : '未通过'}），写作直读与数值核对轮生效`;
       }
     } catch (error) {
-      console.error(`[blueprint] 清单事实锁构建失败（章节按证据独立成稿）：${error instanceof Error ? error.message : String(error)}`);
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[blueprint] 清单事实锁构建失败：${message}`);
       session.blueprint.billFactLock = undefined;
+      // 降级治理：**这把锁坏掉不只是「少注入一段文本」**——下游 factReconciliation 系规则
+      // 在权威缺失时全部静默跳过、图纸/清单类门禁直接 return []，即「依赖坏了 → 检测器不报 →
+      // 用户看到无问题」。这是最隐蔽的一类失败，必须显性上屏并说清后果。
+      upsertProgressStage(session.global.progressStages, displayStage({
+        type: 'validation',
+        roleId: 'bill-fact-lock',
+        status: 'failed',
+        message: `清单事实锁构建失败：清单类数值核对未生效（${message}）`,
+        details: [
+          '后果：清单落位、数值对账、写作直读注入三项均不会执行——本稿的清单相关缺陷**不会被检出**。',
+          '建议：核对该项目工程量清单文件（xls/xlsx/PDF）是否可解析、是否已入库，再重新生成。',
+        ],
+      }, { subtitle: '清单事实锁', order: session.global.progressStages.length }));
+      session.global.emitProgress();
     }
   }
   // ── B-T3 图纸事实锁构建：图纸类证据 → 「设计说明/构造做法/材料规格/设备参数」行级事实锁 ──
@@ -125,8 +142,21 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
       session.global.emitProgress();
     }
   } catch (error) {
-    console.error(`[blueprint] 图纸事实锁构建失败（章节按证据独立成稿）：${error instanceof Error ? error.message : String(error)}`);
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[blueprint] 图纸事实锁构建失败：${message}`);
     session.blueprint.drawingFactLock = undefined;
+    // 同清单锁：图纸引用率验收与图纸分量评分都依赖本锁，坏掉后是「不检测」而非「未通过」
+    upsertProgressStage(session.global.progressStages, displayStage({
+      type: 'validation',
+      roleId: 'drawing-fact-lock',
+      status: 'failed',
+      message: `图纸事实锁构建失败：图纸引用与图纸事实分量未生效（${message}）`,
+      details: [
+        '后果：图纸事实注入、图纸引用率验收、数据锚定的图纸分量均不会执行——本稿的图纸相关缺陷**不会被检出**。',
+        '建议：核对该项目图纸文件（dwg/dxf/pdf）是否可解析、是否已入库，再重新生成。',
+      ],
+    }, { subtitle: '图纸事实锁', order: session.global.progressStages.length }));
+    session.global.emitProgress();
   }
   // ── 招标要求分配（唯一权威分配：每条要求唯一主责章；章级注入/章级验收/终局对账共用同一份分配） ──
   // 低置信条目经 LLM 按实际章节列表裁决主责章；LLM 明确拒选（none）即移出要求池（excluded 审计，
@@ -258,7 +288,16 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
       if (adjustments.length > 0 || compressed) console.warn(`[blueprint] 章预算可行性校准：${adjustments.length} 章调整能量；Σ章预算 = ${budgetTargetChars} 字守恒`);
       session.global.emitProgress();
     } catch (error) {
-      console.error(`[blueprint] 章预算可行性校准失败（沿用原章预算，不阻断）：${error instanceof Error ? error.message : String(error)}`);
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[blueprint] 章预算可行性校准失败：${message}`);
+      // 降级治理：章预算直接决定每章字数目标，校准失败只 console 的话用户看到的是「无此环节」
+      upsertProgressStage(session.global.progressStages, displayStage({
+        type: 'validation',
+        roleId: 'chapter-budget-feasibility',
+        status: 'failed',
+        message: `章预算可行性校准失败：沿用原章预算（可能偏离真实要点密度）（${message}）`,
+      }, { subtitle: '章预算可行性校准', order: session.global.progressStages.length }));
+      session.global.emitProgress();
     }
   }
   // 蓝图接管（三期收口：旧 planDataMaster/decisionLock 管线已删除，蓝图是唯一计划类数值权威源）：
@@ -266,4 +305,34 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
   // （s1-slim：参数桶/切片不再文档级预渲染全量文本，单块输入从 10 万字符级降到块相关量级）；
   // 蓝图缺失/校验失败时参数桶为空、各章按证据独立成稿
   session.blueprint.blueprintActive = Boolean(session.blueprint.integratedBlueprint?.validation.passed);
+  // G 线 P1-3 供给面 ↔ 要求面对齐核算：**按量化参数**核算每章供给（既有「章预算可行性校准」
+  // 按的是要点数，覆盖不到参数供给这条线）。写作端要不到料、检测端照样按固定密度线扣分，
+  // 是本项目「模板化/空泛表述」的结构性来源之一——两端各自成立、合起来无解。
+  // 此处只做**显式诊断**（不自动改预算）：处置是同源二选一（扩注入预算 / 同步下调目标字数与密度线），
+  // 属产品决策；把差距摆出来即可，避免在无实测依据时自动调参。
+  {
+    const outlineChapters = session.blueprint.integratedBlueprint?.outline.chapters ?? [];
+    const assessments = session.planning.effectiveChapters.map(chapter => {
+      const blueprintChapter = outlineChapters.find(item => item.title === chapter.title)
+        ?? outlineChapters.find(item => chapter.title.includes(item.title) || item.title.includes(chapter.title));
+      const availableParameters = (blueprintChapter?.subSections ?? []).reduce((sum, section) => sum + (section.requiredParams?.length ?? 0), 0);
+      return assessChapterSupplyDemand({
+        chapterTitle: chapter.title,
+        targetWords: session.planning.documentBudget.chapterTargets.get(chapter.id) || 0,
+        availableParameters,
+      });
+    });
+    session.planning.chapterSupplyDemand = assessments;
+    const underSupplied = assessments.filter(item => !item.sufficient);
+    upsertProgressStage(session.global.progressStages, displayStage({
+      type: 'validation',
+      roleId: 'supply-demand-alignment',
+      status: underSupplied.length === 0 ? 'success' : 'failed',
+      message: underSupplied.length === 0
+        ? `供给面 ↔ 要求面对齐核算通过：${assessments.length} 章参数密度均达检测同源线 ${CHAPTER_PARAMETER_DENSITY_PER_1000}/千字`
+        : `供给面不足：${underSupplied.length}/${assessments.length} 章可用量化参数低于检测同源密度线 ${CHAPTER_PARAMETER_DENSITY_PER_1000}/千字`,
+      details: underSupplied.slice(0, 8).flatMap(item => [`【${item.chapterTitle}】`, ...item.remediation]),
+    }, { subtitle: '章预算可行性校准', order: session.global.progressStages.length }));
+    session.global.emitProgress();
+  }
 }

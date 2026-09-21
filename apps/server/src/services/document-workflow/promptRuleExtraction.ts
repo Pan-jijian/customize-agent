@@ -469,8 +469,10 @@ export function normalizePlannedSections(sections: string[] = [], chapterTitle: 
   return result;
 }
 
-/** 每章小节总数上限：锁定小节（用户声明：提示词强制/模板或 OUTLINE 已提供）不受截断，上限只约束 LLM 规划增量 */
-export const MAX_CHAPTER_SECTIONS = 12;
+// 上限治理：原 MAX_CHAPTER_SECTIONS = 12 已删除——它约束的是 LLM 规划增量，
+// 被截掉的小节在结构层就不存在，永远不会被写作（后续 requirementCalibration 每章最多再补 2 节，
+// 补不回被截掉的量）。小节数多只影响写作批次数，不影响正确性；丢小节是交付结构缺损。
+// 锁定小节（用户声明）本就豁免，删除本上限后规划增量与锁定小节同等对待。
 
 /** LLM 规划产出的表格需求项：表名 + 表头字段（字段可为空，写作时按表名与所在小节内容确定） */
 export interface PlannedTableRequest {
@@ -556,7 +558,8 @@ export async function planChapterSectionsWithLlm(input: { template: DocumentTemp
     for (const title of plannedItems) {
       if (!merged.some(item => sectionTitleEquivalent(item, title))) merged.push(title);
     }
-    const sections = dedupePlannedSections(merged).slice(0, Math.max(MAX_CHAPTER_SECTIONS, locked.length));
+    // 上限治理：全量保留规划小节
+    const sections = dedupePlannedSections(merged);
     const tables: PlannedTableRequest[] = [];
     for (const item of input.bodyTablePolicy === 'forbidden' ? [] : result?.tables || []) {
       const title = cleanSectionTitleArtifacts(normalizePlannedSectionTitle(String(item?.title || '')));

@@ -1,5 +1,142 @@
 # server
 
+## 4.55.1
+
+### Patch Changes
+
+- 修复：生成前章节结构校验误伤「大纲在提示词里」的正常工作流 + 幻影锚点收口
+
+  ## 一、章节结构校验误伤（**会导致生成根本不启动**）
+
+  上一版新增的「模板 chapters < 2 → error」在 `validateDocumentTemplateRun` 中**误伤了大纲驱动的工作流**：
+  `generate.ts` 对任何 `level:'error'` 直接返回 **422 且不调用 `startGenerateDocumentTask`** —— 生成根本不会开始。
+
+  而本仓的常规形态恰恰是：**模板只作载体（outputTitle/角色配置/资料绑定），章节结构由用户需求或提示词里的大纲整份替换**
+  （`stagePrepare`：`hasExplicitOutline` 时 `template.chapters = explicitPromptChapters`）。丰乐镇模板即如此
+  （1 章占位，大纲 10 章在提示词里）。
+
+  现口径：校验**移到提示词解析之后**，并用与 `stagePrepare` **同源的双路大纲来源**（用户需求 + 提示词内容）；
+  只有「既无显式大纲、模板自身又是单章/占位」才判 error。有大纲时改为 **warning 显式告知**
+  （「模板章节将被显式大纲覆盖：模板 N 章 → 大纲 M 章」），让用户知情而不阻断。
+
+  实测（丰乐镇 tpl-1788641517421，项目根为本仓库目录）：**0 error / 2 warning**，生成链路可正常启动。
+
+  ## 二、四个幻影锚点收口（悬空声明 → 接入真实检测器）
+
+  `templating-filler` / `workpackage-skeleton` / `planned-section-completeness` / `global-consistency-review`
+  四条 `DetectorEntry` **全仓零 `det()` 发出点**，唯一作用是充当 4 个 LLM 修复轮的 `anchoredTo` ——
+  即「检测定位=修复定位」契约实际是空的（`global-consistency-review` 甚至只是个进度 stage 的 roleId）。
+
+  处置：**接入**（这 4 轮在跑且有用）——4 轮改锚**同族真实检测器**，锚点声明从此为真：
+
+  | 轮                            | 原悬空锚点                     | 改锚真实检测器                      |
+  | ----------------------------- | ------------------------------ | ----------------------------------- |
+  | `templating-repair`           | `templating-filler`            | `construction-org-generic-language` |
+  | `workpackage-skeleton-repair` | `workpackage-skeleton`         | `construction-org-division-section` |
+  | `planned-section-repair`      | `planned-section-completeness` | `writer-missing-section`            |
+  | `global-consistency-repair`   | `global-consistency-review`    | `cross-chapter-consistency`         |
+
+  四条悬空 `DetectorEntry` 一并删除。注意：这 4 轮走的是 `globalQualityGates` 内的**内联检查**
+  （`fillerDensityReport` / 工作包骨架 / `collectSectionContentGaps` / `crossChapterConsistencyIssues`），
+  本身不产 `ValidationIssue`，故改锚标的是「**同族**检测器」而非「同源检测器」——已在注册表注释中写明。
+
+  **说明**：检测器总数 149 → 145、覆盖计数 97 → 92 是**去伪**而非退化（删掉的都是零发出点的假检测器）；
+  注册表一致性闸门在改动中正确拦下了 `construction-org-generic-language` 的处置声明与事实不符（manual → fixed），
+  已同步修正。
+
+  **回归**：server 248 文件 / 13,020 用例 0 failed；两侧 `tsc` 与 `eslint` 全绿。
+
+## 4.55.0
+
+### Minor Changes
+
+- 交付质量全链加固：上限治理（不丢数据）+ 降级治理（不静默失败）+ 旧代码清理
+
+  本轮由用户三条口径驱动：**① 不要兜底与降级**（都是凑合，不是保证质量）；**② 旧代码/冗余节点直接删，不做兼容**；
+  **③ 不许设会丢数据的上限**（「后期别的项目文件数据量很大，上限本质上不还是丢失吗」）。
+
+  ## 一、上限治理：上限只能是**批量预算**，总量不设
+
+  此前大量「防提示词膨胀」的实现是**总量截断**——超出部分**永远**不被任何后续轮次处理。已逐一改造：
+
+  ### knowledge
+
+  - **CAD MTEXT 格式码剥离**：`{\fSimSun|b0|i0|c134|p2;建设单位}`、`\A1;`、`\W1.2;`、`\L…\l` 此前完全未清洗。
+    危害双重：污染检索词面；更严重的是被「符号占比 > 0.35」判为乱码而**整行丢弃**（真标注被吞）。
+    实测巢湖终态库 1730 个 cad chunk 中 738 个残留（42.7%）。`\P` 段落符在 `buildCadSemanticNodes`
+    转真换行（三种形态实测：残留 `\P` → 拆独立标注被重建粘连 → 保留换行是唯一正确解）。
+  - **重排候选分源保底**：原 `slice(0,30)` 纯按融合分截断，低密度来源（只切出 1~2 片的小文件）
+    **连被重排的机会都没有** ⇒ 表现为「某个小文件怎么都检索不到」。改为按来源保底选入。
+  - **工程规格词权重**：实测查「混凝土强度等级 C50」**首条返回讲 C30 的文档**——规格值（高区分度）
+    与通用中文词同权（0.2/次），被字面量淹没。新增 `ENGINEERING_SPEC_TOKEN_RE` 与 12 倍权重。
+  - **PDF 表格接入智能表头检测**：原无条件把第 0 行当表头，标题行（「表 3-1 主要材料表」）冒充表头后
+    真实列名全丢；改为与 xlsx/CSV/DOCX 同源接入 `detectSmartTableHeader`。
+  - **解析器版本戳**：`change-tracker` 的重解析判据此前只覆盖「文件本身变了」，**解析器改进对存量库完全不可见**。
+    新增 `PARSER_VERSION`，解析/清洗产出变化即自动传播（首次会触发一次性全量重解析，属有意为之）。
+    同时修「重解析失败时旧分块存活」——原实现只把记录改写为 `chunkCount:0/status:error` 却不删分块，
+    旧内容继续被检索到而记录声称无内容。
+  - **CAD 单字符碎片合并**：实测 49,426 行中单字符行 3,978（8.0%），其中「连续 ≥3」的 1,894 行是被逐字符
+    拆成实体的真实文本（`NINGBO`→`N|I|N|G|B|O`、`有限公司`→`有|限|公|司`）。合并后 **8.0% → 4.4%**，
+    零信息损失；其余 4.2% 孤立单字符（`A` 为主，上下文为电气图例表列值）**未做删除式治理**。
+
+  ### server
+
+  - **事实抽取分批**（原 `slice(0,48)`）：第 49 条起的证据**其事实从未存在**——不进事实模型、参数池、
+    蓝图锚点、落位义务、数值对账。这是唯一的「上游断流」型上限。改为按 token 预算分批抽取合并；
+    **证据编号跨批全局递增**（按批从 E1 重开会把事实挂到错误的文件上）。
+  - **检测器全量产出**：`integrity/detectors` **14 处** `return issues.slice(0,N)` + `factReconciliation MAX_ISSUES=60`
+    （含 11 处 blocker）——超出的问题**不进阻断集、不进暂停清单**，即「门禁因报告上限而放行」。
+  - **修复通道解除截断**：参数分配层取消全部上限（原「所有章满额时该参数被整体丢弃」）；
+    「已确认事实未落位」修复通道解除 60/12 双层夹断；BOQ/图纸/参数/责任清单的「超出仅列名 40 条」
+    改为**全量列名**（名字是义务的最小载体）。
+  - **饥饿防护**：专业评分/图纸落位/篇幅压缩的章选择原按分数 `slice(0,4)/(0,8)`，弱章补不动则**恒占名额**、
+    后段章永无机会。改为「已尝试集合跨周期轮转」。
+  - **停机条件改达标驱动**：修复轮次常量语义由**质量上限**改为**预算兜底**（内容深度 2→4/周期 2→8、
+    篇幅压缩 2→8、链尾收口 3→8），停机由「残留清零」与「严格下降」双闸决定。
+  - **用户要求核验解除 24 条上限与正文 12000 字截断**：后者造成**假阴性**（尾部已落实的要求被误判未落实，
+    发起无意义重写）。
+
+  ## 二、降级治理：异常不得等于通过，失败必须显性
+
+  - **块级质检器异常 = 放行成稿**（源码注释自写「扫描失败（放行）」）→ 重试一次，仍失败按**未通过**处理。
+  - **检索失败 = 零命中且被缓存**：一次 DB 异常让该 query 本轮**永久**返回空，UI 上「崩溃」与「确实没有」同形。
+    改为**失败不写缓存** + 失败计数 + failed 级 stage。
+  - **用户提示词强制要求解析失败 → 无声消失**（既不注入写作也不进核验，文档照常判成功）→ 显性 failed stage。
+  - **清单锁/图纸锁构建失败仅 console** → 下游数值对账规则**全部静默跳过**、图纸门禁直接 `return []`
+    ⇒「依赖坏了 → 检测器不报 → 用户看到无问题」。改为 failed stage 并写明后果。
+  - **跨章一致性审查+修复整链崩溃被吞**（返回初值当成功）→ failed stage 明示「本环节未执行」。
+  - **归因错误**：联网检索 `catch { filtered += 1 }` 把请求异常计入「被噪声过滤条数」⇒ 网络全挂被读成
+    「过滤掉了 N 条低质结果」。改为失败与过滤分列。
+  - **字段接了没人渲染＝不存在**：`pinnedEvidenceMissed` 早已登记却全仓无读取点；新增
+    `retrievalFailures` 与之并接入后台诊断。
+  - 其余：xlsx 解析回退计数、结构化工作包解析失败明示、语义复核失败沿既有通道可见、
+    章预算校准失败 failed stage、专业深度分析失败章计数、图纸分量缺失显式标注（原静默重归一抬高维度分）。
+
+  ## 三、旧代码清理（不做兼容）
+
+  `_legacyPrefix` 死兼容参数、`maxItemsPerFile` 死选项、`templating-difficulty` 悬空声明、
+  `fallbackWorkPackagesFromExisting` 休眠死代码、`constructionOrgQualityRules` 无章结构回退
+  （生产不可达 + 产出无 provenance 的孤儿 issue）、`finalizeSession` 两个「写后零读」字段、
+  `important-unplaced-facts` / `table-plan-execution` 两个**幻影检测器**（全仓无发出点，仅作 llm 轮的
+  `anchoredTo`；对应轮已改锚真实检测器）。**连带移除 18 条锁定已删行为的用例**（其中 4 条因返回空而恒真）。
+
+  ## 四、尺子与门禁口径
+
+  - **`quality-caliber-c9.0 → c9.1 → c9.2`**（任何影响分数/阻断的改动必须递增口径版本）。
+  - c9.0：取消 uniqueness **乘性压缩**（原式使 `overall ≤ 100×(u/90)`，实测 u≈74.6 ⇒ **理论上限 83**，
+    六维全满分也拿不到 95）；目标固定 95（不再随知识覆盖静默降为 85）。
+  - c9.1：`passed` 增加**权重覆盖率前置**（`MIN_QUALITY_COVERAGE=0.9`）——综合分是可用维度的重归一分，
+    实测仅 3/6 维、权重覆盖 50% 也能算出 94；现将覆盖面显性打印并对不足判不通过。
+  - c9.2：**阻断口径单源**（报告改消费门禁侧 `classifyBlockingIssue`，消除「报告 12 项阻断、门禁 3 项」）；
+    蓝图 `quantities` 补 `minProperties: 1` 拒绝空权威（并为 JSON schema 校验器补上 `minProperties` 支持）。
+
+  **回归**：server 248 文件 / 13,020 用例 0 failed；knowledge 38 文件 / 551 用例 0 failed；两侧 `tsc` 与 `eslint` 全绿。
+
+### Patch Changes
+
+- Updated dependencies
+  - @customize-agent/knowledge@4.15.0
+
 ## 4.54.0
 
 ### Minor Changes

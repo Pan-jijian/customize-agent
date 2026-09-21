@@ -113,13 +113,13 @@ describe('B1 paragraphOpeningRepeatIssues 段首机械重复', () => {
     const md = `${open(19)}。\n\n${open(19)}!\n\n${open(19)}？`;
     expect(paragraphOpeningRepeatIssues(md).length).toBe(1);
   });
-  it('B1 4 组同指纹最多报 3 条', () => {
+  it('上限治理：B1 4 组同指纹全量报 3 条（全量 4 条）', () => {
     const mk = (body: string) => `${body}。\n\n${body}。\n\n${body}。`;
     const md = `${mk(`甲${open(18)}`)}` +
       `\n\n${mk(`乙${open(18)}`)}` +
       `\n\n${mk(`丙${open(18)}`)}` +
       `\n\n${mk(`丁${open(18)}`)}`;
-    expect(paragraphOpeningRepeatIssues(md).length).toBe(3);
+    expect(paragraphOpeningRepeatIssues(md).length).toBe(4);
   });
 });
 

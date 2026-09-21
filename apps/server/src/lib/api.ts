@@ -519,7 +519,9 @@ export async function exportDocument(input: { documentId?: string; title?: strin
     try {
       const parsed = JSON.parse(text) as { error?: string; message?: string; issues?: Array<{ message?: string }> };
       const issueText = parsed.issues?.map(issue => issue.message).filter(Boolean).slice(0, 3).join('；');
-      message = issueText ? `${parsed.error || '导出失败'}：${issueText}` : parsed.message || parsed.error || message;
+      // 服务端的 message 是给人看的完整说明（含处置指引），优先采用；issue 拼接作为兜底，
+      // 避免把「导出门禁未通过…可选择仍要导出（非交付物）」这类关键指引覆盖成裸错误码+条目
+      message = parsed.message || (issueText ? `${parsed.error || '导出失败'}：${issueText}` : parsed.error || message);
     } catch {
       // 保留原始响应文本
     }

@@ -165,7 +165,8 @@ function cjkRatio(value: string): number {
 }
 
 /** 含 C1 控制区/Latin-1 补充区字符：GBK 字节被按码位直出的乱码候选（不含纯 ASCII） */
-// eslint-disable-next-line no-control-regex -- 探测的就是 U+0080-U+00FF 这一段码位（GBK 半字节被按码位直出的产物），非文本控制语义
+// 探测的就是 U+0080-U+00FF 这一段码位（GBK 半字节被按码位直出的产物）。本正则不触发
+// no-control-regex（该规则只管 C0 控制符与 DEL），故原 eslint-disable 是失效指令，已移除。
 const LATIN1_MOJIBAKE_RE = /[\u0080-\u00FF]/u;
 
 /**

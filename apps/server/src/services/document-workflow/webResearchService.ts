@@ -93,10 +93,12 @@ async function searchDuckDuckGo(query: string, maxResults: number, trustedDomain
 }
 
 export async function retrieveWebEvidence(input: { config: WebAccessConfig; chapterId: string; chapterTitle: string; sectionTitles: string[]; runtimeRules: RuntimePromptRuleSet; localFacts: DocumentFact[]; signal?: AbortSignal }) {
-  if (!input.config.enabled || !shouldUseWebForChapter(input.chapterTitle, input.sectionTitles)) return { evidence: [] as DocumentEvidence[], queries: [] as string[], filtered: 0 };
+  if (!input.config.enabled || !shouldUseWebForChapter(input.chapterTitle, input.sectionTitles)) return { evidence: [] as DocumentEvidence[], queries: [] as string[], filtered: 0, failedQueries: 0, failures: [] as string[] };
   const queries = buildQueries(input.chapterTitle, input.sectionTitles, input.config.maxQueriesPerChapter);
   const evidence: DocumentEvidence[] = [];
   let filtered = 0;
+  let failedQueries = 0;
+  const failures: string[] = [];
   for (const query of queries) {
     try {
       const results = await searchDuckDuckGo(query, input.config.maxResultsPerQuery, input.config.trustedDomains, input.runtimeRules.forbiddenTerms || [], input.signal);
@@ -112,11 +114,15 @@ export async function retrieveWebEvidence(input: { config: WebAccessConfig; chap
           sectionTitle: input.chapterTitle,
         });
       }
-    } catch {
-      filtered += 1;
+    } catch (error) {
+      // 降级治理：原实现把**请求异常计入「被噪声过滤条数」**——网络全挂会被读成
+      // 「过滤掉了 N 条低质结果」，是归因错误而非仅静默。失败必须与过滤分列。
+      failedQueries += 1;
+      failures.push(`${typeof query === 'string' ? query : '查询'}：${error instanceof Error ? error.message : String(error)}`);
+      console.error('[web-research] 检索查询失败（与「被噪声过滤」分列计数）', error);
     }
   }
-  return { evidence, queries, filtered };
+  return { evidence, queries, filtered, failedQueries, failures };
 }
 
 export function webAccessPrompt(enabled: boolean) {

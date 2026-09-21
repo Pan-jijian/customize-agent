@@ -34,7 +34,9 @@ const CONFLICTS_JSON_SCHEMA: DocumentJsonSchema = {
     conflicts: {
       type: 'array',
       required: true,
-      maxItems: 8,
+      // 上限治理：原 `maxItems: 8` 会让第 9 条起的 LLM 报出冲突被 `items.splice()` **原地截断**
+      //（截断不判失败、不进 schemaFailures），且本清单冻结后只消费一次、不再重审全文
+      // ⇒ 被截掉的冲突**永不成为修复目标**。防爆量属展示层职责，不得以截断检测结果实现。
       items: {
         type: 'object',
         required: true,

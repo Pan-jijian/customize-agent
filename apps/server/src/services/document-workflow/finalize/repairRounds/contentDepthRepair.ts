@@ -35,7 +35,7 @@
  *（逐项在正文最相关专业小节写入条目名称与工程量），修历史挂靠缺口：17 轮修复无一消费直坠终门禁。
  */
 import { displayStage, upsertProgressStage } from '../../progress';
-import { repairChapterByQuality, repairPatchGuard } from '../../rolePipeline';
+import { recordRepairActions, repairChapterByQuality, repairPatchGuard } from '../../rolePipeline';
 import { withPatchRollback } from '../../patchRollback';
 import { divisionSectionDeficitCount, majorContentDeficitCount } from '../../constructionOrgQualityRules';
 import { normalizeEngineeringTextForFactMatch } from '../../engineeringUnits';
@@ -69,11 +69,31 @@ const CONTENT_DEPTH_DETECTOR_IDS: ReadonlySet<string> = new Set([
  * 全量分配（缺口并集 = 关键参数缺失池 + 相关遗漏参数池去重），义务缺口不再挂靠关键参数 blocker */
 const PARAMETER_TOKEN_DETECTOR_IDS: ReadonlySet<string> = new Set(['precise-fact-usage', 'parameter-obligation-usage']);
 
-/** 收敛修复：每章定向补写轮上限（残留数下降才继续下一轮；不降/回滚/达上限即停止） */
-const MAX_CONTENT_DEPTH_REPAIR_ROUNDS = 2;
+/**
+ * 收敛修复轮：**停机条件是「达标线」，不是「轮次上限」**（G 线 P2-5）。
+ *
+ * 原值 2 是**质量上限**语义：只要还有下降空间、每章补到第 2 轮就被硬砍，残留直接甩给终门禁。
+ * 现改为**预算上限**语义——停止由收敛判定决定（残留清零即达标停止；不再下降/回滚即无进展停止），
+ * 本常量只兜住「一直下降但迟迟不达标」的最坏情况，防单章无限烧 LLM。
+ * 注意：每轮 = 每章一次 LLM 调用，故本值直接乘算修复链的 LLM 成本（2→4 即最坏翻倍）；
+ * 之所以仍以「严格下降才继续」为闸，是因为修复链补不进新材料（无知识库通道），
+ * 只靠改写/删除收敛——无下降就继续，只会烧钱并把正文越改越薄。
+ */
+const MAX_CONTENT_DEPTH_REPAIR_ROUNDS = 4;
 
-/** 外层收敛周期上限（补写改写后 recompute 语义重算新报的残留需要再消费；首周期处理初检 blocker） */
-const MAX_CONTENT_DEPTH_REPAIR_CYCLES = 2;
+/**
+ * 外层收敛周期的**安全上限**（G 线 上限治理）——不是质量上限。
+ *
+ * 原值 2 是**质量上限**语义：`scored.slice(0, 4)` 每周期只补最薄弱的 4 章、
+ * 图纸落位每周期 8 章，而周期只有 2 ⇒ 20 章的文档里**只有 8 章**拿得到专业分补写机会，
+ * 其余章无论多差都永不修复。把上限从 2 调大只是挪动悬崖（与参数分配的 6/24→16/96 同型错误），
+ * 故改为**达标驱动**：循环持续到目标集清空或不再下降（与 P2-5 同口径），
+ * 本常量仅兜住「一直下降但迟迟不收敛」的最坏情况，防单次生成无限烧 LLM。
+ *
+ * 每次循环 = 每目标章一次 LLM 调用，故本值直接乘算成本；之所以仍以「严格下降才继续」为闸，
+ * 是因为修复链补不进新材料，无下降就继续只会烧钱并把正文越改越薄。
+ */
+const MAX_CONTENT_DEPTH_REPAIR_CYCLES = 8;
 
 /** D-T1 专业评分补写预算（单列，防超预算——独立于六类内容深度补写的每章 2 轮收敛框架）：
  * 单周期最多补写章数（按实时评分升序取最薄弱章优先）与每章专业补写轮上限 */
@@ -179,7 +199,7 @@ function contentDepthBlockers(session: FinalizeSession): ValidationIssue[] {
  * analyze 实时重算六维分数（与检测端单源口径）→ 快照过期已达线章剔除 → 分数升序取最薄弱章 →
  * 预算截断（单周期章数上限）。返回 issue + 章 id + 薄弱维度（任务卡指令载荷）。
  */
-async function professionalScoreTargets(session: FinalizeSession): Promise<Array<{ issue: ValidationIssue; chapterId: string; weakDimensions: DepthDimension[] }>> {
+async function professionalScoreTargets(session: FinalizeSession, attempted: Set<string> = new Set()): Promise<Array<{ issue: ValidationIssue; chapterId: string; weakDimensions: DepthDimension[] }>> {
   const warnings = session.validationIssues.filter(issue => issue.provenance?.detectorId === 'professional-score' && issue.chapterId);
   if (warnings.length === 0) return [];
   const scored: Array<{ issue: ValidationIssue; chapterId: string; total: number; weakDimensions: DepthDimension[] }> = [];
@@ -198,7 +218,15 @@ async function professionalScoreTargets(session: FinalizeSession): Promise<Array
     scored.push({ issue, chapterId, total, weakDimensions: professionalWeakDimensions(analysis.dimensions) });
   }
   scored.sort((left, right) => left.total - right.total);
-  return scored.slice(0, MAX_PROFESSIONAL_SCORE_REPAIR_CHAPTERS);
+  // 饥饿防护（上限治理）：原实现每周期重新 `slice(0,4)` 取最薄弱 4 章 —— 若这 4 章补写回滚/未生效
+  //（分数不升），下周期仍按同样排序取到**同样 4 章**，第 5 章起**永远拿不到补写机会**。
+  // 现口径：优先取「本批次尚未尝试过」的章（比分切片更公平），全部尝试过后再回落到从头重试
+  //（避免已尝试但未改善的章被永久放弃）。
+  const fresh = scored.filter(item => !attempted.has(item.chapterId));
+  const ordered = fresh.length > 0 ? fresh : scored;
+  const picked = ordered.slice(0, MAX_PROFESSIONAL_SCORE_REPAIR_CHAPTERS);
+  for (const item of picked) attempted.add(item.chapterId);
+  return picked;
 }
 
 const blockerCount = (issues: ValidationIssue[]) => issues.filter(issue => issue.severity === 'blocker').length;
@@ -336,7 +364,10 @@ function instructionFor(draftChapter: DocumentDraftChapter, todos: ChapterTodo[]
       lines.push(`  本章负责补齐的未落位清单项（逐项在正文最相关的专业小节写入条目名称与工程量，保持清单原文数值与单位）：${shown.map(item => `${item.name}${item.quantity ? ` ${item.quantity}` : ''}${item.rows > 1 ? `（同族${item.rows}行）` : ''}${item.section ? `［建议小节：${item.section}］` : ''}`).join('；')}。`);
       const overflow = todo.pendingBoqItems.slice(MAX_BOQ_PENDING_ITEMS_IN_INSTRUCTION);
       if (overflow.length > 0) {
-        lines.push(`  另需覆盖（仅列名，共${overflow.length}项，按上述同一口径逐项补齐）：${overflow.slice(0, 40).map(item => item.name).join('、')}${overflow.length > 40 ? ' 等' : ''}。`);
+        // 上限治理：**全量列名**（原 `overflow.slice(0, 40)` 让第 161 项起连名字都不出现，
+        // 补写义务彻底消失）。名字是补写义务的最小载体，压缩它可以，丢弃它不行——
+        // 详细渲染（名称+工程量+建议小节）仍受 `MAX_BOQ_PENDING_ITEMS_IN_INSTRUCTION` 的预算约束。
+        lines.push(`  另需覆盖（仅列名，共${overflow.length}项，按上述同一口径逐项补齐）：${overflow.map(item => item.name).join('、')}。`);
       }
     }
     if (todo.pendingSentences && todo.pendingSentences.length > 0) {
@@ -349,7 +380,8 @@ function instructionFor(draftChapter: DocumentDraftChapter, todos: ChapterTodo[]
       lines.push(`  本章负责补齐的未落位图纸事实（逐份在正文最相关的专业小节写入图纸名称及其规格/构造做法，数值、材料代号与规格逐字照抄原文，不得改写或省略）：${shown.map(item => `${item.name}${item.lines.length > 0 ? `［参考事实行：${item.lines.join('；')}］` : ''}`).join('；')}。`);
       const overflow = todo.pendingDrawings.slice(MAX_DRAWING_PENDING_ITEMS_IN_INSTRUCTION);
       if (overflow.length > 0) {
-        lines.push(`  另需覆盖（仅列名，共${overflow.length}份，按上述同一口径逐份在相关小节补齐）：${overflow.slice(0, 40).map(item => item.name).join('、')}${overflow.length > 40 ? ' 等' : ''}。`);
+        // 同上：图纸名全量列出（原 slice(0,40) 让第 53 份起完全不出现在指令中）
+        lines.push(`  另需覆盖（仅列名，共${overflow.length}份，按上述同一口径逐份在相关小节补齐）：${overflow.map(item => item.name).join('、')}。`);
       }
     }
   }
@@ -593,11 +625,16 @@ export async function stageContentDepthRepair(session: FinalizeSession): Promise
   let repairedChaptersTotal = 0;
   let resolvedTotal = 0;
   let repairedInAnyCycle = false;
+  // 达标驱动：目标集（blocker + 评分不足 + 图纸未落位）清零即停；不再固定 2 周期。
+  // 每周期取最薄弱的 N 章（批量，防单周期成本失控），已修好的章下周期自然退出目标集，
+  // 故批量必然轮转到后面的章——这正是原实现缺失的性质（固定 2 周期时后面的章永无机会）。
+  /** 饥饿防护：本批次已尝试过专业评分补写的章（跨周期轮转，避免弱章恒占名额、后段章永无机会） */
+  const attemptedScoreChapters = new Set<string>();
   for (let cycle = 1; cycle <= MAX_CONTENT_DEPTH_REPAIR_CYCLES; cycle += 1) {
     // 输入=检测链最新 blocker（六类内容深度 detectorId 精确过滤，不依赖 message 文案）
     const blockerIssues = contentDepthBlockers(session);
     // D-T1：专业评分不足（<8/12，warning 级）目标章同轮消费（预算单列，与 blocker 合并章级定位）
-    const scoreTargetList = await professionalScoreTargets(session);
+    const scoreTargetList = await professionalScoreTargets(session, attemptedScoreChapters);
     // C3-6-4：图纸事实未落位（<90%，warning 级独立通道）未引用份重算 + 相关性分章（预算单列）
     const drawingAssignment = drawingPlacementAssignments(session);
     const drawingGap = drawingAssignment.issue ? 1 : 0;
@@ -753,4 +790,6 @@ export async function stageContentDepthRepair(session: FinalizeSession): Promise
   if (repairedInAnyCycle || firstCycleBlockerCount > 0 || firstCycleScoreCount > 0 || firstCycleDrawingCount > 0) {
     session.generationDiagnostics.llm.lastInfo = `内容深度定向补写：初检 ${firstCycleBlockerCount} 项深度类阻断${firstCycleScoreCount > 0 ? `、${firstCycleScoreCount} 章专业评分不足（补写线 ${PROFESSIONAL_SCORE_LINE}/12，资源类章 10/12）` : ''}${firstCycleDrawingCount > 0 ? `、${firstCycleDrawingCount} 份图纸事实未落位（引用率目标 90%）` : ''}（定位 ${firstCycleBlockerCount - Math.min(unlocatedTotal, firstCycleBlockerCount)} 项${unlocatedTotal > 0 ? `，未定位 ${unlocatedTotal} 项` : ''}），章级定向补写（六类每章最多 ${MAX_CONTENT_DEPTH_REPAIR_ROUNDS} 轮 + 专业评分每章最多 ${MAX_PROFESSIONAL_SCORE_REPAIR_ROUNDS} 轮/单周期最多 ${MAX_PROFESSIONAL_SCORE_REPAIR_CHAPTERS} 章 + 图纸落位每章最多 ${MAX_DRAWING_REFERENCE_REPAIR_ROUNDS} 轮/单周期最多 ${MAX_DRAWING_REFERENCE_REPAIR_CHAPTERS} 章，收敛周期上限 ${MAX_CONTENT_DEPTH_REPAIR_CYCLES}），${repairedChaptersTotal} 章次落地，本次消解 ${resolvedTotal} 项缺口，终态残留 ${residualBlockers.length} 项（由终门禁照常复核）`;
   }
+  // G 线 P2-4：LLM 补写轮消解缺口项数计量（与确定性修复器「处数」同口径——两者计的都是被消解的问题数）
+  recordRepairActions(session.generationDiagnostics, resolvedTotal);
 }

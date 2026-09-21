@@ -11,6 +11,7 @@ import { cleanFormalSourcePhrases } from '../../markdownComposer';
 import { SURFACE_FIX_STEPS, type SurfaceFixerContext } from '../../deterministicFixChains';
 import { buildResourceBreakdownAuthority } from '../../resourceBreakdownNumbers';
 import { displayStage, upsertProgressStage } from '../../progress';
+import { recordRepairActions } from '../../rolePipeline';
 import type { FinalizeSession } from '../finalizeSession';
 
 export async function stageDeterministicStage5(session: FinalizeSession): Promise<void> {
@@ -160,6 +161,7 @@ export async function stageDeterministicStage5(session: FinalizeSession): Promis
   const cleanedFinalMarkdown = cleanFormalSourcePhrases(session.finalMarkdown);
   if (cleanedFinalMarkdown !== session.finalMarkdown) {
     session.finalMarkdown = cleanedFinalMarkdown;
+    recordRepairActions(session.generationDiagnostics, 1);
     await session.recomputeFinalValidationBundle();
     // 4.36.2 复查修正（诊断可见性）：清洗器修改最终成稿后此前无任何事件，复盘不可见（同 stage5 scoring 先例）——
     // 修复轮事件（快照后）必须双写，单写 progressStages 不进入持久化 executionStages
@@ -167,4 +169,14 @@ export async function stageDeterministicStage5(session: FinalizeSession): Promis
     upsertProgressStage(session.progressStages, formalSourceCleanStage);
     upsertProgressStage(session.finalGateRepairStages, formalSourceCleanStage);
   }
+  // G 线 P2-4：本阶段确定性修复动作计量（surfaceFixCounts 逐修复器计数此前只进进度文案、算完即弃；
+  // 跨章表格去重与三处 consistency 修复各自另有计数，一并合计）
+  recordRepairActions(
+    session.generationDiagnostics,
+    stage5TableDup.removedCount
+    + [...surfaceFixCounts.values()].reduce((sum, count) => sum + count, 0)
+    + stage5ChapterFix.fixedCount
+    + stage5MarkdownFix.fixedCount
+    + stage5NumericFix.fixedCount,
+  );
 }

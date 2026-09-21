@@ -13,7 +13,7 @@ export async function stageFactLanding(session: FinalizeSession): Promise<void> 
   // 重要事实落位补写轮（P1-3）：结构缺陷修复收敛后，若项目基础字段类硬数据仍未落位（建筑面积、标段数、编号、工期等），
   // 按事实标签映射目标章节做一轮定向 patch 落位（保持数值口径，不新增小节、不改表头结构）。
   // 十度实测缺陷：建设规模“建筑面积约为4646㎡”、招标范围“本项目分为1个标段”未落位直达交付（针对性维度 68 分）
-  const importantUnplacedFacts = uncoveredImportantFacts(session.finalMarkdown, [...session.structuredFacts, ...session.factsModel.preciseFacts], { maxItems: 60 });
+  const importantUnplacedFacts = uncoveredImportantFacts(session.finalMarkdown, [...session.structuredFacts, ...session.factsModel.preciseFacts]);
   if (importantUnplacedFacts.length > 0) {
     // 标签→章节关键词映射：项目基础字段 → 概况/基本信息章；工期 → 进度部署章；质量 → 质量章；危大安全 → 安全章；资源材料机械 → 资源投入章
     const factChapterMatchers: Array<[RegExp, RegExp]> = [
@@ -36,11 +36,10 @@ export async function stageFactLanding(session: FinalizeSession): Promise<void> 
         unmatchedFacts.push(`${item.label}=${item.value}`);
         continue;
       }
+      // 上限治理：**不设每章条数上限**。原实现 `group.length >= 12` 把超出的未落位事实
+      // 丢进 droppedParamFacts、只写进进度 details——而本轮的职责恰恰是「把已确认事实落位」，
+      // 丢弃即交付缺项。真实约束是单次 patch 的 token 预算，应在 patch 指令渲染层处理。
       const group = chapterFactGroups.get(targetChapter.id) || [];
-      if (group.length >= 12) {
-        droppedParamFacts.push(`${item.label}=${item.value}`);
-        continue;
-      }
       group.push({ label: item.label, value: item.value, fact: item.fact });
       chapterFactGroups.set(targetChapter.id, group);
     }

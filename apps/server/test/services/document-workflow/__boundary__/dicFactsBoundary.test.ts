@@ -102,9 +102,9 @@ describe('A5 fabricatedStartDate 日期格式谱系', () => {
     const issues = fabricatedStartDateIssues(md, factsOf({}));
     expect(issues.length > 0).toBe(expectIssue);
   });
-  it('A5 最多报 3 条', () => {
+  it('上限治理：A5 全量报 3 条（全量 4 条）', () => {
     const md = '2026年1月1日开工、2026年2月2日开工、2026年3月3日开工、2026年4月4日开工。';
-    expect(fabricatedStartDateIssues(md, factsOf({})).length).toBe(3);
+    expect(fabricatedStartDateIssues(md, factsOf({})).length).toBe(4);
   });
 });
 
@@ -181,10 +181,10 @@ describe('B3 fieldValueMismatch 单位与标签来源谱系', () => {
     const model = factsOf({ project: [factOf({ key: '总占地面积', value: '30000㎡' }), factOf({ key: '总建筑面积', value: '28500㎡' })] });
     expect(fieldValueMismatchIssues('总建筑面积30000㎡。', model).length).toBe(1);
   });
-  it('B3 最多报 3 条', () => {
+  it('上限治理：B3 全量报 3 条（全量 4 条）', () => {
     const model = factsOf({ project: [factOf({ fieldName: '总占地面积', value: '30000㎡' }), factOf({ fieldName: '单体建筑面积', value: '28500㎡' })] });
     const md = '单体建筑面积30000㎡。总建筑面积30000㎡。建筑面积30000㎡。单体建筑面积30000㎡。';
-    expect(fieldValueMismatchIssues(md, model).length).toBe(3);
+    expect(fieldValueMismatchIssues(md, model).length).toBe(4);
   });
 });
 
@@ -227,9 +227,9 @@ describe('C2 basicInfoScheduleField 结构边界', () => {
   it('C2 全角空格与多空格仍命中', () => {
     expect(basicInfoScheduleFieldIssues('|  计划工期  |  违约条款  |').length).toBe(1);
   });
-  it('C2 最多报 2 条', () => {
+  it('上限治理：C2 全量报 2 条（全量 3 条）', () => {
     const md = '| 计划工期 | 违约条款 |\n| 计划工期 | 赔偿条款 |\n| 计划工期 | 罚款条款 |';
-    expect(basicInfoScheduleFieldIssues(md).length).toBe(2);
+    expect(basicInfoScheduleFieldIssues(md).length).toBe(3);
   });
 });
 

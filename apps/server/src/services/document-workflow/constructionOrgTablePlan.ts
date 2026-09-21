@@ -943,17 +943,6 @@ export function tablePlansPrompt(chapter: DocumentTemplateChapter) {
   ].filter(Boolean).join('\n');
 }
 
-/** 小节级表格指令：把分配给小节的表格计划转成 Writer prompt 片段（小节级成稿链路使用） */
-export function sectionTablePlansPrompt(plans: PlannedTablePlan[], sectionTitle: string) {
-  if (!plans.length) return '';
-  return [
-    `【本节“${sectionTitle}”必须输出的表格（硬性验收项）】`,
-    '以下表格归属于本节，必须真实输出为 markdown 表格（紧跟相关三级小节）；输出后逐表自检，缺失即视为正文不足。',
-    ...TABLE_FORMAT_RULES,
-    ...plans.map((plan, index) => tablePlanLines(plan, index)),
-  ].filter(Boolean).join('\n');
-}
-
 /** R20 C1 图类呈现元件（招标要求条目识别的「图/框图」元件 → 正文承载映射；产品级通用图类词表，与具体项目无关） */
 export interface DiagramArtifactRequirement {
   /** 元件名（图类名词，如「横道图」「网络图」） */

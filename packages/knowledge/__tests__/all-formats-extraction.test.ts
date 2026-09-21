@@ -384,6 +384,34 @@ describe('Garbled text filtering', () => {
     expect(result.text).toContain('徽光阁');
   });
 
+  it('DWG 兜底路径还原 GBK 中文标注（修复前中文 0 字入库）', async () => {
+    // 伪 DWG：GBK 编码的中文标注 —— DWG 内部标注的真实编码形态。
+    // 编码候选此前只有 utf8/utf16le/字节交换/latin1：utf8 把 GBK 读成 U+FFFD（被替换符规则
+    // 整条判乱码）、latin1 读成 "¿ò" 形态（被 gbkMisreadChars 规则整条判乱码）——
+    // **两条候选都保不住，该图纸的中文标注全部丢失、只剩 ASCII 碎片**。
+    // 这与 DXF 实体路径的 GBK 缺陷同根因，此前只修了 DXF 一侧。
+    const gbkBytes = [
+      0xBF, 0xF2, 0xBC, 0xDC, 0xD6, 0xF9, 0xC5, 0xE4, 0xBD, 0xEE, 0xC6, 0xBD, 0xC3, 0xE6, 0xCD, 0xBC,
+      0xBB, 0xF9, 0xB4, 0xA1, 0xC6, 0xBD, 0xC3, 0xE6, 0xB2, 0xBC, 0xD6, 0xC3, 0xCD, 0xBC,
+      0xBD, 0xE1, 0xB9, 0xB9, 0xC9, 0xE8, 0xBC, 0xC6, 0xD7, 0xDC, 0xCB, 0xB5, 0xC3, 0xF7,
+      0xD7, 0xEE, 0xC4, 0xDA, 0xB2, 0xE0, 0xB8, 0xD6, 0xBD, 0xEE, 0xD0, 0xE8, 0xD4, 0xDA, 0xD6, 0xF9, 0xB7, 0xB6, 0xCE, 0xA7, 0xC4, 0xDA,
+    ];
+    const buffer = Buffer.concat([
+      Buffer.from([0x41, 0x43, 0x31, 0x30, 0x31, 0x34, 0x00]),   // DWG 版本头（非 UTF-8）
+      Buffer.from(gbkBytes),
+      Buffer.from([0x00, 0x01, 0x02]),
+    ]);
+    const file = makeFile('cad/fake-gbk.dwg', buffer);
+    const result = await extractor.extract(file);
+    const text = String(result.text ?? '');
+
+    expect(text).toContain('框架柱配筋平面图');
+    expect(text).toContain('基础平面布置图');
+    expect(text).toContain('结构设计总说明');
+    expect(text).toContain('最内侧钢筋需在柱范围内');
+    expect(Number(result.metadata.characterDataCount)).toBeGreaterThanOrEqual(32);
+  });
+
   it('filters garbled strings from legacy .xls fallback extraction', async () => {
     // 伪 .xls（无效 CFB）：xlsx 解析失败后走旧版 Office 二进制兜底，
     // UTF-16LE 中文正常解码、乱码行应被过滤

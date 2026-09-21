@@ -5,7 +5,7 @@
  */
 import { applySpanReplacements, applyNumericConsistencyDeterministicFixes, collapseRepeatedWords, stripCommercialDataBodyLines, fixTocFromBody, fixRegulationNumberTypos, fixTruncatedSentenceArtifacts, fixZeroLengthDayRanges, runDeterministicChainUntilConverged, scanSpecLocationMismatchHits } from '../../documentIntegrityChecks';
 import { applyDeterministicConsistencyFixesToMarkdown } from '../../qualityValidation';
-import { demoteUnsourcedNumericTokens, enforceBoqDivisionCoverageInMethodChapters } from '../../documentFactTrace';
+import { enforceBoqDivisionCoverageInMethodChapters } from '../../documentFactTrace';
 import { blueprintCitationVerdict } from '../../integratedBlueprint';
 import { buildAuthorityIndex } from '../../authorityIndex';
 import { repairTableBlocksInMarkdownDeterministically } from '../../tableRepairHelpers';
@@ -20,6 +20,7 @@ import { isBodyTableForbidden } from '../../bidComposition';
 import { enforcePlannedSectionCompleteness, mergeNearDuplicateSectionHeadings } from '../../globalQualityGates';
 import { SURFACE_FIX_STEPS } from '../../deterministicFixChains';
 import { displayStage, upsertProgressStage } from '../../progress';
+import { recordRepairActions } from '../../rolePipeline';
 import { stageAutoSpecGateRepair } from './autoSpecGateRepair';
 import { stageBasisRegulationsRepair } from './basisRegulationsRepair';
 import { stageBasisRegulationsCrossRepair } from './basisRegulationsCrossRepair';
@@ -38,6 +39,7 @@ export async function stagePostReviewSurface(session: FinalizeSession): Promise<
   // 重写引入的变体。位于缺节补写（plannedSectionFixFinal）之前：先合并再判定缺节，补写轮不重复补。
   const nearDuplicateMerge = mergeNearDuplicateSectionHeadings(session.finalChapterDrafts);
   if (nearDuplicateMerge.mergedCount > 0) {
+    recordRepairActions(session.generationDiagnostics, nearDuplicateMerge.mergedCount);
     session.finalMarkdown = session.rebuildFinalMarkdown();
     await session.recomputeFinalValidationBundle();
     const nearDuplicateStage = displayStage({ type: 'validation', roleId: 'near-duplicate-section-merge', status: 'success', message: `近名小节确定性合并：${nearDuplicateMerge.mergedCount} 处`, details: nearDuplicateMerge.details.slice(0, 4) }, { subtitle: '评审后兜底' });
@@ -56,6 +58,8 @@ export async function stagePostReviewSurface(session: FinalizeSession): Promise<
     bidComposition: session.bidComposition,
   });
   if (plannedSectionFixFinal.plannedSectionFixApplied) {
+    // 补写轮按「1 次修复动作」计（该通道只回报是否落地，无逐处计数）
+    recordRepairActions(session.generationDiagnostics, 1);
     session.finalMarkdown = session.rebuildFinalMarkdown();
     await session.recomputeFinalValidationBundle();
   }
@@ -108,6 +112,7 @@ export async function stagePostReviewSurface(session: FinalizeSession): Promise<
   // 修复后再重算校验组，保证交付门禁与评分基于目录一致的最终成稿
   const tocConsistencyFix = fixTocFromBody(session.finalMarkdown);
   if (tocConsistencyFix.fixedCount > 0) {
+    recordRepairActions(session.generationDiagnostics, tocConsistencyFix.fixedCount);
     session.finalMarkdown = tocConsistencyFix.markdown;
     await session.recomputeFinalValidationBundle();
     const tocConsistencyStage = displayStage({ type: 'validation', roleId: 'toc-consistency', status: 'success', message: `目录与正文一致性兜底：按正文实际结构重建目录 ${tocConsistencyFix.fixedCount} 处` }, { subtitle: '评审后兜底' });
@@ -158,6 +163,7 @@ export async function replayBlueprintCitationNumericFixes(session: FinalizeSessi
     quantityAnchors: citationReplayVerdict.anchors,
   });
   if (numericReplayFix.fixedCount === 0) return;
+    recordRepairActions(session.generationDiagnostics, numericReplayFix.fixedCount);
   session.finalMarkdown = numericReplayFix.markdown;
   await session.recomputeFinalValidationBundle();
   const citationReplayStage = displayStage({ type: 'validation', roleId: 'citation-numeric-replay', status: 'success', message: `链尾蓝图引用数值收口重放：${numericReplayFix.fixedCount} 处（${[...new Set(numericReplayFix.details)].slice(0, 4).join('、')}）` }, { subtitle: '评审后兜底' });
@@ -174,6 +180,7 @@ export async function replayStage5FactsModelNumericFixes(session: FinalizeSessio
   if (!session.factsModel) return;
   const stage5FactsFix = await applyDeterministicConsistencyFixesToMarkdown(session.finalMarkdown, session.factsModel, session.scopeConflicts);
   if (stage5FactsFix.fixedCount === 0) return;
+    recordRepairActions(session.generationDiagnostics, stage5FactsFix.fixedCount);
   session.finalMarkdown = stage5FactsFix.markdown;
   await session.recomputeFinalValidationBundle();
   const stage5FactsReplayStage = displayStage({ type: 'validation', roleId: 'stage5-facts-replay', status: 'success', message: `链尾事实口径数值收口重放：${stage5FactsFix.fixedCount} 处（${stage5FactsFix.details.slice(0, 4).join('、')}）` }, { subtitle: '评审后兜底' });
@@ -236,6 +243,7 @@ export async function runSurfaceDeterministicCleans(session: FinalizeSession): P
     factsModel: session.factsModel,
   });
   if (unsupportedTotalFix.fixedCount > 0) {
+    recordRepairActions(session.generationDiagnostics, unsupportedTotalFix.fixedCount);
     session.finalMarkdown = unsupportedTotalFix.markdown;
     await session.recomputeFinalValidationBundle();
     const unsupportedTotalStage = displayStage({ type: 'validation', roleId: 'unsupported-total-claim-clean', status: 'success', message: `无源合计值确定性删除：${unsupportedTotalFix.fixedCount} 处（${unsupportedTotalFix.details.slice(0, 4).join('、')}）` }, { subtitle: '评审后兜底' });
@@ -252,6 +260,7 @@ export async function runSurfaceDeterministicCleans(session: FinalizeSession): P
     factsModel: session.factsModel,
   });
   if (unsourcedBindingFix.fixedCount > 0) {
+    recordRepairActions(session.generationDiagnostics, unsourcedBindingFix.fixedCount);
     session.finalMarkdown = unsourcedBindingFix.markdown;
     await session.recomputeFinalValidationBundle();
     const unsourcedBindingStage = displayStage({ type: 'validation', roleId: 'unsourced-binding-clean', status: 'success', message: `无源名称绑定确定性删除：${unsourcedBindingFix.fixedCount} 处（${unsourcedBindingFix.details.slice(0, 4).join('、')}）` }, { subtitle: '评审后兜底' });
@@ -264,6 +273,7 @@ export async function runSurfaceDeterministicCleans(session: FinalizeSession): P
   // 总工期未知时扫描自跳过（零变更静默）。
   const preliminaryTimingFix = fixPreliminaryActionTimingDeterministically(session.finalMarkdown, session.blueprintData?.contract.totalDays);
   if (preliminaryTimingFix.fixedCount > 0) {
+    recordRepairActions(session.generationDiagnostics, preliminaryTimingFix.fixedCount);
     session.finalMarkdown = preliminaryTimingFix.markdown;
     await session.recomputeFinalValidationBundle();
     const preliminaryTimingStage = displayStage({ type: 'validation', roleId: 'preliminary-action-timing-clean', status: 'success', message: `前期动作时限确定性改写：${preliminaryTimingFix.fixedCount} 处（${preliminaryTimingFix.details.slice(0, 4).join('、')}）` }, { subtitle: '评审后兜底' });
@@ -276,6 +286,7 @@ export async function runSurfaceDeterministicCleans(session: FinalizeSession): P
   // 改述为「按进度计划」。总工期/节点未知时扫描自跳过（零变更静默）；重放无命中零变更（幂等零成本）。
   const equipmentTimingFix = fixEquipmentEntryTimingDeterministically(session.finalMarkdown, session.factsModel);
   if (equipmentTimingFix.fixedCount > 0) {
+    recordRepairActions(session.generationDiagnostics, equipmentTimingFix.fixedCount);
     session.finalMarkdown = equipmentTimingFix.markdown;
     await session.recomputeFinalValidationBundle();
     const equipmentTimingStage = displayStage({ type: 'validation', roleId: 'equipment-entry-timing-clean', status: 'success', message: `设备进场时序确定性改写：${equipmentTimingFix.fixedCount} 处（${equipmentTimingFix.details.slice(0, 4).join('、')}）` }, { subtitle: '评审后兜底' });
@@ -289,6 +300,7 @@ export async function runSurfaceDeterministicCleans(session: FinalizeSession): P
   // 净变更点重放时自动恢复回退（与 citation-numeric-replay 重放同链）
   const workInjuryFix = fixWorkInjuryInsuranceStatement(session.finalMarkdown);
   if (workInjuryFix.fixedCount > 0) {
+    recordRepairActions(session.generationDiagnostics, workInjuryFix.fixedCount);
     session.finalMarkdown = workInjuryFix.markdown;
     await session.recomputeFinalValidationBundle();
     const workInjuryStage = displayStage({ type: 'validation', roleId: 'work-injury-statement-clean', status: 'success', message: `工伤保险表述确定性收口：${workInjuryFix.fixedCount} 处（${workInjuryFix.details.slice(0, 4).join('、')}）` }, { subtitle: '评审后兜底' });
@@ -300,6 +312,7 @@ export async function runSurfaceDeterministicCleans(session: FinalizeSession): P
   // 有权威口径无须改数，只确定性删除「合计/小计」口径词（与检测器同正则同源，复检恒清零）。
   const listingJargonFix = fixListingJargonInCriticalPackageSections(session.finalMarkdown);
   if (listingJargonFix.fixedCount > 0) {
+    recordRepairActions(session.generationDiagnostics, listingJargonFix.fixedCount);
     session.finalMarkdown = listingJargonFix.markdown;
     await session.recomputeFinalValidationBundle();
     const listingJargonStage = displayStage({ type: 'validation', roleId: 'listing-jargon-clean', status: 'success', message: `关键小节清单口径词去词：${listingJargonFix.fixedCount} 处（${listingJargonFix.details.slice(0, 4).join('、')}）` }, { subtitle: '评审后兜底' });
@@ -316,6 +329,7 @@ export async function runSurfaceDeterministicCleans(session: FinalizeSession): P
     3,
   );
   if (surfaceFixRound2Result.markdown !== session.finalMarkdown) {
+    recordRepairActions(session.generationDiagnostics, surfaceFixRound2Result.fixedCount);
     session.finalMarkdown = surfaceFixRound2Result.markdown;
     await session.recomputeFinalValidationBundle();
     // 4.36.2 复查修正（诊断可见性）：round-2 链修改正文后此前无任何事件，复盘不可见——补事件并双写
@@ -340,6 +354,7 @@ export async function runSurfaceDeterministicCleans(session: FinalizeSession): P
   // 链尾此前无确定性收口点（两轮成稿编制依据段均残留）。纯正则定点（仅「第N订」紧邻右括号语境）幂等零误伤。
   const regulationNumberFix = fixRegulationNumberTypos(session.finalMarkdown);
   if (regulationNumberFix.fixedCount > 0) {
+    recordRepairActions(session.generationDiagnostics, regulationNumberFix.fixedCount);
     session.finalMarkdown = regulationNumberFix.markdown;
     await session.recomputeFinalValidationBundle();
     const regulationNumberStage = displayStage({ type: 'validation', roleId: 'regulation-number-typo', status: 'success', message: `法规文号残缺确定性收口：${regulationNumberFix.fixedCount} 处（${regulationNumberFix.details.slice(0, 4).join('、')}）` }, { subtitle: '评审后兜底' });
@@ -367,6 +382,7 @@ export async function runSurfaceDeterministicCleans(session: FinalizeSession): P
       specFixDetails.push(...specApplied.details);
     }
     if (specFixTotal > 0) {
+      recordRepairActions(session.generationDiagnostics, specFixTotal);
       await session.recomputeFinalValidationBundle();
       const specLocationStage = displayStage({ type: 'validation', roleId: 'spec-location-mismatch-clean', status: 'success', message: `规格错位清单权威确定性收口：${specFixTotal} 处（${[...new Set(specFixDetails)].slice(0, 4).join('、')}）` }, { subtitle: '评审后兜底' });
       upsertProgressStage(session.progressStages, specLocationStage);
@@ -387,6 +403,7 @@ export async function runSurfaceDeterministicCleans(session: FinalizeSession): P
     factsModel: session.factsModel,
   });
   if (boqDivisionFix) {
+    recordRepairActions(session.generationDiagnostics, boqDivisionFix.appended.length);
     session.finalMarkdown = boqDivisionFix.markdown;
     await session.recomputeFinalValidationBundle();
     const boqDivisionStage = displayStage({ type: 'validation', roleId: 'boq-division-coverage-closure', status: 'success', message: `清单分部覆盖链尾兜底：方法章补写 ${boqDivisionFix.appended.length} 个缺失分项（${boqDivisionFix.appended.slice(0, 6).join('、')}）` }, { subtitle: '评审后兜底' });
@@ -404,6 +421,7 @@ export async function runSurfaceDeterministicCleans(session: FinalizeSession): P
     chapters: session.finalChapterDrafts,
   });
   if (canonicalAnchors) {
+    recordRepairActions(session.generationDiagnostics, canonicalAnchors.inserted.length);
     session.finalMarkdown = canonicalAnchors.markdown;
     await session.recomputeFinalValidationBundle();
     const canonicalAnchorStage = displayStage({ type: 'validation', roleId: 'canonical-term-anchor', status: 'success', message: `规范术语显性落位链尾兜底：插入 ${canonicalAnchors.inserted.length} 处术语锚句（${canonicalAnchors.inserted.join('、')}）` }, { subtitle: '评审后兜底' });
@@ -416,6 +434,7 @@ export async function runSurfaceDeterministicCleans(session: FinalizeSession): P
   // 「由技术负责人组织/合格后方可/验收合格后」与闭环密度上限）；同为纯追加零删改。
   const closureBoost = enforceFiveElementClosureBoost(session.finalMarkdown);
   if (closureBoost) {
+    recordRepairActions(session.generationDiagnostics, closureBoost.fixedCount);
     session.finalMarkdown = closureBoost.markdown;
     await session.recomputeFinalValidationBundle();
     const closureBoostStage = displayStage({ type: 'validation', roleId: 'five-element-closure-boost', status: 'success', message: `五要素闭合补强：${closureBoost.fixedCount} 个措施块补句达标` }, { subtitle: '评审后兜底' });
@@ -468,24 +487,14 @@ export async function runSurfaceDeterministicCleans(session: FinalizeSession): P
     upsertProgressStage(session.progressStages, anchorIsolationStage);
     upsertProgressStage(session.finalGateRepairStages, anchorIsolationStage);
   }
-  // C-T2 未溯源数值链尾确定性改定性（实测归因：真未溯源数字「能改定性即改」）：
-  // 前序 numeric-verification 轮交 LLM 定向修复（时间/次数/百分比类改语义），本块对残留的
-  // 可删单位类（空间/数量/长度/重量）直接删除改定性；删除前保护量词/维度/约数字尾（「每座」
-  // 「壁厚」「间距」字尾接数值不删，防悬空/语义反转）；检测器 numeric-traceability 与本器同源扫描
-  //（删除后复检恒清零）；同步章 drafts 防 factDistribution 重建回退；无可删项时零成本静默（幂等）。
-  const numericDemote = demoteUnsourcedNumericTokens({ markdown: session.finalMarkdown, factsModel: session.factsModel });
-  if (numericDemote) {
-    session.finalMarkdown = numericDemote.markdown;
-    // 同步章 drafts（同口径逐章重跑；章内无命中即不动——markdown 与 drafts 双端一致）
-    for (const chapter of session.finalChapterDrafts) {
-      const chapterDemote = demoteUnsourcedNumericTokens({ markdown: chapter.content || '', factsModel: session.factsModel });
-      if (chapterDemote) chapter.content = chapterDemote.markdown;
-    }
-    await session.recomputeFinalValidationBundle();
-    const numericDemoteStage = displayStage({ type: 'validation', roleId: 'numeric-traceability-demote', status: 'success', message: `未溯源数值确定性改定性：${numericDemote.fixedCount} 处（${numericDemote.details.slice(0, 4).map(detail => detail.slice(0, 32)).join('；')}）` }, { subtitle: '评审后兜底' });
-    upsertProgressStage(session.progressStages, numericDemoteStage);
-    upsertProgressStage(session.finalGateRepairStages, numericDemoteStage);
-  }
+  // C-T2 未溯源数值链尾确定性改定性 —— **G 线 P2-2 整块移除**。
+  //
+  // 原块调用 demoteUnsourcedNumericTokens 把「可删单位类」未溯源数值直接删除、改成定性表述，
+  // 使检测器 numeric-traceability 复检恒清零。那是**以删除通过门禁**：交付物看着干净，实际是
+  //「本来该有数据的地方被抹掉」，与验收基准（要么产出 95+ 完整文档，要么明确失败并说清缺什么）
+  // 直接冲突——删数值恰好把「缺权威值」这一事实从交付物里抹掉，用户再也看不到缺口在哪。
+  // 修复器本体已停用（恒返回 null），此处的调用/复检/进度事件随之删除，避免保留一条
+  //「宣称已做、实际不做」的进度事件。残留的未溯源数值现由终门禁照常复核，按「未达交付标准」呈现。
 }
 
 /**
@@ -509,6 +518,7 @@ export async function replaySurfacePunctuationClosure(session: FinalizeSession):
   const applied: string[] = [];
   const punctuation = fixTruncatedSentenceArtifacts(markdown);
   if (punctuation.fixedCount > 0) {
+    recordRepairActions(session.generationDiagnostics, punctuation.fixedCount);
     markdown = punctuation.markdown;
     applied.push(`标点叠用收敛（${punctuation.details.slice(0, 3).join('；')}）`);
   }
@@ -519,6 +529,7 @@ export async function replaySurfacePunctuationClosure(session: FinalizeSession):
   }
   const zeroRange = fixZeroLengthDayRanges(markdown);
   if (zeroRange.fixedCount > 0) {
+    recordRepairActions(session.generationDiagnostics, zeroRange.fixedCount);
     markdown = zeroRange.markdown;
     applied.push(`同日零长区间收敛（${zeroRange.details.slice(0, 3).join('；')}）`);
   }

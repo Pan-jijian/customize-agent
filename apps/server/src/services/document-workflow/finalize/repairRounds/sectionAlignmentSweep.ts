@@ -16,6 +16,7 @@
  * draft-mutating 位置：empty-section-sweep 之后、链尾 markdown-only 重放（runSurfaceDeterministicCleans 等）之前。
  */
 import { displayStage, upsertProgressStage } from '../../progress';
+import { recordRepairActions } from '../../rolePipeline';
 import { mergeNearDuplicateSectionHeadings, reconcileUnplannedSectionHeadings } from '../../globalQualityGates';
 import { renumberSectionHeadings } from '../../structureIntegrityRules';
 import type { FinalizeSession } from '../finalizeSession';
@@ -36,6 +37,8 @@ export async function stageSectionAlignmentSweep(session: FinalizeSession): Prom
   });
   const total = merge.mergedCount + reconcile.demotedCount;
   const changed = total > 0 || renumberedChapters > 0;
+  // G 线 P2-4：结构对齐动作计量（近名合并/规划外降级按处、编号重放按章；此前只进进度文案）
+  recordRepairActions(session.generationDiagnostics, total + renumberedChapters);
   const details = [...merge.details, ...reconcile.details];
   const stage = displayStage({
     type: 'validation',

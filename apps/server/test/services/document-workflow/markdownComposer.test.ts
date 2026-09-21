@@ -503,7 +503,7 @@ describe('L0_WRITER_SYSTEM_PREFIX（3.2 Writer 类 system 前缀统一）', () =
   });
 
   it('writerSystemPrefix 默认返回统一前缀（3.1：L0+FORMAL 公共段前置，身份句后移）', () => {
-    const prefix = writerSystemPrefix('legacy');
+    const prefix = writerSystemPrefix();
     expect(prefix.startsWith(DOCUMENT_L0_COMMON_PREFIX)).toBe(true);
     expect(prefix).toContain(FORMAL_WRITING_RULES);
     expect(prefix).toContain('你是施工组织设计文档写作专家。');
@@ -516,7 +516,7 @@ describe('L0_WRITER_SYSTEM_PREFIX（3.2 Writer 类 system 前缀统一）', () =
     const head = [DOCUMENT_L0_COMMON_PREFIX, FORMAL_WRITING_RULES].join('\n\n');
     expect(head.length).toBeGreaterThanOrEqual(2000);
     const samples = [
-      writerSystemPrefix('legacy'),
+      writerSystemPrefix(),
       docSystemPrefix('你是章节局部修复专家。'),
       docSystemPrefix('你是施工组织设计数据一致性审查器。'),
       docSystemPrefix('你是专业施工组织设计文档结构规划专家。'),

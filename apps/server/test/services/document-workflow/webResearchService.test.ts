@@ -82,7 +82,8 @@ describe('retrieveWebEvidence', () => {
       runtimeRules: rulesOf(),
       localFacts: [],
     });
-    expect(result).toEqual({ evidence: [], queries: [], filtered: 0 });
+    // 早退路径同样携带分列计数字段（失败计数与过滤计数都必须存在，否则消费端无法区分）
+    expect(result).toEqual({ evidence: [], queries: [], filtered: 0, failedQueries: 0, failures: [] });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -175,7 +176,7 @@ describe('retrieveWebEvidence', () => {
     expect(result.evidence).toHaveLength(0);
   });
 
-  it('检索请求失败计入 filtered 且不产出证据', async () => {
+  it('降级治理：检索请求失败**与「被噪声过滤」分列计数**（原实现把异常计入 filtered，属归因错误）', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
     const result = await retrieveWebEvidence({
       config: configOf(),
@@ -186,7 +187,10 @@ describe('retrieveWebEvidence', () => {
       localFacts: [],
     });
     expect(result.evidence).toHaveLength(0);
-    expect(result.filtered).toBeGreaterThan(0);
+    // 失败进 failedQueries（网络全挂不再被读成「过滤掉了 N 条低质结果」）
+    expect(result.failedQueries).toBeGreaterThan(0);
+    expect(result.failures.length).toBe(result.failedQueries);
+    expect(result.filtered).toBe(0);
   });
 
   it('摘要中的本地项目事实被剥离（不引入本项目商务/身份数据）', async () => {

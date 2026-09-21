@@ -536,11 +536,6 @@ export function renderAuthorityDomains(index: AuthorityIndex, domains?: Authorit
   return rows;
 }
 
-/** 权威条目按域过滤（章域路由/审计分流共用） */
-export function entriesByDomains(index: AuthorityIndex, domains: AuthorityDomain[]): AuthorityEntry[] {
-  return index.entries.filter(entry => domains.includes(entry.domain));
-}
-
 // ── 块级聚焦渲染（s1-slim 单块输入瘦身）：quantity/material 条目级筛选 ──
 // 实测根因：参数桶全量注入（quantity 19387 + material 14941 字符，1014 条目）逐块进入 prompt，
 // 单块输入被推到 10 万字符级（验收线 4 万）。文档物资表/工程量引用实际只消费块相关条目

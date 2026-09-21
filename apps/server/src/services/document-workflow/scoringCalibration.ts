@@ -68,8 +68,39 @@
  * 区域）。评分口径变更点：要求实体响应·锚点分量（变体归一 + 死锁兜底）、合规·占位符分量
  * （业务列豁免）、事实完整与一致性（层数/枚举/设备豁免 + C8-7 声明句归因/清单多条目分层）、
  * delivery 阻断计数（声明降级 + 全豁免）、模板化降档（命中线密度化）、低雷同性·空话短语分量
- * （词面召回 + 语义复核）——跨版本分数不可直接比较） */
-export const SCORING_CALIBRATION_VERSION = 'quality-caliber-c8.0';
+ * （词面召回 + 语义复核）——跨版本分数不可直接比较）
+ *
+ * C9 批次 = quality-caliber-c9.0 → c9.1（G 线「产出即可用」交付能力类：尺子失真修订）
+ * P3-3 低雷同性：由**乘性压缩 overall** 改为**独立否决门槛**（UNIQUENESS_FLOOR=60）。
+ *   原式 `overall = weighted × min(1, uniqueness/90)` 使 overall ≤ 100×(uniqueness/90) ——
+ *   要达 95 必须 uniqueness ≥ 85.5，而实测 s28m 的 uniqueness ≈ 74.6 ⇒ **理论上限 83**
+ *   （`.dbg/final-acceptance-record.md` 自述「上限 83 受 uniqueness 0.83 约束」）。即：六个维度
+ *   全部满分也拿不到 95，而 uniqueness 是第 7 个、乘性、且不出现在「六维」里的量 ——
+ *   目标「六维 ≥95」与尺子的「overall ≥95」根本不是同一个命题。
+ * P3-2 目标线：固定 95。原 `target = knowledgeCoverage.score >= 95 ? 95 : 85` 会让资料覆盖不足的
+ *   项目以 85 为达标线宣告通过（与「95+ 可交付」错位），并形成「补强知识库反而抬高自己达标线」
+ *   的逆向激励。资料覆盖不足应作独立前置条件与风险标注，不得降低文档质量达标线。
+ * P3-1 交付资格：主尺未达标由 `level:'info'` 恢复为 `error` + `blocker` —— 此前它在数据结构上
+ *   **永远进不了阻断集**（阻断判据首行要求 severity==='blocker'），于是全链没有任何执行点持有
+ *   「这份文档不够格交付」的判断权。
+ * 评分口径变更点：低雷同性（乘性→门槛）、目标线（变量→常量 95）、交付资格（info→blocker）
+ * ——跨版本分数不可直接比较。
+ *
+ * **c9.1（G 线 P3-4/P3-1 复核）**：`passed` 增加**权重覆盖率前置**（`MIN_QUALITY_COVERAGE = 0.9`）。
+ *   综合分是「可用维度的重归一分」（不可用维度剔除分母后归一），仅 2/6 维参与时同样能算出 95 ——
+ *   原 `passed` 不校验覆盖面，等于允许用重归一分宣告达标。现覆盖率不足即判未通过，
+ *   并在 summary/actions 显性打印「本次仅计量 X/6 维、权重覆盖 Y%」。
+ *   变更点：达标判据多一个前置条件 ⇒ 部分原本 passed 的报告会转为未通过（更严，不会反向）。
+ *
+ * **c9.2（G 线 P0-7 + P1-6）**：
+ * ① **阻断口径单源**：报告的 `blockingIssues` 由「所有 error 级」改为消费门禁的
+ *    `classifyBlockingIssue`（白名单子集）。此前同名不同集，报告与门禁可自相矛盾
+ *    （「报告 12 项阻断、门禁 3 项」）。现统一到门禁侧。
+ *    变更点：`deliveryProbability` 的扣分基数变小 ⇒ 部分历史报告的交付置信度上升
+ *    （更贴近实际交付判定，不是放宽——门禁本身未变）。
+ * ② **空权威拒绝**：`quantities` 补 `minProperties: 1`（工程量恒派生自清单，空即派生未发生）。
+ *    变更点：零权威骨架蓝图在 schema 层即失败。 */
+export const SCORING_CALIBRATION_VERSION = 'quality-caliber-c9.2';
 
 /** 口径戳：报告标注用（版本 + 主从角色 + 从属指向） */
 export interface ScoringCaliberStamp {
@@ -84,6 +115,7 @@ export const QUALITY_REPORT_CALIBER: ScoringCaliberStamp = {
   version: SCORING_CALIBRATION_VERSION,
   role: 'primary',
 };
+
 
 /** 招标六项口径（从属展示） */
 export const TENDER_BID_SCORES_CALIBER: ScoringCaliberStamp = {

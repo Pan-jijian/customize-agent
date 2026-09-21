@@ -58,10 +58,10 @@ describe('calibrateOutlineSectionsToRequirements', () => {
     expect(result).toEqual([{ chapterTitle: '第三章 质量目标与创优计划', sections: ['创优目标与奖惩承诺'] }]);
   });
 
-  it('数量上限：每章最多 2 个新增、全局最多 8 个', async () => {
+  it('上限治理：新增小节**不设数量上限**（原每章 2 节 / 全局 8 节：被截掉的评分项要求小节永不被写作）', async () => {
     llmJsonMock.mockResolvedValue({ additions: [{ chapterTitle: '质量目标与创优计划', sections: ['创优目标与奖惩承诺', '奖项申报保障措施', '超额第三个', '超额第四个'] }] });
     const result = await calibrateOutlineSectionsToRequirements({ chapters, requirementSummary, templateName: '施工组织设计' });
-    expect(result[0]?.sections).toHaveLength(2);
+    expect(result[0]?.sections).toHaveLength(4);
   });
 
   it('空 additions → 空数组（摘要无属地必提项时不补挂）', async () => {

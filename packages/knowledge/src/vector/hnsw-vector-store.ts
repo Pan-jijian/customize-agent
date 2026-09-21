@@ -148,6 +148,17 @@ export class HNSWVectorStore implements VectorStoreInterface {
     if (this.dirty) this.persist();
   }
 
+  /**
+   * 集合内真实向量条数（G 线 P0-9）。
+   * 用于让 `vector_indexed_chunks` 记录**实际入库的向量数**，而不是与新鲜度判据同源的切片数——
+   * 后者会让 `indexedChunks === chunkCount` 恒真，检查退化为同义反复（实测整个素材包向量为 0
+   * 仍被判「新鲜」，语义检索静默缺失且永不重建）。
+   * 调用方需先 `ensureCollection()`（未加载时返回 0）。
+   */
+  getDocumentCount(): number {
+    return this.documents.size;
+  }
+
   needsRebuild(): boolean {
     if (this.unavailable) return false;
     const total = this.documents.size + this.deletedSinceRebuild;

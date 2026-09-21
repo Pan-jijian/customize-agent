@@ -309,8 +309,10 @@ export default function DocumentsPage() {
     const h = Math.floor(m / 60), rm = m % 60;
     return rm ? `${h} 小时 ${rm} 分` : `${h} 小时`;
   };
-  const draftStatusColor = (s: GeneratedDocumentRecord['status']) => s === 'completed' ? 'success' : s === 'completed_with_issues' ? 'warning' : s === 'warning' ? 'warning' : s === 'failed' ? 'error' : s === 'aborted' || s === 'queued' ? 'default' : 'processing';
-  const draftStatusText = (s: GeneratedDocumentRecord['status']) => s === 'completed' ? '已完成' : s === 'completed_with_issues' ? '已完成(待复核)' : s === 'warning' ? '需复核' : s === 'failed' ? '失败' : s === 'aborted' ? '已中止' : s === 'queued' ? '排队中' : '生成中';
+  // G 线 P0-4 终态语义：门禁未通过时导出已被阻断（P0-3），该记录不再是「已完成」——
+  // 此前显示为黄色「已完成(待复核)」，文字仍读作成功，用户无法分辨「可用」与「不可交付」。
+  const draftStatusColor = (s: GeneratedDocumentRecord['status']) => s === 'completed' ? 'success' : s === 'completed_with_issues' ? 'error' : s === 'warning' ? 'warning' : s === 'failed' ? 'error' : s === 'aborted' || s === 'queued' ? 'default' : 'processing';
+  const draftStatusText = (s: GeneratedDocumentRecord['status']) => s === 'completed' ? '已完成' : s === 'completed_with_issues' ? '已产出·未达交付标准' : s === 'warning' ? '需复核' : s === 'failed' ? '失败' : s === 'aborted' ? '已中止' : s === 'queued' ? '排队中' : '生成中';
   const isDraftGenerating = (s: GeneratedDocumentRecord['status']) => s !== 'completed' && s !== 'completed_with_issues' && s !== 'warning' && s !== 'failed' && s !== 'aborted';
   const canResumeDraft = (item?: GeneratedDocumentRecord | null) => Boolean(item) && (
     item!.status === 'failed'
@@ -939,14 +941,39 @@ export default function DocumentsPage() {
     document.body.appendChild(a); a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window })); a.remove();
     window.setTimeout(() => URL.revokeObjectURL(u), 1000);
   };
+  /**
+   * G 线 P0-3：门禁阻断时的显式二次确认通道。
+   * 默认阻断、绝不静默放行；用户显式确认后放行，产物标记为「非交付物」。
+   */
+  const isGateBlockedError = (msg: string) => /导出门禁未通过|EXPORT_GATE_BLOCKED/u.test(msg);
+  const confirmNonDeliverableExport = (blockedMessage: string): Promise<boolean> => new Promise(resolve => {
+    Antd.Modal.confirm({
+      title: '导出门禁未通过',
+      content: `${blockedMessage}\n\n继续导出得到的文件为「非交付物」，不得直接作为正式成果提交。`,
+      okText: '仍要导出（非交付物）',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: () => resolve(true),
+      onCancel: () => resolve(false),
+    });
+  });
+  /** 门禁阻断时走显式确认通道；非门禁类错误直接提示 */
+  const handleExportError = async (e: unknown, retryAsNonDeliverable: () => Promise<void>): Promise<void> => {
+    const msg = e instanceof Error ? e.message : t('common.error');
+    if (!isGateBlockedError(msg)) { message.error(msg); return; }
+    if (!await confirmNonDeliverableExport(msg)) return;
+    try { await retryAsNonDeliverable(); } catch (e2) { message.error(e2 instanceof Error ? e2.message : t('common.error')); }
+  };
   const doExport = async (fmt: 'markdown' | 'html' | 'pdf' | 'docx') => {
     if (!draft) return; setExporting(fmt);
+    const docxMimeParts = ['application/vnd.', 'open', 'xml', 'formats-', 'office', 'document.', 'word', 'processing', 'ml.document'];
+    const docxMime = docxMimeParts.join('');
+    const mimes: Record<string, string> = { markdown: 'text/markdown;charset=utf-8', html: 'text/html;charset=utf-8', pdf: 'application/pdf', docx: docxMime };
+    const ext = fmt === 'markdown' ? 'md' : fmt;
+    // G 线 P0-3：不再默认传 enforceGate:false —— 那会让服务端门禁成为死参数、最后一道闸门敞开。
+    // 默认由服务端按交付门禁结论决定是否放行。
+    const payload = { documentId: currentDocumentId || undefined, title: draft.title, markdown: content, format: fmt, exportGate: draft.exportGate, useClientMarkdown: true, projectRoot: draft.projectRoot || currentProjectRoot || undefined };
     try {
-      const docxMimeParts = ['application/vnd.', 'open', 'xml', 'formats-', 'office', 'document.', 'word', 'processing', 'ml.document'];
-      const docxMime = docxMimeParts.join('');
-      const mimes: Record<string, string> = { markdown: 'text/markdown;charset=utf-8', html: 'text/html;charset=utf-8', pdf: 'application/pdf', docx: docxMime };
-      const ext = fmt === 'markdown' ? 'md' : fmt;
-      const payload = { documentId: currentDocumentId || undefined, title: draft.title, markdown: content, format: fmt, enforceGate: false, exportGate: draft.exportGate, useClientMarkdown: true, projectRoot: draft.projectRoot || currentProjectRoot || undefined };
       const blob = await exportDocument(payload);
       dl(blob, `${draft.title}.${ext}`, mimes[fmt]);
       // B3：导出成功后刷新归档的闭环报告，展示最新一次导出与历史对比
@@ -956,7 +983,9 @@ export default function DocumentsPage() {
           if (document) setExportReports(document.exportReports || []);
         } catch { /* 报告刷新失败不影响导出 */ }
       }
-    } catch (e) { message.error(e instanceof Error ? e.message : t('common.error')); } finally { setExporting(null); }
+    } catch (e) {
+      await handleExportError(e, async () => { dl(await exportDocument({ ...payload, enforceGate: false }), `${draft.title}.${ext}`, mimes[fmt]); });
+    } finally { setExporting(null); }
   };
   // 工作流模式导出：对 failed/aborted/生成中的记录导出已有正文（不限制导出）
   const workflowExportable = () => Boolean((workflowRecord?.editedMarkdown || workflowRecord?.markdown || workflowRecord?.draft?.markdown || '').trim());
@@ -971,9 +1000,14 @@ export default function DocumentsPage() {
       const docxMime = docxMimeParts.join('');
       const mimes: Record<string, string> = { markdown: 'text/markdown;charset=utf-8', html: 'text/html;charset=utf-8', pdf: 'application/pdf', docx: docxMime };
       const ext = fmt === 'markdown' ? 'md' : fmt;
-      const blob = await exportDocument({ documentId: record.id, title: record.title, markdown, format: fmt, enforceGate: false, useClientMarkdown: true, projectRoot: record.projectRoot || currentProjectRoot || undefined });
-      dl(blob, `${record.title}.${ext}`, mimes[fmt]);
-    } catch (e) { message.error(e instanceof Error ? e.message : t('common.error')); } finally { setExporting(null); }
+      const payload = { documentId: record.id, title: record.title, markdown, format: fmt, useClientMarkdown: true, projectRoot: record.projectRoot || currentProjectRoot || undefined };
+      try {
+        dl(await exportDocument(payload), `${record.title}.${ext}`, mimes[fmt]);
+      } catch (e) {
+        // G 线 P0-3：门禁阻断时不静默放行，走显式「非交付物」确认通道
+        await handleExportError(e, async () => { dl(await exportDocument({ ...payload, enforceGate: false }), `${record.title}.${ext}`, mimes[fmt]); });
+      }
+    } finally { setExporting(null); }
   };
   const saveDraft = async () => {
     if (!draft) return;

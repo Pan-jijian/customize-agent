@@ -85,20 +85,3 @@ export const DOCUMENT_ENV_REGISTRY: readonly DocumentEnvEntry[] = [
   { name: 'DOCUMENT_MEMORY_ALERT_MB', status: 'managed', default: '3072', note: 'finalize 收尾 rss 内存采样告警阈值（MB，超阈值写入 healthAlerts）' },
 ];
 
-/**
- * 启动期/调用期告警：status 非 managed 的环境变量残留设置将被忽略——removed 提示行为已固化，
- * merged 提示改用 DOCUMENT_TUNING_PROFILE。防旧配置残留造成「以为已生效」的误导。
- */
-export function warnDeprecatedDocumentEnv(): void {
-  if (process.env.NODE_ENV === 'test') return;
-  for (const entry of DOCUMENT_ENV_REGISTRY) {
-    if (entry.status === 'managed') continue;
-    if (process.env[entry.name] !== undefined) {
-      if (entry.status === 'removed') {
-        console.warn(`[envRegistry] ${entry.name} 已废弃（行为已固化默认），当前设置将被忽略。`);
-      } else {
-        console.warn(`[envRegistry] ${entry.name} 已并入 DOCUMENT_TUNING_PROFILE，当前设置将被忽略，请改用 ${entry.note}。`);
-      }
-    }
-  }
-}

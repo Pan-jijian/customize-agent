@@ -257,8 +257,11 @@ export function parseMajorConstructionPackages(projectContext: string): MajorCon
         if (!scope || /资料内容事实|#{2,6}/u.test(scope)) continue;
         packages.push({ name, scope, quantities, process, acceptance });
       }
-      if (packages.length > 0) return packages.slice(0, 16);
-    } catch {
+      // 上限治理：**不截断**结构化工作包（原 slice(0,16) 丢弃第 17 个起的骨架权威）
+      if (packages.length > 0) return packages;
+    } catch (error) {
+      // 降级治理：原实现静默清空后落正则兜底（保真度下降非等价替换），且无任何计数
+      console.warn(`[gen] 结构化工作包解析失败，回退正则提取（保真度下降）：${error instanceof Error ? error.message : String(error)}`);
       packages.length = 0;
     }
   }

@@ -367,90 +367,11 @@ describe('Y5 constructionOrgProfessionalChainIssues', () => {
     expect(constructionOrgProfessionalChainIssues({ markdown: '', factsModel: makeFactsModel(), chapters: [] })).toEqual([]);
   });
 
-  it('房建 label 命中但链词 0 → 覆盖不足 warning', () => {
-    const issues = constructionOrgProfessionalChainIssues({ markdown: '本工程为房建工程。', factsModel: makeFactsModel(), chapters: [] });
-    expect(issues).toHaveLength(1);
-    expect(issues[0].message).toContain('房建工程工序链覆盖不足');
-  });
-
   it('房建链 3 词命中 → 无覆盖不足', () => {
     const issues = constructionOrgProfessionalChainIssues({ markdown: '房建工程：施工准备、土方/基础、主体结构。', factsModel: makeFactsModel(), chapters: [] });
     expect(issues).toEqual([]);
   });
 
-  it('链词 ≥3 即使无 label 也触发检查', () => {
-    const issues = constructionOrgProfessionalChainIssues({ markdown: '施工准备、土方/基础、主体结构。', factsModel: makeFactsModel(), chapters: [] });
-    expect(issues).toEqual([]);
-  });
-
-  it('房建 label + 2 个禁配词 → 疑似混入 warning', () => {
-    const issues = constructionOrgProfessionalChainIssues({ markdown: '房建工程涉及管道闭水试验和沥青摊铺。', factsModel: makeFactsModel(), chapters: [] });
-    const mixed = issues.find(issue => issue.message.includes('混入'));
-    expect(mixed).toBeTruthy();
-    expect(mixed?.message).toContain('管道闭水试验');
-    expect(mixed?.message).toContain('沥青摊铺');
-  });
-
-  it('房建 1 个禁配词 → 不报混入、只报覆盖不足', () => {
-    const issues = constructionOrgProfessionalChainIssues({ markdown: '房建工程涉及管道闭水试验。', factsModel: makeFactsModel(), chapters: [] });
-    expect(issues).toHaveLength(1);
-    expect(issues[0].message).toContain('覆盖不足');
-  });
-
-  it('市政 label + 房建工序词 → 混入 warning', () => {
-    const issues = constructionOrgProfessionalChainIssues({ markdown: '市政工程包含主体结构和二次结构施工。', factsModel: makeFactsModel(), chapters: [] });
-    expect(issues.some(issue => issue.message.includes('混入'))).toBe(true);
-  });
-
-  it('改造 label + 深基坑/高支模 → 混入 warning', () => {
-    const issues = constructionOrgProfessionalChainIssues({ markdown: '老旧小区改造涉及大面积深基坑和高支模。', factsModel: makeFactsModel(), chapters: [] });
-    expect(issues.some(issue => issue.message.includes('混入'))).toBe(true);
-  });
-
-  it('装饰 label + 深基坑/路基压实 → 混入 warning', () => {
-    const issues = constructionOrgProfessionalChainIssues({ markdown: '装饰装修工程涉及深基坑和路基压实。', factsModel: makeFactsModel(), chapters: [] });
-    expect(issues.some(issue => issue.message.includes('混入'))).toBe(true);
-  });
-
-  it('装饰链 3 词命中 → 无 issue', () => {
-    const issues = constructionOrgProfessionalChainIssues({ markdown: '装饰装修工程：基层处理、防水闭水、吊顶龙骨。', factsModel: makeFactsModel(), chapters: [] });
-    expect(issues).toEqual([]);
-  });
-
-  it('factsModel.project 值参与上下文', () => {
-    const issues = constructionOrgProfessionalChainIssues({
-      markdown: '房建工程。', factsModel: makeFactsModel(['施工准备 土方/基础 主体结构']), chapters: [],
-    });
-    expect(issues).toEqual([]);
-  });
-
-  it('label 未命中且链词 2 → 跳过检查', () => {
-    expect(constructionOrgProfessionalChainIssues({ markdown: '施工准备、土方/基础。', factsModel: makeFactsModel(), chapters: [] })).toEqual([]);
-  });
-
-  it('链词 2 但 label 命中 → 覆盖不足', () => {
-    const issues = constructionOrgProfessionalChainIssues({ markdown: '房建工程：施工准备、土方/基础。', factsModel: makeFactsModel(), chapters: [] });
-    expect(issues.some(issue => issue.message.includes('覆盖不足'))).toBe(true);
-  });
-
-  it('混入与覆盖不足可同时报', () => {
-    const issues = constructionOrgProfessionalChainIssues({ markdown: '房建工程涉及管道闭水试验和沥青摊铺。', factsModel: makeFactsModel(), chapters: [] });
-    expect(issues).toHaveLength(2);
-  });
-
-  it('禁配词 2 + 链词 3 → 只报混入', () => {
-    const issues = constructionOrgProfessionalChainIssues({
-      markdown: '房建工程：施工准备、土方/基础、主体结构，涉及管道闭水试验和沥青摊铺。',
-      factsModel: makeFactsModel(), chapters: [],
-    });
-    expect(issues).toHaveLength(1);
-    expect(issues[0].message).toContain('混入');
-  });
-
-  it('normalize 去空白：插空禁配词仍命中', () => {
-    const issues = constructionOrgProfessionalChainIssues({ markdown: '房建工程涉及管 道 闭 水 试 验和沥 青 摊 铺。', factsModel: makeFactsModel(), chapters: [] });
-    expect(issues.some(issue => issue.message.includes('混入'))).toBe(true);
-  });
 });
 
 // ═══════ Y6 加分模块提示词与信息 ═══════

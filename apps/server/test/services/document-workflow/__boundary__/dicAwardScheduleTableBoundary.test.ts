@@ -236,13 +236,13 @@ describe('V2 nodeSchedule 聚合与截断', () => {
     const md = '第60日完成基坑支护及土方外运。第75日完成基坑支护及土方外运。第210日完成地下结构出正负零。第215日完成地下结构出正负零。';
     expect(nodeScheduleConsistencyIssues(md)).toHaveLength(2);
   });
-  it('V2-14 5 锚点冲突 → slice(0,4) 截断为 4 条', () => {
+  it('上限治理：V2-14 5 锚点冲突 → slice(0,4) 不再截断为 4 条（全量 5 条）', () => {
     const md = '第60日完成基坑支护及土方外运。第75日完成基坑支护及土方外运。'
       + '第60日完成地下结构出正负零。第75日完成地下结构出正负零。'
       + '第60日完成主体结构封顶。第75日完成主体结构封顶。'
       + '第60日完成装饰装修及幕墙。第75日完成装饰装修及幕墙。'
       + '第60日完成机电安装及智能化调试。第75日完成机电安装及智能化调试。';
-    expect(nodeScheduleConsistencyIssues(md)).toHaveLength(4);
+    expect(nodeScheduleConsistencyIssues(md)).toHaveLength(5);
   });
   it('V2-15 5 口径 raws slice(0,4) → 第5个 raw 不入 message', () => {
     const issues = nodeScheduleConsistencyIssues(

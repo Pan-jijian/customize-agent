@@ -87,7 +87,7 @@ export function factValueAppears(markdown: string, value: string) {
   return false;
 }
 
-export function uncoveredImportantFacts(markdown: string, facts: DocumentFact[], options: { maxItems?: number } = {}) {
+export function uncoveredImportantFacts(markdown: string, facts: DocumentFact[]): { fact: DocumentFact; label: string; value: string }[] {
   const important = facts.filter(fact => {
     const labelText = `${fact.key || ''}${fact.fieldName || ''}${fact.fieldId || ''}`;
     const valueText = stringifyFactValue(fact.value);
@@ -116,11 +116,13 @@ export function uncoveredImportantFacts(markdown: string, facts: DocumentFact[],
     seen.add(key);
     if (factValueAppears(markdown, value)) continue;
     missing.push({ fact, label, value });
-    if (options.maxItems && missing.length >= options.maxItems) break;
+    // 上限治理：**不设遗漏上限**。原实现 `if (missing.length >= maxItems) break` 会让
+    // 超出的事实永不进入补写指令——而这是「已确认事实未落位」的唯一修复通道，
+    // 截断即交付缺项。指令规模由渲染层的 token 预算决定，不由「取前 N 条」决定。
   }
   return missing;
 }
 
-export function factCoverageIssues(markdown: string, facts: DocumentFact[], options: { maxIssues?: number } = {}) {
-  return uncoveredImportantFacts(markdown, facts, { maxItems: options.maxIssues }).map(item => ({ level: 'warning' as const, message: `已确认事实未在正文中落位：${item.label}=${item.value}`, suggestion: '请将该事实自然写入对应章节或小节，不得改变原始数值和单位。' }));
+export function factCoverageIssues(markdown: string, facts: DocumentFact[]) {
+  return uncoveredImportantFacts(markdown, facts).map(item => ({ level: 'warning' as const, message: `已确认事实未在正文中落位：${item.label}=${item.value}`, suggestion: '请将该事实自然写入对应章节或小节，不得改变原始数值和单位。' }));
 }

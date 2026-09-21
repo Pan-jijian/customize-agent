@@ -9,7 +9,7 @@ import { validateJsonAgainstSchema } from '../llmClient';
 import type { BillOfQuantitiesResult } from '../billOfQuantitiesParser';
 import { deriveQuantitiesFromBoq } from './parse';
 import { BLUEPRINT_JSON_SCHEMA } from './types';
-import type { BlueprintAuthorityId, BlueprintValidationReport, IntegratedBlueprint } from './types';
+import type { BlueprintAuthorityId, BlueprintData, BlueprintValidationReport, IntegratedBlueprint } from './types';
 
 // ═══════════════════════════════ 阶段 D：蓝图校验（冻结前四道） ═══════════════════════════════
 
@@ -136,14 +136,18 @@ export function computeBlueprintAuthorityAvailability(input: {
   factPassed: boolean;
   coveragePassed: boolean;
   consistencyErrors: string[];
+  /** G 线 P0-6：清单源可用性。缺省视为可用（保持既有调用方行为）；
+   *  清单不可用时 laborPeak/schedule/blueprint 三项权威均由清单推导 → 一律不可用。 */
+  boqAvailable?: boolean;
 }): Record<BlueprintAuthorityId, boolean> {
   const scheduleConsistencyOk = !input.consistencyErrors.some(error => /里程碑|总工期/u.test(error));
   const laborConsistencyOk = !input.consistencyErrors.some(error => /劳动力|工种/u.test(error));
   const machineConsistencyOk = !input.consistencyErrors.some(error => /机械/u.test(error));
+  const boqOk = input.boqAvailable !== false;
   return {
-    laborPeak: input.schemaPassed && input.factPassed && laborConsistencyOk,
-    schedule: input.schemaPassed && input.factPassed && scheduleConsistencyOk,
-    blueprint: input.schemaPassed && input.factPassed && input.coveragePassed && machineConsistencyOk,
+    laborPeak: boqOk && input.schemaPassed && input.factPassed && laborConsistencyOk,
+    schedule: boqOk && input.schemaPassed && input.factPassed && scheduleConsistencyOk,
+    blueprint: boqOk && input.schemaPassed && input.factPassed && input.coveragePassed && machineConsistencyOk,
   };
 }
 
@@ -160,6 +164,59 @@ export function chapterBlueprintAuthoritiesNeeded(title: string, classifier?: Ch
 
 /** P14 章级蓝图权威缺口判定（阻断判定 + 消息精确化的统一消费点）：
  * 返回本章所需权威的缺失清单与失败校验项名；无 authorityAvailability（旧数据/占位构造）时保守全阻断 */
+/**
+ * 按域过滤蓝图数据（G 线 P1-5）。
+ *
+ * **缺陷**：注入侧此前是「全有全无」——`validation.passed ? data : undefined`。
+ * 只要有一项校验没过，**整套**蓝图数据（含完全可用的域）都不注入写作层，
+ * 于是「劳动力权威不可用」会连带把进度/清单/图纸等可用权威一并掐断，章级损失被放大成篇级损失。
+ *
+ * **现口径**：按 `authorityAvailability` 逐域过滤——不可用的域**清零**（而非删字段，
+ * 保持类型兼容与消费侧读取路径不变），其余照常注入。清零比删除更安全：消费侧若漏判
+ * 仍会读到「0/空」而不是 `undefined` 崩栈，且锚点卡渲染对该域自然产出空内容。
+ *
+ * 未提供 availability（旧数据/占位构造）时**原样返回**——由调用方的 passed 二元判定兜底，
+ * 避免在无信息时擅自清空数据。
+ */
+/**
+ * 章级注入用的蓝图数据（G 线 P1-5 的**唯一决策点**）。
+ *
+ * 三种情形：
+ * 1. `validation.passed` → 全量注入（各域权威齐备）。
+ * 2. 未过但**清单源可用**（`0. 清单源可用性` 检查通过）→ 按 `authorityAvailability`
+ *    逐域过滤后注入：劳动力不可用不注入 labor，进度/清单/图纸照常。这正是 P1-5 的落点 ——
+ *    原实现是「全有全无」，任一校验未过即整套不注入，章级损失被放大成篇级损失。
+ * 3. 清单源不可用 → **不注入**。这是 P0-6 的防护：清单缺失时 blueprint 会以空清单走完全程，
+ *    产出「schema 合法、authorityAvailability 全 true」的**零权威骨架**；若照情形 2 过滤，
+ *    availability 全 true ⇒ 骨架被整份注入，写作层拿不到任何真权威值却以为齐备 ——
+ *    正是 P0-6 要根治的「零权威骨架蓝图」。
+ */
+export function blueprintDataForChapterInjection(blueprint?: IntegratedBlueprint): BlueprintData | undefined {
+  if (!blueprint) return undefined;
+  if (blueprint.validation.passed) return blueprint.data;
+  const boqUsable = blueprint.validation.checks.find(check => check.name === '0. 清单源可用性')?.passed ?? false;
+  if (!boqUsable) return undefined;
+  return filterBlueprintDataByAvailability(blueprint.data, blueprint.validation.authorityAvailability);
+}
+
+export function filterBlueprintDataByAvailability(data: BlueprintData, availability?: BlueprintValidationReport['authorityAvailability']): BlueprintData {
+  if (!availability) return data;
+  let next = data;
+  if (!availability.laborPeak) {
+    next = {
+      ...next,
+      resources: {
+        ...next.resources,
+        labor: { ...next.resources.labor, peak: { min: 0, max: 0 }, peakValue: 0, byPhase: [], byTrade: [], composition: [] },
+      },
+    };
+  }
+  if (!availability.schedule) {
+    next = { ...next, schedule: [], contract: { ...next.contract, totalDays: 0 } };
+  }
+  return next;
+}
+
 export function chapterBlueprintAuthorityGaps(title: string, validation?: BlueprintValidationReport, classifier?: ChapterIntentClassifier): { missing: BlueprintAuthorityId[]; failedChecks: string[] } {
   const needed = chapterBlueprintAuthoritiesNeeded(title, classifier);
   const failedChecks = validation ? validation.checks.filter(check => !check.passed).map(check => check.name) : [];
@@ -186,6 +243,20 @@ function validateBlueprintComposition(blueprint: IntegratedBlueprint): string {
 /** 阶段 D 主入口：四道校验（阻断判定）+ 标书编制规格承接（信息审计），全部阻断校验通过方可冻结 */
 export function validateBlueprint(blueprint: IntegratedBlueprint, boq?: BillOfQuantitiesResult): BlueprintValidationReport {
   const checks: BlueprintValidationReport['checks'] = [];
+  // G 线 P0-6 素材不足走失败（不接受降级交付）：清单是四源之一，不可用时蓝图**不得**以
+  // emptyBoq 兜底继续。此前 `integratedBlueprint.ts:89` 用空清单走完全程，产出的是
+  // 「schema 合法、四项校验全绿、authorityAvailability 全 true」的**零权威骨架蓝图**——
+  // 下游据此认为权威齐备（blueprintActive=true），写作层拿不到任何权威值，正文数值只能由
+  // 模型自产（正是数值冲突/编造数值的源头），而用户看不到任何缺口信号。
+  // 现口径：清单缺失或零条目即判蓝图校验失败，缺口写进 checks 供用户定位。
+  const boqUnusable = !boq || boq.entries.length === 0;
+  checks.push({
+    name: '0. 清单源可用性',
+    passed: !boqUnusable,
+    message: boqUnusable
+      ? '工程量清单缺失或未解析出任何条目：工程量/规格/资源计划类权威值全部无法推导，蓝图不可用。请确认资料包内含工程量清单且已成功解析入库后重试。'
+      : `清单可用：${boq.entries.length} 条目、${boq.villages.length} 个单位工程`,
+  });
   const schemaErrors = validateBlueprintSchema(blueprint);
   checks.push({ name: '1. Schema 校验', passed: schemaErrors.length === 0, message: schemaErrors.length === 0 ? '结构/类型/必填/边界全部通过' : schemaErrors.join('；') });
   const factErrors = validateBlueprintFacts(blueprint, boq);
@@ -202,6 +273,7 @@ export function validateBlueprint(blueprint: IntegratedBlueprint, boq?: BillOfQu
     factPassed: factErrors.length === 0,
     coveragePassed: coverageErrors.length === 0,
     consistencyErrors,
+    boqAvailable: !boqUnusable,
   });
   return { passed: checks.every(check => check.passed), checks, authorityAvailability };
 }

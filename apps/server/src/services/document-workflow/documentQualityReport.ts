@@ -6,7 +6,7 @@ import { scanBillExplicitDispositions } from './billFactLock';
 import { appendixEntryCarried } from './composeAppendices';
 import { tenderRequirementResponseGaps } from './tenderRequirements';
 import { documentTextLength } from './budget';
-import { professionalDepthTotal, professionalScoreTargetLine } from './qualityValidation';
+import { classifyBlockingIssue, professionalDepthTotal, professionalScoreTargetLine } from './qualityValidation';
 import { countTableArithmeticFindings } from './integrity/detectors/detectors';
 import { buildEvaluationCriteriaAttainmentAudit } from './evaluationCriteriaMapping';
 import { auditBasisRegulationsCross } from './basisRegulationsCross';
@@ -39,6 +39,16 @@ import type {
  */
 
 /** 维度权重（产品级通用常量，与项目无关；目标态全达标 = 95 分的精确构造） */
+/**
+ * 质量报告的**最低权重覆盖率**（G 线 P3-4/P3-1）。
+ *
+ * `weighted` 是可用维度的重归一分：不可用维度被剔除分母后归一，于是仅 2 个维度参与时
+ * 也可能算出 95 分，而读者无从知道这个 95 只来自 2/6 维。覆盖率下限强制两件事：
+ * ① 报告显性打印「本次仅计量 X/6 维、权重覆盖 Y%」；
+ * ② 覆盖率不足时 `passed` 不成立 —— 不得用重归一分宣告达标。
+ */
+export const MIN_QUALITY_COVERAGE = 0.9;
+
 export const QUALITY_DIMENSION_WEIGHTS = {
   requirement: 0.3,
   structure: 0.15,
@@ -78,6 +88,13 @@ export const REGULATION_GAP_PENALTY = 20;
 
 /** 数字溯源扣分（无主数值审计三桶缺口每处 5 分，下限 0） */
 export const AUTHORITY_GAP_PENALTY = 5;
+
+/**
+ * 低雷同性门槛（G 线 P3-3）：uniqueness 由「乘性压缩 overall」改为「独立否决门槛」。
+ * 取值依据：评审逻辑本就把低雷同性当触发式否决项（与公开模板重合度超 30% 触发雷同判定），
+ * 60 分对应「重合度明显偏高、需人工研判」的水平。低于该值判雷同风险，直接判报告未通过。
+ */
+export const UNIQUENESS_FLOOR = 60;
 
 /** 双数收敛常量：delivery = overall − min(DELIVERY_PENALTY_CAP, blocking×DELIVERY_BLOCKING_PENALTY) */
 export const DELIVERY_BLOCKING_PENALTY = 3;
@@ -242,6 +259,14 @@ function dataAnchorPart(input: {
   if (parameterUsageAudit && parameterUsageAudit.rate !== null && Number.isFinite(parameterUsageAudit.rate)) {
     parts.push({ weight: DATA_ANCHOR_PART_WEIGHTS.parameters, value: parameterUsageAudit.rate * 100, detail: `参数 ${parameterUsageAudit.usedParams}/${parameterUsageAudit.usedParams + parameterUsageAudit.relevantMissedCount}` });
   }
+  // 降级治理：图纸分量**不可用时必须显式标注**。原实现直接不入 parts ⇒ `weighParts` 按剩余分量
+  // 重归一 ⇒ 维度分被抬高（少一个低分分量，均值反而上升），而读者只看到「数据锚定 92」，
+  // 看不到图纸那一路根本没测。这与「覆盖率前置」是同一类问题（覆盖面必须可见）。
+  const drawingMissingReason = !drawingFactLock
+    ? '图纸事实锁不可用（未构建或构建失败）'
+    : drawingFactLock.groups.length === 0
+      ? '图纸事实锁无可用分组（无图纸类证据入库）'
+      : undefined;
   if (drawingFactLock && drawingFactLock.groups.length > 0) {
     const placement = drawingFactPlacement(drawingFactLock, markdown);
     parts.push({ weight: DATA_ANCHOR_PART_WEIGHTS.drawing, value: placement.rate * 100, detail: `图纸事实 ${placement.referenced.length}/${drawingFactLock.groups.length}` });
@@ -254,7 +279,11 @@ function dataAnchorPart(input: {
       detail: gapCount > 0 ? `无主数值 缺口 ${gapCount} 处` : '无主数值 0 缺口',
     });
   }
-  return weighParts(parts);
+  const weighed = weighParts(parts);
+  if (drawingMissingReason && weighed.value !== null) {
+    weighed.detail = `${weighed.detail ? `${weighed.detail}；` : ''}⚠ ${drawingMissingReason}，图纸分量未计量（本维度按剩余分量重归一）`;
+  }
+  return weighed;
 }
 
 /** 专业深度：章级（≥800 字，与 professionalScoreIssues 同口径）六维语义评分（12 分制，qualityValidation 单源）
@@ -263,7 +292,13 @@ async function professionalDepthPart(chapters: DocumentDraftChapter[], classifie
   if (!classifier) return { value: null };
   const scored = chapters.filter(chapter => documentTextLength(chapter.content) >= 800);
   if (scored.length === 0) return { value: null };
-  const analyses = await Promise.all(scored.map(chapter => classifier.analyze(chapter.content).catch(() => undefined)));
+  // 降级治理：分析失败的章原来被 `.filter(Boolean)` 静默摘除（分母变小、均值被抬高），
+  // 且**哪些章失败、为什么失败**全程不可见。现计数并在 detail 中显式标注。
+  const analysisFailures: string[] = [];
+  const analyses = await Promise.all(scored.map(chapter => classifier.analyze(chapter.content).catch((error: unknown) => {
+    analysisFailures.push(`${chapter.title}：${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  })));
   const entries = scored
     .map((chapter, index) => ({ title: chapter.title, analysis: analyses[index] }))
     .filter((entry): entry is { title: string; analysis: NonNullable<typeof entry.analysis> } => Boolean(entry.analysis));
@@ -277,9 +312,11 @@ async function professionalDepthPart(chapters: DocumentDraftChapter[], classifie
     if (total < line) weak.push(`${entry.title} ${total}/12`);
   }
   const value = (sum / entries.length) * 100;
-  const detail = weak.length > 0
+  // 降级治理：分析失败的章必须可见（否则「分母变小抬高均值」对读者完全不可见）
+  const failureNote = analysisFailures.length > 0 ? `；⚠ ${analysisFailures.length} 章语义分析失败未计入（${analysisFailures.slice(0, 2).join('；')}）` : '';
+  const detail = (weak.length > 0
     ? `专业深度达标 ${Math.round(value)}（薄弱：${weak.slice(0, 3).join('、')}）`
-    : `专业深度达标 ${Math.round(value)}（全部章达目标线）`;
+    : `专业深度达标 ${Math.round(value)}（全部章达目标线）`) + failureNote;
   return { value, detail };
 }
 
@@ -421,7 +458,23 @@ export async function buildDocumentQualityReport(input: {
   );
   const weightSum = availableDimensions.reduce((sum, dimension) => sum + dimension.weight, 0);
   const weighted = weightSum > 0 ? availableDimensions.reduce((sum, dimension) => sum + dimension.value * dimension.weight, 0) / weightSum : 0;
-  const overall = Math.round(weighted * Math.min(1, scores.uniqueness / 90));
+  // G 线 P3-4 + P3-1：**计量覆盖面必须显性化**。
+  // `weighted` 是「可用维度的重归一分」——不可用的维度（value === null）被剔除分母后归一，
+  // 于是只有 2 个维度参与时也可能算出 95 分，读报告的人无从知道这个 95 只来自 2/6 维。
+  // 权重和恒为 1.0（QUALITY_DIMENSION_WEIGHTS），故 weightSum 即权重覆盖率。
+  // 覆盖率不足时：① 报告显性打印；② `passed` 直接不成立（不得用重归一分宣告达标）。
+  const coverageRatio = weightSum;
+  const measuredDimensionCount = availableDimensions.length;
+  const totalDimensionCount = candidateDimensions.length;
+  const coverageSufficient = coverageRatio >= MIN_QUALITY_COVERAGE;
+  // G 线 P3-3：取消 uniqueness 的**乘性压缩**，改为独立门槛项（见 UNIQUENESS_FLOOR）。
+  // 原式 `overall = weighted × min(1, uniqueness/90)` 使 overall ≤ 100×(uniqueness/90) ——
+  // 要达 95 必须 uniqueness ≥ 85.5，而实测 s28m 的 uniqueness ≈ 74.6 ⇒ **理论上限 83**
+  // （`.dbg/final-acceptance-record.md` 自述「上限 83 受 uniqueness 0.83 约束」）。
+  // 即：即使六个维度全部满分，文档在数学上永远拿不到 95，而 uniqueness 是第 7 个、乘性、
+  // 且不出现在「六维」里的量 —— 目标「六维 ≥95」与尺子的「overall ≥95」根本不是同一个命题。
+  // 现口径：overall 只由六维加权构成；雷同性由独立门槛（< UNIQUENESS_FLOOR 判雷同风险）承担否决。
+  const overall = Math.round(weighted);
   const dimensions: DocumentQualityDimension[] = availableDimensions.map(dimension => ({
     key: dimension.key,
     label: dimension.label,
@@ -432,9 +485,20 @@ export async function buildDocumentQualityReport(input: {
 
   // 双数收敛（铁律 4）：delivery = overall − min(10, blocking×3)——两套数字恒差 ≤10（D4 根治），
   // 目标态 blockers=0 时两值相等；阻断越多扣越多但封顶 10，不再出现 92 vs 28 式打架
-  const blockingIssues = input.issues.filter(issue => issue.level === 'error').length;
+  // 口径说明（G 线 P0-7 推迟至 P3）：本处阻断口径 = 所有 error 级，而终门禁 = isHardExportBlockingIssue
+  // 白名单子集，两者是集合包含关系却同名。该差异属**评分口径语义**，改动会波及 deliveryProbability
+  // 与既有评分校准（6 条校准测试），按 P3-5「任何影响分数的改动必须递增口径版本」，
+  // 与 P3 尺子修订一并实施，不在此处单独变更。
+  // 注：交付结果本身已无矛盾——P0-1 让主尺未达标产出 blocker，导出层以「更严的一方」生效。
+  // G 线 P0-7 阻断口径单源：此前数「所有 error 级」，而终门禁用 classifyBlockingIssue
+  //（白名单子集）——同名不同集，报告与门禁可以自相矛盾。现统一消费门禁side的同一出口。
+  const blockingIssues = input.issues.filter(issue => issue.level === 'error' && classifyBlockingIssue(issue)).length;
   const deliveryProbability = Math.max(0, Math.min(99, Math.round(overall - Math.min(DELIVERY_PENALTY_CAP, blockingIssues * DELIVERY_BLOCKING_PENALTY))));
-  const target = input.knowledgeCoverage.score >= 95 ? 95 : 85;
+  // G 线 P3-2：目标**固定 95**，不再随资料覆盖度静默降为 85。
+  // 原式 `target = coverage >= 95 ? 95 : 85` 有两个后果：①产品在绝大多数项目上以 85 为达标线
+  // 宣告「已达到当前质量目标」，与「95+ 可交付」直接错位；②**逆向激励** —— 补强知识库反而
+  // 抬高自己的达标线。资料覆盖不足应作为独立的前置条件与风险标注，不得降低文档质量达标线。
+  const target = 95;
   const templating = await buildTenderBidTemplatingReport(input.markdown, input.embedDocuments);
   // C0-3 评分细则映射层：招标评分表逐条 → 检测目标（内容级三态判定），专家视角模拟分与六维并列展示
   const evaluationCriteriaAttainment = input.evaluationCriteriaItems && input.evaluationCriteriaItems.length > 0
@@ -455,12 +519,27 @@ export async function buildDocumentQualityReport(input: {
   const attainmentNote = evaluationCriteriaAttainment
     ? `；评分细则模拟 ${evaluationCriteriaAttainment.simulatedScore}%（met ${evaluationCriteriaAttainment.met} / partial ${evaluationCriteriaAttainment.partial} / missing ${evaluationCriteriaAttainment.missing}）`
     : '';
-  const summary = `交付置信度 ${deliveryProbability}% / 目标 ${target}%，综合评分 ${overall}/100（${[...dimensions.map(dimension => `${dimension.label} ${dimension.score}`), `低雷同性 ${scores.uniqueness}`].join('、')}）${modeNote}${attainmentNote}；评分口径 ${SCORING_CALIBRATION_VERSION}（主尺）`;
+  // G 线 P3-3：雷同性作为独立否决门槛参与 passed（不再靠乘性压缩总体分数来体现）
+  // G 线 P3-4/P3-1：覆盖率同样是否决前置——重归一分不得用来宣告达标
+  const passed = deliveryProbability >= target && blockingIssues === 0 && scores.uniqueness >= UNIQUENESS_FLOOR && coverageSufficient;
+  const actions = passed
+    ? ['已达到当前质量目标，建议保持事实口径和导出前复核。']
+    : [
+        ...(coverageSufficient ? [] : [`本次仅计量 ${measuredDimensionCount}/${totalDimensionCount} 维（权重覆盖 ${(coverageRatio * 100).toFixed(0)}%，低于下限 ${(MIN_QUALITY_COVERAGE * 100).toFixed(0)}%）：重归一分不得作为达标依据，须先补齐缺失维度的计量条件再判定。`]),
+        '按对齐评分口径补齐短板维度：要求实体响应补锚点全命中（核心词与数字参数逐条落位）、结构呈现补图表落位、数据锚定补 BOQ/参数/图纸/无主数值溯源、专业深度按章补六维薄弱项、合规与规范清理自伤与占位符并压缩超限篇幅且编制依据与正文双向对齐、事实一致性补关键事实落位与数值对账。',
+        '系统需优先修复阻断问题、扩大本地知识库检索、补抽结构化事实，并将未落位事实写入对应章节。',
+      ];
+  if (scores.uniqueness < UNIQUENESS_FLOOR) {
+    actions.push(`低雷同性 ${scores.uniqueness} 低于门槛 ${UNIQUENESS_FLOOR}：存在与公开模板/通用话术重合的雷同风险，须改写高重合段落后再交付。`);
+  }
+  // G 线 P3-4：计量覆盖面显性打印（覆盖率不足时加 ⚠ 前缀，杜绝「只测了 2 维就报 95+」被读成全面达标）
+  const coverageNote = `${coverageSufficient ? '' : '⚠ '}本次仅计量 ${measuredDimensionCount}/${totalDimensionCount} 维、权重覆盖 ${(coverageRatio * 100).toFixed(0)}%`;
+  const summary = `交付置信度 ${deliveryProbability}% / 目标 ${target}%，综合评分 ${overall}/100（${[...dimensions.map(dimension => `${dimension.label} ${dimension.score}`), `低雷同性 ${scores.uniqueness}`].join('、')}）；${coverageNote}${modeNote}${attainmentNote}；评分口径 ${SCORING_CALIBRATION_VERSION}（主尺）`;
   return {
     overall,
     deliveryProbability,
     target,
-    passed: deliveryProbability >= target && blockingIssues === 0,
+    passed,
     scores,
     mode,
     dimensions,
@@ -471,22 +550,31 @@ export async function buildDocumentQualityReport(input: {
     templating,
     caliber: QUALITY_REPORT_CALIBER,
     evaluationCriteriaAttainment,
+    measurementCoverage: { dimensions: measuredDimensionCount, totalDimensions: totalDimensionCount, weightRatio: coverageRatio, sufficient: coverageSufficient },
     summary,
-    actions: deliveryProbability >= target && blockingIssues === 0
-      ? ['已达到当前质量目标，建议保持事实口径和导出前复核。']
-      : [
-          '按对齐评分口径补齐短板维度：要求实体响应补锚点全命中（核心词与数字参数逐条落位）、结构呈现补图表落位、数据锚定补 BOQ/参数/图纸/无主数值溯源、专业深度按章补六维薄弱项、合规与规范清理自伤与占位符并压缩超限篇幅且编制依据与正文双向对齐、事实一致性补关键事实落位与数值对账。',
-          '系统需优先修复阻断问题、扩大本地知识库检索、补抽结构化事实，并将未落位事实写入对应章节。',
-        ],
+    actions,
   };
 }
 
 export function qualityReportIssues(report: DocumentQualityReport): ValidationIssue[] {
   if (report.passed) return [];
   return [{
-    // 交付置信度说明是质量报告结论而非正文缺陷，按 info 计入，避免污染缺陷计分
-    level: 'info',
-    message: `交付置信度未达目标：${report.deliveryProbability}% / ${report.target}%`,
+    // G 线 P0-1 交付资格判定：主尺未达标必须进阻断集。
+    // 此前按 info 计入（注释「避免污染缺陷计分」），代价是主尺结论在**数据结构上永远进不了**
+    // blockingIssues —— 阻断判据首行要求 `severity === 'blocker'`，而 level:'info' 只会被
+    // 归类为 suggestion。于是全链没有任何执行点持有「这份文档不够格交付」的判断权：
+    // 不达标也照常导出，用户看不出区别。
+    //
+    // 语义澄清：本项是**整篇聚合结论**，不是单点正文缺陷（单点缺陷各自已有 issue）。
+    // 故 repairability 取 manual_review —— 不交给 LLM 修复轮（若标 llm_repairable，修复链会
+    // 反复尝试一个由诸多缺陷聚合而成、无法单点收敛的目标）。归用户决策：补强资料/配置后重生成，
+    // 或显式接受「非交付物」。
+    level: 'error',
+    severity: 'blocker',
+    category: 'structure',
+    repairability: 'manual_review',
+    owner: 'user',
+    message: `交付置信度未达目标：${report.deliveryProbability}% / ${report.target}%（综合评分 ${report.overall}/100）`,
     suggestion: report.actions.join(' '),
   }];
 }

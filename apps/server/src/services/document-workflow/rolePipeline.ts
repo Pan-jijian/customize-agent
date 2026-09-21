@@ -81,6 +81,25 @@ export function createGenerationDiagnostics(strategy: DocumentGenerationStrategy
   };
 }
 
+/**
+ * G 线 P2-4：修复动作计量接线（此前 `quality.repairedCount` 只被初始化为 0，全仓无写入点）。
+ *
+ * 各修复轮一直把 `fixedCount` 算得很细（`deterministicStage5` 甚至逐修复器建 Map），却只用于
+ * 拼进度文案，算完即弃 ⇒ 导出闭环报告（`export.ts` 归档 `repairedCount`）永远宣称「0 处修复」，
+ * 与「修复链做了多少事」完全脱节：既无法判断一次生成到底修没修，也无法发现「修复轮空转」。
+ *
+ * 口径：确定性修复器按**修复处数**累加；LLM 补写轮按**消解缺口项数**累加（两者计的都是
+ * 「被消解的问题数」，量纲一致）。与 `repairHeat`（逐轮 hits/repaired/failed，走
+ * patchGuardStats 通道）互补：本字段是全文合计，heat 是逐轮明细。
+ */
+export function recordRepairActions(diagnostics: DocumentGenerationDiagnostics, count: number): void {
+  if (!Number.isFinite(count) || count <= 0) return;
+  // 防御：单测以局部 session 桩（只带被测字段）调用修复轮，其 diagnostics 无 quality 段；
+  // 生产路径的 diagnostics 恒由 createGenerationDiagnostics 构造（quality 恒在），此判空不吞真实计数
+  if (!diagnostics?.quality) return;
+  diagnostics.quality.repairedCount = (diagnostics.quality.repairedCount ?? 0) + count;
+}
+
 export async function measureGenerationStep<T>(diagnostics: DocumentGenerationDiagnostics, name: string, run: () => Promise<T>, meta?: Record<string, string | number | boolean>) {
   const startedAt = Date.now();
   try {
@@ -91,49 +110,11 @@ export async function measureGenerationStep<T>(diagnostics: DocumentGenerationDi
   }
 }
 
-export function blockingChapterIssues(issues: string[]) {
-  const blocking: string[] = [];
-  for (const issue of issues) {
-    BLOCKING_CHAPTER_ISSUE_RE.lastIndex = 0;
-    if (BLOCKING_CHAPTER_ISSUE_RE.test(issue)) blocking.push(issue);
-  }
-  return blocking;
-}
-
 export function repairableQualityIssue(issue: string) {
   REPAIRABLE_QUALITY_ISSUE_RE.lastIndex = 0;
   return REPAIRABLE_QUALITY_ISSUE_RE.test(issue);
 }
 
-export function lightweightChapterIssues(input: { chapter: DocumentTemplateChapter; content: string; missingFacts: string[]; targetWords: number }) {
-  const issues: string[] = [];
-  if (!new RegExp(`^##\\s+(?:第[一二三四五六七八九十百千万\\d]+章\\s*)?${input.chapter.title.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'mu').test(input.content)) issues.push('正文缺少章节标题');
-  for (const degenerateIssue of degenerateContentIssues(input.content, [{ id: input.chapter.id, title: input.chapter.title, content: input.content, evidence: [], sections: input.chapter.sections || [], missingFacts: [] }])) {
-    issues.push(degenerateIssue.message);
-  }
-  if (documentTextLength(input.content) < Math.floor(input.targetWords * 0.85)) issues.push('正文篇幅明显低于目标');
-  WORKFLOW_PHRASE_RE.lastIndex = 0;
-  if (WORKFLOW_PHRASE_RE.test(input.content) || /知识库|检索|事实字段|校验结果/u.test(input.content)) issues.push('正文包含后台流程话术');
-  if (/资料未提供|满足相关要求|结合实际情况|根据实际情况|视情况|待明确|待确认/u.test(input.content)) issues.push('正文存在空泛占位表达');
-  // 检查所有缺失事实（而非仅前 8 个），但按重要性评分排序后限制报告数量
-  const uncheckedFacts = input.missingFacts.filter(fact => fact && !input.content.includes(fact));
-  for (const fact of uncheckedFacts) {
-    issues.push(`requiredFacts 未明显覆盖：${fact}`);
-  }
-  const unique = [...new Set(issues)];
-  // 全部问题进入修复器（无数量截断，问题反馈完整保留）
-  return unique;
-}
-
-export function issuesForChapter(chapter: DocumentDraftChapter, issues: string[]) {
-  const actionableIssues = issues.filter(repairableQualityIssue);
-  const sectionHits = new Set(chapter.sections || []);
-  // 用 token 预算替代硬截断：LLM 上下文限制是真实的，但应在语义边界处截断
-  const contentTruncated = truncateToTokenBudget(chapter.content, 4000, 'issue-matching').truncated;
-  const text = `${chapter.title}\n${chapter.sections?.join('\n') || ''}\n${contentTruncated}`;
-  return actionableIssues
-    .filter(issue => issue.includes(chapter.title) || [...sectionHits].some(section => issue.includes(section)) || /图片|三级小节|目录|表格|量化|数值|单位|事实|不得出现|禁止词|禁用主体|生成后事实反查失败|跨章一致性/u.test(issue) && /!\[|####|\*\*|\||m\s*[²2]|mm2|cm2|km2|重新生成|见招标公告|招标范围|兜底|施工方|\d/u.test(text));
-}
 
 export function classifyQualityRepairType(issues: string[]): QualityRepairType {
   const text = issues.join('\n');
@@ -684,24 +665,3 @@ export function promptTextsForResolvedPrompts(prompts: ResolvedPromptContent[]) 
   return prompts.map(prompt => `## [${prompt.roleId}/${prompt.category}] ${prompt.name}\n${sanitizePromptForExecution(prompt.content)}`).join('\n\n');
 }
 
-export function promptTextsForExecution(promptBindings: PromptBinding[], executionTypes: string[]) {
-  const roleTypes = promptRoleExecutionTypes();
-  const allowed = new Set(executionTypes);
-  const blocks: string[] = [];
-  for (const prompt of readPromptContents(promptBindings)) {
-    if (!allowed.has(roleTypes.get(prompt.roleId) || 'reference')) continue;
-    blocks.push(`## [${prompt.roleId}] ${prompt.name}\n${sanitizePromptForExecution(prompt.content)}`);
-  }
-  if (blocks.length === 0) return '';
-  // 元话语泄漏根治（评分报告 N2："第一、第二、第三"及"不得出现"类约束文字曾从数据库写作主控提示词整段泄漏进正文）
-  return `${blocks.join('\n\n')}\n\n${systemConstraintLine('以上提示词仅指导写作：提示词文字本身（编号"第一/第二/第三"、约束表述、格式说明等元话语）禁止复述进正文，正文只输出正式施工组织设计内容')}`;
-}
-
-export function promptOutlineTextsForExecution(promptBindings: PromptBinding[]) {
-  const blocks: string[] = [];
-  for (const prompt of readPromptContents(promptBindings)) {
-    if (!hasExplicitOutlineBlock(prompt.content)) continue;
-    blocks.push(`## [${prompt.roleId}] ${prompt.name}\n${prompt.content}`);
-  }
-  return blocks.join('\n\n');
-}

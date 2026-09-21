@@ -159,6 +159,8 @@ export function sameSectionText(left: string, right: string) {
  *    时接受章级欠产显式暴露）；
  * 5. 点配额 = 块预算 × tier 权重归一（软下限 100，保底溢出时严格归一）→ Σ点配额 = 块预算。 */
 export function capacityPlanChapterBlocks(blocks: PlannedChapterBlock[], targetWords: number) {
+  /** 降级治理：超密度守卫把要点合并为「概览要点」＝细节丢失，须可被上层渲染（原仅 console.warn） */
+  const densityMergeWarnings: string[] = [];
   if (blocks.length === 0) return;
   const target = Math.max(0, Math.round(targetWords));
   const totalPoints = blocks.reduce((sum, block) => sum + Math.max(1, block.subPoints.length), 0);
@@ -293,7 +295,11 @@ export function capacityPlanChapterBlocks(blocks: PlannedChapterBlock[], targetW
       ...detailed,
       { title: '其他分部分项工程施工要点', sources: [...new Set(deferred.flatMap(point => point.sources))], tier: 'brief' as const },
     ];
-    console.warn(`[blueprint] 块「${block.title}」超密度守卫：要点数 ${originalCount} → ${block.subPoints.length}（块预算 ${block.targetWords} 字，密度上限 ${cap} 要点，${deferred.length} 个要点合并为概览要点）`);
+    // 降级治理：要点被合并为「概览要点」意味着**细节丢失**，只 console.warn 用户看不到。
+    // 现同时写入蓝图降级警告（该警告已改为全量上屏）。
+    const mergeWarning = `块「${block.title}」超密度守卫：要点数 ${originalCount} → ${block.subPoints.length}（块预算 ${block.targetWords} 字，密度上限 ${cap} 要点，${deferred.length} 个要点合并为概览要点，细节丢失）`;
+    console.warn(`[blueprint] ${mergeWarning}`);
+    densityMergeWarnings.push(mergeWarning);
   });
   // 4. 点配额：块内 tier 权重归一；软下限让位优先（汇总超块预算时严格归一，覆盖清单概览形态）
   for (const block of planned) {
@@ -323,6 +329,9 @@ export function capacityPlanChapterBlocks(blocks: PlannedChapterBlock[], targetW
     blocks.length = 0;
     blocks.push(...planned);
   }
+  // 降级治理：超密度守卫的合并警告随数组带回调用方（本函数原位写回、无返回值），
+  // 供上层渲染——只 console.warn 的话用户看不到「要点被合并＝细节丢失」。
+  (blocks as unknown as { densityMergeWarnings?: string[] }).densityMergeWarnings = densityMergeWarnings;
 }
 
 /** 关键施工容器块判定（项目主要施工内容/主要分部分项工程施工方案）：其真实输出单元是
@@ -361,3 +370,53 @@ export function mergeUniqueSkeletonNames(names: string[], cap: number): string[]
 
 // （原 splitSinglePointOversizedBlocks 事后拆半已删除：容量规划在规划层按块数上限/点配额一次成型，
 //  写作层之后不允许任何结构性拆半/归并动作——与写作、检测、修复的口径冲突已消除）
+
+/**
+ * 章级「供给面 ↔ 要求面」对齐核算（G 线 P1-3）。
+ *
+ * **缺陷**：容量规划只按字数分配块与小节，**从不核算这一章有多少可用的量化参数**。
+ * 于是「章目标 8000 字、可用参数只有 3 个」这种供给严重不足的章照常开工——
+ * 写不满就只能靠通用话术注水（正是模板化与空泛表述的来源），而检测端又按**固定的**
+ * 参数密度线去扣分：写作端要不到料、检测端照样判不及格，两端各自成立、合起来无解。
+ *
+ * **现口径**：在容量规划期核算「章可用量化参数数 ÷ 章目标字数」，与检测端**同源常量**
+ *（`CHAPTER_PARAMETER_DENSITY_PER_1000`，每千字所需量化参数数）。不足时给出**二选一**的
+ * 同源处置：① 扩注入预算（把本章参数池优先级提前/加大限额）；② **同步下调**该章的
+ * 密度要求与目标字数——二者必须一起动，只动一端就会重新制造「要不到料却照常扣分」。
+ */
+export const CHAPTER_PARAMETER_DENSITY_PER_1000 = 1.5;
+
+export interface ChapterSupplyDemandAssessment {
+  chapterTitle: string;
+  targetWords: number;
+  availableParameters: number;
+  /** 每千字可用量化参数数 */
+  densityPer1000: number;
+  /** 检测端要求的密度线（同源常量） */
+  requiredDensityPer1000: number;
+  sufficient: boolean;
+  /** 达到密度线所需的最少参数数 */
+  requiredParameters: number;
+  /** 差额（requiredParameters − availableParameters；≥0） */
+  parameterShortfall: number;
+  /** 同源处置建议（充足时为空） */
+  remediation: string[];
+}
+
+export function assessChapterSupplyDemand(input: {
+  chapterTitle: string;
+  targetWords: number;
+  availableParameters: number;
+}): ChapterSupplyDemandAssessment {
+  const targetWords = Math.max(0, Math.round(input.targetWords));
+  const availableParameters = Math.max(0, Math.round(input.availableParameters));
+  const densityPer1000 = targetWords > 0 ? (availableParameters / targetWords) * 1000 : 0;
+  const requiredParameters = Math.ceil((targetWords / 1000) * CHAPTER_PARAMETER_DENSITY_PER_1000);
+  const parameterShortfall = Math.max(0, requiredParameters - availableParameters);
+  const sufficient = targetWords === 0 || parameterShortfall === 0;
+  const remediation = sufficient ? [] : [
+    `本章目标 ${targetWords} 字，可用量化参数 ${availableParameters} 个（${densityPer1000.toFixed(2)}/千字），低于检测端同源密度线 ${CHAPTER_PARAMETER_DENSITY_PER_1000}/千字，缺 ${parameterShortfall} 个。`,
+    '二选一（须与检测口径同源，只动一端会重新制造「要不到料却照常扣分」）：① 扩注入预算——把本章参数池的取用优先级提前、放宽本章参数配额上限；② 同步下调——把本章目标字数降到 ' + `${Math.floor((availableParameters / CHAPTER_PARAMETER_DENSITY_PER_1000) * 1000)} 字` + ' 附近，使供给与要求对齐（目标字数与密度要求必须一起改）。',
+  ];
+  return { chapterTitle: input.chapterTitle, targetWords, availableParameters, densityPer1000, requiredDensityPer1000: CHAPTER_PARAMETER_DENSITY_PER_1000, sufficient, requiredParameters, parameterShortfall, remediation };
+}

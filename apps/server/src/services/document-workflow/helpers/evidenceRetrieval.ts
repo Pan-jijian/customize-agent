@@ -139,19 +139,6 @@ export function compactChapterQueries(chapter: DocumentTemplateChapter, queries:
   return [...new Set([...decomposedQueries, ...queries, ...chapterBasicQueries].filter(Boolean))];
 }
 
-export function qualityFirstSearchQueryLimit(chapter: DocumentTemplateChapter, chapterBasicQueries: string[]) {
-  const configured = Number(process.env.DOCUMENT_MAX_QUERIES_PER_CHAPTER);
-  const base = Number.isFinite(configured) && configured > 0 ? configured : 4;
-  const complexityBonus = (chapter.sections || []).length >= 6 || chapter.requiredFacts.length >= 8 ? 1 : 0;
-  return Math.max(2, Math.min(9, Math.floor(base) + complexityBonus + Math.min(2, chapterBasicQueries.length)));
-}
-
-export function qualityFirstEvidenceItemLimit(requestedEvidencePerChapter: number, chapter: DocumentTemplateChapter, deepRetrieval = false) {
-  const complexityBonus = (chapter.sections || []).length >= 6 || chapter.requiredFacts.length >= 8 ? 4 : 0;
-  const deepBonus = deepRetrieval ? 18 : 0;
-  return Math.max(12, Math.min(deepRetrieval ? 58 : 26, requestedEvidencePerChapter + 10 + complexityBonus + deepBonus));
-}
-
 export async function retrieveSectionEvidence(input: { manager: ReturnType<typeof getMultiProjectManager>; projectRoot: string; chapter: DocumentTemplateChapter; sectionTitle: string; scopedFilePaths: string[]; scopedMaterialRoots?: string[]; fileRoleByPath: Map<string, string>; fileProcessingByPath: Map<string, string>; signal?: AbortSignal }) {
   throwIfAborted(input.signal);
   if (input.scopedFilePaths.length === 0) return [];

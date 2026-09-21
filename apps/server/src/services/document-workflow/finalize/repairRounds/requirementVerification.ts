@@ -37,7 +37,9 @@ function chapterRequirementTexts(session: FinalizeSession, chapterTitle: string)
   const chapterReqs = (plan.chapterRequirements || [])
     .filter(item => item.chapterTitle && (chapterTitle.includes(item.chapterTitle) || item.chapterTitle.includes(chapterTitle)))
     .flatMap(item => item.requirements);
-  return [...new Set([...(plan.globalRequirements || []), ...chapterReqs])].filter(Boolean).slice(0, 24);
+  // 上限治理：**不截断**（原 slice(0,24)：第 25 条起的用户要求**永不参与核验**，既不核验也不补写）。
+  // 要求本身是短句，全量列入对 prompt 影响可忽略。
+  return [...new Set([...(plan.globalRequirements || []), ...chapterReqs])].filter(Boolean);
 }
 
 /** V5 P4.2 收敛修复：每章定向补写轮上限（修复落地后复验，复验残留数下降才继续下一轮；不降/回滚即停止转 warning 兜底） */
@@ -56,7 +58,10 @@ export async function stageRequirementVerification(session: FinalizeSession): Pr
   ].join('\n\n'), [
     `章节标题：${chapterTitle}`,
     `用户要求（逐条核验）：\n${requirements.map((req, index) => `${index + 1}. ${req}`).join('\n')}`,
-    `章节正文：\n${content.slice(0, 12000)}`,
+    // 上限治理：**不截断章节正文**（原 slice(0,12000)）。截断的代价不是「少看一点」，而是
+    // **假阴性**：尾部已落实的要求被误判为未落实 → 发起无意义的重写（甚至改写已正确的段落）。
+    // 上下文溢出由 llmClient 的 isContextOverflowLlmError 通道处理，不由此处静默截断。
+    `章节正文：\n${content}`,
   ].filter(Boolean).join('\n\n'), {
     maxTokens: 1200,
     temperature: 0,

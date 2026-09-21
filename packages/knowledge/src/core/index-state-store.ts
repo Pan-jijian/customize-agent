@@ -9,6 +9,22 @@ import { materialRootOf, materialRootSqlExpression } from './material-pack.js';
 /** 资料包列回填完成标记（kb_metadata key），存在即跳过整段迁移 */
 const MATERIAL_ROOT_BACKFILL_KEY = 'material_root_backfill_v1';
 
+/**
+ * 工程规格 token 形态（G 线 P2-10）：字母+数字组合（`C30`/`DN200`/`HRB400E`/`MU10`）、
+ * 数字+字母（`400E`）、以及罗马数字等级（`Ⅱ级`/`Ⅲ类`，小写形态 `ⅱ级` 亦覆盖）。
+ *
+ * 这类词与通用中文词有本质区别：同领域文档里「混凝土强度等级」人人命中，
+ * 规格值「C50」只在一份里命中——区分度上等价于高 IDF，故单列权重而非与通用词同权。
+ */
+const ENGINEERING_SPEC_TOKEN_RE = /^(?:[a-z]+\d+[a-z]*|\d+[a-z]+|[Ⅰ-ⅿ][一-鿿]*)$/u;
+
+/**
+ * 规格 token 的单次命中权重（对比通用词的 0.2）。取值须足以翻转「通用词大堆命中」
+ * 对「规格值单点命中」的压制——实测（engineering-token-retrieval.test.ts 的 A/B 对照）
+ * 校准得到：权重 0.2 时「混凝土强度等级 C50」首条错回 C30 文档；本值下 A/B 六组全部正确翻转。
+ */
+const ENGINEERING_SPEC_TOKEN_WEIGHT = 12;
+
 
 export type KnowledgeJobStatus = 'PENDING' | 'PARSING' | 'CHUNKING' | 'INDEXING' | 'SUCCESS' | 'ERROR';
 
@@ -325,22 +341,19 @@ export class IndexStateStore {
         group.push(chunk);
         parentGroups.set(parentId, group);
       }
-      const parentContents: string[] = [];
       for (const [parentId, group] of parentGroups.entries()) {
         const firstChunkMeta = group[0]?.metadata;
-        const parentContent = this.metadataString(firstChunkMeta?.parentText) || group.map(chunk => chunk.text).join('\n\n---\n\n');
-        parentContents.push(parentContent);
-        
-        // 我们不想把一整个大文本冗余在每个切片的 metadata 里，所以存完 parent 之后清理一下
-        for (const chunk of group) {
-            delete chunk.metadata.parentText;
-        }
 
+        // 父块**不存正文**：父块正文 = 该节子切片按序拼接，与 kb_chunks 字符完全重复
+        // （实测 kb_parent_chunks 3,322,889 字符 ≈ 清洗后全文的 0.97 倍，纯冗余）。
+        // 读取时由 kb_chunks 重建（见 hydrateParentContent），库里不留第二份副本。
+        // 注意 parentContents 仍要保留 —— kb_document_chunks 复用它存清洗后全文，
+        // 那是分块的**输入源**（切片因裁剪并不完全覆盖它），属「源数据 + 索引」关系而非重复。
         insertParent.run(
           parentId,
           relativePath,
           parentId,
-          parentContent,
+          '',
           file.category,
           file.format,
           file.collectionName,
@@ -354,7 +367,7 @@ export class IndexStateStore {
       insertDocument.run(
         `${relativePath}#document`,
         relativePath,
-        parentContents.join('\n\n=== SECTION ===\n\n'),
+        '',   // 不存正文：文档正文 = 全部子切片按序拼接，与 kb_chunks 完全重复（见 getDocumentChunk）
         file.category,
         file.format,
         file.collectionName,
@@ -517,13 +530,28 @@ export class IndexStateStore {
     return rows.map(row => this.rowToChunk(row, 0));
   }
 
+  /**
+   * 补全父块正文：`kb_parent_chunks` 不存正文（与子切片重复），读取时按 chunk_index
+   * 拼接该 parent 下的子切片重建。旧库仍存有正文的行直接沿用，无需迁移。
+   */
+  private hydrateParentContent(parent: StoredParentChunk): StoredParentChunk {
+    if (parent.content) return parent;
+    const rows = this.db.prepare(`
+      SELECT content FROM kb_chunks
+      WHERE relative_path = ? AND parent_id = ?
+      ORDER BY chunk_index
+    `).all(parent.relativePath, parent.parentId) as Array<{ content: string }>;
+    if (rows.length === 0) return parent;
+    return { ...parent, content: rows.map(row => row.content).join('\n\n') };
+  }
+
   listParentChunks(relativePath: string): StoredParentChunk[] {
     const rows = this.db.prepare(`
       SELECT * FROM kb_parent_chunks
       WHERE relative_path = ?
       ORDER BY parent_id
     `).all(relativePath) as Array<Record<string, unknown>>;
-    return rows.map(row => this.rowToParentChunk(row));
+    return rows.map(row => this.hydrateParentContent(this.rowToParentChunk(row)));
   }
 
   getParentChunk(relativePath: string, parentId: string): StoredParentChunk | undefined {
@@ -532,16 +560,30 @@ export class IndexStateStore {
       WHERE relative_path = ? AND parent_id = ?
       LIMIT 1
     `).get(relativePath, parentId) as Record<string, unknown> | undefined;
-    return row ? this.rowToParentChunk(row) : undefined;
+    return row ? this.hydrateParentContent(this.rowToParentChunk(row)) : undefined;
   }
 
+  /**
+   * 取文档级正文：`kb_document_chunks` 不存正文（实测切片对全文的覆盖为零丢失，
+   * 单独存一份纯属冗余），读取时由该文件的全部切片按 chunk_index 拼接重建。
+   * 旧库已存正文的行直接沿用，无需迁移。
+   */
   getDocumentChunk(relativePath: string): StoredDocumentChunk | undefined {
     const row = this.db.prepare(`
       SELECT * FROM kb_document_chunks
       WHERE relative_path = ?
       LIMIT 1
     `).get(relativePath) as Record<string, unknown> | undefined;
-    return row ? this.rowToDocumentChunk(row) : undefined;
+    if (!row) return undefined;
+    const document = this.rowToDocumentChunk(row);
+    if (document.content) return document;
+    const rows = this.db.prepare(`
+      SELECT content FROM kb_chunks
+      WHERE relative_path = ?
+      ORDER BY chunk_index
+    `).all(relativePath) as Array<{ content: string }>;
+    if (rows.length === 0) return document;
+    return { ...document, content: rows.map(item => item.content).join('\n\n') };
   }
 
   /** 聚合统计切片数：单条 SUM 查询，避免加载全部索引记录后再求和 */
@@ -812,11 +854,23 @@ export class IndexStateStore {
    * 删除指定文件的全部索引数据（含切片、哈希、MinHash、标签、关系等）
    * @param relativePath 文件相对路径
    */
-  deleteRecord(relativePath: string): void {
+  /**
+   * 删除单文件的全部分块（含派生表与 FTS 索引），**保留** `kb_index_state` 记录本身。
+   *
+   * G 线 P2-6：用于「重解析失败」的收场。此前失败路径只把记录改写为 `chunkCount: 0 /
+   * status: 'error'`，**不删除已有分块** —— 于是旧块继续被检索到，而记录声称 0 块，
+   * 形成「记录与实存不符」的假象（与 P0-1/P0-2 的「假非空库」同族：门禁读冗余列、
+   * 实存表早已换了一副内容）。记录必须留下（标 error 供变更追踪重试），旧块必须走。
+   */
+  deleteChunksForFile(relativePath: string): void {
     this.db.prepare('DELETE FROM kb_chunks WHERE relative_path = ?').run(relativePath);
     this.db.prepare('DELETE FROM kb_parent_chunks WHERE relative_path = ?').run(relativePath);
     this.db.prepare('DELETE FROM kb_document_chunks WHERE relative_path = ?').run(relativePath);
     if (this.ftsEnabled) this.db.prepare('DELETE FROM kb_chunks_fts WHERE relative_path = ?').run(relativePath);
+  }
+
+  deleteRecord(relativePath: string): void {
+    this.deleteChunksForFile(relativePath);
     this.db.prepare('DELETE FROM kb_index_state WHERE relative_path = ?').run(relativePath);
     this.db.prepare('DELETE FROM kb_file_hashes WHERE file_path = ?').run(relativePath);
     this.db.prepare('DELETE FROM kb_minhash WHERE file_path = ?').run(relativePath);
@@ -1366,7 +1420,14 @@ export class IndexStateStore {
     raw += exactPhraseBoost;
     for (const term of terms) {
       if (term === exactPhrase) continue;
-      raw += this.countOccurrences(lower, term) * 0.2;
+      const hits = this.countOccurrences(lower, term);
+      if (hits === 0) continue;
+      // G 线 P2-10：工程规格 token（C50 / DN200 / HRB400E / MU10 / Ⅱ级）按**高区分度**计权。
+      // 实测缺陷：同领域两份文档里，通用中文词（「混凝土强度等级」）两边都命中，规格值只在一份命中，
+      // 却同样按 0.2/次 计权，于是被通用词的字面量淹没——查「混凝土强度等级 C50」首条返回讲 C30
+      // 的文档。规格 token 的区分度本质上是高 IDF，单列权重才体现得出来。
+      // （注：仅当整句恰好连续命中时才会触发 exactPhraseBoost 的 1000×，那是运气而非机制。）
+      raw += hits * (ENGINEERING_SPEC_TOKEN_RE.test(term) ? ENGINEERING_SPEC_TOKEN_WEIGHT : 0.2);
     }
     return {
       keywordScore: raw / Math.max(1, content.length / 1000),

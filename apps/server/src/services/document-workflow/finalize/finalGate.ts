@@ -24,6 +24,14 @@ export async function stageFinalGate(session: FinalizeSession): Promise<void> {
   session.generationDiagnostics.quality.minorCount += finalQualitySummary.minor;
   session.telemetry = buildDocumentTelemetryReport({ diagnostics: session.generationDiagnostics });
   const blockingCount = session.qualityBundle.finalExportGate.blockingIssues.length;
+  // G 线 降级治理：「字段接了但没人渲染」等于不存在（`pinnedEvidenceMissed` 就是活例：早已登记、
+  // 全仓无读取点，用户永远看不到）。失败类计数必须上屏，否则与「没发生」无差别。
+  const retrievalFailureMessage = (session.generationDiagnostics.evidence.retrievalFailures ?? 0) > 0
+    ? `，⚠ 检索失败 ${session.generationDiagnostics.evidence.retrievalFailures} 次（非「无命中」，请看进度中的 failed 事件）`
+    : '';
+  const pinnedMissedMessage = (session.generationDiagnostics.evidence.pinnedEvidenceMissed ?? 0) > 0
+    ? `，⚠ 固定证据未命中 ${session.generationDiagnostics.evidence.pinnedEvidenceMissed} 处（资料包绑定漂移）`
+    : '';
   session.telemetry.qualityIssues.blockingCount = blockingCount;
   session.professionalScore = await buildProfessionalScoreReport(session.finalChapterDrafts, session.finalMarkdown, { templating: session.qualityBundle.qualityReport.templating });
   // A2 语义级模板化复核（仅 A1 风险信号命中时触发一次 LLM，失败静默降级）
@@ -56,7 +64,7 @@ export async function stageFinalGate(session: FinalizeSession): Promise<void> {
   const factSanitizeMessage = session.generationDiagnostics.factSanitize
     ? `，事实净化 截断${session.generationDiagnostics.factSanitize.truncated}/丢弃${session.generationDiagnostics.factSanitize.dropped}/编号补全${session.generationDiagnostics.factSanitize.repaired}`
     : '';
-  session.finalStages.push(displayStage({ type: 'validation', roleId: 'document-diagnostics', status: 'success', message: `性能统计：LLM ${session.generationDiagnostics.llm.calls} 次，失败 ${session.generationDiagnostics.llm.failures} 次，瞬态重试 ${session.generationDiagnostics.llm.retries} 次，schema 校验失败 ${session.generationDiagnostics.llm.schemaFailures} 次，峰值并行 ${session.generationDiagnostics.llm.maxActive}，检索 ${session.generationDiagnostics.evidence.searchQueries} 次/${Math.round(session.generationDiagnostics.evidence.searchMs / 1000)} 秒，证据上下文 ${session.generationDiagnostics.evidence.contextChars} 字，噪声过滤 ${session.generationDiagnostics.evidence.filteredNoise} 条，预算裁剪 ${session.generationDiagnostics.evidence.budgetDropped} 条，质量问题 阻断${session.generationDiagnostics.quality.blockingCount}/重要${session.generationDiagnostics.quality.importantCount}/轻微${session.generationDiagnostics.quality.minorCount}${factSanitizeMessage}${slowMetrics ? `，Top耗时：${slowMetrics}` : ''}${callTopSummary ? `，调用输入Top5：${callTopSummary}` : ''}`, details: [...phaseWaterfallDetails(session.generationDiagnostics.metrics), ...callBreakdownTopDetails(session.generationDiagnostics.llm.callBreakdown)] }, { subtitle: '后台诊断' }));
+  session.finalStages.push(displayStage({ type: 'validation', roleId: 'document-diagnostics', status: 'success', message: `性能统计：LLM ${session.generationDiagnostics.llm.calls} 次，失败 ${session.generationDiagnostics.llm.failures} 次，瞬态重试 ${session.generationDiagnostics.llm.retries} 次，schema 校验失败 ${session.generationDiagnostics.llm.schemaFailures} 次，峰值并行 ${session.generationDiagnostics.llm.maxActive}，检索 ${session.generationDiagnostics.evidence.searchQueries} 次/${Math.round(session.generationDiagnostics.evidence.searchMs / 1000)} 秒，证据上下文 ${session.generationDiagnostics.evidence.contextChars} 字，噪声过滤 ${session.generationDiagnostics.evidence.filteredNoise} 条，预算裁剪 ${session.generationDiagnostics.evidence.budgetDropped} 条，质量问题 阻断${session.generationDiagnostics.quality.blockingCount}/重要${session.generationDiagnostics.quality.importantCount}/轻微${session.generationDiagnostics.quality.minorCount}${factSanitizeMessage}${retrievalFailureMessage}${pinnedMissedMessage}${slowMetrics ? `，Top耗时：${slowMetrics}` : ''}${callTopSummary ? `，调用输入Top5：${callTopSummary}` : ''}`, details: [...phaseWaterfallDetails(session.generationDiagnostics.metrics), ...callBreakdownTopDetails(session.generationDiagnostics.llm.callBreakdown)] }, { subtitle: '后台诊断' }));
 
   // C6 交付报告类（P5/D5）：三件套报告确定性落盘（评分/进度/下轮预估）——纯聚合既有产物（零新增
   // 判定，口径与主尺同源）；构建在自身 stage 入列之前（报告内容不含自引用，离线复算可确定性重建）；

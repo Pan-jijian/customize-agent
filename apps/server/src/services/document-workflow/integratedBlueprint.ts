@@ -38,9 +38,11 @@ export * from './integratedBlueprint/types';
 export { resolveBillOfQuantities, deriveQuantitiesFromBoq, extractRedLineFacts, extractVillageCount, deriveSpecAuthoritiesFromBoq, extractContractFromFacts, extractBasisRegulations, extractLocationFromFacts, renderBasicFactsForBlueprint } from './integratedBlueprint/parse';
 export { deriveLaborFromBoq, deriveEquipmentFromBoq, deriveMaterialsPlanFromBoq, deriveMilestonesFromBoq, deriveInspectionBatchesFromBoq, deriveEarthworkBalanceFromBoq, deriveTempUtilitiesFromBoq, deriveConstructionDeployment, deriveKeyDifficulties, deriveTestInstruments, deriveSchedule, deriveTempLand, buildBlueprintData } from './integratedBlueprint/derive';
 export { extractDecisionLockEntries, decisionLockCategoryMeta, matchDecisionCategory, locateDecisionOptionAnchor, decisionMentionNegated, buildBlueprintDecisionLock } from './integratedBlueprint/decisionLock';
-export { buildBlueprintOutline, buildWorkPackageFromBoqSection, fallbackWorkPackagesFromExisting, fallbackStructureForSections, buildChapterStructureFromBlueprint, estimateChapterMinFeasibleWords } from './integratedBlueprint/outline';
+export { buildBlueprintOutline, buildWorkPackageFromBoqSection, fallbackStructureForSections, buildChapterStructureFromBlueprint, estimateChapterMinFeasibleWords } from './integratedBlueprint/outline';
 export type { PlannedChapterSubPoint, PlannedChapterBlock, PlannedChapterStructure } from './integratedBlueprint/capacity';
 export { renderBlueprintDataText, renderBlueprintDataTextForBlock, AUTHORITY_DOMAIN_CHAPTER_ROUTES, renderBlueprintChapterAuthorityCard, renderBlueprintChapterSlice, renderBlueprintBlockSlice, findBlueprintChapter, alignChapterContentToBlueprint, renderBlueprintMustCiteValues } from './integratedBlueprint/render';
+export { blueprintDataForChapterInjection, filterBlueprintDataByAvailability } from './integratedBlueprint/validate';
+export { AUTHORITY_PLACEHOLDER_RE, fillAuthorityPlaceholders, renderAuthorityPlaceholderCatalog, renderAuthorityValue, type AuthorityPlaceholderFillResult } from './integratedBlueprint/authorityPlaceholders';
 export type { BlueprintBlockSliceOptions } from './integratedBlueprint/render';
 export { computeBlueprintAuthorityAvailability, chapterBlueprintAuthoritiesNeeded, chapterBlueprintAuthorityGaps, validateBlueprint } from './integratedBlueprint/validate';
 export { collectBlueprintCitationCandidates, blueprintCitationVerdict, blueprintCitationConsistencyIssues, rebaseCitationAnchorsForChapters } from './integratedBlueprint/citation';
@@ -143,5 +145,3 @@ export function loadBlueprintAsset(projectRoot: string): IntegratedBlueprint | u
   }
 }
 
-/** 静默导出知识卡常量（阶段 C 知识卡补的兜底检测用，避免未使用导入告警） */
-export const BLUEPRINT_KNOWLEDGE_CARD_COUNT = PROCESS_KNOWLEDGE_CARDS.length;

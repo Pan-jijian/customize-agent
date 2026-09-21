@@ -231,6 +231,11 @@ export async function stageRequirementResponseRepair(session: FinalizeSession, o
 
 /** 链尾终局收口单次确定性补写上限（C3-3 扩容：D6 消费面扩容后残留规模可达数十条——
  * 语义放行但锚点缺口的条目全部进入修复消费面，单轮 32 × 上限 3 轮覆盖 ~96 条） */
+/**
+ * 链尾收口**每轮批量**（不是总量上限）：32 条/轮。
+ * `attemptedSignatures` 会把已尝试的条目排除，故下一轮自然取「尚未尝试」的下一批——
+ * 真正的悬崖在 `MAX_TAIL_CLOSURE_ROUNDS`（见其注释）。上限治理：批量保留，总量不设。
+ */
 const MAX_TAIL_CLOSURE_INSERTS = 32;
 
 /** C8 S1 查重下限（24→8）：签名归一化后 ≥8 字符才参与查重——短于 8 的素材子串可能自然命中
@@ -404,7 +409,12 @@ export async function applyRequirementTailClosure(input: {
 /** r11 链尾收口循环上限（r10 实机 #3 机制归因：单次收口插入补写文本后句集变化引发语义采样重洗，
  * 边缘条款 0.60x→0.57 新浮出残留无轮消费——循环收口每轮消费「插入后新浮现」的残留，
  * 插入文本按构造满足条款判定（insertedCount>0 即残留已实降），正常 1-2 轮收敛，上限防振荡） */
-export const MAX_TAIL_CLOSURE_ROUNDS = 3;
+/**
+ * 链尾收口轮数**安全上限**（原 3，配合每轮 32 条 ⇒ 残留超 ~96 条时尾部不再补写）。
+ * 上限治理：改为**达标驱动**——循环持续到残留清零或不再下降，本值仅兜住最坏情况。
+ * 每轮 = 一次 LLM 补写，故本值直接乘算成本；仍以「严格下降」为闸的理据同 P2-5。
+ */
+export const MAX_TAIL_CLOSURE_ROUNDS = 8;
 
 /**
  * r10 链尾要求响应终局收口（可重放形态，r15 封装范式）：在调用点以检测端完全同源口径现场重跑

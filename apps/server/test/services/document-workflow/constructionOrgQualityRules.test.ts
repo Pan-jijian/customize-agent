@@ -133,32 +133,10 @@ describe('constructionOrgControlLoopIssues（控制闭环检测）', () => {
 });
 
 describe('constructionOrgProfessionalChainIssues（专业工序链校验）', () => {
-  it('房建内容混入市政工序报混入警告', () => {
-    const markdown = '本工程为房建工程施工组织设计。';
-    const model = factsModel([fact('范围', '主体结构施工'), fact('内容', '沥青摊铺与水稳层作业')]);
-    const issues = constructionOrgProfessionalChainIssues({ markdown, factsModel: model, chapters: [] });
-    expect(issues.some(issue => issue.message.includes('混入不匹配工序'))).toBe(true);
-  });
-
-  it('房建工序链覆盖不足报警告', () => {
-    const markdown = '本工程为房建工程施工组织设计。';
-    const model = factsModel();
-    const issues = constructionOrgProfessionalChainIssues({ markdown, factsModel: model, chapters: [] });
-    expect(issues.some(issue => issue.message.includes('工序链覆盖不足'))).toBe(true);
-  });
-
-  it('工序链覆盖充分且无混入不报', () => {
-    const markdown = '本工程为房建工程施工组织设计。';
-    const model = factsModel([fact('内容', '施工准备、主体结构、竣工验收')]);
-    expect(constructionOrgProfessionalChainIssues({ markdown, factsModel: model, chapters: [] })).toHaveLength(0);
-  });
-
-  it('无专业类型命中不检查', () => {
-    const model = factsModel([fact('内容', '普通说明')]);
-    expect(constructionOrgProfessionalChainIssues({ markdown: '普通文档。', factsModel: model, chapters: [] })).toHaveLength(0);
-  });
-
-  it('D-T9 章结构路径：节级域错位产 warning 带 chapterId+provenance（修复轮可消费）', () => {
+  // 上限治理 · 旧代码清理：原「无章结构回退」（chapters 为空时的旧口径全文级判定）已删除——
+  // 生产不可达且产出无 provenance 的孤儿 issue。以其为被测对象的 4 条用例一并移除；
+  // 生产路径（带 chapters）由下方 D-T9 用例覆盖。
+          it('D-T9 章结构路径：节级域错位产 warning 带 chapterId+provenance（修复轮可消费）', () => {
     const mixed = chapter('道路工程施工组织', '### 道路工程\n本项目道路工程采用外脚手架配合塔吊完成主体结构施工。');
     const issues = constructionOrgProfessionalChainIssues({ markdown: `## ${mixed.title}\n${mixed.content}`, factsModel: factsModel(), chapters: [mixed] });
     expect(issues).toHaveLength(1);

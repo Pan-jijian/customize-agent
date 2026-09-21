@@ -14,7 +14,9 @@ describe('capFactCoverageContext', () => {
     const lines = Array.from({ length: 1000 }, (_, index) => `${line}${index}`).join('\n');
     expect(lines.length).toBeGreaterThan(6000);
     const capped = capFactCoverageContext(lines);
-    expect(capped.length).toBeLessThanOrEqual(6100);
+    // 上限治理：截断提示现在**如实说明 + 列名缺口清单**（原提示「其余事实见绑定材料与证据」是误导——
+    // 证据注入本身另有预算截断），故允许少量附加文本
+    expect(capped.length).toBeLessThanOrEqual(7000);
     // 按行完整截断：保留行均为完整行，且行号连续
     const kept = capped.split('\n').filter(item => item.startsWith('- 事实条目'));
     expect(kept.length).toBeGreaterThan(0);
@@ -24,7 +26,7 @@ describe('capFactCoverageContext', () => {
     const firstDropped = kept.length;
     expect(lastIndex).toBe(firstDropped - 1);
     // 截断提示存在（尾部一行，非事实行）
-    expect(capped).toContain('本章事实索引过长已截断');
+    expect(capped).toContain('本章事实索引超出注入预算已截断');
   });
 
   it('空输入与空字符串原样返回', () => {
@@ -36,8 +38,8 @@ describe('capFactCoverageContext', () => {
     try {
       const lines = Array.from({ length: 50 }, (_, index) => `- 条目 ${index}：${'长内容'.repeat(50)}`).join('\n');
       const capped = capFactCoverageContext(lines);
-      expect(capped.length).toBeLessThanOrEqual(600);
-      expect(capped).toContain('本章事实索引过长已截断');
+      expect(capped.length).toBeLessThanOrEqual(1400);
+      expect(capped).toContain('本章事实索引超出注入预算已截断');
     } finally {
       delete process.env.DOCUMENT_TUNING_PROFILE;
     }

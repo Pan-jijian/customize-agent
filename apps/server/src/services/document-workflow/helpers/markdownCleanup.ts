@@ -55,12 +55,6 @@ export function formatMarkdownTableLine(cells: string[], columns: number) {
   return `| ${normalized.join(' | ')} |`;
 }
 
-export function genericTableHeaders(columns: number) {
-  if (columns === 2) return ['信息项', '内容'];
-  const headers = ['控制项目', '执行要求', '责任岗位', '检查标准', '形成资料', '闭环要求', '备注'];
-  return Array.from({ length: columns }, (_item, index) => headers[index] || `补充说明${index + 1}`);
-}
-
 export function normalizeBareMarkdownTables(markdown: string) {
   markdown = mergeTableLineBreaks(markdown);
   const lines = markdown.replace(/\r?\n/gu, '\n').split('\n');
@@ -345,47 +339,6 @@ export async function stripBidDisciplineSentencesSemantic(content: string, judge
       .filter(segment => !dropSegments.has(segment.trim()))
       .join('');
   }).join('\n');
-}
-
-export function splitOverlongParagraphs(markdown: string) {
-  return markdown.split(/\n{2,}/u).map(block => {
-    const text = block.trim();
-    if (text.length < 420 || /^\s*(#|\||[-*]\s|\d+[.、])/u.test(text)) return block;
-    const parts = text.split(/(?<=[。；])(?=.)/u);
-    const chunks: string[] = [];
-    let current = '';
-    for (const part of parts) {
-      if ((current + part).length > 260 && current) {
-        chunks.push(current);
-        current = part;
-      } else {
-        current += part;
-      }
-    }
-    if (current) chunks.push(current);
-    return chunks.join('\n\n');
-  }).join('\n\n');
-}
-
-export function demoteNonFormalH2(markdown: string) {
-  return markdown.replace(/^##\s+(.+)$/gmu, (full, title: string) => {
-    const clean = String(title || '').trim();
-    // 附表区（附表一~N，composeAppendices 直出）与附录区同为非章节结构，不得降级为 ###
-    if (clean === '目录' || /^附录/u.test(clean) || /^附表\s*[一二三四五六七八九十\d]{1,3}/u.test(clean) || /^第[一二三四五六七八九十百千万\d]+章\s+/u.test(clean)) return full;
-    return `### ${clean}`;
-  });
-}
-
-export function filterResolvedFinalIssues(markdown: string, issues: ValidationIssue[]) {
-  const hasIllegalH2 = /^##\s+(?!目录$)(?!附录)(?!附表\s*[一二三四五六七八九十\d]{1,3})(?!第[一二三四五六七八九十百千万\d]+章\s+)/gmu.test(markdown);
-  const hasPageRefs = /(?:第?\d+页|P\.?\s*\d+)/iu.test(markdown);
-  const hasForbiddenParty = /施工方/u.test(markdown);
-  return issues.filter(issue => {
-    if (/正文存在非正式章二级标题/u.test(issue.message)) return hasIllegalH2;
-    if (/资料页码|文件页码|页码引用/u.test(issue.message)) return hasPageRefs;
-    if (/禁止内容|施工方/u.test(issue.message)) return hasForbiddenParty;
-    return true;
-  });
 }
 
 /** M11 行级切分共用基准：终检 formalContentIntegrityIssues 对正文行（已排除标题/表格/HTML 行）

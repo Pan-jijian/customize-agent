@@ -263,10 +263,10 @@ describe('D1 areaArithmetic 三元组', () => {
       expect(areaArithmeticIssues(`地上500${unit}、地下200${unit}，单体建筑面积800${unit}。`).length).toBeGreaterThan(0);
     }
   });
-  it('D1 最多报 3 处', () => {
+  it('D1 上限治理：四处算术矛盾全量产出（原实现截断为 3 条）', () => {
     // 容差 = max(1, total×0.1%)：差值必须超过容差才报（差 1 的小数不报，改差 2）
     const md = '地上500㎡、地下200㎡，单体建筑面积800㎡。地上1㎡、地下1㎡，单体建筑面积4㎡。地上2㎡、地下2㎡，单体建筑面积6㎡。地上3㎡、地下3㎡，总建筑面积8㎡。';
-    expect(areaArithmeticIssues(md).length).toBe(3);
+    expect(areaArithmeticIssues(md).length).toBe(4);
   });
 });
 

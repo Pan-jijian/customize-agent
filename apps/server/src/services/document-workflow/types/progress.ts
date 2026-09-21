@@ -48,6 +48,12 @@ export interface DocumentGenerationDiagnostics {
     intentEvidenceInjected?: number;
     intentEvidenceUsed?: number;
     retrievedEvidenceInjected?: number;
+    /**
+     * G 线 降级治理：深召回/补充召回**失败次数**（区别于「命中 0 条」）。
+     * 原实现用 `.catch(() => [])` 把调用异常压成空数组，UI 上显示「深度召回完成：命中 0 条」——
+     * 基础设施故障与「资料里确实没有」同形。本字段让两者可分。
+     */
+    retrievalFailures?: number;
     retrievedEvidenceUsed?: number;
     /** 模板 pinned 证据整文件注入未命中计数（包内相对路径解析后 KB 无此文件）：配置漂移可见化，不再静默丢弃 */
     pinnedEvidenceMissed?: number };

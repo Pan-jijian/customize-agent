@@ -117,6 +117,12 @@ export interface DocumentQualityReport {
    * 字段，落位=任一候选值经 factValueAppears 命中正文（与 fact-coverage 落位判定同口径单源）；
    * C-T7 验收判据：关键事实落位率 100%（rate===1），未落位明细供落位复核定位 */
   keyFactPlacementAudit?: KeyFactPlacementAudit;
+  /**
+   * 计量覆盖面（G 线 P3-4/P3-1）：参与计分的维度数与权重覆盖率。
+   * 综合分是「可用维度的重归一分」——不可用维度被剔除分母后归一，仅 2 维参与也可能算出 95，
+   * 故覆盖面必须随报告显性暴露，覆盖率不足时 `passed` 直接不成立。
+   */
+  measurementCoverage?: { dimensions: number; totalDimensions: number; weightRatio: number; sufficient: boolean };
   summary: string;
   actions: string[];
   /** 模板化套用专项检测报告（docx 第十类核心降档判定，重难点重度模板化→直接降档） */

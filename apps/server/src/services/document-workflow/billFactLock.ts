@@ -149,15 +149,20 @@ export function renderBillFactLockText(lock: BillFactLock, chapterTitle: string,
   const scored = lock.entries
     .map(entry => ({ entry, score: entryRelevanceScore(entry, tokens) }))
     .sort((a, b) => b.score - a.score || a.entry.seq - b.entry.seq);
-  const selected = scored.map(item => item.entry).slice(0, maxEntries);
   const lines: string[] = [];
   let total = 0;
-  for (const entry of selected) {
+  // 上限治理：逐条渲染直到字符预算耗尽。**预算之外（含条数上限之外）的条目全部进入下方
+  // 「另需覆盖」列名**——原实现只把「超出 maxEntries」的送 overflow，而「撑爆 maxChars 被 break
+  // 掉」的条目既没渲染也没列名，在写作提示词里彻底消失（比 maxEntries 那条更隐蔽）。
+  let renderedCount = 0;
+  for (const { entry } of scored) {
+    if (renderedCount >= maxEntries) break;
     const specText = entry.specQuantityPairs.length > 0 ? ` [${entry.specQuantityPairs.map(pair => `${pair.spec} ${pair.quantity}`).join('；')}]` : '';
     const line = `${entry.seq}. ${entry.name}${entry.description ? `（${entry.description}）` : ''}：${entry.quantity}${entry.unit}${entry.section ? `｜${entry.section}` : ''}${specText}`;
     if (total + line.length + 1 > maxChars) break;
     lines.push(line);
     total += line.length + 1;
+    renderedCount += 1;
   }
   if (lines.length === 0) return '';
   return [
@@ -425,7 +430,10 @@ export function renderBillChapterTaskLines(
   }
   const overflow = owned.slice(maxEntries);
   if (overflow.length > 0) {
-    lines.push(`- 另需覆盖（仅列名，共${overflow.length}条）：${overflow.slice(0, 40).map(item => item.entry.name).join('、')}${overflow.length > 40 ? ' 等' : ''}`);
+    // 上限治理：**全量列名**（原 slice(0,40) 让第 41 条起连名字都不出现在写作提示词里）。
+    // 注意条数上限之外与字符预算之外是两回事：本函数的详细渲染按 `maxEntries` 条数截断，
+    // 被截下的条目全部在此列名——义务不丢，只是详略不同。
+    lines.push(`- 另需覆盖（仅列名，共${overflow.length}条）：${overflow.map(item => item.entry.name).join('、')}`);
   }
   return lines;
 }

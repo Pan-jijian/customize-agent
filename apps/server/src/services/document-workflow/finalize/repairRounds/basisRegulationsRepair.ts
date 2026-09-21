@@ -20,8 +20,9 @@ import type { FinalizeSession } from '../finalizeSession';
 /** 每章定向修复轮上限（缺失类目可能多类：每轮补列全部缺口，复检清零即停） */
 const MAX_BASIS_REPAIR_ROUNDS = 2;
 
-/** 招标文件引用法规清单在指令中的条数上限（防超长清单挤占修复 prompt） */
-const MAX_BLUEPRINT_REGULATION_ITEMS = 12;
+// 上限治理：原 `MAX_BLUEPRINT_REGULATION_ITEMS = 12`（且**每轮都重取前 12 条**同一批）已删除——
+// 第 13 条起的招标文件引用法规**永不出现在修复指令**中，而检测端只在「全漏」时报出、部分漏列不逐条报
+// ⇒ 部分法规漏列永远无人补。法规名+文号本身极短，全量列入对 prompt 的影响可忽略。
 
 function hanCount(text: string): number {
   return (text.match(/[\u4e00-\u9fa5]/gu) || []).length;
@@ -42,7 +43,8 @@ export async function stageBasisRegulationsRepair(session: FinalizeSession): Pro
     return;
   }
   // 招标文件引用法规清单（照抄输入；检测器第 5 类仅在全漏时报出，缺失即应全量纳入编制依据小节）
-  const blueprintRegulationItems = (session.blueprintData?.basisRegulations ?? []).slice(0, MAX_BLUEPRINT_REGULATION_ITEMS);
+  // 上限治理：全量列出（原 slice(0,12) 且每轮重取同一批 ⇒ 第 13 条起永不进指令）
+  const blueprintRegulationItems = session.blueprintData?.basisRegulations ?? [];
   let repairedChapters = 0;
   for (const { chapter, index } of defectiveChapters) {
     let chapterContent = chapter.content;

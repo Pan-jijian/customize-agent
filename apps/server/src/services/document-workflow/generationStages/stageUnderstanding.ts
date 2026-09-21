@@ -70,6 +70,8 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
   session.understanding.chapterGenerationStagesByOrder = [];
   session.understanding.knowledgeBaseStageIndex = -1;
   const searchCache = new Map<string, KbSearchResult[]>();
+  /** 本轮检索失败明细（失败≠无命中；不写缓存、逐条上屏） */
+  const searchFailures: Array<{ query: string; message: string }> = [];
   const fileDetailCache = new Map<string, ReturnType<NonNullable<typeof session.understanding.project.getFileDetail>>>();
   session.understanding.getCachedFileDetail = (relativePath: string) => {
     const key = `${relativePath}::full`;
@@ -93,9 +95,15 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
     // 曾被迫 disableReranker 退化为纯 JS heuristicRerank，小节级证据相关性排序精度下降）。
     // （原 DOCUMENT_GENERATION_RERANKER 回退已固化删除：reranker 恒开；KB_RERANKER_WORKER=0 仍可回退主线程推理）
     const generationRerankerEnabled = true;
+    // 检索失败明细（G 线 降级治理）：失败与「无命中」必须可分，见下方 catch
     const key = stableHash({ query, scopedFilePaths, effectiveMaterialRoots, limit, weights, generationMode: true, reranker: generationRerankerEnabled });
     const cached = searchCache.get(key);
     if (cached) return cached;
+    // 上限/降级治理：**检索失败 ≠ 无命中**。原实现 `.catch(() => null)` 把两者压成同一个空数组，
+    // 并把空结果**写进本轮 searchCache** —— 一次 DB/索引异常会让该 query 在本轮生成中
+    // **永久**返回空（后续章节同 query 全部复用该空结果），而进度页写的是「KB 检索完成：N 组查询」
+    // 这种成功语气。即：基础设施故障被伪装成「资料里没有」，用户无从分辨。
+    // 现口径：失败单独计数、**不写缓存**（下次同 query 会真正重试）、并置 failed 级 stage。
     const result = await session.understanding.manager.search(session.prepare.projectRoot, query, {
       scope: 'project',
       filters: { filePaths: scopedFilePaths, materialRoots: effectiveMaterialRoots },
@@ -103,8 +111,12 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
       weights,
       generationMode: true,
       disableReranker: !generationRerankerEnabled,
-    }).catch(() => null);
-    const results = result?.results || [];
+    }).catch((error: unknown) => {
+      searchFailures.push({ query, message: error instanceof Error ? error.message : String(error) });
+      return null;
+    });
+    if (result === null) return [];
+    const results = result.results || [];
     searchCache.set(key, results);
     return results;
   };
@@ -116,6 +128,19 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
   if (projectBasicEvidence.length > 0) {
     session.understanding.allEvidence.push(...projectBasicEvidence);
     upsertProgressStage(session.global.progressStages, displayStage({ type: 'knowledge_retrieval', roleId: 'project-basic-evidence', status: 'success', message: `已锁定项目基础事实证据 ${projectBasicEvidence.length} 条`, details: projectBasicEvidence.slice(0, 8).map(item => `${path.basename(item.filePath)}｜${item.sectionTitle || '正文片段'}｜score=${item.score.toFixed(2)}`) }, { subtitle: '基础事实召回', order: session.global.progressStages.length }));
+    session.global.emitProgress();
+  }
+  // G 线 降级治理：检索失败显性上报——失败与「无命中」必须可分（见 search 闭包的注释）。
+  // 该 stage 只在确有失败时产出，且为 failed 级：让「基础设施故障」不再伪装成「资料里没有」。
+  session.understanding.searchFailures = searchFailures;
+  if (searchFailures.length > 0) {
+    upsertProgressStage(session.global.progressStages, displayStage({
+      type: 'knowledge_retrieval',
+      roleId: 'kb-search-failures',
+      status: 'failed',
+      message: `知识库检索失败 ${searchFailures.length} 次（失败与「无命中」已分开计；失败结果不写缓存，同 query 后续会重试）`,
+      details: searchFailures.slice(0, 10).map(item => `${item.query}：${item.message}`),
+    }, { subtitle: '基础事实召回', order: session.global.progressStages.length }));
     session.global.emitProgress();
   }
   // 证据内容安全分区（源头断流，评分报告 P1 串章根因治理）：投标/评标纪律、评标办法、商务报价类证据

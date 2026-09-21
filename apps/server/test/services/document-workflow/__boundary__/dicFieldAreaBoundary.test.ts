@@ -89,10 +89,10 @@ describe('dicFieldAreaBoundary · M 组：字段/面积/工期字段检测器', 
       expect(issues.length).toBe(1);
     });
 
-    it('M1 多处错配 slice(0,3) 上限', () => {
+    it('上限治理：M1 多处错配 slice(0,3) 上限（全量 4 条）', () => {
       const model = scopeModel('20000', '15000');
       const md = '本项目单体建筑面积20000㎡。本项目总建筑面积20000㎡。本项目建筑面积20000㎡。本项目单体建筑面积20000㎡。';
-      expect(fieldValueMismatchIssues(md, model).length).toBe(3);
+      expect(fieldValueMismatchIssues(md, model).length).toBe(4);
     });
   });
 
@@ -169,9 +169,9 @@ describe('dicFieldAreaBoundary · M 组：字段/面积/工期字段检测器', 
       expect(basicInfoScheduleFieldIssues('| 计划工期 |  |')).toEqual([]);
     });
 
-    it('M3 多处违约行 slice(0,2) 上限', () => {
+    it('上限治理：M3 多处违约行 slice(0,2) 上限（全量 3 条）', () => {
       const md = '| 计划工期 | 延误处理 |\n| 计划工期 | 违约条款 |\n| 计划工期 | 罚款条款 |';
-      expect(basicInfoScheduleFieldIssues(md).length).toBe(2);
+      expect(basicInfoScheduleFieldIssues(md).length).toBe(3);
     });
 
     it('M3 行首空白容忍（^\\s*\\|）', () => {
@@ -244,9 +244,9 @@ describe('dicFieldAreaBoundary · M 组：字段/面积/工期字段检测器', 
       expect(fabricatedStartDateIssues('本项目2026 年 3 月 1 日开工。', model)).toEqual([]);
     });
 
-    it('M5 多处编造日期 slice(0,3) 上限', () => {
+    it('上限治理：M5 多处编造日期 slice(0,3) 上限（全量 4 条）', () => {
       const md = '2026年3月1日开工。2026年4月2日进场。2026年5月3日封顶。2026年6月4日竣工。';
-      expect(fabricatedStartDateIssues(md, factsOf({})).length).toBe(3);
+      expect(fabricatedStartDateIssues(md, factsOf({})).length).toBe(4);
     });
   });
 

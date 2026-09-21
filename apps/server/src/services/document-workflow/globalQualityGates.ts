@@ -1809,7 +1809,23 @@ export async function runGlobalConsistencyReviewLoop(input: {
     emitProgress(chapterDraftsFinal);
   } catch (err) {
     if (signal?.aborted) throw err;
+    const message = err instanceof Error ? err.message : String(err);
     console.error('[gen] global consistency review failed:', err);
+    // 降级治理：原实现只 console.error 后**返回初值**（部分结果当成功）——用户看到的是
+    // 「跨章一致性已审」而实际整链（审查 + 定向修复 + 确定性去重）从未执行。
+    // 该环节崩溃是「不检测」而非「未通过」，必须显性上屏并把异常并入交付告警。
+    const failureStage = displayStage({
+      type: 'llm_review',
+      roleId: 'global-consistency-repair',
+      status: 'failed',
+      message: `跨章一致性审查异常中断：本环节**未执行**（${message}）`,
+      details: [
+        '后果：跨章数值冲突的 LLM 复查与定向修复、跨章表格/段落确定性去重均不会执行。',
+        '终门禁会重算确定性冲突，但仍可能有冲突未经复查直接进入交付；请人工复核跨章一致性问题。',
+      ],
+    }, { subtitle: '跨章一致性审查' });
+    upsertProgressStage(progressStages, failureStage);
+    emitProgress(chapterDraftsFinal);
   }
   return { issues: globalConsistencyIssues, dedupRan: globalDedupRan };
 }

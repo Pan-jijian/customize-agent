@@ -183,8 +183,8 @@ describe('U2 危大清单一致性：标题谱系与条目边界', () => {
   it('U2 清单内重复条目去重（Set）→ 0 条', () => {
     expect(dangerousListConsistencyIssues(lists(['- 深基坑工程', '- 深基坑工程', '- 高大模板'], ['- 深基坑工程', '- 高大模板']))).toHaveLength(0);
   });
-  it('U2 5 清单全差异 → slice(0,3) 截断 3 条', () => {
+  it('上限治理：U2 5 清单全差异 → slice(0,3) 不再截断 3 条（全量 10 条）', () => {
     const body = ['深基坑', '高大模板', '脚手架', '塔吊', '吊篮'].map((item) => `## 危大清单\n- ${item}工程\n- 其他工程`).join('\n\n');
-    expect(dangerousListConsistencyIssues(body)).toHaveLength(3);
+    expect(dangerousListConsistencyIssues(body)).toHaveLength(10);
   });
 });

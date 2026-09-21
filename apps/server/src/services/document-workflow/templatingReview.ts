@@ -68,9 +68,13 @@ export async function reviewTemplatingSemantics(input: {
       diagnostics: input.diagnostics,
       taskKind: 'structuredGeneration',
     });
-    const issues = Array.isArray(result?.issues) ? result.issues.filter(issue => typeof issue === 'string' && issue.length > 0).slice(0, 6) : [];
+    // 上限治理：**不截断** LLM 报出的 issues（原 slice(0,6)）——截断只属展示层
+    const issues = Array.isArray(result?.issues) ? result.issues.filter(issue => typeof issue === 'string' && issue.length > 0) : [];
     return { issues, reviewed: true };
-  } catch {
-    return { issues: [], reviewed: false };
+  } catch (error) {
+    // 降级治理：原实现返回 `{ issues: [], reviewed: false }` 而**调用方从不渲染 reviewed**
+    // ⇒ 复核失败与「复核通过且无问题」在 UI 上完全同形。改为把失败作为一条 issue 返回，
+    // 沿既有渲染通道显性上屏（无需改调用方即可见）。
+    return { issues: [`⚠ 语义级模板化复核未完成（模型调用失败，本项未复核）：${error instanceof Error ? error.message : String(error)}`], reviewed: false };
   }
 }

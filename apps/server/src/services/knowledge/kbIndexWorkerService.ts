@@ -1,3 +1,4 @@
+import * as os from 'node:os';
 import { fork } from 'child_process';
 import fs from 'node:fs';
 import path from 'path';
@@ -85,6 +86,23 @@ function resolveWorkerScriptPath(): string | undefined {
 }
 
 function runInChildProcess(job: IndexJob, operationId: string, operationType: 'upload' | 'reindex', operationTitle: string): Promise<WorkerResult> {
+/**
+ * 索引 worker 的 V8 堆上限（MB）。
+ *
+ * **实测缺陷**：183MB 的施工图 PDF 在 Node 默认堆（约 4GB）下解析时触发
+ * `v8::internal::V8::FatalProcessOutOfMemory` → `SIGABRT`，**整个索引任务失败**
+ *（`[kb-worker] exit { signal: 'SIGABRT' }`，库被删到一半）。大图纸是工程项目的常态，
+ * 不是异常输入 —— 索引是内存密集的离线任务、且与主服务分进程，故按机器物理内存
+ * 的 1/4 为该进程单独定量（下限 4GB / 上限 12GB），不影响主进程。
+ * `KB_INDEX_MAX_OLD_SPACE_MB` 可显式覆盖。
+ */
+function indexWorkerHeapMb(): number {
+  const configured = Number(process.env.KB_INDEX_MAX_OLD_SPACE_MB);
+  if (Number.isFinite(configured) && configured > 0) return Math.floor(configured);
+  const totalMb = Math.floor(os.totalmem() / 1024 / 1024);
+  return Math.min(12288, Math.max(4096, Math.floor(totalMb / 4)));
+}
+
   const workerPath = resolveWorkerScriptPath();
   if (!workerPath) {
     // 脚本缺失（打包异常/启动目录不可控）：直接进程内索引，保证上传不因进程壳问题失败
@@ -96,6 +114,11 @@ function runInChildProcess(job: IndexJob, operationId: string, operationType: 'u
       cwd: process.cwd(),
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       env: process.env,
+      // 大图纸解析需要远超 Node 默认堆的内存，见 indexWorkerHeapMb 注释（实测 183MB PDF OOM/abort）
+      execArgv: [
+        ...process.execArgv.filter(arg => !arg.startsWith('--max-old-space-size')),
+        `--max-old-space-size=${indexWorkerHeapMb()}`,
+      ],
     });
     let settled = false;
     // 子进程 stdout/stderr 按 chunk 触发（OCR 噪声下每秒可达数十次），upsertKbOperation 每次都要全量读写

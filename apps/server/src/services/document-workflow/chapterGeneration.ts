@@ -163,14 +163,33 @@ export function capFactCoverageContext(text: string): string {
   if (configured === 0) return text;
   const cap = Number.isFinite(configured) && configured! > 0 ? Math.floor(configured!) : 6000;
   if (!text || text.length <= cap) return text;
+  const lines = text.split('\n');
   const kept: string[] = [];
   let total = 0;
-  for (const line of text.split('\n')) {
+  for (const line of lines) {
     if (total + line.length + 1 > cap) break;
     kept.push(line);
     total += line.length + 1;
   }
-  return `${kept.join('\n')}\n（本章事实索引过长已截断，其余事实见绑定材料与证据，正文以材料为准）`;
+  // 上限治理：截断必须**如实说明**（原提示「其余事实见绑定材料与证据」是**误导**——
+  // 绑定材料与证据注入本身另有预算截断，指向那里等于让用户白找）。
+  // 并把被截条目在有限预算内**列名**，给出可追溯的缺口清单。
+  const omitted = lines.slice(kept.length).filter(Boolean);
+  const NAME_BUDGET = 600;
+  const omittedNames: string[] = [];
+  let nameChars = 0;
+  for (const line of omitted) {
+    const label = line.slice(0, 40);
+    if (nameChars + label.length + 1 > NAME_BUDGET) break;
+    omittedNames.push(label);
+    nameChars += label.length + 1;
+  }
+  const omittedNote = omitted.length > 0
+    ? `（本章事实索引超出注入预算已截断 ${omitted.length} 条${omittedNames.length > 0 ? `，缺口清单：${omittedNames.join('；')}${omittedNames.length < omitted.length ? ' 等' : ''}` : ''}。` +
+      `注意：这部分事实**本次未注入写作上下文**，绑定材料与证据注入另有独立预算、不保证覆盖它们；` +
+      `如需全量注入，可将 DOCUMENT_TUNING_PROFILE.factCoverageCap 设为 0）`
+    : '';
+  return omittedNote ? `${kept.join('\n')}\n${omittedNote}` : text;
 }
 
 /** 两步生成第一步产出的事实大纲 */
@@ -347,7 +366,12 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
       const allOutlinedMissing = [...new Set(outline.sections.flatMap(section => (section.missingFacts || []).filter(Boolean)))];
       const outlinedMissingFacts = allOutlinedMissing;
       if (outlinedMissingFacts.length > 0 && options.supplementEvidenceProvider) {
-        const supplements = await options.supplementEvidenceProvider(outlinedMissingFacts).catch(() => []);
+        const supplements = await options.supplementEvidenceProvider(outlinedMissingFacts).catch((error: unknown) => {
+          // 降级治理：失败 ≠ 无补充（原 `.catch(() => [])` 让调用异常表现为「大纲缺失事实无补充资料」）
+          if (options.diagnostics) options.diagnostics.llm.lastError = `大纲缺失事实补充检索失败：${error instanceof Error ? error.message : String(error)}`;
+          console.error('[gen] 大纲缺失事实补充检索失败', error);
+          return [];
+        });
         const fresh = supplements.filter(item => !evidence.some(existing => existing.filePath === item.filePath && (existing.sectionTitle || '') === (item.sectionTitle || '')));
         if (fresh.length > 0) {
           const mergedEvidence = [...evidence, ...fresh];
@@ -402,7 +426,7 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     : projectContext;
   const system = [
     // 3.2 L0 恒定前缀（跨 Writer 类型共享 prefix cache）；DOCUMENT_L0_SYSTEM_PREFIX=0 回退原前缀
-    writerSystemPrefix(FORMAL_WRITING_RULES),
+    writerSystemPrefix(),
     options.forbidDrawingImages ? '图片类材料只作为文本事实依据；禁止插入图片或 Markdown 图片语法。' : '',
     // 标书编制规格写作口径（正文表格计划口径/禁图/身份禁语硬约束；无口径差异时返回空串不注入）
     bidCompositionWritingRules(options.bidComposition),
@@ -999,7 +1023,7 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
   ].filter(Boolean).join('\n\n');
   const system = [
     // 3.2 L0 恒定前缀（跨 Writer 类型共享 prefix cache）；DOCUMENT_L0_SYSTEM_PREFIX=0 回退原前缀
-    writerSystemPrefix('你是专业文档的小节生成专家。\n\n' + FORMAL_WRITING_RULES),
+    writerSystemPrefix(),
     // A5a 前缀缓存：可变 promptTexts 已移入 user 首部，system 保持恒定（跨章共享 prefix cache）
     // 输出池扩容：小节正文含多个 #### 三级小节标题（实测 9 个 H4 均分输出池导致靠后小节
     // 「工艺流程：」被 maxTokens 截断）。中文约 1.5 token/字，按 2.6 倍系数 + 2800 下限留足
@@ -1113,38 +1137,6 @@ function sectionSupplementQualityIssue(sectionTitle: string, content: string) {
   const effectiveLength = documentTextLength(body);
   if (effectiveLength < 360) return `正文有效内容不足：${sectionTitle} 当前约 ${effectiveLength} 字`;
   if (/资料未提供|信息有限|无法确定|待补充|建议扩大本地知识库检索|以下是|本文档|本小节围绕/u.test(body)) return `存在空泛或说明性话术：${sectionTitle}`;
-  return undefined;
-}
-
-export function sectionSupplementAttempts(totalTargets: number) {
-  // （原 DOCUMENT_SECTION_SUPPLEMENT_ATTEMPTS 已固化删除：上限恒为 2）
-  return Math.max(1, Math.min(3, 2, totalTargets));
-}
-
-export async function buildQualifiedSectionSupplement(input: Parameters<typeof buildLlmSectionContent>[0], maxAttempts: number) {
-  let feedback: string | undefined;
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const generated = await buildLlmSectionContent({ ...input, qualityFeedback: feedback });
-    if (!generated) {
-      // 定向补写（C2）：被拒后不整节重写——保留上一轮已通过检查的内容，只补缺失要素段，
-      // 避免整节重写把已正确的部分再次写乱（轮7 实测两套形态混用：前段一段式、后段标签式）
-      feedback = `上一轮未生成有效正文${input.diagnostics?.llm.lastError ? `（被拒原因：${input.diagnostics.llm.lastError}）` : ''}。请定向修正：保留上一轮已通过检查的内容不变，只补写缺失的要素段（作业对象与工程量/工序顺序/施工方法，缺哪项补哪项），不得整体重写已正确的部分。`;
-      continue;
-    }
-    const issue = sectionSupplementQualityIssue(input.sectionTitle, generated);
-    // P4/P5 节级补写数值核验：首轮成稿与证据对账，确定性错误（同位置不同值）进入反馈重试；
-    // 反馈携带正确值与已核验正确数值保留清单（重写保护）；第二轮仍错误时放行交由后续审查链兜底
-    let numericIssue: string | undefined;
-    if (attempt === 0 && !issue) {
-      const reconciliation = reconcileContentNumbers(generated, input.evidence.map(item => item.content).join('\n'));
-      if (reconciliation.mismatched.length > 0) {
-        if (input.diagnostics) input.diagnostics.llm.lastInfo = `数值核验：${input.sectionTitle} 发现 ${reconciliation.mismatched.length} 处疑似错误数值（${reconciliation.mismatched.map(item => `${item.found}→${item.expected}`).join('、')}）`;
-        numericIssue = renderNumericFeedback(reconciliation);
-      }
-    }
-    if (!issue && !numericIssue) return generated;
-    feedback = issue || numericIssue;
-  }
   return undefined;
 }
 
@@ -1408,7 +1400,12 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
       .map(item => ({ item, score: blockTokens.reduce((sum, token) => sum + (item.content.includes(token) ? 1 : 0), 0) }))
       .sort((left, right) => right.score - left.score)
       .map(entry => entry.item);
-    const extraEvidence = input.sectionEvidenceProvider ? await input.sectionEvidenceProvider(block.title).catch(() => []) : [];
+    const extraEvidence = input.sectionEvidenceProvider ? await input.sectionEvidenceProvider(block.title).catch((error: unknown) => {
+      // 降级治理：失败 ≠ 无块级专属证据（原实现让块级差异化注入静默消失且无任何信号）
+      if (input.diagnostics) input.diagnostics.llm.lastError = `块级专属证据召回失败（${block.title}）：${error instanceof Error ? error.message : String(error)}`;
+      console.error(`[gen] 块级专属证据召回失败（${block.title}）`, error);
+      return [];
+    }) : [];
     const blockEvidence = [...scoredEvidence, ...extraEvidence];
     // 骨架锁定（稳定版）：仅当块 H3 标题本身是工作包级小节时才锁定骨架。块内 H4 要点命中关键小节
     // 不触发块级骨架锁定——「项目主要施工内容」作为其他章（如重点难点章）的 H4 要点时，
@@ -1493,7 +1490,9 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     const blockSectionQuotas: SectionQuotaItem[] = blockSectionPoints.map(point => ({ title: point.title, words: point.quotaWords || 0 }));
     // P3/P7 专属事实注入：blockFacts 为章级分配表分配给本块的事实行（每条只归属一个块）；
     // 蓝图规划层 block.facts 历史恒为空数组（factsHint 载体存在但从未填充），现由分配表确定性填充
-    const blockFacts = [...(block.facts || []), ...blockFactAssignments[index]].slice(0, 8);
+    // 上限治理：**不截断块专属事实**（原 slice(0,8)）。分配是**互斥**的（每条事实只归属一个块），
+    // 故被截掉的事实**任何块都拿不到**——不是「本块少注入」，是「该事实在写作层彻底消失」。
+    const blockFacts = [...(block.facts || []), ...blockFactAssignments[index]];
     const factsHint = blockFacts.length
       ? `【本主题块专属事实（只能在本节使用，不得重复出现在本章其他节；本章其他节已认领各自专属事实，本节不得重复展开其他节专属事实）】${blockFacts.map(item => `- ${item}`).join('\n')}`
       : '';
@@ -1705,14 +1704,27 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         // 二轮放行交终检链兜底（照 numericBlocking 首轮模式）。
         // 扫描失败不阻断写作（检测故障≠内容缺陷，本地模型异常不应杀块）。
         let blockTemplating: BlockTemplatingVerdict | undefined;
+        // 上限治理 · 异常不得等于通过：原实现在扫描器抛错时留 undefined ⇒ fillerBlocking 恒 false
+        // ⇒ 该块**放行成稿**。这是「做不到就当作做到了」的教科书写法，直接违背「宁缺毋假」：
+        // 套话内容在扫描器故障时可整章成稿，且没有任何「本轮未完成质检」的痕迹。
+        // 现口径：重试一次；仍失败则**按未通过处理**（该块走重写路径；持续失败则章阻断、
+        // 文档明确失败），并把失败原因写进 lastError 供定位。确定性扫描器崩溃属代码缺陷，
+        // 让它显性失败远比让它静默放行安全。
+        let templatingScanFailure: string | undefined;
         if (attempt === 0) {
-          try {
-            blockTemplating = await det('block-templating', () => scanBlockTemplating(withBlockShell));
-          } catch (error) {
-            console.error(`[gen][block-qc] 模板化扫描失败（放行）: ${block.title}`, error);
+          for (let scanTry = 0; scanTry < 2 && blockTemplating === undefined; scanTry += 1) {
+            try {
+              blockTemplating = await det('block-templating', () => scanBlockTemplating(withBlockShell));
+            } catch (error) {
+              templatingScanFailure = error instanceof Error ? error.message : String(error);
+              console.error(`[gen][block-qc] 模板化扫描第 ${scanTry + 1} 次失败: ${block.title}`, error);
+            }
+          }
+          if (templatingScanFailure && input.diagnostics) {
+            input.diagnostics.llm.lastError = `块级模板化质检未完成（按未通过处理）：${block.title} —— ${templatingScanFailure}`;
           }
         }
-        const fillerBlocking = attempt === 0 && blockTemplating !== undefined && templatingBlockingOf(blockTemplating);
+        const fillerBlocking = attempt === 0 && (templatingScanFailure !== undefined || (blockTemplating !== undefined && templatingBlockingOf(blockTemplating)));
         if (fillerBlocking && blockTemplating) {
           console.error(`[gen][block-qc] 首轮模板化阻断（套话 ${blockTemplating.fillerSentences}/${blockTemplating.totalSentences} 句、占比 ${(blockTemplating.fillerRatio * 100).toFixed(1)}%、模糊 ${blockTemplating.vagueCount} 处）: ${block.title}: ${blockTemplating.fillerDetails.slice(0, 3).join(' / ')}`);
         }
@@ -1731,14 +1743,21 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         // difficultyCountermeasureReport 同源、同验收线）；非重难点章不启用（质量/安全章执行器按 S3 扩展）
         const attributionApplicable = requiresAttributionQuantification(`${input.chapter.title} ${block.title}`);
         let attributionVerdict: AttributionQuantificationVerdict | undefined;
+        let attributionScanFailure: string | undefined;
         if (attempt === 0 && attributionApplicable) {
-          try {
-            attributionVerdict = await det('block-attribution-quantification', () => scanAttributionQuantification(withBlockShell));
-          } catch (error) {
-            console.error(`[gen][block-qc] 归因量化扫描失败（放行）: ${block.title}`, error);
+          for (let scanTry = 0; scanTry < 2 && attributionVerdict === undefined; scanTry += 1) {
+            try {
+              attributionVerdict = await det('block-attribution-quantification', () => scanAttributionQuantification(withBlockShell));
+            } catch (error) {
+              attributionScanFailure = error instanceof Error ? error.message : String(error);
+              console.error(`[gen][block-qc] 归因量化扫描第 ${scanTry + 1} 次失败: ${block.title}`, error);
+            }
+          }
+          if (attributionScanFailure && input.diagnostics) {
+            input.diagnostics.llm.lastError = `块级归因量化质检未完成（按未通过处理）：${block.title} —— ${attributionScanFailure}`;
           }
         }
-        const attributionBlocking = attempt === 0 && attributionVerdict !== undefined && attributionBlockingOf(attributionVerdict);
+        const attributionBlocking = attempt === 0 && (attributionScanFailure !== undefined || (attributionVerdict !== undefined && attributionBlockingOf(attributionVerdict)));
         if (attributionBlocking && attributionVerdict) {
           console.error(`[gen][block-qc] 首轮归因量化阻断（双达标率 ${(attributionVerdict.bothRatio * 100).toFixed(0)}%，${attributionVerdict.entries} 条目）: ${block.title}`);
         }
@@ -1771,9 +1790,15 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           };
         });
         // 4.40 块写作字数双向硬合同 = [0.85,1.15]×块目标（4.51 末轮容差 1.2×；详见下方字数判定段的完整口径）
-        // P4：首轮确定性错误数值阻断重试（feedback 携带正确值）；第二轮仍错误时放行（避免无限重试，
-        // 错误数值交由下游 Reviewer/跨章一致性审查兜底）
-        const numericBlocking = attempt === 0 && numericReconciliation.mismatched.length > 0;
+        // G 线 P1-2：取消「二轮放行」——与证据冲突的数值一律阻断该块（首轮阻断重试带正确值；
+        // 重试后仍冲突则该块失败，不再放行）。
+        // 原注释称「错误数值交由下游 Reviewer/跨章一致性审查兜底」，但**下游并不存在能兜住它的校验**：
+        // 引用一致性判定（integratedBlueprint/citation.ts）只覆盖 4 类权威域
+        // （labor-peak / total-days / village-count / quantity），而蓝图 derive.ts 推导出的其余
+        // 10 类（里程碑工期 / 机械台数 / 材料计划量 / 土方平衡 / 临水临电 / 检验批次 / 临时用地 /
+        // 试验仪器 / 规格权威 / 施工部署）没有任何正文级核对。
+        // 于是「把有权威的数值写错」恰好落在「二轮放行 + 下游不覆盖」的交集里，可以零拦截交付。
+        const numericBlocking = numericReconciliation.mismatched.length > 0;
         // WS3 首轮工序表达形式核验：块内已有工序顺序表达但形式与指定不符时首轮阻断重试（照 numericBlocking
         // 首轮模式：二轮放行交终检 flowFormRepeatIssues + 修复轮兜底）；完全无工序表达不在此阻断——
         // 由分部分项质量规则的三要素检查承担（避免两处阻断口径打架）

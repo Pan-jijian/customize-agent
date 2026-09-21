@@ -53,14 +53,15 @@ describe('selectChapterParameterFacts（按章相关性选择）', () => {
     expect(picked.map(item => item.key)).toEqual(['排水管道']);
   });
 
-  it('maxEntries 截断且排序可复现（相关分降序、键字典序兜底）', () => {
+  it('上限治理：**不设条数上限**（原 maxEntries=60 让第 61 项起既不进提示词也不进落位义务）', () => {
     const many = [
       fact({ key: '排水管C', value: 'DN500' }),
       fact({ key: '排水管A', value: 'DN300' }),
       fact({ key: '排水管B', value: 'DN400' }),
     ];
-    const picked = selectChapterParameterFacts(modelOf(many), CHAPTERS[1]!.title, { sections: CHAPTERS[1]!.sections, maxEntries: 2 });
-    expect(picked.map(item => item.key)).toEqual(['排水管A', '排水管B']);
+    const picked = selectChapterParameterFacts(modelOf(many), CHAPTERS[1]!.title, { sections: CHAPTERS[1]!.sections });
+    expect(picked).toHaveLength(3);
+    expect(picked.map(item => item.key)).toEqual(['排水管A', '排水管B', '排水管C']);
   });
 });
 
@@ -183,19 +184,37 @@ describe('missingRelevantParameterTokens / assignMissingParameterChapters（修�
     expect([...assignment.entries()]).toEqual([[1, ['Φ1250']]]);
   });
 
-  it('商务/噪声遗漏不进入补写池；逐章限额生效', () => {
+  it('商务/噪声遗漏不进入补写池（池净化）', () => {
     const noisy = modelOf([
       fact({ key: '综合单价', value: '45元/m' }),
       fact({ key: '排水管OCR残留', value: 'DN300' }),
     ]);
     expect(assignMissingParameterChapters(markdown, noisy, CHAPTERS).size).toBe(0);
+  });
+
+  it('G 线 上限治理：分配层**不设任何限额**——每个遗漏参数都必须有主章（无截断丢失）', () => {
+    // 历史实现有「每章 16 条 + 总量 96 条」两道限额：超出者**永不进入补写**，
+    // 且所有章满额时该参数被整体丢弃（内层择优循环走完仍未分配）。
+    // 当时的处置是「放宽限额」（6/24 → 16/96）而非去掉——把悬崖往后挪一格，
+    // 项目数据量一大就复现。现口径：分配层不截断，指令大小由**渲染层按真实 prompt 预算**控制，
+    // 剩余项由后续轮次继续消费（每轮基于当前正文重算 relevantMissed，已落位的自然退出）。
     const many = modelOf([
       fact({ key: '排水管A', value: 'DN300' }),
       fact({ key: '排水管B', value: 'DN400' }),
       fact({ key: '排水管C', value: 'DN500' }),
     ]);
-    const limited = assignMissingParameterChapters('本工程无相关参数。', many, CHAPTERS, { maxPerChapter: 2 });
-    expect(limited.get(1)).toHaveLength(2);
+    const assignment = assignMissingParameterChapters('本工程无相关参数。', many, CHAPTERS);
+    const assigned = [...assignment.values()].flat();
+    // 三条全部有主，一条不少
+    expect(assigned.sort()).toEqual(['DN300', 'DN400', 'DN500']);
+  });
+
+  it('G 线 上限治理：超大批次（500 条）全部有主——不因数据量大而丢弃', () => {
+    const bulk = modelOf(Array.from({ length: 500 }, (_, i) => fact({ key: `排水管${i}`, value: `DN${1000 + i}` })));
+    const assignment = assignMissingParameterChapters('本工程无相关参数。', bulk, CHAPTERS);
+    const assigned = [...assignment.values()].flat();
+    expect(assigned).toHaveLength(500);
+    expect(new Set(assigned).size).toBe(500);
   });
 });
 

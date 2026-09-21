@@ -2,7 +2,7 @@ import type { AutoDocumentSpecGateRule, GateRuleEvaluator } from '../document-co
 import type { QualitySeverity, SpecGateRuleHandler } from '../types/qualityValidationTypes';
 
 /** 导出阻断类校验问题匹配规则。 */
-export const EXPORT_BLOCKING_ISSUE_RE = /用户要求不得|出现禁用文本|生成未完成|章节生成失败|大模型未能|重新生成|空小节|小节只有标题|只有标题或表格无正文|缺少必要表格|正文缺少章节标题|重复 token|退化输出|其他对象|其他文档|文档编号|明确事实污染|明确无来源编造|必需材料角色缺失|章节缺少证据|文档质量基准评分未达标/iu;
+export const EXPORT_BLOCKING_ISSUE_RE = /用户要求不得|出现禁用文本|生成未完成|章节生成失败|大模型未能|重新生成|空小节|小节只有标题|只有标题或表格无正文|缺少必要表格|正文缺少章节标题|重复 token|退化输出|其他对象|其他文档|文档编号|明确事实污染|明确无来源编造|必需材料角色缺失|章节缺少证据|文档质量基准评分未达标|正文篇幅明显低于目标|正文存在空泛占位表达|结构化事实读取不足|正文可能未显式覆盖|仅包含文件类型和占位符/iu;
 
 /** 导出门禁中用于判断结构化精确参数缺失的问题规则。 */
 export const EXPORT_GATE_PRECISION_ISSUE_RE = /可靠精确参数使用不足/u;

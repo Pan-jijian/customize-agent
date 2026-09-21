@@ -37,8 +37,10 @@ import { repairChapterByQuality, repairPatchGuard } from '../../rolePipeline';
 import { withPatchRollback } from '../../patchRollback';
 import type { FinalizeSession } from '../finalizeSession';
 
-/** Phase B 单轮 LLM 应用章预算（超出按分值降序留守，交终门禁照常复核） */
-const MAX_APPLICATION_CHAPTERS = 6;
+// 上限治理：原 `MAX_APPLICATION_CHAPTERS = 6` 已删除——本阶段**无外层批次循环**，
+// 被 `slice(0,6)` 截下的章其 gap 只累加进 `applicationResidual` 计数，**永不获得修复**，
+// 而注释自述「交终门禁照常复核」——终门禁只会再报一次同样的缺陷，不会补写。
+// 每章的 LLM 调用仍受 `MAX_APPLICATION_ROUNDS`（每章轮上限）约束，章数上限不构成成本保护。
 
 /** 每章应用引用补写轮上限（残留条目数下降才继续下一轮） */
 const MAX_APPLICATION_ROUNDS = 2;
@@ -416,8 +418,9 @@ export async function stageBasisRegulationsCrossRepair(session: FinalizeSession)
     }
   }
   const ranked = [...assignmentTargets.entries()].sort((left, right) => right[1].score - left[1].score);
-  const selected = ranked.slice(0, MAX_APPLICATION_CHAPTERS);
-  const overflowGapCount = ranked.slice(MAX_APPLICATION_CHAPTERS).reduce((sum, entry) => sum + entry[1].gaps.length, 0);
+  // 上限治理：全量章参与（原 slice(0,6) 让第 7 章起永不修复）
+  const selected = ranked;
+  const overflowGapCount = 0;
   let applicationChapters = 0;
   let applicationResolved = 0;
   let applicationResidual = overflowGapCount;

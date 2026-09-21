@@ -16,6 +16,7 @@ import { cleanAppendixInternalPhrases } from '../../composeAppendices';
 import { fixTocFromBody } from '../../documentIntegrityChecks';
 import { splitOverlengthBodyParagraphs } from '../../helpers/markdownCleanup';
 import { displayStage, upsertProgressStage } from '../../progress';
+import { recordRepairActions } from '../../rolePipeline';
 import type { FinalizeSession } from '../finalizeSession';
 
 export async function stageDeliveryStructureClosure(session: FinalizeSession): Promise<void> {
@@ -23,22 +24,28 @@ export async function stageDeliveryStructureClosure(session: FinalizeSession): P
   // C2 D4 兜底复洗：附表区内部推导话术确定性中性化（幂等；源头已在 composeTenderAppendixMarkdown 出口净版，
   // 此处收口链中段 rebuild/LLM 补写句再引入的附表区话术）
   const cleaned = cleanAppendixInternalPhrases(session.finalMarkdown);
+  let repairActions = 0;
   if (cleaned !== session.finalMarkdown) {
     session.finalMarkdown = cleaned;
+    repairActions += 1;
     details.push('附表区内部话术清洗：内部推导口径已中性化（唯一口径/经验工效区间/清单批注等）');
   }
   // ③ 超长段落切分先于目录重建：切分不改标题行，目录重建基于切分后正文（同一次 recompute 收口）
   const split = splitOverlengthBodyParagraphs(session.finalMarkdown);
   if (split.markdown !== session.finalMarkdown) {
     session.finalMarkdown = split.markdown;
+    repairActions += split.splitCount;
     details.push(`超长段落切分：消除 >380 字符段落 ${split.splitCount} 处`);
   }
   // ① 目录按正文实际 H2/H3 结构重建（与 tocBodyConsistencyIssues 检测口径同源）
   const toc = fixTocFromBody(session.finalMarkdown);
   if (toc.fixedCount > 0) {
     session.finalMarkdown = toc.markdown;
+    repairActions += toc.fixedCount;
     details.push(...toc.details);
   }
+  // G 线 P2-4：交付结构收口动作计量（此前只进进度文案）
+  recordRepairActions(session.generationDiagnostics, repairActions);
   const changed = details.length > 0;
   const stage = displayStage({
     type: 'validation',

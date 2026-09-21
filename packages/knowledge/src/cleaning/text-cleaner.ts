@@ -475,14 +475,21 @@ export function cleanExtractedText(input: TextCleaningInput): TextCleaningResult
   if (!isCadCategory && input.category === 'document' && input.format === 'pdf' && lines.length >= 20) {
     let coordinateLines = 0;
     let shortFragmentLines = 0;
-    let pageMarkers = 0;
     for (const line of lines) {
       const trimmed = line.trim();
-      if (/^##\s*PDF 第 \d+ 页/u.test(trimmed)) { pageMarkers += 1; continue; }
+      // 页标记行不参与占比统计（既不是坐标行也不是碎片行）
+      if (/^##\s*PDF 第 \d+ 页/u.test(trimmed)) continue;
       if (isCoordinateNoiseLine(trimmed)) coordinateLines += 1;
       if (isShortFragmentLine(trimmed)) shortFragmentLines += 1;
     }
-    if (pageMarkers >= 3 && (coordinateLines / lines.length >= 0.12 || shortFragmentLines / lines.length >= 0.15)) isDrawing = true;
+    // 判据**不要求页标记数**：单张出图（一个文件一张 A2/A3）只有 1 个页标记，
+    // 旧判据 `pageMarkers >= 3` 让单页图纸永远落入文档链 —— 而文档链的「纯数字行=页码」
+    // 与「高重复行=页眉页脚」两条规则本已写好图纸豁免（`!isDrawing`），却因 isDrawing
+    // 不成立而全部失效：生产库实测门窗表 36 行、一层平面图 34 行被当页码整批删除，
+    // 90 份有删除记录的文件中 86 份（96%）是图纸类、合计删除 1,890 行。
+    // 改为纯内容驱动。实测分离度充足：招标文件碎片行占比 8.1%、单页 A2 图纸 58.0%。
+    // 误判方向也是安全的：文档被误判为图纸只会少删噪声，图纸被误判为文档才会删掉数据。
+    if (coordinateLines / lines.length >= 0.12 || shortFragmentLines / lines.length >= 0.15) isDrawing = true;
   }
   // CAD 控制码还原前置：确定性无损替换（%%U/%%O 格式开关删除、%%%→%），
   // 不参与行级启发式删除与 30% 回退保护——纯图纸文件（标高/图元行占比高）常触发

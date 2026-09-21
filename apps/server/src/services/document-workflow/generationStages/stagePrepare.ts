@@ -133,7 +133,25 @@ export async function stagePrepare(session: GenerationSession): Promise<void> {
     { text: promptOutlineTexts, source: '提示词角色', strict: true },
   ]);
   session.prepare.hasExplicitOutline = session.prepare.explicitPromptChapters.length >= 2;
-  if (session.prepare.hasExplicitOutline) session.prepare.template = { ...baseTemplate, chapters: session.prepare.explicitPromptChapters };
+  if (session.prepare.hasExplicitOutline) {
+    // G 线 P1-11：大纲覆盖模板章节**必须显式告知**。原实现静默替换——用户在界面上配好的
+    // 模板章节结构被提示词里的大纲整份顶替，却看不到任何提示，成稿结构与模板不符时无从归因
+    //（「我明明配了章节，出来的是别的」）。此处登记一条可追溯的进度事件，列明两侧章数。
+    const templateChapterCount = baseTemplate.chapters?.length ?? 0;
+    session.prepare.template = { ...baseTemplate, chapters: session.prepare.explicitPromptChapters };
+    upsertProgressStage(session.global.progressStages, displayStage({
+      type: 'validation',
+      roleId: 'explicit-outline-override',
+      status: 'success',
+      message: `模板章节被显式大纲覆盖：模板 ${templateChapterCount} 章 → 按需求/提示词大纲 ${session.prepare.explicitPromptChapters.length} 章生成`,
+      details: [
+        '覆盖来源：用户需求或提示词角色中的显式大纲（章数 ≥ 2 时优先于模板章节）',
+        ...(templateChapterCount > 0 ? [`被覆盖的模板章节：${(baseTemplate.chapters || []).map(chapter => chapter.title).slice(0, 12).join('、')}`] : []),
+        `实际生效章节：${session.prepare.explicitPromptChapters.map(chapter => chapter.title).slice(0, 12).join('、')}`,
+      ],
+    }, { subtitle: '生成准备', order: session.global.progressStages.length }));
+    session.global.emitProgress();
+  }
   session.prepare.projectMaterialSummary = await session.global.withProgressHeartbeat(() => Promise.resolve(buildProjectMaterialSummary(session.prepare.projectRoot, { requirement: session.global.input.requirement, boundFilePaths: session.prepare.materialFilePaths })));
   upsertProgressStage(session.global.progressStages, displayStage({
     type: 'validation',
@@ -225,6 +243,20 @@ export async function stagePrepare(session: GenerationSession): Promise<void> {
     signal: session.global.input.signal,
     diagnostics: undefined,
   }).catch(() => emptyRequirementSemanticPlan()));
+  // G 线 降级治理：解析失败显性上屏（原实现只 console.error，用户零感知）
+  if (session.prepare.requirementSemantics.parseFailed) {
+    upsertProgressStage(session.global.progressStages, displayStage({
+      type: 'validation',
+      roleId: 'requirement-semantics-parse',
+      status: 'failed',
+      message: `用户生成要求的语义解析失败：强制要求**未注入写作、也未进入核验闭环**（${session.prepare.requirementSemantics.parseFailureReason}）`,
+      details: [
+        '影响：本次生成不会核验你在提示词里写下的强制要求，成稿可能不含它们。',
+        '建议：核对提示词措辞后重新生成；若反复失败，请检查模型配置与额度。',
+      ],
+    }, { subtitle: '生成准备', order: session.global.progressStages.length }));
+    session.global.emitProgress();
+  }
   if (session.prepare.requirementSemantics.mandatoryBlockText) {
     session.prepare.runtimeRulesText = `${session.prepare.runtimeRulesText}\n\n${session.prepare.requirementSemantics.mandatoryBlockText}`;
   }

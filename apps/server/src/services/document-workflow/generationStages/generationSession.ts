@@ -63,6 +63,8 @@ import type { buildSemanticSimilarity } from '../semanticSimilarity';
 import type { TenderRequirementAssignment, TenderStructureAssignment } from '../tenderRequirements';
 import type { DiversityProfile } from '../diversityProfile';
 import type { SectionFingerprintPool } from '../sectionFingerprint';
+import type { EvidenceDensityAssessment } from '../budget';
+import type { ChapterSupplyDemandAssessment } from '../integratedBlueprint/capacity';
 
 /** 生成入口输入（原 generateDocumentDraft 函数签名参数） */
 export interface GenerateDocumentDraftInput {
@@ -144,6 +146,8 @@ export interface GenerationSessionPrepare {
 /** understanding：阶段 1 产物（索引/证据/事实池/图谱/canonical） */
 export interface GenerationSessionUnderstanding {
   manager: MultiProjectManager;
+  /** G 线 降级治理：本轮知识库检索失败明细（失败≠无命中；失败不写缓存，逐条上屏） */
+  searchFailures?: Array<{ query: string; message: string }>;
   evidenceScopePaths: Set<string>;
   fileRoleByPath: Map<string, string>;
   fileProcessingByPath: Map<string, string>;
@@ -154,7 +158,7 @@ export interface GenerationSessionUnderstanding {
   rolePoolRisk: RetrievalCoverageRisk;
   allEvidence: DocumentEvidence[];
   retrievalCoverageReports: RetrievalCoverageReport[];
-  webResearchReport: { enabled: boolean; queries: string[]; evidenceCount: number; filteredCount: number; chapters: string[] };
+  webResearchReport: { enabled: boolean; queries: string[]; evidenceCount: number; filteredCount: number; chapters: string[]; /** 降级治理：**检索失败**次数（原实现把请求异常计入 filteredCount，属归因错误） */ failedCount?: number };
   missingItems: string[];
   failedChapterMessages: string[];
   chapterGenerationStages: DocumentExecutionStage[];
@@ -205,6 +209,10 @@ export interface GenerationSessionPlanning {
   tenderWritingRulesText: string;
   chapterScopedProjectContext: (chapter: DocumentTemplateChapter) => string;
   documentBudget: DocumentBudget;
+  /** G 线 P1-3 章级「供给面 ↔ 要求面」核算结果（生成前记录，供诊断与人工复核追溯） */
+  chapterSupplyDemand?: ChapterSupplyDemandAssessment[];
+  /** G 线 P1-14 证据密度体检结果（生成前记录，供诊断与人工复核追溯） */
+  evidenceDensity?: EvidenceDensityAssessment;
   plannedDocument: Awaited<ReturnType<typeof planDocument>>;
   generationStrategy: DocumentGenerationStrategy;
   generationBudget: GenerationBudget;

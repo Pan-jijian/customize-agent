@@ -1046,7 +1046,7 @@ describe('M23 规则常量与 system 前缀', () => {
   });
 
   it('writerSystemPrefix：默认含统一公共段与身份句', () => {
-    const system = writerSystemPrefix('旧前缀');
+    const system = writerSystemPrefix();
     expect(system).toContain('事实分级');
     expect(system).toContain('施工组织设计文档写作专家。');
   });

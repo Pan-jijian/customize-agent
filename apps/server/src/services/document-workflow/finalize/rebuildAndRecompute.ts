@@ -223,7 +223,7 @@ export async function buildFullValidationIssues(input: {
     det('project-contamination', () => validateProjectContamination(finalMarkdown, projectMaterialSummary)),
     det('project-basic-placeholder', () => projectBasicPlaceholderIssues(finalMarkdown, structuredFacts)),
     await detSafe('standard-final', () => buildStandardFinalValidationIssues({ markdown: finalMarkdown, chapters: finalChapterDrafts, factsModel, template, promptBindings, promptDocumentRules, scopeConflicts, evaluationCriteriaItems, effectiveChapters, tenderRequirements, requirementsSimilarity, factTokenScopeClassifier, professionalDepthClassifier, blueprintData, billFactLock, drawingFactLock, bodyTableForbidden, bodyFigureForbidden, identityMarksForbidden, coverForbidden })),
-    det('fact-coverage', () => factCoverageIssues(finalMarkdown, [...structuredFacts, ...factsModel.preciseFacts], { maxIssues: 30 }).map(issue => ({ ...issue, level: 'warning' as const, severity: 'warning' as const, suggestion: '建议后续优化事实自然落位；导出阶段不因未落位的引用型或可优化事实阻断。' }))),
+    det('fact-coverage', () => factCoverageIssues(finalMarkdown, [...structuredFacts, ...factsModel.preciseFacts]).map(issue => ({ ...issue, level: 'warning' as const, severity: 'warning' as const, suggestion: '建议后续优化事实自然落位；导出阶段不因未落位的引用型或可优化事实阻断。' }))),
     det('page-target', () => pageTargetIssues(template.generationSettings || template.exportSettings, finalMarkdown).filter(issue => !(documentBudget.minPages && /低于目标页数/u.test(issue.message)))),
     det('document-budget', () => documentBudgetIssues(documentBudget, finalMarkdown)),
     // planned-structure 不在此重复调用：standard-final 组内（documentFinalValidation.buildStandardFinalValidationIssues）
@@ -335,7 +335,7 @@ export async function stageValidationPack(session: FinalizeSession): Promise<voi
   const budgetDraftMarkdown = session.chapterDrafts.map(chapter => chapter.content).join('\n\n');
   session.validationIssues = collectValidationIssueGroups(
     session.validationIssues,
-    factCoverageIssues(budgetDraftMarkdown, session.structuredFacts, { maxIssues: 20 }).map(issue => ({ ...issue, level: 'warning' as const, severity: 'warning' as const, suggestion: '建议 Agent Writer 在章节生成阶段优先落位可信基础事实；导出阶段不因未落位的低置信或泛化事实阻断。', provenance: { detectorId: 'fact-coverage', fingerprint: stableHash(budgetDraftMarkdown) } })),
+    factCoverageIssues(budgetDraftMarkdown, session.structuredFacts).map(issue => ({ ...issue, level: 'warning' as const, severity: 'warning' as const, suggestion: '建议 Agent Writer 在章节生成阶段优先落位可信基础事实；导出阶段不因未落位的低置信或泛化事实阻断。', provenance: { detectorId: 'fact-coverage', fingerprint: stableHash(budgetDraftMarkdown) } })),
   );
 
   const missingChapterCount = Math.max(0, session.effectiveChapters.length - session.chapterDrafts.length);

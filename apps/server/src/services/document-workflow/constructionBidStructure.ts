@@ -343,8 +343,6 @@ export function prioritizeOverviewSections<T extends DocumentTemplateChapter>(ch
 
 /** 结构组数量约束：单章小节数上限（防止某章膨胀） */
 export const MAX_SECTIONS_PER_CHAPTER = 18;
-/** 关键承载章最小小节数下限（概况/方案类章不能空壳） */
-export const MIN_SECTIONS_FOR_CARRIER = 4;
 
 export interface BidStructureIssue {
   level: 'error' | 'warning';

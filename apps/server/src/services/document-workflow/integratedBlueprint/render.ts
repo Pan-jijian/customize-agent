@@ -4,6 +4,7 @@
  * S6 零行为拆分自 integratedBlueprint.ts（门面 re-export，对外导出不变）：仅机械搬迁，未改动任何语句与常量。
  */
 import { buildAuthorityIndex, renderAuthorityDomains, renderAuthorityDomainsForBlock, type AuthorityDomain } from '../authorityIndex';
+import { renderAuthorityPlaceholderCatalog } from './authorityPlaceholders';
 import { parseChineseNumber } from '../budget';
 import { THREE_SOURCE_WRITE_RULES } from '../writingSpec';
 import { DEFAULT_SUBSECTION_TARGET_WORDS } from './capacity';
@@ -69,14 +70,43 @@ export function renderBlueprintDataTextForBlock(data: BlueprintData, options: { 
  * 升级为「域路由表 + 通用渲染器」——命中域的全部权威条目经 renderAuthorityDomains 聚焦注入）。
  * 路由只是「聚焦加分」，不是数据可见性门槛：未命中任何域的章仍在全局参数桶中看到全部权威；
  * 无路由的 domain 默认只进全局桶。行文案单一来源，与全局桶零漂移。 */
-export const AUTHORITY_DOMAIN_CHAPTER_ROUTES: Array<{
+/**
+ * 权威域注册表（G 线 P1-1）——**单一事实来源**，同时驱动「注入」与「写后确定性对齐」两条通道。
+ *
+ * ## 为什么必须统一
+ *
+ * 原实现有两条彼此不识的通道：
+ * - **注入**：`AUTHORITY_DOMAIN_CHAPTER_ROUTES`，覆盖 11 个域，章标题命中即注入锚点行；
+ * - **写后对齐**：`alignChapterContentToBlueprint` 里**硬编码 2 个域**（劳动力峰值、养护期），
+ *   外加 `data.contract.total_days` 的特例分支。
+ *
+ * 于是「注入了锚点」与「写后会把错值纠回来」成了两件事：域可以只注入、不对齐，
+ * 写作层写错后**没有任何确定性收口**——而两侧的章标题正则还是各写一份，改一处漏一处。
+ * 本注册表把两条通道收进同一条声明：`chapterPattern` 同时用于注入与对齐路由，
+ * `alignment` 声明该域写后对齐的锚点路径（缺省即**显式承认该域无写后对齐通道**）。
+ *
+ * ## 覆盖面差距是**显式**的
+ *
+ * 11 个域里目前只有 3 个（contract / labor / redline）声明了 alignment。这不是遗漏，
+ * 是现状：其余域的权威值要么已在写作期强约束（锚点卡），要么尚无确定性对齐实现。
+ * 把「没有」写成 `alignment: undefined` 而不是留白，是为了让差距可被统计与被审查——
+ * `authorityDomainChannelReport()` 即输出该覆盖表，`assertAuthorityDomainChannels` 断言注册表自洽。
+ */
+export interface AuthorityDomainSpec {
   domain: AuthorityDomain;
-  /** 章标题命中该正则注入该域锚点行 */
+  /** 章标题命中该正则：① 注入该域锚点行；② 若声明了 alignment 则参与写后对齐 */
   chapterPattern: RegExp;
-}> = [
-  { domain: 'contract', chapterPattern: /进度|工期|总体|部署|概况|工程|计划/u },
+  /**
+   * 写后确定性对齐锚点（BlueprintRequiredParam.path）。缺省 = 该域**无**写后对齐通道，
+   * 写作层写错后只能靠 S5 引用判定与终门禁兜底。
+   */
+  alignment?: { path: string };
+}
+
+export const AUTHORITY_DOMAIN_REGISTRY: readonly AuthorityDomainSpec[] = [
+  { domain: 'contract', chapterPattern: /进度|工期|总体|部署|概况|工程|计划/u, alignment: { path: 'data.contract.total_days' } },
   { domain: 'schedule', chapterPattern: /进度|工期|部署|计划|总体|施工方案|分部分项/u },
-  { domain: 'labor', chapterPattern: /劳动力|人员|资源|进度|工期|部署|概况/u },
+  { domain: 'labor', chapterPattern: /劳动力|人员|资源|进度|工期|部署|概况/u, alignment: { path: 'data.resources.labor.peak_value' } },
   { domain: 'equipment', chapterPattern: /机械|设备|资源/u },
   { domain: 'material', chapterPattern: /物资|材料|资源|采购|亮化|路灯|照明/u },
   { domain: 'quantity', chapterPattern: /分部分项|施工方案|施工方法|土方|道路|管网|工程概况/u },
@@ -84,8 +114,45 @@ export const AUTHORITY_DOMAIN_CHAPTER_ROUTES: Array<{
   { domain: 'earthwork', chapterPattern: /土方|土石方|道路|管网|施工方案|分部分项/u },
   { domain: 'site', chapterPattern: /总平面|平面布置|临时设施|临时用地|驻地|堆场|加工区|施工方案/u },
   { domain: 'test', chapterPattern: /质量|试验|检测|验收/u },
-  { domain: 'redline', chapterPattern: /绿化|种植|养护|苗木|技能|培训|成品保护|质量|亮化|路灯|照明|概况|工程|总体/u },
+  { domain: 'redline', chapterPattern: /绿化|种植|养护|苗木|技能|培训|成品保护|质量|亮化|路灯|照明|概况|工程|总体/u, alignment: { path: 'data.redline.greening_maintenance' } },
 ];
+
+/** 注入路由（由注册表派生，行为与历史逐字一致） */
+export const AUTHORITY_DOMAIN_CHAPTER_ROUTES: Array<{
+  domain: AuthorityDomain;
+  /** 章标题命中该正则注入该域锚点行 */
+  chapterPattern: RegExp;
+}> = AUTHORITY_DOMAIN_REGISTRY.map(spec => ({ domain: spec.domain, chapterPattern: spec.chapterPattern }));
+
+/** 该章命中的、且声明了写后对齐的域锚点（写后对齐通道的路由来源） */
+export function alignmentAnchorsForChapter(chapterTitle: string): string[] {
+  return AUTHORITY_DOMAIN_REGISTRY
+    .filter(spec => spec.alignment && spec.chapterPattern.test(chapterTitle))
+    .map(spec => spec.alignment!.path);
+}
+
+/** 域级通道覆盖报告：哪些域有注入、哪些域**尚无**写后对齐（供诊断/审查显式看到差距） */
+export function authorityDomainChannelReport(): { total: number; withAlignment: string[]; withoutAlignment: string[] } {
+  const withAlignment = AUTHORITY_DOMAIN_REGISTRY.filter(spec => spec.alignment).map(spec => spec.domain);
+  return {
+    total: AUTHORITY_DOMAIN_REGISTRY.length,
+    withAlignment,
+    withoutAlignment: AUTHORITY_DOMAIN_REGISTRY.filter(spec => !spec.alignment).map(spec => spec.domain),
+  };
+}
+
+/** 注册表自洽断言：域唯一、正则非空（供单测与发版前复核；不参与运行时链路） */
+export function assertAuthorityDomainChannels(): void {
+  const errors: string[] = [];
+  const seen = new Set<string>();
+  for (const spec of AUTHORITY_DOMAIN_REGISTRY) {
+    if (seen.has(spec.domain)) errors.push(`权威域重复声明：${spec.domain}`);
+    seen.add(spec.domain);
+    if (!(spec.chapterPattern instanceof RegExp)) errors.push(`权威域 ${spec.domain} 的 chapterPattern 非正则`);
+    if (spec.chapterPattern && spec.chapterPattern.global) errors.push(`权威域 ${spec.domain} 的 chapterPattern 带 g 标志（test 会因 lastIndex 抖动，路由不可复现）`);
+  }
+  if (errors.length > 0) throw new Error(`权威域注册表不自洽（${errors.length} 项）：${errors.join('；')}`);
+}
 
 /** 编制依据小节路由（basis_regulations 非索引对象特例：数据源 data.basisRegulations 而非索引） */
 const BASIS_REGULATIONS_CHAPTER_PATTERN = /编制|工程概况|项目概况|概况|说明/u;
@@ -115,6 +182,14 @@ export function renderBlueprintChapterAuthorityCard(chapter: BlueprintChapter, d
   const lines = renderAuthorityDomains(buildAuthorityIndex(data), domains);
   if (BASIS_REGULATIONS_CHAPTER_PATTERN.test(chapter.title)) {
     lines.push(...renderBasisRegulationsLines(data));
+  }
+  // G 线 P2-1 占位符协议：本章命中的、且有权威值的域锚点以 `{{AUTH:<path>}}` 目录形式给出，
+  // 要求模型**引用占位符而不是自己写数**——数值的产出方从 LLM 换成权威层（生成后确定性填充）。
+  // 目录只列有权威值的 path（列了填不进的会自造未决告警）。
+  const placeholderPaths = alignmentAnchorsForChapter(chapter.title);
+  const catalog = placeholderPaths.length > 0 ? renderAuthorityPlaceholderCatalog(placeholderPaths, data) : [];
+  if (catalog.length > 0) {
+    lines.push('【数值占位符协议】下列计划类数值请**原样写出占位符**，不要自行写数（生成后由系统确定性填充为权威值）：', ...catalog);
   }
   if (lines.length === 0) return '';
   return [
@@ -268,13 +343,11 @@ export function alignChapterContentToBlueprint(markdown: string, chapter: Bluepr
   const mustCiteStrict = chapter.subSections.flatMap(section => section.requiredParams.filter(param => param.mode === 'must_cite' && param.strict));
   // 域级锚点（章标题命中即对齐，不依赖 requiredParams 声明）：劳动力峰值/养护期是写作层高频自编数值，
   // 蓝图权威为唯一口径——章标题命中域即强制对齐（检测定位=修复定位同源锚点，与数值锚点卡注入同域）。
-  const domainAnchors: BlueprintRequiredParam[] = [];
-  if (/劳动力|人员|资源|进度|工期|部署|概况/u.test(chapter.title) && data.resources.labor.peakValue > 0) {
-    domainAnchors.push({ path: 'data.resources.labor.peak_value', mode: 'must_cite', strict: true });
-  }
-  if (/绿化|种植|养护|苗木|技能|培训|成品保护|质量/u.test(chapter.title)) {
-    domainAnchors.push({ path: 'data.redline.greening_maintenance', mode: 'must_cite', strict: true });
-  }
+  // G 线 P1-1/P1-8：域级锚点由**权威域注册表**派生（与注入通道同源单声明），
+  // 不再在两条通道各写一份章标题正则——历史缺陷正是两处正则各改各的、改一处漏一处。
+  // 取值守卫（如劳动力峰值 <= 0 时跳过）留在下方 switch 的取值逻辑里，不在此重复判断。
+  const domainAnchors: BlueprintRequiredParam[] = alignmentAnchorsForChapter(chapter.title)
+    .map(path => ({ path, mode: 'must_cite' as const, strict: true }));
   const alignedParams = [...mustCiteStrict, ...domainAnchors];
   const seen = new Set<string>();
   for (const param of alignedParams) {

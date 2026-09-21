@@ -166,7 +166,7 @@ describe('s1-slim 单块输入探针（实测与超标定位）', () => {
   });
 
   it('3) 固定指令段与封顶参数（L0/L1 常量 + 预算单源）', () => {
-    const l0 = writerSystemPrefix(FORMAL_WRITING_RULES);
+    const l0 = writerSystemPrefix();
     const profile = tuningProfile();
     console.log(`\n[固定段] L0 writerSystemPrefix：${l0.length} 字符`);
     console.log(`[固定段] SECTION_GENERATION_SAFETY_RULES：${SECTION_GENERATION_SAFETY_RULES.length} 字符`);
@@ -188,7 +188,7 @@ describe('s1-slim 单块输入探针（实测与超标定位）', () => {
     // s1-slim 改造后口径：参数桶/切片均为块级聚焦渲染（全章节遍历取块内最大，近似生产块 tokens）
     const blockMax = pass && blueprint ? blockLevelMaxChars(blueprint) : { data: 0, slice: 0, blocks: 0, top: [] };
     const segments: Array<{ name: string; chars: number; note: string }> = [
-      { name: 'L0 system 恒定段', chars: writerSystemPrefix(FORMAL_WRITING_RULES).length + SECTION_GENERATION_SAFETY_RULES.length, note: '固定' },
+      { name: 'L0 system 恒定段', chars: writerSystemPrefix().length + SECTION_GENERATION_SAFETY_RULES.length, note: '固定' },
       { name: 'L1 promptTexts（主控提示词）', chars: promptLibraryMaxChars(), note: '提示词库参考量' },
       { name: 'L1 固定生成要求', chars: 1200, note: '约' },
       { name: 'L2 sharedFactLayerText', chars: Math.floor(profile.chapterPoolChars ?? 5000), note: '封顶值（默认 5000）' },

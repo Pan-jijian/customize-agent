@@ -29,8 +29,7 @@ const REQUIREMENT_CALIBRATION_SYSTEM = [
   '只返回 JSON，不要返回 markdown。',
 ].join('\n\n');
 
-const MAX_ADDITIONS_PER_CHAPTER = 2;
-const MAX_TOTAL_ADDITIONS = 8;
+// 上限治理：原 MAX_ADDITIONS_PER_CHAPTER=2 / MAX_TOTAL_ADDITIONS=8 已删除（见补挂处注释）
 
 /** 章名匹配：先精确匹配（去序号归一化），再包含关系兜底（LLM 可能输出带序号或缩写的章标题） */
 function findChapterIndex(chapters: DocumentTemplateChapter[], rawTitle: string) {
@@ -94,12 +93,12 @@ export async function calibrateOutlineSectionsToRequirements(input: {
       if (cleaned.some(existing => sectionTitleEquivalent(existing, title))) continue;
       cleaned.push(title);
     }
-    const budget = Math.min(MAX_ADDITIONS_PER_CHAPTER, cleaned.length, Math.max(0, MAX_TOTAL_ADDITIONS - totalCount));
-    const capped = cleaned.slice(0, budget);
+    // 上限治理：取消每章 2 节 / 总量 8 节的补挂上限。被截掉的评分项要求小节在结构层就不存在
+    // ⇒ 永不被写作，评分项覆盖永远上不去（同参数分配 6/24 到 16/96 的悬崖错误）。
+    const capped = cleaned;
     if (capped.length === 0) continue;
     totalCount += capped.length;
     validated.push({ chapterTitle: chapter.title, sections: capped });
-    if (totalCount >= MAX_TOTAL_ADDITIONS) break;
   }
   // P3.3 属地合规必提项确定性补挂：创优目标/工伤保险属评审硬要求，LLM 偶发漏补（实测只补 3 节）
   // 时按评分项摘要词面确定性补挂到语义宿主章（质量章/安全文明章），与 LLM 新增同构去重。

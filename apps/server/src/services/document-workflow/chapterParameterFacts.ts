@@ -36,8 +36,14 @@ const PARAMETER_NOISE_RE = /OCR|乱码|识别错误|无法确认|语义断裂|�
  * 税率/增值税/报价/合价类，未覆盖「预留金/暂列金额/暂估价」——C-T6 红线（预留金零进入）在此补齐 */
 const PARAMETER_COMMERCIAL_EXTRA_RE = /暂列金额|暂估价|预留金/u;
 
-/** 本章参数注入条数/字符预算（与清单直读同族量级：单章 60 行、3600 字符） */
-const CHAPTER_PARAMETER_MAX_ENTRIES = 60;
+/**
+ * 本章参数注入的**字符预算**（默认 3600；条数上限已删除）。
+ *
+ * 上限治理：原 `CHAPTER_PARAMETER_MAX_ENTRIES = 60` 已删除——**本章相关参数清单是「逐项落位义务」
+ * 的载体**（实测参数落位仅 126/244 = 51.6%，与清单被截断直接相关）。被截掉的参数在第 61 项起
+ * 既不进写作提示词、也不进落位义务 ⇒ 永远写不进正文。
+ * 现口径：字符预算是**渲染预算**（超出的条目降级为「仅列名」而非消失），义务不丢。
+ */
 const CHAPTER_PARAMETER_MAX_CHARS = 3600;
 
 /** 参数文本（相关性计分与渲染共用口径）：键/字段名/值 */
@@ -111,20 +117,19 @@ function parameterRelevanceScore(fact: DocumentFact, expandedTokens: string[]): 
 export function selectChapterParameterFacts(
   factsModel: ParameterFactsSource | undefined | null,
   chapterTitle: string,
-  options: { sections?: string[]; maxEntries?: number } = {},
+  options: { sections?: string[] } = {},
 ): DocumentFact[] {
   const { usable: pool } = usableParameterFacts(factsModel);
   if (pool.length === 0) return [];
   const tokens = chapterParameterTokens(chapterTitle, options.sections || []);
   if (tokens.length === 0) return [];
-  const maxEntries = Math.max(1, options.maxEntries ?? CHAPTER_PARAMETER_MAX_ENTRIES);
+  // 上限治理：**不设条数上限**——本章全部相关参数都须进入义务口径（原 slice(0,60) 让第 61 项起消失）
   return pool
     .map(fact => ({ fact, score: parameterRelevanceScore(fact, tokens) }))
     .filter(item => item.score > 0)
     .sort((a, b) => b.score - a.score
       || String(a.fact.key).localeCompare(String(b.fact.key), 'zh')
       || String(a.fact.value).localeCompare(String(b.fact.value), 'zh'))
-    .slice(0, maxEntries)
     .map(item => item.fact);
 }
 
@@ -135,7 +140,7 @@ export function selectChapterParameterFacts(
 export function renderChapterParameterLines(
   factsModel: ParameterFactsSource | undefined | null,
   chapterTitle: string,
-  options: { sections?: string[]; maxEntries?: number; maxChars?: number } = {},
+  options: { sections?: string[]; maxChars?: number } = {},
 ): string[] {
   const selected = selectChapterParameterFacts(factsModel, chapterTitle, options);
   if (selected.length === 0) return [];
@@ -149,10 +154,14 @@ export function renderChapterParameterLines(
     lines.push(line);
     total += line.length + 1;
   }
+  const rest = selected.slice(lines.length);
   if (lines.length === 0) return [];
   return [
-    `【本章可靠参数清单（资料事实链参数索引：${lines.length} 项与本章相关的规格/参数/数量/时间/比例/标准编号，须逐项在正文对应位置自然写入，保持原值原形态（数字、单位、编号中的连字符与年份不得改写、拆分或省略）；商务金额/单价/税率/预留金类数据一律不得写入正文）】`,
+    `【本章可靠参数清单（资料事实链参数索引：${selected.length} 项与本章相关的规格/参数/数量/时间/比例/标准编号，须逐项在正文对应位置自然写入，保持原值原形态（数字、单位、编号中的连字符与年份不得改写、拆分或省略）；商务金额/单价/税率/预留金类数据一律不得写入正文）】`,
     ...lines,
+    // 上限治理：超预算的条目**降级为仅列名**（原实现直接 break 掉、在提示词中彻底消失）。
+    // 名字+值是落位义务的最小载体，压缩详略可以，丢弃义务不行。
+    ...(rest.length > 0 ? [`- 另需落位（仅列名，共${rest.length}项，须同样逐项写入正文）：${rest.map(fact => String(fact.key)).join('、')}`] : []),
   ];
 }
 
@@ -267,10 +276,21 @@ export function missingRelevantParameterTokens(
 /** 参数值可注入长度上限（与 missingRelevantParameterTokens 同口径：超长值无法自然嵌入正文，不进补写指令） */
 const PARAMETER_REPAIR_VALUE_MAX = 80;
 
-/** 修复分配预算（C3-4 扩容：初版 6/24 在 s28l 净化后 74 条缺口下仅覆盖 17 条，义务满足率无法向 90% 收敛——
- * 单章/总量上限按 s28l/r28l 实机缺口量级放宽；防指令膨胀由「同章参数聚合单条补写指令 + 值长过滤」兜底） */
-const PARAMETER_REPAIR_MAX_PER_CHAPTER = 16;
-const PARAMETER_REPAIR_MAX_TOTAL = 96;
+/**
+ * 每章单轮补写指令的**批量**（不是截断）——超出本批的参数由后续轮次继续消费。
+ *
+ * 历史教训（本常量本身就是证据）：初版 6/24 在 s28l 的 74 条缺口下仅覆盖 17 条，
+ * 义务满足率上不去；当时的处置是**放宽上限**（6/24 → 16/96）而不是去掉总量上限——
+ * 于是 96 条以外的参数**仍永不修复**，只是把悬崖往后挪了一格。任何固定的总量上限
+ * 都是「把丢失伪装成预算」，项目数据量一大就复现。
+ *
+ * 现口径：**分配层不设任何上限**——每个相关而遗漏的参数都必须有主章。
+ * 此前还有「每章 16 条」的批量上限，其副作用是**所有章都满额时该参数被整体丢弃**
+ *（内层择优循环走完仍未分配），同样是丢失。上限的正当位置在**指令渲染层**：
+ * 那里按真实 prompt 预算决定本轮展示多少条，剩余项由后续轮次继续（分配函数每轮基于
+ * **当前正文**重算 relevantMissed，已落位的自然退出）。分配层一旦截断，
+ * 渲染层再正确也拿不到被截掉的那些。
+ */
 
 /** 相关而遗漏参数 → 目标章索引的修复分配（逐条按相关性降序取章，同分取大纲靠前章；
  * 首选章满额时顺位次优章——仅分数 >0 的章可承载，防单章拥塞（s28l 质量/施工方法两章集中 60+ 条）
@@ -279,18 +299,13 @@ export function assignMissingParameterChapters(
   markdown: string,
   factsModel: ParameterFactsSource | undefined | null,
   chapters: Array<{ title: string; sections?: string[] }> = [],
-  options: { maxPerChapter?: number; maxTotal?: number } = {},
 ): Map<number, string[]> {
   const assignment = new Map<number, string[]>();
   if (chapters.length === 0) return assignment;
-  const maxPerChapter = Math.max(1, options.maxPerChapter ?? PARAMETER_REPAIR_MAX_PER_CHAPTER);
-  const maxTotal = Math.max(1, options.maxTotal ?? PARAMETER_REPAIR_MAX_TOTAL);
   const missed = classifyParameterUsage(markdown, factsModel, chapters).relevantMissed;
   if (missed.length === 0) return assignment;
   const tokenSets = chapters.map(chapter => chapterParameterTokens(chapter.title, chapter.sections || []));
-  let assigned = 0;
   for (const fact of missed) {
-    if (assigned >= maxTotal) break;
     const value = String(fact.value).trim();
     if (value.length === 0 || value.length > PARAMETER_REPAIR_VALUE_MAX) continue;
     // 相关性降序候选章（同分取大纲靠前章；分数 >0 才入候选——与 relevantMissed 判定同尺度）
@@ -298,13 +313,12 @@ export function assignMissingParameterChapters(
       .map((tokens, index) => ({ index, score: tokens.length === 0 ? 0 : parameterRelevanceScore(fact, tokens) }))
       .filter(item => item.score > 0)
       .sort((left, right) => right.score - left.score || left.index - right.index);
-    for (const candidate of ranked) {
-      const list = assignment.get(candidate.index) ?? [];
-      if (list.length >= maxPerChapter) continue;
+    // 逐章择优：取相关性最高的章；同章聚合为一条补写指令（指令大小由渲染层按预算控制）
+    const best = ranked[0];
+    if (best) {
+      const list = assignment.get(best.index) ?? [];
       list.push(value);
-      assignment.set(candidate.index, list);
-      assigned += 1;
-      break;
+      assignment.set(best.index, list);
     }
   }
   return assignment;

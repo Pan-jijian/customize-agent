@@ -76,7 +76,7 @@ export interface FinalizeGenerationInput {
   documentSpec: AutoDocumentSpecPackage; projectMaterialProfile: ProjectMaterialProfile;
   projectMaterialSummary: ProjectMaterialSummary; domainProfile: DocumentDomainProfile;
   documentBudget: DocumentBudget; generationStrategy: DocumentGenerationStrategy;
-  readiness: DocumentGenerationReadiness; indexHealth: ReturnType<typeof kbIndexHealth>; promptPlan: PromptBindingPlan;
+  readiness: DocumentGenerationReadiness; indexHealth: ReturnType<typeof kbIndexHealth>;
   // ── 提示词与规则 ──
   promptTexts: string; reviewPromptTexts: string;
   repairPromptTexts: string;
@@ -183,14 +183,12 @@ export interface FinalizeSession {
   failedChapterMessages: string[];
   indexHealth: ReturnType<typeof kbIndexHealth>;
   webResearchReport: { enabled: boolean; queries: string[]; evidenceCount: number; filteredCount: number; chapters: string[] };
-  hasExplicitOutline: boolean;
   retrievalCoverageReports: RetrievalCoverageReport[];
   writingTaskBrief?: WritingTaskBrief;
   globalConsistencyIssues?: string[];
   agentWorkflow: AgentWorkflowContext;
   factExtractionPromptTexts: string;
   readiness: DocumentGenerationReadiness;
-  promptPlan: PromptBindingPlan;
   // ── 可变状态 ──
   allEvidence: DocumentEvidence[];
   facts: Record<string, string>;
@@ -277,14 +275,12 @@ export function createFinalizeSession(input: FinalizeGenerationInput): FinalizeS
     failedChapterMessages: input.failedChapterMessages,
     indexHealth: input.indexHealth,
     webResearchReport: input.webResearchReport,
-    hasExplicitOutline: input.hasExplicitOutline,
     retrievalCoverageReports: input.retrievalCoverageReports,
     writingTaskBrief: input.writingTaskBrief,
     globalConsistencyIssues: input.globalConsistencyIssues,
     agentWorkflow: input.agentWorkflow,
     factExtractionPromptTexts: input.factExtractionPromptTexts,
     readiness: input.readiness,
-    promptPlan: input.promptPlan,
     allEvidence: input.allEvidence,
     facts: {},
     structuredFacts: [],

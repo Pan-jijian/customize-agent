@@ -64,14 +64,14 @@ describe('reviewTemplatingSemantics', () => {
     expect(prompt).toContain('重难点分析');
   });
 
-  it('问题过滤非字符串与空串并截断至 6 条', async () => {
+  it('上限治理：问题过滤非字符串与空串，但**不截断**（原实现 slice(0,6) 会丢第 7 条起）', async () => {
     callDocumentLlmJsonMock.mockResolvedValue({ issues: ['a', '', 'b', 42, 'c', 'd', 'e', 'f', 'g', null] });
     const result = await reviewTemplatingSemantics({
       templating: makeReport({ vagueHitCount: 1 }),
       markdown: '正文',
       diagnostics: DIAGNOSTICS,
     });
-    expect(result.issues).toEqual(['a', 'b', 'c', 'd', 'e', 'f']);
+    expect(result.issues).toEqual(['a', 'b', 'c', 'd', 'e', 'f', 'g']);
     expect(result.reviewed).toBe(true);
   });
 
@@ -86,13 +86,17 @@ describe('reviewTemplatingSemantics', () => {
     expect(prompt).toContain('四新技术命中');
   });
 
-  it('LLM 失败静默降级返回未复核（不阻断）', async () => {
+  it('降级治理：LLM 失败**显性返回未复核**（原实现返回空 issues，与「复核通过无问题」同形）', async () => {
     callDocumentLlmJsonMock.mockRejectedValue(new Error('llm down'));
     const result = await reviewTemplatingSemantics({
       templating: makeReport({ level: 'heavy' }),
       markdown: '正文',
       diagnostics: DIAGNOSTICS,
     });
-    expect(result).toEqual({ issues: [], reviewed: false });
+    // 失败必须沿既有渲染通道可见（调用方只渲染 issues），否则「复核失败」与「复核通过」同形
+    expect(result.reviewed).toBe(false);
+    expect(result.issues).toHaveLength(1);
+    expect(result.issues[0]).toContain('语义级模板化复核未完成');
+    expect(result.issues[0]).toContain('llm down');
   });
 });

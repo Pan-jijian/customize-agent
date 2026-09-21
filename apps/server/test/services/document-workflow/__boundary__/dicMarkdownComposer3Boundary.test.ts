@@ -711,13 +711,13 @@ describe('O8 composeDocumentMarkdown', () => {
 // ═══════ O9 writerSystemPrefix / docSystemPrefix ═══════
 describe('O9 writerSystemPrefix / docSystemPrefix', () => {
   it('默认 → 含 L0 公共前缀', () => {
-    const prefix = writerSystemPrefix('LEGACY');
+    const prefix = writerSystemPrefix();
     expect(prefix).toContain('事实分级');
     expect(prefix).not.toBe('LEGACY');
   });
 
   it('默认 → 写作专家身份句', () => {
-    expect(writerSystemPrefix('LEGACY')).toContain('你是施工组织设计文档写作专家');
+    expect(writerSystemPrefix()).toContain('你是施工组织设计文档写作专家');
   });
 
   it('docSystemPrefix 默认 → L0 + role', () => {

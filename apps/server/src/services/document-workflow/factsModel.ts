@@ -61,6 +61,8 @@ function parseWorkbookTablesCached(absolute: string, item: DocumentEvidence): St
 }
 
 export function extractStructuredTables(evidence: DocumentEvidence[]): StructuredTableFact[] {
+  /** 降级治理：工作簿解析失败明细（回退到文本解析＝保真度下降，必须可计数可归因） */
+  const workbookParseFailures: string[] = [];
   const tables: StructuredTableFact[] = [];
   const seen = new Set<string>();
   for (const item of evidence.filter(e => e.processingType === 'table' || e.processingType === 'structured_data' || e.processingType === 'bill_of_quantities')) {
@@ -74,8 +76,10 @@ export function extractStructuredTables(evidence: DocumentEvidence[]): Structure
       try {
         tables.push(...parseWorkbookTablesCached(absolute, item));
         continue;
-      } catch {
-        // 回退到文本解析
+      } catch (error) {
+        // 降级治理：回退到文本解析是**保真度下降**（工作簿解析 → 行内分隔符猜表），
+        // 原实现无任何计数 ⇒ 无法区分「表解析失败」与「资料本无表」。此处登记计数与原因。
+        workbookParseFailures.push(`${item.filePath}：${error instanceof Error ? error.message : String(error)}`);
       }
     }
     const lines = item.content.split('\n').map(line => line.trim()).filter(Boolean);
@@ -85,6 +89,10 @@ export function extractStructuredTables(evidence: DocumentEvidence[]): Structure
     const rows = tableLines.map(line => line.split(delimiter).map(cell => cell.trim()).filter(Boolean)).filter(row => row.length > 1);
     if (rows.length < 2) continue;
     tables.push({ tableType: item.roleId || 'table', headers: rows[0], rows: rows.slice(1), sourceFile: item.filePath, sourceRange: item.sectionTitle });
+  }
+  // 降级治理：解析失败必须可见（原实现静默回退，无法区分「表解析失败」与「资料本无表」）
+  if (workbookParseFailures.length > 0) {
+    console.warn(`[facts] 工作簿解析失败 ${workbookParseFailures.length} 份，已回退文本猜表（保真度下降）：${workbookParseFailures.slice(0, 5).join('；')}`);
   }
   return tables;
 }
@@ -269,34 +277,65 @@ export function shouldRunLlmFactExtraction(existingFacts: DocumentFact[], templa
 
 export async function extractFactsWithLlm(evidence: DocumentEvidence[], promptTexts: string, template: DocumentTemplate, spec?: AutoDocumentSpecPackage, signal?: AbortSignal, diagnostics?: DocumentGenerationDiagnostics): Promise<{ facts: DocumentFact[]; stages: DocumentExecutionStage[] }> {
   const stages: DocumentExecutionStage[] = [{ type: 'fact_extraction', roleId: 'llm-json', status: 'skipped', message: 'LLM JSON 抽取未启用或无可用模型' }];
+  // 上限治理（G 线）：**maxChars 是本批预算，不是总量上限**。
+  // 原实现 `slice(0, maxItems=48)` + `if (chars + part.length > maxChars) break` 会把第 49 条起的
+  // 证据**永久排除在事实抽取之外**——它的项目事实**从未存在**：不进 factsModel、不进参数池、
+  // 不进蓝图锚点、不进落位义务、不进数值对账。这是所有上限里唯一「上游断流」型：
+  // 其它上限最多丢「一次注入」，这一条丢的是**数据本身**，且任何下游通道都无从补救。
+  // 现口径：按分数排序后**分批**（每批 ≈ maxChars），逐批抽取、批间合并去重——总量无上限。
   const maxChars = Math.max(12000, Math.floor(tuningProfile().factExtractionMaxChars ?? 45000));
-  const maxItems = Math.max(8, Math.floor(tuningProfile().factExtractionMaxItems ?? 48));
-  let chars = 0;
-  const sampleParts: string[] = [];
-  // 证据编号映射表：模型只引用 [E编号]，路径/角色由本表回填——模型输出无法伪造来源
-  const evidenceIndex = new Map<string, DocumentEvidence>();
-  // 按分数排序取最重要的证据（而非前 maxItems 个）
-  const topEvidence = [...evidence].sort((a, b) => b.score - a.score).slice(0, maxItems);
-  for (const item of topEvidence) {
-    // round-23 P0-3：LLM 提取输入先清 PDF 标题标记噪声，防止模型面对夹断乱行输出截断坏值
-    const content = cleanPdfHeadingNoise(stringifyFactValue(item.content)).replace(/\s+/gu, ' ').slice(0, Math.max(800, Math.floor(maxChars / maxItems)));
-    const evidenceId = `E${sampleParts.length + 1}`;
-    const part = `[${evidenceId}] 文件:${item.filePath}\n角色:${item.roleId || ''}\n处理:${item.processingType || ''}\n内容:${content}`;
-    if (sampleParts.length > 0 && chars + part.length > maxChars) break;
-    chars += part.length;
-    sampleParts.push(part);
-    evidenceIndex.set(evidenceId, item);
-  }
-  const sample = sampleParts.join('\n\n---\n\n');
-  if (!sample.trim()) return { facts: [], stages };
-  throwIfAborted(signal);
+  const perItemChars = Math.max(800, Math.floor(maxChars / Math.max(8, Math.floor(tuningProfile().factExtractionMaxItems ?? 48))));
+  const rankedEvidence = [...evidence].sort((a, b) => b.score - a.score);
   const targets = specFactTargets(template, spec);
   const schemaText = targets.map(field => `- id=${field.id} name=${field.name} type=auto required=${field.required} sourceRoleIds=${field.sourceRoleIds.join(',') || '不限'} hint=${field.extractionHint || '无'}`).join('\n');
-  const llm = await callDocumentLlmJson<{ facts?: Array<{ fieldId?: string; fieldName?: string; key: string; value: string; evidenceId?: string; confidence?: number }> }>(
-    promptTexts || '你是文档事实抽取器。',
-    `请严格按下面的动态事实 schema 从资料中抽取事实。只抽取资料明确支持的内容；如果字段限定 sourceRoleIds，必须优先来自对应文件角色；事实取舍和冲突处理遵循规范包字段说明、文件角色和提示词角色配置。\n返回 {"facts":[{"fieldId":"...","fieldName":"...","key":"...","value":"...","evidenceId":"E1","confidence":0.8}]}。evidenceId 必须取自资料行首的编号（如 E1、E2），不得自造来源。\n\n动态事实 schema：\n${schemaText}\n\n资料：\n${sample}`,
-    { signal, maxTokens: 1800, temperature: 0, diagnostics },
-  );
+  const systemPrompt = promptTexts || '你是文档事实抽取器。';
+  type RawFact = { fieldId?: string; fieldName?: string; key: string; value: string; evidenceId?: string; confidence?: number };
+  const llm = { facts: [] as RawFact[] };
+  // 证据编号映射表：模型只引用 [E编号]，路径/角色由本表回填——模型输出无法伪造来源。
+  // **编号跨批全局递增**（E1..En 连续），不可按批从 E1 重开：下游按 evidenceId 回填来源文件，
+  // 批内重开会让第 2 批的 E1 覆盖第 1 批的 E1，把事实挂到**错误的文件**上（来源伪造的隐蔽形态）。
+  const evidenceIndex = new Map<string, DocumentEvidence>();
+  if (rankedEvidence.length === 0) return { facts: [], stages };
+
+  // 分批：贪心装入直到本批超出 maxChars（单条超预算也自成一档，保证不漏）
+  const batches: Array<Array<{ item: DocumentEvidence; content: string }>> = [];
+  let currentBatch: Array<{ item: DocumentEvidence; content: string }> = [];
+  let currentChars = 0;
+  for (const item of rankedEvidence) {
+    // round-23 P0-3：LLM 提取输入先清 PDF 标题标记噪声，防止模型面对夹断乱行输出截断坏值
+    const content = cleanPdfHeadingNoise(stringifyFactValue(item.content)).replace(/\s+/gu, ' ').slice(0, perItemChars);
+    const partLength = content.length + item.filePath.length + 64;
+    if (currentBatch.length > 0 && currentChars + partLength > maxChars) {
+      batches.push(currentBatch);
+      currentBatch = [];
+      currentChars = 0;
+    }
+    currentBatch.push({ item, content });
+    currentChars += partLength;
+  }
+  if (currentBatch.length > 0) batches.push(currentBatch);
+
+  let evidenceSeq = 0;
+  for (const batch of batches) {
+    throwIfAborted(signal);
+    const sampleParts = batch.map(({ item, content }) => {
+      evidenceSeq += 1;
+      const evidenceId = `E${evidenceSeq}`;
+      evidenceIndex.set(evidenceId, item);
+      return `[${evidenceId}] 文件:${item.filePath}\n角色:${item.roleId || ''}\n处理:${item.processingType || ''}\n内容:${content}`;
+    });
+    const sample = sampleParts.join('\n\n---\n\n');
+    if (!sample.trim()) continue;
+    const batchResult = await callDocumentLlmJson<{ facts?: RawFact[] }>(
+      systemPrompt,
+      `请严格按下面的动态事实 schema 从资料中抽取事实。只抽取资料明确支持的内容；如果字段限定 sourceRoleIds，必须优先来自对应文件角色；事实取舍和冲突处理遵循规范包字段说明、文件角色和提示词角色配置。\n返回 {"facts":[{"fieldId":"...","fieldName":"...","key":"...","value":"...","evidenceId":"E1","confidence":0.8}]}。evidenceId 必须取自资料行首的编号（如 E1、E2），不得自造来源。\n\n动态事实 schema：\n${schemaText}\n\n资料：\n${sample}`,
+      { signal, maxTokens: 1800, temperature: 0, diagnostics },
+    );
+    for (const raw of batchResult?.facts ?? []) {
+      if (!raw || typeof raw.key !== 'string') continue;
+      llm.facts.push(raw);
+    }
+  }
   throwIfAborted(signal);
   if (!llm?.facts?.length) return { facts: [], stages };
   const facts: DocumentFact[] = [];
@@ -566,7 +605,9 @@ export function extractProjectBasicFactsFromEvidence(evidence: DocumentEvidence[
       }
     }
   }
-  return facts.slice(0, 80);
+  // 上限治理：**不截断**（原 slice(0,80)：第 81 条起项目基本事实被丢弃，而本函数无分页/批间续取）。
+  // 该项目基本事实是 T0 白名单层的来源，丢一条就少一条锚点。
+  return facts;
 }
 
 export function extractPreciseFactsFromEvidence(evidence: DocumentEvidence[], profile: DocumentDomainProfile = DEFAULT_DOCUMENT_DOMAIN_PROFILE): DocumentFact[] {
