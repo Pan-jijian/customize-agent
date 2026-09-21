@@ -27,17 +27,30 @@ interface IndexJob {
   uploadOperationId?: string;
   uploadTitle?: string;
   forceReindexAll?: boolean;
+  /** 强制重解析 relativePath/relativePaths（跳过内容哈希比对），「重新解析」入口使用 */
+  forceReindex?: boolean;
   relativePath?: string;
   relativePaths?: string[];
 }
 
 const activeJobs = new Map<string, ActiveIndexJob>();
 
+/** 后台索引输出的良性噪声行：OCR 链路自身会往 stderr 写告警（图片过小/行不可识别），
+ * PP-OCRv6 ONNX 模型每次加载还会输出 CleanUnusedInitializersAndNodeArgs 告警。
+ * 子进程 stderr 一律以「后台索引错误输出」前缀落盘且会把进度重置到 parsing/5%，
+ * 这些行不影响索引结果，透传会让整个重新索引过程被误报为失败并覆盖真实进度。 */
+const WORKER_OUTPUT_NOISE = [
+  /^Image too small to scale!!/u,
+  /^Line cannot be recognized!!$/u,
+  /CleanUnusedInitializersAndNodeArgs/u,
+  /should be removed from the model/u,
+];
+
 function normalizeWorkerOutput(chunk: unknown): string {
   return String(chunk)
     .split(/\r?\n/u)
     .map(line => line.trim())
-    .filter(line => line && !/^Image too small to scale!!/u.test(line) && line !== 'Line cannot be recognized!!')
+    .filter(line => line && !WORKER_OUTPUT_NOISE.some(pattern => pattern.test(line)))
     .join('\n');
 }
 

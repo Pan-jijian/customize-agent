@@ -7,7 +7,7 @@ import { resolveAndImport, resolvePackage } from './module-resolver.js';
 import { createOcrProvider, type OcrProvider, type OcrRecognizeOptions, type OcrResult } from './ocr-providers.js';
 import { PADDLE_DETECTION_MAX_SIDE_PX, buildPaddleRecognizeOptions } from './paddle-model-select.js';
 import { planTiles, recognizeWithTiling, shouldTilePage } from './ocr-tiling.js';
-import { applyOcrMisreadCorrections, decodeTextBuffer, filterOcrGraphicNoiseLines, hasForeignScriptGarbledText, normalizeSymbolicPua } from './text-encoding.js';
+import { applyOcrMisreadCorrections, decodeTextBuffer, filterOcrGraphicNoiseLines, hasForeignScriptGarbledText, normalizeSymbolicPua, restoreLatin1MojibakeAsGbk } from './text-encoding.js';
 import { extractEmbeddedOfficeImages } from './office-embedded-images.js';
 import { detectSmartTableHeader } from './table-header-detect.js';
 import type { ClassifiedFile } from '../types.js';
@@ -95,6 +95,46 @@ export function layoutCadAnnotations(annotations: CadAnnotation[]): string[] {
   if (current.length > 0) paragraphs.push(current.join('\n'));
 
   return [...paragraphs, ...unpositioned.map(item => item.text)];
+}
+
+/** 单条标注类 DXF 实体的成对解析结果：(组码, 值) 按文档顺序保留 */
+export interface DxfEntityPairs {
+  type: string;
+  pairs: Array<[string, string]>;
+}
+
+/** 标注类实体：TEXT/MTEXT 是图纸文字主体，DIMENSION/LEADER 携带尺寸与引线文字，ATTRIB 是块属性（门窗表/材料表） */
+const DXF_TEXT_ENTITY_RE = /^(?:TEXT|MTEXT|DIMENSION|LEADER|ATTRIB)/u;
+
+/**
+ * 按 (组码, 值) 成对推进解析 DXF，只保留标注类实体。
+ *
+ * 为什么不能沿用正则切分实体：`raw.split(/(?:^|\r?\n)\s*0\s*\r?\n/u)` 无法区分「组码 0 行」
+ * 与「值为 0 的组码值行」——` 72` 组码后面跟一行 `     0`（水平对齐参数，DXF 中极常见）
+ * 同样命中该正则，实体被从中间劈开；后半段以子类标记 `100` 开头，通不过
+ * `^(?:TEXT|MTEXT|DIMENSION|LEADER|ATTRIB)` 过滤而被整条丢弃。实测因此丢失
+ * 2#3#门卫结构图 4,241 个中文字、1#厂房结构基础 10,905 个中文字（两份图纸入库均仅剩 30 余字）。
+ *
+ * DXF 只有严格「两行一组」才是 (组码, 值)，任何逐行扫描的匹配都可能把值当成组码，
+ * 因此这里必须按索引成对推进，并把配对结果交给调用方复用于图层/块名/坐标等组码查询。
+ */
+export function parseDxfTextEntities(raw: string): DxfEntityPairs[] {
+  const lines = String(raw ?? '').split(/\r?\n/u);
+  const entities: DxfEntityPairs[] = [];
+  let current: DxfEntityPairs | undefined;
+  for (let index = 0; index + 1 < lines.length; index += 2) {
+    const code = lines[index]!.trim();
+    const value = lines[index + 1] ?? '';
+    if (code === '0') {
+      const type = value.trim().split(/\s+/u)[0] ?? '';
+      current = DXF_TEXT_ENTITY_RE.test(type) ? { type, pairs: [] } : undefined;
+      if (current) entities.push(current);
+      continue;
+    }
+    // 非标注实体不收集组码，避免为整份图纸（可达 15 万个实体）无谓分配
+    if (current) current.pairs.push([code, value]);
+  }
+  return entities;
 }
 
 const CAD_INTERNAL_TOKEN_RE = /\b(?:TDbPipe|TDbPipeValve|TDbPipeFitting|TDbWellh|AcDb[\w:]+|Dwg\w+|ObjectId|Handle|ByLayer|Continuous|Model|Layout\d*|MLEADERSTYLE|AppInfoHistory|AppInfoDataList|ObjectDBX|Classes|DICTIONARYVARP|ObjFreeSpaceP|AuxHeaderT|\$AUDIT_BAD_\w+)\b/giu;
@@ -306,7 +346,6 @@ export class ContentExtractor {
     const readableRatio = readable / chars.length;
     const symbolRatio = symbols / chars.length;
     const hasDomainSignal = CAD_DOMAIN_SIGNAL_RE.test(compact);
-    const hasCommonTextShape = /[，。；：、,.\-/()（）]|\d+(?:\.\d+)?\s*(?:mm|cm|m|㎡|%|°)?/iu.test(compact);
     const latinVowelCount = chars.filter(char => /[aAeEiIoOuU]/u.test(char)).length;
     // 替换符（U+FFFD）：解码失败的标志，正常标注不会出现
     if (chars.includes('\uFFFD')) return true;
@@ -316,7 +355,14 @@ export class ContentExtractor {
     if (readableRatio < 0.6) return true;
     if (symbolRatio > 0.35 && !hasDomainSignal) return true;
     if (latin >= 12 && latinVowelCount === 0 && !hasDomainSignal) return true;
-    if (cjk >= 8 && digits === 0 && !hasDomainSignal && !hasCommonTextShape) return true;
+    // 已移除「cjk >= 8 && digits === 0 && !hasDomainSignal && !hasCommonTextShape → 乱码」规则：
+    // 它把「无数字、无句读、不含工程关键词」的整句中文一律判为二进制误读，但图纸里这类
+    // 纯汉字短句极为常见（「双门热风循环消毒柜」「檐口支撑收边固定用自攻螺钉」
+    // 「防火吊顶耐火极限不小于」「一层防火分区示意图」「本图未盖出图章无效」）。
+    // 巢湖 21 张图纸实测：该规则命中 888 处（去重 201 条），逐条人工核对**全部是正常中文标注、
+    // 无一条真乱码**，而其中 841 处属于「只被它拦下」——即纯粹的误杀。其余规则（符号占比、
+    // Latin-1 扩展字符密度、短片段周期重复、汉字高频重复等）实测仍独立拦下 3,019 处真噪声，
+    // 移除本规则不削弱对真乱码的防护（同批语料误杀从 873 处降至 32 处）。
     // 短行内汉字-Latin-汉字交叉混排（考堂f肀、渱潑喲W晀耀）：二进制误读的典型形态；
     // 正常标注的字母编号在汉字前或后（JD 电井、AB轴），不会夹在汉字中间
     if (chars.length <= 8 && cjk >= 2 && latin >= 1 && digits === 0 && !hasDomainSignal && /[\p{Script=Han}][\p{Script=Latin}][\p{Script=Han}]/u.test(compact)) return true;
@@ -606,9 +652,11 @@ export class ContentExtractor {
       }
     }
 
-    const layers = this.matchAll(raw, /(?:^|\r?\n)\s*8\s*\r?\n([^\r\n]+)/gu).filter(value => this.isUsableCadName(value)).slice(0, 300);
+    // 图层/块名同样走 GBK 还原：中文图层名（「轴线」「标注」）在 DWG→DXF 后与标注文本
+    // 是同一类码位直出乱码，不还原会被 isUsableCadName 整批判为乱码而丢失
+    const layers = this.matchAll(raw, /(?:^|\r?\n)\s*8\s*\r?\n([^\r\n]+)/gu).map(restoreLatin1MojibakeAsGbk).filter(value => this.isUsableCadName(value)).slice(0, 300);
     const textEntities = this.extractDxfTextAnnotations(raw).slice(0, 5000);
-    const blocks = this.matchAll(raw, /(?:^|\r?\n)\s*2\s*\r?\n([^\r\n]+)/gu).filter(value => this.isUsableCadName(value)).slice(0, 300);
+    const blocks = this.matchAll(raw, /(?:^|\r?\n)\s*2\s*\r?\n([^\r\n]+)/gu).map(restoreLatin1MojibakeAsGbk).filter(value => this.isUsableCadName(value)).slice(0, 300);
     const entityTypes = this.matchAll(raw, /(?:^|\r?\n)\s*0\s*\r?\n([A-Z][A-Z0-9_]+)/gu).slice(0, 1200);
     const uniqueLayers = Array.from(new Set(layers));
     const uniqueBlocks = Array.from(new Set(blocks));
@@ -662,37 +710,46 @@ export class ContentExtractor {
   private extractDxfTextAnnotations(raw: string): CadAnnotation[] {
     // ATTRIB（块属性）是门窗表/材料表/标题栏数据的载体（块插入时的属性值实体），
     // 此前遗漏导致整表数据丢失（真实图纸回归：门窗表仅剩零散标注）
-    const entities = raw.split(/(?:^|\r?\n)\s*0\s*\r?\n/u).filter(section => /^(?:TEXT|MTEXT|DIMENSION|LEADER|ATTRIB)/u.test(section.trim()));
-    return entities.flatMap(section => {
-      const entityType = section.trim().split(/\s+/u)[0];
+    return parseDxfTextEntities(raw).flatMap(entity => {
+      const entityType = entity.type;
+      // 组码查询一律走成对解析结果：值行与组码行外观相同，按行匹配会把值当组码
+      const first = (code: string): string | undefined => entity.pairs.find(pair => pair[0] === code)?.[1];
+      const numeric = (code: string): number | undefined => {
+        const value = first(code);
+        if (value === undefined) return undefined;
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : undefined;
+      };
       let rawText: string;
       if (entityType === 'ATTRIB') {
         // 属性实体：组码 2 是属性标签名（门窗表/材料表的列名），组码 1 是属性值，
         // 标签与值是独立语义字段（「型号 M1021」「高度 2100」），空格连接而非续段拼接
-        const tag = /(?:^|\r?\n)\s*2\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]?.trim() ?? '';
-        const value = /(?:^|\r?\n)\s*1\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]?.trim() ?? '';
-        rawText = `${tag} ${value}`;
+        rawText = `${first('2')?.trim() ?? ''} ${first('1')?.trim() ?? ''}`;
       } else {
         // MTEXT 多段文本：组码 1 是首段（≤255 字符），组码 3 是后续续段（每段 ≤250 字符），
         // 必须按序拼接才是完整文字（此前只取首个组码 1/3，多段标注丢失大半内容）；
-        // DIMENSION 组码 1/3 是显式尺寸文字与后缀，TEXT/LEADER 组码 3 罕见但同按序收集
-        rawText = [...section.matchAll(/(?:^|\r?\n)\s*(?:1|3)\s*\r?\n([^\r\n]+)/gu)].map(match => match[1]).join('');
+        // DIMENSION 组码 1/3 是显式尺寸文字与后缀，TEXT/LEADER 组码 3 罕见但同按序收集。
+        // 按 pairs 的文档顺序取，保持 1 与 3 的交错次序
+        rawText = entity.pairs.filter(pair => pair[0] === '1' || pair[0] === '3').map(pair => pair[1]).join('');
       }
-      const text = this.cleanCadReadableText(rawText);
+      // DWG→DXF 转换把 DWG 内部的 GBK 标注按码位直出（0xBF 0xF2 → "¿ò"），必须先还原编码：
+      // cleanCadReadableText 会把 C1 半字节（U+0080-U+009F）直接替换成空格，一旦先清洗，
+      // 中文标注就永久还原不回来，只能被 isLikelyGarbledCadText 当乱码整条丢弃
+      const text = this.cleanCadReadableText(restoreLatin1MojibakeAsGbk(rawText));
       if (!text || !this.isReadableCadValue(text)) return [];
       // 图层/块名同样要过可读性过滤：DXF 里 GBK 误读（Ïä¹ñ）或纯数字/内部
       // 标识（11、AcDb...）会直接混进节点文本，不合格时置空由语义节点回退
-      const layer = /(?:^|\r?\n)\s*8\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]?.trim() ?? '';
+      const layer = restoreLatin1MojibakeAsGbk(first('8')?.trim() ?? '');
       // ATTRIB 的组码 2 是属性标签名而非块名，不可当块名使用
-      const block = entityType === 'ATTRIB' ? '' : /(?:^|\r?\n)\s*2\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]?.trim() ?? '';
+      const block = entityType === 'ATTRIB' ? '' : restoreLatin1MojibakeAsGbk(first('2')?.trim() ?? '');
       return [{
         text,
         layer: layer && this.isReadableCadValue(layer) ? layer : undefined,
         block: block && this.isReadableCadValue(block) ? block : undefined,
         entityType,
-        x: Number(/(?:^|\r?\n)\s*10\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]),
-        y: Number(/(?:^|\r?\n)\s*20\s*\r?\n([^\r\n]+)/u.exec(section)?.[1]),
-      }].map(item => ({ ...item, x: Number.isFinite(item.x) ? item.x : undefined, y: Number.isFinite(item.y) ? item.y : undefined }));
+        x: numeric('10'),
+        y: numeric('20'),
+      }];
     });
   }
 

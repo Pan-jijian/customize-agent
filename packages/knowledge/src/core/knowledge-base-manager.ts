@@ -592,12 +592,30 @@ export class KnowledgeBaseManager {
 
   async reindexFile(relativePath: string, options: { onProgress?: (progress: KnowledgeIndexProgress) => void; vectorMode?: 'sync' | 'defer' } = {}): Promise<DiffResult> {
     const normalized = this.normalizeRelativePath(relativePath);
-    const record = this.store.listRecords().find(item => item.relativePath === normalized);
     const targetPath = this.resolveKbRelativePath(normalized);
     if (!fs.existsSync(targetPath)) throw new Error('file not found');
-    if (record) await this.deleteVectorFile(record.collectionName, normalized);
-    this.store.deleteRecord(normalized);
-    return this.incrementalIndex({ ...options, onlyRelativePaths: [normalized] });
+    return this.reindexPaths([normalized], options);
+  }
+
+  /**
+   * 强制重解析指定路径（文件或文件夹展开后的文件列表），**不比对内容哈希**。
+   *
+   * 为什么不能直接用 incrementalIndex：变更判定以「mtime + 文件大小」为初筛、内容哈希为复核，
+   * 解析器升级不改文件内容，这些文件一律被判「未变更」而跳过 —— 「重新解析」按钮于是对解析器
+   * 修复永远不生效（用户点了没变化）。这里先按 reindexFile 同一口径删记录与向量，再走增量索引，
+   * 使这批路径必然按「新文件」重新解析入库。
+   */
+  async reindexPaths(relativePaths: string[], options: { onProgress?: (progress: KnowledgeIndexProgress) => void; vectorMode?: 'sync' | 'defer' } = {}): Promise<DiffResult> {
+    this.initialize();
+    const normalized = Array.from(new Set(relativePaths.map(item => this.normalizeRelativePath(item))));
+    // 一次性取记录建索引：按路径逐个 listRecords 是 O(N×M)，大库（数千文件）下开销显著
+    const records = new Map(this.store.listRecords().map(record => [record.relativePath, record]));
+    for (const relativePath of normalized) {
+      const record = records.get(relativePath);
+      if (record) await this.deleteVectorFile(record.collectionName, relativePath);
+      this.store.deleteRecord(relativePath);
+    }
+    return this.incrementalIndex({ ...options, onlyRelativePaths: normalized });
   }
 
   async addFile(sourcePath: string, targetRelativePath?: string): Promise<DiffResult> {

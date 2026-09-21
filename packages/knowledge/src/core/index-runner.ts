@@ -4,6 +4,12 @@ import type { KnowledgeBaseManager, KnowledgeIndexProgress } from './knowledge-b
 export interface IndexRunJob {
   relativePath?: string;
   relativePaths?: string[];
+  /**
+   * 强制重解析 relativePath/relativePaths（不比对内容哈希）。
+   * 解析器升级不改文件内容与 mtime，增量比对会把它们判为「未变更」而跳过，
+   * 因此「重新解析文件/文件夹」这类显式重解析入口必须带上本标记。
+   */
+  forceReindex?: boolean;
   forceReindexAll?: boolean;
   vectorMode?: 'sync' | 'defer';
   uploadOperationId?: string;
@@ -26,7 +32,9 @@ export async function runIndexLoop(
   onProgress: (progress: KnowledgeIndexProgress) => void,
 ): Promise<IndexRunOutcome> {
   let diff: DiffResult = job.relativePaths?.length
-    ? await project.incrementalIndex({ vectorMode: job.vectorMode, onProgress, onlyRelativePaths: job.relativePaths })
+    ? job.forceReindex
+      ? await project.reindexPaths(job.relativePaths, { vectorMode: job.vectorMode, onProgress })
+      : await project.incrementalIndex({ vectorMode: job.vectorMode, onProgress, onlyRelativePaths: job.relativePaths })
     : job.relativePath
       ? await project.reindexFile(job.relativePath, { vectorMode: job.vectorMode, onProgress })
       : job.forceReindexAll

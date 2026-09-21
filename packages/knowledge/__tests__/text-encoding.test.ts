@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyOcrMisreadCorrections, decodeTextBuffer, filterOcrGraphicNoiseLines, hasForeignScriptGarbledText, normalizeSymbolicPua } from '../src/extraction/text-encoding.js';
+import { applyOcrMisreadCorrections, decodeTextBuffer, filterOcrGraphicNoiseLines, hasForeignScriptGarbledText, normalizeSymbolicPua, restoreLatin1MojibakeAsGbk } from '../src/extraction/text-encoding.js';
 
 describe('decodeTextBuffer', () => {
   it('UTF-8 中文文本按 UTF-8 解码', () => {
@@ -146,5 +146,61 @@ describe('applyOcrMisreadCorrections', () => {
   it('不误伤包含相同字符的无关词', () => {
     const text = '煤炭、研究、石材';
     expect(applyOcrMisreadCorrections(text)).toBe(text);
+  });
+});
+
+/**
+ * 复现 dwgdxf WASM 的污染链：DWG 内部的 GBK 标注字节在写 DXF 时被按码位直出为
+ * Latin-1 字符（0xBF 0xF2 → "¿ò"），再以 UTF-8 写出。字节层是完全合法的 UTF-8，
+ * 因此 decodeTextBuffer 的「替换符率 > 2%」判据恒不成立，只能在字符串层还原。
+ */
+function toLatin1Mojibake(bytes: number[]): string {
+  return bytes.map(byte => String.fromCharCode(byte)).join('');
+}
+
+describe('restoreLatin1MojibakeAsGbk', () => {
+  it('还原 DWG→DXF 码位直出乱码（实测巢湖结构图「框架柱配筋平面图」）', () => {
+    const mojibake = toLatin1Mojibake([0xBF, 0xF2, 0xBC, 0xDC, 0xD6, 0xF9, 0xC5, 0xE4, 0xBD, 0xEE, 0xC6, 0xBD, 0xC3, 0xE6, 0xCD, 0xBC]);
+    expect(restoreLatin1MojibakeAsGbk(mojibake)).toBe('框架柱配筋平面图');
+  });
+
+  it('还原图内说明类长标注（实测「结构设计总说明」）', () => {
+    const mojibake = toLatin1Mojibake([0xBD, 0xE1, 0xB9, 0xB9, 0xC9, 0xE8, 0xBC, 0xC6, 0xD7, 0xDC, 0xCB, 0xB5, 0xC3, 0xF7]);
+    expect(restoreLatin1MojibakeAsGbk(mojibake)).toBe('结构设计总说明');
+  });
+
+  it('ASCII 与乱码混排时保留 ASCII 部分（实测「7|22(三向)」）', () => {
+    const mojibake = toLatin1Mojibake([0x37, 0x7C, 0x32, 0x32, 0x28, 0xC8, 0xFD, 0xCF, 0xF2, 0x29]);
+    expect(restoreLatin1MojibakeAsGbk(mojibake)).toBe('7|22(三向)');
+  });
+
+  it('幂等：还原结果再次执行不再变化（重索引安全）', () => {
+    const once = restoreLatin1MojibakeAsGbk(toLatin1Mojibake([0xD6, 0xF9, 0xB6, 0xA5, 0x2D, 0x35, 0x30]));
+    expect(once).toBe('柱顶-50');
+    expect(restoreLatin1MojibakeAsGbk(once)).toBe(once);
+  });
+
+  it('纯 ASCII 原样返回', () => {
+    const text = '1:100 C35 200x400';
+    expect(restoreLatin1MojibakeAsGbk(text)).toBe(text);
+  });
+
+  it('已是正常中文的值原样返回（含 U+0100 以上真实字符时不做二次变换）', () => {
+    const text = '框架柱配筋平面图';
+    expect(restoreLatin1MojibakeAsGbk(text)).toBe(text);
+  });
+
+  it('真实 Latin-1 文本不误转（Ø 直径符号）', () => {
+    const text = 'Ø25@200';
+    expect(restoreLatin1MojibakeAsGbk(text)).toBe(text);
+  });
+
+  it('含希腊字母 Φ 的工程标注不误转', () => {
+    const text = 'Φ8 钢筋';
+    expect(restoreLatin1MojibakeAsGbk(text)).toBe(text);
+  });
+
+  it('空值安全', () => {
+    expect(restoreLatin1MojibakeAsGbk('')).toBe('');
   });
 });

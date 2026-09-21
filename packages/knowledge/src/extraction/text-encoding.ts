@@ -159,6 +159,40 @@ export function applyOcrMisreadCorrections(value: string): string {
   return text;
 }
 
+/** 中文字符占比：编码误判的判据（GBK 解码后中文占比更高才认为解码正确） */
+function cjkRatio(value: string): number {
+  return (value.match(/[\u4E00-\u9FFF]/gu) ?? []).length / Math.max(1, value.length);
+}
+
+/** 含 C1 控制区/Latin-1 补充区字符：GBK 字节被按码位直出的乱码候选（不含纯 ASCII） */
+// eslint-disable-next-line no-control-regex -- 探测的就是 U+0080-U+00FF 这一段码位（GBK 半字节被按码位直出的产物），非文本控制语义
+const LATIN1_MOJIBAKE_RE = /[\u0080-\u00FF]/u;
+
+/**
+ * Latin-1 误读还原：把「GBK 字节被按码位逐字节直出」的乱码还原回中文。
+ *
+ * 为什么 decodeTextBuffer 兜不住：dwgdxf WASM 转换器写 DXF 时就把 DWG 内部的 GBK 标注
+ * 按码位映射（0xBF 0xF2 → "¿ò"）再以 UTF-8 写出，字节层是完全合法的 UTF-8，
+ * 「替换符率 > 2%」判据恒不成立。必须在字符串层把码位低字节取回重组成字节流再按 GBK 解码。
+ *
+ * 判据与 decodeTextBuffer 同源：只有 GBK 结果的中文占比更强时才采用，避免把真实
+ * Latin-1 文本（Ø、Café 等）误转；已含 U+0100 以上真实字符的值（本就是中文等）直接返回，
+ * 不做二次变换 —— 变换必须幂等，否则重跑会二次损伤已还原的文本。
+ */
+export function restoreLatin1MojibakeAsGbk(value: string): string {
+  const text = String(value ?? '');
+  if (!text || !LATIN1_MOJIBAKE_RE.test(text)) return text;
+  const bytes = Buffer.allocUnsafe(text.length);
+  let index = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code > 0xFF) return text;
+    bytes[index++] = code;
+  }
+  const decoded = new TextDecoder('gbk', { fatal: false }).decode(bytes.subarray(0, index));
+  return cjkRatio(decoded) > cjkRatio(text) ? decoded : text;
+}
+
 /**
  * 文本编码自动检测解码：BOM（UTF-16LE/BE）→ UTF-8 → GBK。
  * UTF-8 解码替换符率高于 2% 时判定为 GBK 等非 UTF-8 编码；
@@ -180,7 +214,6 @@ export function decodeTextBuffer(buffer: Buffer): { text: string; encoding: stri
 
   try {
     const gbkText = new TextDecoder('gbk', { fatal: true }).decode(buffer);
-    const cjkRatio = (value: string) => (value.match(/[\u4E00-\u9FFF]/gu) ?? []).length / Math.max(1, value.length);
     if (replacementRatio > 0.3 || cjkRatio(gbkText) > cjkRatio(utf8Text)) {
       return { text: gbkText, encoding: 'gbk' };
     }

@@ -50,7 +50,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       filePath: relativePath,
       fileName: relativePath.split('/').filter(Boolean).pop(),
     });
-    startKnowledgeIndex({ id: operationId, projectRoot, relativePath, relativePaths, forceReindexAll: false });
+    // forceReindex：文件内容与 mtime 都没变时增量比对会跳过（解析器升级属于这种情况，
+    // 用户点「重新解析」却看不到任何变化）；本入口的语义就是「重新解析这批路径」，必须强制
+    startKnowledgeIndex({ id: operationId, projectRoot, relativePath, relativePaths, forceReindex: true, forceReindexAll: false });
     return res.status(202).json({ success: true, accepted: true, operationId, job, fileCount: relativePaths.length });
   } catch (e: unknown) {
     console.error('[api] kb/files/reindex', e);
