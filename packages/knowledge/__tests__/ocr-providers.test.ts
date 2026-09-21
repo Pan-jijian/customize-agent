@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createOcrProvider, PaddleOcrJsProvider, TesseractJsProvider, reflowOcrRegionsByColumns, type OcrRegion } from '../src/extraction/ocr-providers.js';
+import { MIN_ONNX_BYTES, PADDLE_MODEL_FILES } from '../src/extraction/paddle-model-select.js';
 
 // ─── 设置 ────────────────────────────────────────────────────
 
@@ -11,6 +12,20 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kb-ocr-providers-'));
 afterEach(() => {
   delete process.env.CUSTOMIZE_PADDLE_MODEL_DIR;
 });
+
+/**
+ * 建一个模型目录。ONNX 需达到最小体积门槛（拦占位文件），字典不需要体积门槛。
+ * 文件名固定为随包发布的 v6 配置。
+ */
+function makeModelDir(name: string): string {
+  const dir = path.join(tmpDir, name);
+  fs.mkdirSync(dir, { recursive: true });
+  const weights = Buffer.alloc(MIN_ONNX_BYTES + 1);
+  fs.writeFileSync(path.join(dir, PADDLE_MODEL_FILES.detection), weights);
+  fs.writeFileSync(path.join(dir, PADDLE_MODEL_FILES.recognition), weights);
+  fs.writeFileSync(path.join(dir, PADDLE_MODEL_FILES.dictionary), 'x');
+  return dir;
+}
 
 // ─── PaddleOcrJsProvider 可用性 ─────────────────────────────
 
@@ -34,12 +49,38 @@ describe('PaddleOcrJsProvider availability', () => {
     const provider = new PaddleOcrJsProvider();
     expect(provider.available).toBe(false);
   });
+
+  it('按下载脚本安装的 PP-OCRv6 目录可用（曾经的静默降级缺陷）', () => {
+    process.env.CUSTOMIZE_PADDLE_MODEL_DIR = makeModelDir('v6-models');
+    const provider = new PaddleOcrJsProvider();
+    expect(provider.available).toBe(true);
+    expect(provider.availabilityNote).toBeUndefined();
+  });
+
+  it('只有旧代次（v5）模型文件时判为不可用：不再保留旧模型兼容', () => {
+    const v5Dir = path.join(tmpDir, 'v5-only');
+    fs.mkdirSync(v5Dir, { recursive: true });
+    for (const name of ['PP-OCRv5_mobile_det_infer.onnx', 'PP-OCRv5_mobile_rec_infer.onnx', 'ppocrv5_dict.txt']) {
+      fs.writeFileSync(path.join(v5Dir, name), Buffer.alloc(MIN_ONNX_BYTES + 1));
+    }
+    process.env.CUSTOMIZE_PADDLE_MODEL_DIR = v5Dir;
+    const provider = new PaddleOcrJsProvider();
+    expect(provider.available).toBe(false);
+    expect(provider.availabilityNote).toContain('download-paddleocr-models.sh');
+  });
+
+  it('不可用时给出 availabilityNote 说明原因', () => {
+    process.env.CUSTOMIZE_PADDLE_MODEL_DIR = path.join(tmpDir, 'missing-models');
+    const provider = new PaddleOcrJsProvider();
+    expect(provider.available).toBe(false);
+    expect(provider.availabilityNote).toContain('模型');
+  });
 });
 
 // ─── 工厂选择 ────────────────────────────────────────────────
 
 describe('createOcrProvider 引擎选择', () => {
-  it('默认优先 PP-OCRv5 ONNX 引擎', async () => {
+  it('默认优先 PaddleOCR ONNX 引擎', async () => {
     const provider = await createOcrProvider();
     expect(provider.id).toBe('paddleocr.js');
     await provider.dispose();
@@ -63,7 +104,7 @@ describe('TesseractJsProvider 回归', () => {
   });
 });
 
-// ─── 推理 smoke（PP-OCRv5 对清晰中文印刷体的识别） ───────────
+// ─── 推理 smoke（PP-OCRv6 对清晰中文印刷体的识别） ───────────
 
 describe('PaddleOcrJsProvider 推理 smoke', () => {
   it('识别清晰中文印刷体图片', async () => {

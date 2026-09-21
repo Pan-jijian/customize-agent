@@ -132,6 +132,34 @@ export function filterOcrGraphicNoiseLines(value: string): string {
 }
 
 /**
+ * OCR 已知误读纠正表（种子列表）。准入规则：左侧必须是**在本领域不成立的词**，
+ * 即它在工程资料里不可能作为正确写法出现，这样无条件替换也伤不到正确文本。
+ * 只做「整词已知错 → 已知对」的精确替换，不做编辑距离/通用拼写纠错 ——
+ * 没有可靠词典时通用纠错会把正确术语改坏，风险大于收益。
+ *
+ * 收录来源：真实图纸/扫描件的识别回归。新增条目请附上出现该误读的文件与上下文。
+ * - 煤研石 → 煤矸石：PP-OCRv5 在 A2 施工图总说明上稳定误读（同页 2 处），v6 已能正确识别，
+ *   该条主要作为 tesseract 降级路径与其他文件的兜底。
+ */
+const OCR_MISREAD_CORRECTIONS: ReadonlyArray<readonly [string, string]> = [
+  ['煤研石', '煤矸石'],
+];
+
+/**
+ * 应用已知误读纠正。按左侧长度降序替换（长词优先，避免短词先命中破坏长词），
+ * 幂等：纠正后的文本再次执行不会变化。
+ */
+export function applyOcrMisreadCorrections(value: string): string {
+  let text = String(value ?? '');
+  if (!text) return text;
+  const ordered = [...OCR_MISREAD_CORRECTIONS].sort((a, b) => b[0].length - a[0].length);
+  for (const [wrong, right] of ordered) {
+    if (text.includes(wrong)) text = text.split(wrong).join(right);
+  }
+  return text;
+}
+
+/**
  * 文本编码自动检测解码：BOM（UTF-16LE/BE）→ UTF-8 → GBK。
  * UTF-8 解码替换符率高于 2% 时判定为 GBK 等非 UTF-8 编码；
  * GBK 对绝大多数字节序列都能成功解码，因此再比较两种解码结果的中文占比，

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { decodeTextBuffer, filterOcrGraphicNoiseLines, hasForeignScriptGarbledText, normalizeSymbolicPua } from '../src/extraction/text-encoding.js';
+import { applyOcrMisreadCorrections, decodeTextBuffer, filterOcrGraphicNoiseLines, hasForeignScriptGarbledText, normalizeSymbolicPua } from '../src/extraction/text-encoding.js';
 
 describe('decodeTextBuffer', () => {
   it('UTF-8 中文文本按 UTF-8 解码', () => {
@@ -117,5 +117,34 @@ describe('filterOcrGraphicNoiseLines', () => {
 
   it('空行保留', () => {
     expect(filterOcrGraphicNoiseLines('第一行\n\n第二行')).toBe('第一行\n\n第二行');
+  });
+});
+
+describe('applyOcrMisreadCorrections', () => {
+  it('纠正已知误读', () => {
+    expect(applyOcrMisreadCorrections('内、外墙均为煤研石空心砖')).toBe('内、外墙均为煤矸石空心砖');
+  });
+
+  it('同段多处误读全部纠正', () => {
+    expect(applyOcrMisreadCorrections('煤研石空心砖，非承重煤研石')).toBe('煤矸石空心砖，非承重煤矸石');
+  });
+
+  it('正确文本不受影响', () => {
+    const text = '砖墙采用煤矸石空心砖砌筑，强度等级 A3.5';
+    expect(applyOcrMisreadCorrections(text)).toBe(text);
+  });
+
+  it('幂等：重复执行不再变化', () => {
+    const once = applyOcrMisreadCorrections('煤研石');
+    expect(applyOcrMisreadCorrections(once)).toBe(once);
+  });
+
+  it('空文本安全', () => {
+    expect(applyOcrMisreadCorrections('')).toBe('');
+  });
+
+  it('不误伤包含相同字符的无关词', () => {
+    const text = '煤炭、研究、石材';
+    expect(applyOcrMisreadCorrections(text)).toBe(text);
   });
 });

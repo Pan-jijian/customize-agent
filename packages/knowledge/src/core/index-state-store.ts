@@ -164,6 +164,9 @@ export class IndexStateStore {
         mtime = excluded.mtime,
         chunk_count = excluded.chunk_count,
         collection_name = excluded.collection_name,
+        -- indexed_at 必须一并更新：此前漏掉它，重新解析已存在的文件时只有分块/哈希/状态变了，
+        -- 「解析时间」仍停在首次入库的时刻 —— 用户据此判断「没重新解析」，是最直观的误导
+        indexed_at = excluded.indexed_at,
         last_verified_at = excluded.last_verified_at,
         status = excluded.status,
         error_message = excluded.error_message,

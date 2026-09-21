@@ -121,6 +121,9 @@ function resolveLocalEmbeddingBatchSize(configured?: number): number {
   return Math.max(1, Math.min(128, Math.floor(raw)));
 }
 
+/** 大批量嵌入进度日志间隔（批次数）：ONNX 推理期间让运维可见推进，避免「计算中」被误判为「挂起」 */
+const EMBED_PROGRESS_LOG_EVERY_BATCHES = 32;
+
 function resolveBundledBgeModelPath(): string | undefined {
   const currentDir = path.dirname(fileURLToPath(import.meta.url));
   const candidates = [
@@ -163,6 +166,15 @@ export class LocalTransformersEmbeddingProvider implements EmbeddingProvider {
       const batch = input.slice(offset, offset + this.batchSize);
       const output = await extractor(batch, { pooling: 'mean', normalize: true });
       vectors.push(...this.parseVectors(output, batch.length).map(vector => this.resizeVector(vector)));
+      const processed = offset + batch.length;
+      if (processed >= input.length) break;
+      if (Math.floor(processed / this.batchSize) % EMBED_PROGRESS_LOG_EVERY_BATCHES === 0) {
+        console.log(`[embed] 本地嵌入进度 ${processed}/${input.length}`);
+      }
+      // 批次间让出事件循环（第 5 章 r28h 挂起治理）：onnxruntime-node 的 Run 在主线程同步执行，
+      // 连续大批次推理长时间独占主线程会饿死心跳/HTTP（磁盘冻结的「假死」形态）；
+      // setImmediate 让 timer/IO 回调在批次间隙获得执行机会。单 Run 阻塞无法在 JS 层消除，治本方案为推理下沉 worker。
+      await new Promise<void>(resolve => setImmediate(resolve));
     }
     return vectors;
   }

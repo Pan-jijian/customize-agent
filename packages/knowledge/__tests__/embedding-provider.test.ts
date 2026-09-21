@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LocalTransformersEmbeddingProvider } from '../src/embedding/embedding-provider.js';
 
 /**
@@ -43,5 +43,65 @@ describe('LocalTransformersEmbeddingProvider.getPipeline 缓存自愈', () => {
     // 向量经 resize/归一化：[3,4] → [0.6, 0.8]
     expect(a[0]?.[0]).toBeCloseTo(0.6);
     expect(b[0]?.[1]).toBeCloseTo(0.8);
+  });
+});
+
+/**
+ * 批次间让出事件循环（第 5 章 r28h 挂起治理）：onnxruntime-node 的 Run 在主线程同步执行，
+ * 连续大批次推理会饿死心跳/HTTP（磁盘冻结的「假死」形态）；修复后每批之间 setImmediate 让出，
+ * 并每 32 批打一条进度日志供运维识别「计算中」。经 prototype 注入假 extractor，不加载真实模型。
+ */
+describe('LocalTransformersEmbeddingProvider 批次间让出事件循环', () => {
+  const original = proto.createPipeline;
+  afterEach(() => {
+    proto.createPipeline = original;
+    pipelinesCache.pipelines.clear();
+  });
+
+  it('批次间 setImmediate 让出：嵌入进行中事件循环宏任务可推进', async () => {
+    let ticks = 0;
+    let spinning = true;
+    const spinLoop = (): void => {
+      if (!spinning) return;
+      ticks += 1;
+      setImmediate(spinLoop);
+    };
+    setImmediate(spinLoop);
+    const ticksAtBatch: number[] = [];
+    proto.createPipeline = () => Promise.resolve(async (batch: unknown) => {
+      ticksAtBatch.push(ticks);
+      const size = Array.isArray(batch) ? batch.length : 1;
+      return Array.from({ length: size }, () => [1]);
+    });
+    const provider = new LocalTransformersEmbeddingProvider({ modelPath: '/fake-model-dir', batchSize: 2 });
+    try {
+      const vectors = await provider.embedDocuments(Array.from({ length: 8 }, (_, index) => `文本${index}`));
+      expect(vectors).toHaveLength(8);
+    } finally {
+      spinning = false;
+    }
+    // 无让出时整个 embed 是纯微任务链（ticks 恒 0）；让出后 check 阶段在批次间隙执行 spinLoop
+    expect(ticksAtBatch).toHaveLength(4);
+    expect(ticks).toBeGreaterThan(0);
+    expect(ticksAtBatch[1]).toBeGreaterThan(0);
+  });
+
+  it('≥32 批打进度日志（含位置），小批量静默', async () => {
+    proto.createPipeline = () => Promise.resolve(async (batch: unknown) => {
+      const size = Array.isArray(batch) ? batch.length : 1;
+      return Array.from({ length: size }, () => [1]);
+    });
+    const provider = new LocalTransformersEmbeddingProvider({ modelPath: '/fake-model-dir', batchSize: 1 });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await provider.embedDocuments(Array.from({ length: 10 }, (_, index) => `小${index}`));
+      expect(logSpy.mock.calls.filter(call => String(call[0]).includes('[embed]'))).toHaveLength(0);
+      await provider.embedDocuments(Array.from({ length: 33 }, (_, index) => `大${index}`));
+      const progressLogs = logSpy.mock.calls.filter(call => String(call[0]).includes('[embed]'));
+      expect(progressLogs).toHaveLength(1);
+      expect(String(progressLogs[0]?.[0])).toContain('32/33');
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 });

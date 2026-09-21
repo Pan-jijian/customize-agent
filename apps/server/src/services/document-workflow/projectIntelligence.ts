@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { computeProjectId, locateTableColumns, materialRootOf, scoreTableHeaderRow } from '@customize-agent/knowledge';
@@ -96,11 +97,31 @@ function intelligenceDir(projectRoot: string) {
   return dir;
 }
 
-/** 资料包缓存路径：packs/{encodeURIComponent(packRoot)}.json——包 ID 直接映射文件名，跨包在存储层不可见 */
+/** packs 目录下单段文件名的字节预算：单段上限 255，留出 `.json` 与 `writeJsonAtomic` 的 `.tmp-<pid>` 后缀 */
+const PACK_CACHE_NAME_BUDGET = 200;
+
+/**
+ * 资料包缓存文件名。默认沿用 `encodeURIComponent(packRoot).json`（包 ID 直接映射文件名，
+ * 跨包在存储层不可见），但 URL 编码下每个汉字膨胀成 9 字节，长包名会把文件名撑爆文件系统
+ * 单段 255 字节上限：实测「巢湖市光电新能源产业园项目一东区标准化厂房二标段施工（二次挂网 9.3）」
+ * 编码后 294 字节，加上 `.json` 直接 ENAMETOOLONG，导致该资料包的理解缓存永远写不出来。
+ * 因此超长时退化为「可读前缀 + 全名哈希」——哈希保证唯一与稳定，原名已存在缓存 JSON 的
+ * packRoot 字段里，可直接溯源。
+ */
+export function packCacheFileName(packRoot: string): string {
+  const encoded = encodeURIComponent(packRoot);
+  const plain = `${encoded}.json`;
+  if (Buffer.byteLength(plain, 'utf8') <= PACK_CACHE_NAME_BUDGET) return plain;
+  // 截断可能落在 %XX 转义中间，去掉残缺尾部避免留下无意义的 %E
+  const prefix = encoded.slice(0, 120).replace(/%[0-9A-F]{0,2}$/u, '');
+  return `${prefix}-${createHash('sha1').update(packRoot, 'utf8').digest('hex').slice(0, 12)}.json`;
+}
+
+/** 资料包缓存路径：packs/{packCacheFileName} */
 function packCachePath(projectRoot: string, packRoot: string) {
   const dir = path.join(intelligenceDir(projectRoot), 'packs');
   fs.mkdirSync(dir, { recursive: true });
-  return path.join(dir, `${encodeURIComponent(packRoot)}.json`);
+  return path.join(dir, packCacheFileName(packRoot));
 }
 
 /** 原子写 JSON：先写临时文件再 rename 替换，防进程中断留下半写文件（读取侧 JSON.parse 失败会拒绝缓存）。 */

@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveAndImport, resolvePackage } from './module-resolver.js';
+import { parseDictionaryLines, selectPaddleModelFiles, type PaddleModelSelection } from './paddle-model-select.js';
 
 export interface OcrRegion {
   text: string;
@@ -24,10 +25,32 @@ export interface OcrResult {
   warnings?: string[];
 }
 
+/**
+ * 逐次识别参数（可选）。形状与 paddleocr 的 RecognitionOptions 对齐：
+ * `detection` 覆盖检测预处理/后处理阈值，`process` 覆盖 processRecognition 的行过滤阈值。
+ * 不传时与历史行为完全一致。方向分类（textlineOrientation）不在此处，
+ * 它是实例级配置，逐次传会在库内部抛错。
+ */
+export interface OcrRecognizeOptions {
+  detection?: Record<string, unknown>;
+  recognition?: Record<string, unknown>;
+  process?: Record<string, unknown>;
+}
+
+export interface OcrInput {
+  data: Uint8Array;
+  width: number;
+  height: number;
+  channels?: number;
+  filePath?: string;
+}
+
 export interface OcrProvider {
   readonly id: string;
   readonly available: boolean;
-  recognize(input: { data: Uint8Array; width: number; height: number; channels?: number; filePath?: string }): Promise<OcrResult>;
+  /** 不可用时的原因（如模型文件缺失），供调用方写出可见告警，避免静默降级 */
+  readonly availabilityNote?: string;
+  recognize(input: OcrInput, options?: OcrRecognizeOptions): Promise<OcrResult>;
   getWarnings?(): string[];
   dispose(): Promise<void>;
 }
@@ -35,6 +58,8 @@ export interface OcrProvider {
 // ─── 路径工具 ───────────────────────────────────────────────────
 
 const knowledgeDir = path.dirname(fileURLToPath(import.meta.url));
+/** 方向分类置信度阈值，对应 PaddleOCR 的 cls_thresh 默认值 */
+const ORIENTATION_THRESHOLD = 0.9;
 const OCR_NOISE_SUPPRESSION_KEY = Symbol.for('customize-agent.ocr-noise-suppression');
 const OCR_NATIVE_NOISE_PATTERNS = [
   /^Image too small to scale!!(?:\s*\([^)]*\))?$/u,
@@ -316,7 +341,7 @@ export class TesseractJsProvider implements OcrProvider {
 
 // ─── OCR 分栏阅读顺序重排 ─────────────────────────────────────
 //
-// PP-OCRv5（paddleocr.js）的 processRecognition 按朴素 y→x 顺序合并检测框，
+// paddleocr.js 的 processRecognition 按朴素 y→x 顺序合并检测框，
 // 分栏版面会把左右栏落在同一水平带的文本交错拼进同一行，破坏句子与条款边界；
 // 表格页的「行 = 一条记录」结构反而依赖该 y 行序。这里用「竖向空白走廊检测」
 // 定位分栏切割线，且只对门控确认的「多栏正文页」按栏优先重排，表格页 / 图纸
@@ -606,7 +631,7 @@ export function reflowOcrRegionsByColumns(regions: readonly OcrRegion[], imageWi
   return reflowed;
 }
 
-// ─── PaddleOCR.js（ONNX Runtime PP-OCRv5，模型随 npm 包发布） ──────
+// ─── PaddleOCR.js（ONNX Runtime PP-OCRv6，模型随 npm 包发布） ──────
 
 function paddleModelDir(): string {
   // env 显式指定时信任用户配置（目录缺失由 available 检查暴露，不回退掩盖错误）
@@ -625,32 +650,59 @@ type PaddleOcrServiceLike = {
 };
 
 /**
- * PP-OCRv5 mobile 推理引擎（paddleocr.js + onnxruntime-node）。
+ * PP-OCR 推理引擎（paddleocr.js + onnxruntime-node）。
  * 模型二进制位于 models/paddleocr 并随 npm 包发布，下游用户零配置；
  * 对 CAD 单线矢量字、扫描图纸等 tesseract 弱项场景识别质量显著更高。
  * 识别失败时自动降级 tesseract.js（兜底不丢失解析能力）。
+ *
+ * 模型文件按目录内容自动选择（v6 优先），preset 必须与权重匹配 —— 见 paddle-model-select.ts。
  */
 export class PaddleOcrJsProvider implements OcrProvider {
   readonly id = 'paddleocr.js';
   private _available: boolean | null = null;
+  private _selection: PaddleModelSelection | null | undefined;
+  private _availabilityNote: string | undefined;
   private service: PaddleOcrServiceLike | null = null;
   private servicePromise: Promise<PaddleOcrServiceLike> | null = null;
   private serviceLock: Promise<void> = Promise.resolve();
   private warnings: string[] = [];
   private tesseractFallback: TesseractJsProvider | null = null;
 
+  get availabilityNote(): string | undefined {
+    void this.available;
+    return this._availabilityNote;
+  }
+
+  /** 模型目录内的三元组选择结果；不可用时为 null */
+  private get selection(): PaddleModelSelection | null {
+    if (this._selection === undefined) {
+      let selection: PaddleModelSelection | null;
+      try {
+        selection = selectPaddleModelFiles(paddleModelDir());
+      } catch {
+        selection = null; // 目录不可读等异常按「不可用」处理，由 availabilityNote 说明原因
+      }
+      this._selection = selection;
+      for (const warning of selection?.warnings ?? []) this.pushWarning(warning);
+    }
+    return this._selection;
+  }
+
   get available(): boolean {
     if (this._available !== null) return this._available;
     try {
       resolvePackage('paddleocr');
       resolvePackage('onnxruntime-node');
-    } catch {
+    } catch (error) {
       this._available = false;
+      this._availabilityNote = `paddleocr/onnxruntime-node 依赖不可用（${error instanceof Error ? error.message : String(error)}）`;
       return false;
     }
-    const modelDir = paddleModelDir();
-    this._available = ['PP-OCRv5_mobile_det_infer.onnx', 'PP-OCRv5_mobile_rec_infer.onnx', 'ppocrv5_dict.txt']
-      .every(name => fs.existsSync(path.join(modelDir, name)));
+    const selection = this.selection;
+    this._available = selection !== null;
+    if (!selection) {
+      this._availabilityNote = `模型目录 ${paddleModelDir()} 中未找到完整的「检测+识别+字典」模型文件，请执行 scripts/download-paddleocr-models.sh`;
+    }
     return this._available;
   }
 
@@ -665,9 +717,9 @@ export class PaddleOcrJsProvider implements OcrProvider {
     if (this.warnings.length > 50) this.warnings = this.warnings.slice(-50);
   }
 
-  async recognize(input: { data: Uint8Array; width: number; height: number; channels?: number; filePath?: string }): Promise<OcrResult> {
+  async recognize(input: OcrInput, options?: OcrRecognizeOptions): Promise<OcrResult> {
     try {
-      return await this.recognizeWithPaddle(input);
+      return await this.recognizeWithPaddle(input, options);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.pushWarning(`paddleocr.js 推理失败（${message}），已降级 tesseract.js`);
@@ -677,7 +729,7 @@ export class PaddleOcrJsProvider implements OcrProvider {
     }
   }
 
-  private async recognizeWithPaddle(input: { data: Uint8Array; width: number; height: number; channels?: number; filePath?: string }): Promise<OcrResult> {
+  private async recognizeWithPaddle(input: OcrInput, options?: OcrRecognizeOptions): Promise<OcrResult> {
     let width = input.width;
     let height = input.height;
     let data = input.data;
@@ -706,8 +758,9 @@ export class PaddleOcrJsProvider implements OcrProvider {
     await currentLock;
     try {
       const service = await this.getService();
-      const recognition = await this.recognizeWithTimeout(service, { width, height, data });
-      const processed = service.processRecognition(recognition);
+      const recognition = await this.recognizeWithTimeout(service, { width, height, data }, options);
+      // 行置信度过滤发生在行分组之前：不放宽这里的阈值，放宽检测阈值也拿不回低置信度的标注
+      const processed = service.processRecognition(recognition, options?.process);
       const processedText = (processed.text ?? '').trim();
       const lineResults = (processed.lines ?? []).flat();
       const regions: OcrRegion[] = lineResults
@@ -737,12 +790,19 @@ export class PaddleOcrJsProvider implements OcrProvider {
     }
   }
 
-  private async recognizeWithTimeout(service: PaddleOcrServiceLike, pixels: { width: number; height: number; data: Uint8Array }) {
+  private async recognizeWithTimeout(
+    service: PaddleOcrServiceLike,
+    pixels: { width: number; height: number; data: Uint8Array },
+    options?: OcrRecognizeOptions,
+  ) {
     const timeoutMs = 180_000;
     let timeout: NodeJS.Timeout | undefined;
     try {
+      const recognizeOptions = options?.detection || options?.recognition
+        ? { detection: options.detection, recognition: options.recognition }
+        : undefined;
       return await Promise.race([
-        service.recognize(pixels),
+        service.recognize(pixels, recognizeOptions),
         new Promise<never>((_, reject) => {
           timeout = setTimeout(() => reject(new Error(`OCR recognition timed out after ${timeoutMs}ms`)), timeoutMs);
         }),
@@ -768,25 +828,64 @@ export class PaddleOcrJsProvider implements OcrProvider {
   }
 
   private async createService(): Promise<PaddleOcrServiceLike> {
+    const selection = this.selection;
+    if (!selection) throw new Error(this.availabilityNote ?? `未找到可用的 PaddleOCR 模型文件（${paddleModelDir()}）`);
+
     const paddleMod = await resolveAndImport<Record<string, unknown>>('paddleocr');
     const PaddleOcrService = paddleMod?.PaddleOcrService as { createInstance?: (options: Record<string, unknown>) => Promise<PaddleOcrServiceLike> } | undefined;
     if (!PaddleOcrService || typeof PaddleOcrService.createInstance !== 'function') {
       throw new Error('paddleocr 包缺少 PaddleOcrService.createInstance');
     }
     const ort = await resolveAndImport('onnxruntime-node');
-    const modelDir = paddleModelDir();
-    const detModel = fs.readFileSync(path.join(modelDir, 'PP-OCRv5_mobile_det_infer.onnx'));
-    const recModel = fs.readFileSync(path.join(modelDir, 'PP-OCRv5_mobile_rec_infer.onnx'));
-    const dictText = fs.readFileSync(path.join(modelDir, 'ppocrv5_dict.txt'), 'utf8');
+    const detModel = fs.readFileSync(selection.detFile);
+    const recModel = fs.readFileSync(selection.recFile);
     // 字典末行是空格字符（模型把空格识别为最后一类），trimEnd 会误删；只去掉尾随空行
-    const dictLines = dictText.split(/\r?\n/);
-    while (dictLines.length > 0 && dictLines[dictLines.length - 1] === '') dictLines.pop();
-    return PaddleOcrService.createInstance({
+    const dictLines = parseDictionaryLines(fs.readFileSync(selection.dictFile, 'utf8'));
+    // 字典与识别模型的类别数必须匹配：不匹配时库不会报错，只会稳定输出「看似通顺的乱码」，
+    // 因此这里主动校验并把差异写进告警（模型目录里混放了不同代次的字典时最容易踩到）
+    this.verifyDictionaryMatchesPreset(paddleMod, selection, dictLines.length);
+
+    const options: Record<string, unknown> = {
       ort,
-      modelPreset: 'PP-OCRv5_mobile',
+      modelPreset: selection.preset,
       detection: { modelBuffer: toArrayBuffer(detModel) },
       recognition: { modelBuffer: toArrayBuffer(recModel), charactersDictionary: dictLines },
-    });
+    };
+    // 方向分类（= PaddleOCR use_angle_cls）：检测裁剪与识别之间纠正 0°/180° 文本。
+    // 只纠正 0°/180°，不覆盖 90° 竖排；模型缺失时整体仍然可用，只是没有这项增强。
+    if (selection.orientationFile) {
+      try {
+        options.textlineOrientation = {
+          modelBuffer: toArrayBuffer(fs.readFileSync(selection.orientationFile)),
+          threshold: ORIENTATION_THRESHOLD,
+        };
+      } catch (error) {
+        this.pushWarning(`方向分类模型加载失败（${error instanceof Error ? error.message : String(error)}），已跳过方向纠正`);
+      }
+    }
+    return PaddleOcrService.createInstance(options);
+  }
+
+  /**
+   * 校验字典行数与预设声明的输出类别数是否匹配（不匹配时识别结果会整体错位，且库要到
+   * 第一次识别才报错）。库的契约是 `字典长度 >= 输出类别数 - 1`，上限即输出类别数：
+   * 字典带末尾空格项时为「类别数 - 1」，不带时为「类别数」，两种都合法。
+   * v5 官方字典文件含空格项（18385 ↔ 类别 18385 走上限），v6 官方字符表不含空格项
+   * （18708 + 空格 = 18709 ↔ 类别 18710 走下限）—— 因此必须按区间判断，逐值比对会误报。
+   */
+  private verifyDictionaryMatchesPreset(paddleMod: Record<string, unknown>, selection: PaddleModelSelection, dictLineCount: number): void {
+    try {
+      const getModelPreset = paddleMod.getModelPreset as
+        ((name: string) => { dictionary?: { recognitionOutputClasses?: number; dictionaryLength?: number } }) | undefined;
+      const dictionary = getModelPreset?.(selection.preset)?.dictionary;
+      const classes = dictionary?.recognitionOutputClasses;
+      if (typeof classes !== 'number' || classes <= 0) return;
+      if (dictLineCount < classes - 1 || dictLineCount > classes) {
+        this.pushWarning(`字典行数 ${dictLineCount} 超出预设 ${selection.preset} 的输出类别数 ${classes} 允许范围（${classes - 1}~${classes}），识别结果可能错乱；请确认模型目录内检测/识别/字典属于同一代次`);
+      }
+    } catch {
+      // 校验失败不影响识别主流程
+    }
   }
 
   private async resetService() {
@@ -817,12 +916,20 @@ export class PaddleOcrJsProvider implements OcrProvider {
 // ─── 工厂 ───────────────────────────────────────────────────────
 
 export async function createOcrProvider(): Promise<OcrProvider> {
-  // 优先 PP-OCRv5 ONNX 引擎（质量显著优于 tesseract，模型随包发布）；不可用时回退 tesseract.js
+  // 优先 PP-OCR ONNX 引擎（质量显著优于 tesseract，模型随包发布）；不可用时回退 tesseract.js，
+  // 并把降级原因挂到 availabilityNote 上，调用方据此写出可见告警（历史上这里是静默降级，
+  // 模型目录放错代次会导致图纸/表格识别质量悄悄变差且无人察觉）
   const paddle = new PaddleOcrJsProvider();
   if (paddle.available) return paddle;
 
   const tess = new TesseractJsProvider();
-  if (tess.available) return tess;
+  if (tess.available) {
+    if (paddle.availabilityNote) {
+      // tesseract provider 不可变，降级说明通过包装属性透出
+      Object.defineProperty(tess, 'availabilityNote', { value: paddle.availabilityNote, enumerable: false });
+    }
+    return tess;
+  }
 
   const td = tessdataDir();
   throw new Error(

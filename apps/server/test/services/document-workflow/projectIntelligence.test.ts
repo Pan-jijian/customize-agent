@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { computeProjectId } from '@customize-agent/knowledge';
 import { buildBaseProjectGraph } from '@/services/document-workflow/agentWorkflow';
-import type { ConstructionOrganizationGraph, ProjectIntelligenceIntentEntry } from '@/services/document-workflow/projectIntelligence';
+import { packCacheFileName, type ConstructionOrganizationGraph, type ProjectIntelligenceIntentEntry } from '@/services/document-workflow/projectIntelligence';
 
 vi.mock('@/services/knowledge/kbOperationLog', () => ({ upsertKbOperation: vi.fn(), deleteKbOperation: vi.fn(), listKbOperationsByIdPrefix: vi.fn(() => []) }));
 // 守卫测试用真实 startProjectIntelligenceBuild：仅 mock 外部依赖 getMultiProjectManager/listKnowledgeFiles 控制构建时序
@@ -735,5 +735,44 @@ describe('buildProjectIntelligence 进度回调', () => {
     vi.mocked(listKnowledgeFiles).mockReturnValue([{ relativePath: '资料/招标文件.pdf', contentHash: 'h1', chunkCount: 3, status: 'ok', indexedAt: 123, category: 'document', format: 'pdf', mtime: 0 }] as never);
     await buildProjectIntelligence(root, '资料', (stage) => { stages.push(stage); });
     expect(stages).toEqual(['files', 'facts', 'graph', 'assembly']);
+  });
+});
+
+describe('packCacheFileName（理解缓存文件名长度）', () => {
+  it('短包名沿用 URL 编码名，存量缓存不受影响', () => {
+    expect(packCacheFileName('舒城(2)')).toBe(`${encodeURIComponent('舒城(2)')}.json`);
+    // 已存在于现有知识库的包名：文件名必须保持逐字节一致，否则缓存被判失效并重跑 LLM 构建
+    expect(packCacheFileName('舒城(2)')).toBe('%E8%88%92%E5%9F%8E(2).json');
+  });
+
+  it('长中文包名不再超长（ENAMETOOLONG 回归）', () => {
+    const pack = '巢湖市光电新能源产业园项目一东区标准化厂房二标段施工（二次挂网 9.3）';
+    const name = packCacheFileName(pack);
+    // URL 编码下每汉字 9 字节，原名编码后 294 字节 + .json 已超文件系统单段 255 上限
+    expect(Buffer.byteLength(`${encodeURIComponent(pack)}.json`, 'utf8')).toBeGreaterThan(255);
+    // 留出 writeJsonAtomic 的 `.tmp-<pid>` 后缀后仍须在 255 以内
+    expect(Buffer.byteLength(`${name}.tmp-9999999`, 'utf8')).toBeLessThanOrEqual(255);
+    expect(name.endsWith('.json')).toBe(true);
+  });
+
+  it('截断不会留下残缺的 %XX 转义', () => {
+    const name = packCacheFileName('长'.repeat(60));
+    // 前缀必须由「普通字符或完整 %XX 转义」构成，不允许残缺的 %E / %E9 尾巴
+    expect(name).toMatch(/^(?:[^%]|%[0-9A-F]{2})*-[0-9a-f]{12}\.json$/u);
+    // 逐个 % 检查：每个都必须紧跟两位十六进制（能解回原文）
+    for (const found of name.matchAll(/%/gu)) {
+      expect(name.slice(found.index, found.index + 3)).toMatch(/^%[0-9A-F]{2}$/u);
+    }
+  });
+
+  it('不同长包名映射到不同文件名', () => {
+    const a = packCacheFileName('长'.repeat(50) + 'A');
+    const b = packCacheFileName('长'.repeat(50) + 'B');
+    expect(a).not.toBe(b);
+  });
+
+  it('同一包名结果稳定', () => {
+    const pack = '长'.repeat(50);
+    expect(packCacheFileName(pack)).toBe(packCacheFileName(pack));
   });
 });

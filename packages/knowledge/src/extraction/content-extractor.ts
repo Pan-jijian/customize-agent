@@ -4,8 +4,11 @@ import * as path from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolveAndImport, resolvePackage } from './module-resolver.js';
-import { createOcrProvider, type OcrProvider } from './ocr-providers.js';
-import { decodeTextBuffer, filterOcrGraphicNoiseLines, hasForeignScriptGarbledText, normalizeSymbolicPua } from './text-encoding.js';
+import { createOcrProvider, type OcrProvider, type OcrRecognizeOptions, type OcrResult } from './ocr-providers.js';
+import { PADDLE_DETECTION_MAX_SIDE_PX, buildPaddleRecognizeOptions } from './paddle-model-select.js';
+import { planTiles, recognizeWithTiling, shouldTilePage } from './ocr-tiling.js';
+import { applyOcrMisreadCorrections, decodeTextBuffer, filterOcrGraphicNoiseLines, hasForeignScriptGarbledText, normalizeSymbolicPua } from './text-encoding.js';
+import { extractEmbeddedOfficeImages } from './office-embedded-images.js';
 import { detectSmartTableHeader } from './table-header-detect.js';
 import type { ClassifiedFile } from '../types.js';
 
@@ -107,6 +110,26 @@ const CAD_DOMAIN_SIGNAL_RE = /工程|项目|施工|建筑|结构|装饰|电气|�
 /** 图纸兜底解析可读字符（汉字/字母/数字）的最低总量，低于该值视为无字符数据，不入库 */
 const MIN_CAD_CHARACTER_DATA = 32;
 const OCR_NATIVE_NOISE_PATTERNS = [/^Image too small to scale!!/u, /^Line cannot be recognized!!$/u];
+/** 渲染目录里的页面几何 sidecar（pt/mm），用于大幅面切片判定 */
+const PAGE_GEOMETRY_FILE = 'pages.json';
+
+// ─── 大幅面切片参数（固定值，不提供环境变量开关）─────────────────────
+// 图纸解析的目标是数据精准与不丢失：任何「调低召回/关掉切片换速度」的开关，
+// 都可能让图纸标注静默变少且无人察觉，因此这些参数不作为可配置项暴露。
+/** 切片边长。必须 ≤ 检测输入上限，块内才不会发生任何缩放（等价于原生分辨率检测） */
+const TILE_PX = 900;
+/** 切片重叠。应大于图纸上最高的一行文字，避免文字被切缝截断成两半 */
+const TILE_OVERLAP_PX = 120;
+/** 单页切片数上限，超出时放大切片降低分辨率（宁可略降分辨率也不跳过切片） */
+const TILE_MAX_PER_PAGE = 64;
+/** 触发切片的页面长边物理尺寸：400mm 即 A3 及以上 */
+const TILE_TRIGGER_MM = 400;
+/** 切片页的检测框最小面积（检测坐标系像素²），默认 20 会漏掉小号尺寸标注 */
+const TILE_RECALL_MIN_AREA = 8;
+/** 切片页的检测框置信度阈值，默认 0.6 会漏掉浅淡的单线矢量字 */
+const TILE_RECALL_BOX_SCORE = 0.4;
+/** 切片页的识别行置信度阈值，默认 0.5；与上面两项必须同时放宽才有效 */
+const TILE_RECALL_REC_SCORE = 0.35;
 
 /** KV 声明行（R#C# 列名: 值）的值折叠：单元格内换行折叠为单空格（Excel Alt+Enter 换行
  *  会把「R3C5 项目特征描述: 第一段\n第二段」拆成两行，行级 KV 结构破坏、
@@ -994,7 +1017,74 @@ export class ContentExtractor {
     };
   }
 
+  /**
+   * Office 文档解析入口：正文抽取 + 内嵌图片 OCR。
+   * 图片内容与正文分节（`## 内嵌图片 N（OCR）`），可被检索、可被证据召回、导出可见。
+   */
   private async extractOfficeDocument(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
+    const base = await this.extractOfficeDocumentText(file);
+    return this.appendEmbeddedImageOcr(file, base);
+  }
+
+  /**
+   * OCR Office 文档的内嵌图片并追加到正文之后。
+   * 这些图片常承载关键内容（实测有整页施工图、成套技术说明），此前被整体丢弃。
+   */
+  private async appendEmbeddedImageOcr(
+    file: ClassifiedFile,
+    base: { text: string; metadata: Record<string, unknown>; warnings: string[] },
+  ): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
+    const warnings = [...base.warnings];
+    const images = await extractEmbeddedOfficeImages(file.absolutePath);
+    if (images.length === 0) return base;
+    warnings.push(`文档含 ${images.length} 张内嵌图片，已提交 OCR 解析`);
+    base.metadata.officeEmbeddedImageCount = images.length;
+
+    let provider: OcrProvider | undefined;
+    const tmpDir = fs.mkdtempSync(path.join(this.getTempRoot(), 'kb-office-img-'));
+    try {
+      provider = await createOcrProvider();
+      warnings.push(...this.ocrProviderWarnings(provider));
+      const sections: string[] = [];
+      let recognized = 0;
+      let characters = 0;
+      for (const [index, image] of images.entries()) {
+        try {
+          // 交给 provider 按 filePath 解码，与其在 PDF/栅格路径上的预处理保持一致
+          const imgPath = path.join(tmpDir, `img-${index}${image.data.subarray(0, 2).toString('hex') === 'ffd8' ? '.jpg' : '.png'}`);
+          fs.writeFileSync(imgPath, image.data);
+          const result = await provider.recognize({ data: new Uint8Array(0), width: image.width, height: image.height, channels: 0, filePath: imgPath });
+          const text = this.cleanOcrText(result.text);
+          if (!text || this.normalizedTextLength(text) < 8) continue;
+          sections.push(`## 内嵌图片 ${index + 1}（OCR）\n\n${text}`);
+          recognized += 1;
+          characters += this.normalizedTextLength(text);
+        } catch (error) {
+          warnings.push(`内嵌图片 ${index + 1} OCR 失败：${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      if (sections.length === 0) {
+        warnings.push(`文档含 ${images.length} 张内嵌图片，但未识别出可用文字`);
+        return { text: base.text, metadata: base.metadata, warnings };
+      }
+      base.metadata.officeEmbeddedImagesOcr = recognized;
+      base.metadata.officeEmbeddedImageChars = characters;
+      warnings.push(`内嵌图片 OCR 完成：${recognized}/${images.length} 张识别出文字，共 ${characters} 字`);
+      return {
+        text: [base.text, ...sections].join('\n\n'),
+        metadata: base.metadata,
+        warnings,
+      };
+    } catch (error) {
+      warnings.push(`内嵌图片 OCR 不可用（${error instanceof Error ? error.message : String(error)}），已跳过图片内容`);
+      return { text: base.text, metadata: base.metadata, warnings };
+    } finally {
+      if (provider) await provider.dispose();
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* 清理失败不影响结果 */ }
+    }
+  }
+
+  private async extractOfficeDocumentText(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
     const ext = path.extname(file.absolutePath).toLowerCase();
     const isZip = this.isZipOpenXmlFile(file.absolutePath);
     const isOle = this.isOleCompoundFile(file.absolutePath);
@@ -1405,6 +1495,7 @@ export class ContentExtractor {
     try {
       provider = await createOcrProvider();
       metadata.ocrProvider = provider.id;
+      warnings.push(...this.ocrProviderWarnings(provider));
 
       const ocrResult = await provider.recognize(imageData);
       const text = ocrResult.text.trim();
@@ -1589,6 +1680,8 @@ export class ContentExtractor {
         return { pageTexts, warnings };
       }
       let provider: OcrProvider | null = null;
+      const pageGeometry = this.readPdfPageGeometry(tmpDir);
+      const tiledPages = new Set<number>();
       try {
         for (const pageNo of pageNumbers) {
           const imgPath = images[pageNo - 1];
@@ -1599,21 +1692,33 @@ export class ContentExtractor {
               warnings.push(`PDF 第 ${pageNo} 页渲染图尺寸过小，OCR 已跳过`);
               continue;
             }
-            // 外部引擎优先（CUSTOMIZE_PADDLE_OCR_CMD 配置时），失败回退内置 provider（PP-OCRv5 ONNX → tesseract）
+            // 外部引擎优先（CUSTOMIZE_PADDLE_OCR_CMD 配置时），失败回退内置 provider（PP-OCRv6 ONNX → tesseract）
             const externalText = await this.tryPaddleOcrPageText(imgPath);
             let ocrText: string;
             if (externalText) {
               ocrText = this.cleanOcrText(externalText);
             } else {
-              provider ??= await createOcrProvider();
-              const ocrResult = await provider.recognize({ data: new Uint8Array(0), width: dimensions.width, height: dimensions.height, channels: 0, filePath: imgPath });
-              ocrText = this.cleanOcrText(ocrResult.text);
+              if (!provider) {
+                provider = await createOcrProvider();
+                warnings.push(...this.ocrProviderWarnings(provider));
+              }
+              const tiled = await this.recognizePdfPageOcr({
+                provider, imgPath, dimensions,
+                pageSizeMm: pageGeometry?.get(pageNo),
+                warnings,
+              });
+              // 切片页的有效行占比天然低于正文页（离散标注多），把整页门槛放宽到 0.4，
+              // 否则切片提召回反而会让图纸页在质量门槛上被整页丢弃
+              tiledPages.add(pageNo);
+              ocrText = this.cleanOcrText(tiled.result.text);
+              if (tiled.result.warnings?.length) warnings.push(...tiled.result.warnings.map(item => `OCR 警告: ${item}`));
             }
             if (ocrText) {
               // 页级最低质量门槛：纯图形页（图纸图框、LOGO 页）OCR 产物为零散噪声碎片，
               // 汉字过少、文本过短或有效行占比过低时整页丢弃，避免“伪文本”噪声入库
               const hanCount = (ocrText.match(/[\p{Script=Han}]/gu) ?? []).length;
-              if (hanCount >= 4 && this.normalizedTextLength(ocrText) >= 12 && this.ocrMeaningfulLineRatio(ocrText) >= 0.5) pageTexts.push({ page: pageNo, text: ocrText });
+              const minLineRatio = tiledPages.has(pageNo) ? 0.4 : 0.5;
+              if (hanCount >= 4 && this.normalizedTextLength(ocrText) >= 12 && this.ocrMeaningfulLineRatio(ocrText) >= minLineRatio) pageTexts.push({ page: pageNo, text: ocrText });
               else warnings.push(`PDF 第 ${pageNo} 页 OCR 结果均为图形噪声或无有效文字，已丢弃`);
             } else {
               warnings.push(`PDF 第 ${pageNo} 页 OCR 未识别到文字`);
@@ -1686,7 +1791,10 @@ export class ContentExtractor {
     // OCR Provider
     let ocrProvider: OcrProvider | null | undefined = null;
     const getOcrProvider = async (): Promise<OcrProvider> => {
-      if (!ocrProvider) ocrProvider = await createOcrProvider();
+      if (!ocrProvider) {
+        ocrProvider = await createOcrProvider();
+        warnings.push(...this.ocrProviderWarnings(ocrProvider));
+      }
       return ocrProvider;
     };
 
@@ -1750,6 +1858,10 @@ export class ContentExtractor {
 
     // 逐页 OCR
     const pageTexts: string[] = [];
+    // 页面几何取自渲染 sidecar（pt/mm）；缺失时切片判定退回按 DPI 折算像素尺寸
+    const pageGeometry = this.readPdfPageGeometry(tmpDir);
+    const tiledPages: number[] = [];
+    const tileCounts: number[] = [];
     for (let i = 0; i < pageImages.length; i++) {
       const imgPath = pageImages[i]!;
       try {
@@ -1764,7 +1876,7 @@ export class ContentExtractor {
           warnings.push(`PDF 第 ${i + 1} 页渲染图片尺寸过小（${dimensions.width}x${dimensions.height}），已跳过 OCR`);
           continue;
         }
-        // 外部引擎优先（CUSTOMIZE_PADDLE_OCR_CMD 配置时），失败回退内置 provider（PP-OCRv5 ONNX → tesseract）
+        // 外部引擎优先（CUSTOMIZE_PADDLE_OCR_CMD 配置时），失败回退内置 provider（PP-OCRv6 ONNX → tesseract）
         const externalText = await this.tryPaddleOcrPageText(imgPath);
         let ocrText: string;
         let ocrScore: number;
@@ -1775,16 +1887,27 @@ export class ContentExtractor {
           strategy = 'paddleocr-external';
         } else {
           const provider = await getOcrProvider();
-          const ocrResult = await provider.recognize({
-            data: new Uint8Array(0),
-            width: dimensions.width, height: dimensions.height, channels: 0,
-            filePath: imgPath,
+          // 大幅面页切片识别（块内不缩放，小字标注不再被检测网络压缩掉）
+          const tiled = await this.recognizePdfPageOcr({
+            provider, imgPath, dimensions,
+            pageSizeMm: pageGeometry?.get(i + 1),
+            warnings,
           });
+          const ocrResult = tiled.result;
+          if (tiled.tiled) {
+            tiledPages.push(i + 1);
+            tileCounts.push(tiled.tiles);
+            strategy = `paddleocr-tiled(${tiled.tiles})`;
+          }
           ocrText = this.cleanOcrText(ocrResult.text);
           ocrScore = this.scoreOcrText(ocrText);
           if (ocrResult.warnings?.length) warnings.push(...ocrResult.warnings.map(item => `OCR 警告: ${item}`));
-
-          if (this.shouldRetryPdfOcrAtHigherDpi(ocrText, ocrScore)) {
+          // 切片页跳过高 DPI 重试：切片已在原生分辨率上检测，再升 DPI 只会让切片数翻倍
+          if (tiled.tiled && tiled.tilesFailed === tiled.tiles) {
+            failedPages.push({ page: i + 1, reason: 'all_tiles_failed' });
+            warnings.push(`PDF 第 ${i + 1} 页切片 OCR 全部失败，该页无文本产出`);
+          }
+          if (!tiled.tiled && this.shouldRetryPdfOcrAtHigherDpi(ocrText, ocrScore)) {
             const retry = getHighDpiImage(i);
             if (retry) {
               const retryDimensions = await this.readImageDimensions(retry.imagePath);
@@ -1812,6 +1935,10 @@ export class ContentExtractor {
           ocrPages.push(i + 1);
           ocrStrategies.push({ page: i + 1, strategy, score: ocrScore });
           pageTexts.push(`## PDF 第 ${i + 1} 页（OCR）\n\n${ocrText}`);
+          // 大幅面页切片后仍近乎无产出 —— 显式告警，避免用户只拿到一个空壳结果
+          if (tiledPages.includes(i + 1) && this.normalizedTextLength(ocrText) < 12) {
+            warnings.push(`PDF 第 ${i + 1} 页为大版面条图，分块 OCR 后仅 ${this.normalizedTextLength(ocrText)} 个有效字符，建议确认该图纸是否本身无文字标注`);
+          }
         } else {
           failedPages.push({ page: i + 1, reason: 'empty_ocr' });
         }
@@ -1830,6 +1957,10 @@ export class ContentExtractor {
     metadata.ocrRetryPages = ocrRetryPages;
     metadata.ocrStrategies = ocrStrategies;
     metadata.failedPages = failedPages;
+    if (tiledPages.length > 0) {
+      metadata.pdfOcrTiledPages = tiledPages;
+      metadata.pdfOcrTileCounts = tileCounts;
+    }
     const usedStrategies = ocrStrategies.map(item => item.strategy);
     const builtinId = (ocrProvider as OcrProvider | null)?.id ?? 'unknown';
     metadata.ocrProvider = usedStrategies.includes('paddleocr-external')
@@ -1918,10 +2049,12 @@ export class ContentExtractor {
       const doc = await pdfjsLib.getDocument({ data: new Uint8Array(raw), verbosity: 0 }).promise;
       const pageCount = doc.numPages;
       const images: string[] = [];
+      const geometry: Array<{ page: number; widthMm: number; heightMm: number }> = [];
+      const renderScale = 4;
 
       for (let i = 1; i <= pageCount; i++) {
         const page = await doc.getPage(i);
-        const viewport = page.getViewport({ scale: 4 });
+        const viewport = page.getViewport({ scale: renderScale });
         const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
         const ctx = canvas.getContext('2d');
         await page.render({ canvasContext: ctx, viewport }).promise;
@@ -1931,10 +2064,126 @@ export class ContentExtractor {
           .removeAlpha().normalize().linear(3.0, -150)
           .withMetadata({ density: 288 }).png().toFile(pngPath);
         images.push(pngPath);
+        // scale=1 的 viewport 是页面 pt 尺寸（1pt = 1/72 inch），与 PyMuPDF 侧口径一致
+        const unitViewport = page.getViewport({ scale: 1 });
+        geometry.push({
+          page: i,
+          widthMm: (unitViewport.width * 25.4) / 72,
+          heightMm: (unitViewport.height * 25.4) / 72,
+        });
       }
+      this.writePageGeometry(outputDir, 'pdfjs-dist', renderScale * 72, geometry);
       await doc.destroy();
       return images.length > 0 ? images : null;
     } catch { return null; }
+  }
+
+  /** 写出页面几何 sidecar，供大幅面切片判定使用（写入失败不影响渲染主流程） */
+  private writePageGeometry(outputDir: string, renderer: string, dpi: number, pages: Array<{ page: number; widthMm: number; heightMm: number }>): void {
+    if (pages.length === 0) return;
+    try {
+      fs.writeFileSync(
+        path.join(outputDir, PAGE_GEOMETRY_FILE),
+        JSON.stringify({ renderer, dpi, pages: pages.map(page => ({
+          page: page.page,
+          widthMm: Math.round(page.widthMm * 100) / 100,
+          heightMm: Math.round(page.heightMm * 100) / 100,
+        })) }),
+        'utf8',
+      );
+    } catch {
+      // 几何缺失时上层退回按 DPI 折算，不影响渲染
+    }
+  }
+
+  /**
+   * 切片页的召回档识别参数。**固定值，不提供开关** —— 图纸解析的目标是数据精准与不丢失，
+   * 留一个「调低召回换速度」的开关就意味着有人能把图纸标注悄悄调没。
+   * `process.recognitionScoreThreshold` 必须与检测阈值一起放宽：行置信度过滤发生在行分组之前，
+   * 只放宽检测阈值的话低置信度标注仍会被整体丢弃。
+   */
+  private getOcrRecallOptions(): OcrRecognizeOptions {
+    const built = buildPaddleRecognizeOptions({
+      minimumAreaThreshold: TILE_RECALL_MIN_AREA,
+      boxScoreThreshold: TILE_RECALL_BOX_SCORE,
+      recognitionScoreThreshold: TILE_RECALL_REC_SCORE,
+    });
+    const options: OcrRecognizeOptions = {};
+    if (built.recognizeOptions) options.detection = built.recognizeOptions.detection as Record<string, unknown>;
+    if (built.processOptions) options.process = built.processOptions;
+    return options;
+  }
+
+  /**
+   * 单页 OCR：按页面物理尺寸决定是否切片。切片时逐块识别（块内不做缩放，
+   * 等价于检测在原生分辨率上进行），并启用召回档阈值。
+   */
+  private async recognizePdfPageOcr(options: {
+    provider: OcrProvider;
+    imgPath: string;
+    dimensions: { width: number; height: number };
+    pageSizeMm?: { widthMm: number; heightMm: number };
+    warnings: string[];
+  }): Promise<{ result: OcrResult; tiled: boolean; tiles: number; tilesFailed: number }> {
+    const decision = shouldTilePage({
+      widthPx: options.dimensions.width,
+      heightPx: options.dimensions.height,
+      widthMm: options.pageSizeMm?.widthMm,
+      heightMm: options.pageSizeMm?.heightMm,
+      dpi: this.getPdfOcrDpi(),
+      thresholdMm: TILE_TRIGGER_MM,
+      maxSidePx: PADDLE_DETECTION_MAX_SIDE_PX,
+      tilePx: TILE_PX,
+    });
+    if (!decision.tile) {
+      const result = await options.provider.recognize({
+        data: new Uint8Array(0), width: options.dimensions.width, height: options.dimensions.height,
+        channels: 0, filePath: options.imgPath,
+      });
+      return { result, tiled: false, tiles: 1, tilesFailed: 0 };
+    }
+
+    const plan = planTiles(options.dimensions.width, options.dimensions.height, {
+      tilePx: TILE_PX, overlapPx: TILE_OVERLAP_PX, maxTiles: TILE_MAX_PER_PAGE,
+    });
+    const result = await recognizeWithTiling({
+      source: { filePath: options.imgPath },
+      tiles: plan.tiles,
+      recognize: (pixels, recognizeOptions) => options.provider.recognize(pixels, recognizeOptions),
+      options: this.getOcrRecallOptions(),
+    });
+    // warnings 由调用方统一并入（避免同一批告警既在这里加前缀、又在调用方再加一次前缀）
+    return { result, tiled: true, tiles: plan.tiles.length, tilesFailed: result.tilesFailed };
+  }
+
+  /**
+   * 引擎降级告警：PaddleOCR 不可用而降级 tesseract 时，图纸/表格识别质量会明显下降。
+   * provider 的 availabilityNote 会带上具体原因（模型缺失/依赖缺失），写进解析告警里，
+   * 避免「模型目录放错代次 → 静默降级 → 图纸解析变差」这种无人察觉的退化。
+   */
+  private ocrProviderWarnings(provider: OcrProvider): string[] {
+    if (provider.id === 'paddleocr.js') return [];
+    const note = provider.availabilityNote;
+    return [note ? `OCR 引擎降级为 ${provider.id}（${note}），图纸/表格识别质量下降` : `OCR 引擎降级为 ${provider.id}，图纸/表格识别质量下降`];
+  }
+
+  /** 读取渲染目录里的页面几何；缺失或格式异常时返回 undefined */
+  private readPdfPageGeometry(outputDir: string): Map<number, { widthMm: number; heightMm: number }> | undefined {
+    try {
+      const raw = JSON.parse(fs.readFileSync(path.join(outputDir, PAGE_GEOMETRY_FILE), 'utf8')) as {
+        pages?: Array<{ page?: unknown; widthMm?: unknown; heightMm?: unknown }>;
+      };
+      const geometry = new Map<number, { widthMm: number; heightMm: number }>();
+      for (const page of raw.pages ?? []) {
+        const pageNo = Number(page?.page);
+        const widthMm = Number(page?.widthMm);
+        const heightMm = Number(page?.heightMm);
+        if (Number.isFinite(pageNo) && widthMm > 0 && heightMm > 0) geometry.set(pageNo, { widthMm, heightMm });
+      }
+      return geometry.size > 0 ? geometry : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private getPdfOcrDpi(): number {
@@ -1984,21 +2233,28 @@ export class ContentExtractor {
   }
 
   private cleanOcrText(value: string): string {
-    return filterOcrGraphicNoiseLines(String(value ?? '')
+    // 误读纠正放在噪声行过滤之后：纠正不会把已被判为噪声的行重新救回来，
+    // 也避免替换产生的文本影响噪声行的字符占比判定
+    return applyOcrMisreadCorrections(filterOcrGraphicNoiseLines(String(value ?? '')
       .replace(/[ \t]+/gu, ' ')
       .replace(/([\p{Script=Han}])\s+([\p{Script=Han}])/gu, '$1$2')
       .replace(/([\p{Script=Han}])\s+([，。；：！？、）】》])/gu, '$1$2')
       .replace(/([（【《])\s+([\p{Script=Han}])/gu, '$1$2')
       .replace(/\n{3,}/gu, '\n\n')
-      .trim());
+      .trim()));
   }
 
-  /** 加载图片像素数据（依赖 sharp） */
-  private async loadImagePixels(filePath: string): Promise<{ data: Uint8Array; width: number; height: number }> {
+  /**
+   * 加载图片像素数据（依赖 sharp）。
+   * 必须 removeAlpha + 固定 RGB：paddleocr 的 ImageInput 没有通道字段，恒定按 3 通道解释
+   * data，带 alpha 的 PNG（4 通道）会被当成 RGB 读入而整体错位；灰度图（1 通道）同理。
+   * 通道数一并回传，供 tesseract 兜底路径按真实通道数建图。
+   */
+  private async loadImagePixels(filePath: string): Promise<{ data: Uint8Array; width: number; height: number; channels: number }> {
     const sharpMod: any = await resolveAndImport('sharp');
     const sharpFn = sharpMod.default ?? sharpMod;
-    const { data, info } = await sharpFn(filePath).raw().toBuffer({ resolveWithObject: true });
-    return { data: new Uint8Array(data as Buffer), width: info.width as number, height: info.height as number };
+    const { data, info } = await sharpFn(filePath).removeAlpha().toColourspace('srgb').raw().toBuffer({ resolveWithObject: true });
+    return { data: new Uint8Array(data as Buffer), width: info.width as number, height: info.height as number, channels: info.channels as number };
   }
 
   private async readImageDimensions(filePath: string): Promise<{ width: number; height: number } | undefined> {
