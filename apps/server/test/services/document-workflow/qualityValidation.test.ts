@@ -3,7 +3,7 @@
  * 均为 L2 确定性结构检测，无需语义通道。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { applyDeterministicConsistencyFixesToMarkdown, basisRegulationsCoverageIssues, boqPlacementIssues, resourceBreakdownConsistencyIssues, collectSectionContentGaps, crossChapterConsistencyIssues, criticalPreciseTokens, degenerateContentIssues, evaluationCriteriaCoreKeywords, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, markdownTableQualityIssues, missingCriticalPreciseTokens, preciseFactUsageIssues, processSpecConflictIssues, punctuationArtifactIssues, scanTablePlaceholderCells } from '@/services/document-workflow/qualityValidation';
+import { applyDeterministicConsistencyFixesToMarkdown, basisRegulationsCoverageIssues, boqPlacementIssues, resourceBreakdownConsistencyIssues, collectSectionContentGaps, crossChapterConsistencyIssues, criticalPreciseTokens, degenerateContentIssues, evaluationCriteriaCoreKeywords, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, isNonExemptTablePlaceholderCell, markdownTableQualityIssues, missingCriticalPreciseTokens, preciseFactUsageIssues, processSpecConflictIssues, punctuationArtifactIssues, scanTablePlaceholderCells } from '@/services/document-workflow/qualityValidation';
 import type { BlueprintData } from '@/services/document-workflow/integratedBlueprint';
 import type { DocumentDraftChapter, DocumentFactsModel } from '@/services/document-workflow/types';
 
@@ -267,6 +267,35 @@ describe('formalPlaceholderIssues 占位式表达（h13c 词表扩展 + D-T5 口
     ].join('\n');
     expect(scanTablePlaceholderCells(vagueOrigin).some(hit => hit.cell === '若干')).toBe(true);
     expect(formalPlaceholderIssues(vagueOrigin).some(issue => /占位式表达：表格数据格占位符/u.test(issue.message))).toBe(true);
+  });
+
+  // ── C8 S4-③：业务过程记录列「无」豁免（r28m' 维保台账实锤：存在问题/整改措施/复查结果的「无」
+  // 是业务判断结论（无问题/无需整改），非内容缺失占位符；豁免仅限「无」类，不扩到模糊量词） ──
+  it('S4-③ 正样本：台账过程记录列「无」不判占位（表级零命中 + 函数级豁免，阻断层同源不报）', () => {
+    const ledger = [
+      '| 序号 | 检查部位 | 存在问题 | 整改措施 | 复查结果 |',
+      '| --- | --- | --- | --- | --- |',
+      '| 1 | 配电箱接线 | 无 | 无 | 合格 |',
+      '| 2 | 临时用电线路 | 无 | 无 | 合格 |',
+    ].join('\n');
+    expect(scanTablePlaceholderCells(ledger)).toEqual([]);
+    expect(markdownTableQualityIssues(ledger).filter(issue => /占位符/u.test(issue.message))).toEqual([]);
+    expect(isNonExemptTablePlaceholderCell('无', { headerCell: '存在问题', cellIndex: 2 })).toBe(false);
+    expect(isNonExemptTablePlaceholderCell('无', { headerCell: '整改措施', cellIndex: 3 })).toBe(false);
+    expect(isNonExemptTablePlaceholderCell('无', { headerCell: '复查结果', cellIndex: 4 })).toBe(false);
+  });
+
+  it('S4-③ 反例：非业务列/无表头/非「无」占位词照报（防豁免过宽；「待定」类在任何列不豁免）', () => {
+    expect(isNonExemptTablePlaceholderCell('无', { headerCell: '数量', cellIndex: 3 })).toBe(true);
+    expect(isNonExemptTablePlaceholderCell('无', { cellIndex: 0 })).toBe(true);
+    expect(isNonExemptTablePlaceholderCell('待定', { headerCell: '整改措施', cellIndex: 3 })).toBe(true);
+    expect(isNonExemptTablePlaceholderCell('待补充', { headerCell: '复查结果', cellIndex: 4 })).toBe(true);
+    const numberCellNone = [
+      '| 序号 | 物资名称 | 规格 | 数量 | 备注 |',
+      '| --- | --- | --- | --- | --- |',
+      '| 1 | 中砂 | 中粗砂 | 无 | 按计划进场 |',
+    ].join('\n');
+    expect(scanTablePlaceholderCells(numberCellNone).some(hit => hit.cell === '无' && hit.cellIndex === 3)).toBe(true);
   });
 });
 
@@ -787,6 +816,115 @@ describe('crossChapterConsistencyIssues 机械矩阵泛化（C-T4）', () => {
     const markdown = '本项目不使用塔式起重机，无需另配发电机 1 台，现场配置发电机 2 台。';
     const issues = await crossChapterConsistencyIssues(markdown, emptyFactsC4, undefined, undefined, embedNone);
     expect(issues.filter(issue => issue.message.includes('发电机'))).toEqual([]);
+  });
+});
+
+// ── C8 S4-①b：设备分组/调度声明豁免（s28m' 「按全项目总表调度」声明词与分组词同权） ──
+
+describe('crossChapterConsistencyIssues 设备调度声明豁免（C8 S4-①b）', () => {
+  const emptyFactsS4 = {
+    project: [], schedule: [], quality: [], safety: [], resources: [], tables: [],
+    drawings: [], rules: [], bills: [], preciseFacts: [], schemaFacts: {}, factIndex: {},
+    missing: [], conflicts: [], specifications: [], canonical: { byKey: {} },
+  } as unknown as DocumentFactsModel;
+  const embedNone = async (texts: string[]) => texts.map(() => [0, 0]);
+
+  it('正样本：数值后置的「按全项目总表调度」声明（不含「组」字）与分组词同权 → 降级 warning 不阻断', async () => {
+    // s28m' 实锤：全项目口径 33台 与声明口径 8台 并存——「按全项目总表调度」声明词在数值之后
+    // （s28m' 原文形态），此前仅按「组|村」窗口分类致声明不亮、普通池仍多值误报 blocker；
+    // 声明词与分组词同权识别后同设备整体按分组口径提示降级（合法分层不硬阻断）
+    const markdown = '全项目配置高清网络球形摄像机33台。高清网络球形摄像机8台按全项目总表调度。';
+    const issues = await crossChapterConsistencyIssues(markdown, emptyFactsS4, undefined, undefined, embedNone);
+    const equipment = issues.filter(issue => issue.message.includes('高清网络球形摄像机'));
+    expect(equipment).toHaveLength(1);
+    expect(equipment[0]!.level).toBe('warning');
+    expect(equipment[0]!.message).toContain('设备分组口径提示');
+    expect(issues.some(issue => issue.severity === 'blocker' && issue.message.includes('高清网络球形摄像机'))).toBe(false);
+  });
+
+  it('反例：无任何声明语境的同设备多值维持 blocker（真冲突照报，零放松）', async () => {
+    const markdown = '全项目配置高清网络球形摄像机33台。高清网络球形摄像机8台。';
+    const issues = await crossChapterConsistencyIssues(markdown, emptyFactsS4, undefined, undefined, embedNone);
+    const blocked = issues.filter(issue => issue.message.includes('高清网络球形摄像机'));
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]!.severity).toBe('blocker');
+    expect(blocked[0]!.message).toContain('配置台数出现互相矛盾的取值');
+  });
+});
+
+// ── C8-7：声明句归因（非邻接形态）+ 清单多条目分层感知（s28m' 组2 复算残留误报） ──
+
+describe('crossChapterConsistencyIssues 声明句归因与清单多条目分层（C8-7）', () => {
+  const baseFactsC87 = {
+    project: [], schedule: [], quality: [], safety: [], resources: [], tables: [],
+    drawings: [], rules: [], bills: [], preciseFacts: [], schemaFacts: {}, factIndex: {},
+    missing: [], conflicts: [], specifications: [], canonical: { byKey: {} },
+  } as unknown as DocumentFactsModel;
+  const embedNone = async (texts: string[]) => texts.map(() => [0, 0]);
+
+  it('D 正样本：设备名与「本组配置…按全项目总表调度」同句但不邻接（声明计数不入 claim 扫描）→ 整体降级 warning', async () => {
+    // s28m' 实锤：声明计数的设备名在上一分句（桥接超 12 字且含逗号/数字，claim 扫描不捕获该计数）——
+    // 声明句归因按整句（。；;\n 边界）识别句内设备名，名称与声明同句即整体归因（与邻接形态同权）
+    const markdown = '全项目配置高清网络球形摄像机11台，交通监控子系统配置高清网络球形摄像机8台。高清网络球形摄像机全景视频图像分辨率不小于3680×1656，内置不少于2个GPU芯片，本组配置8台，按全项目总表调度。';
+    const issues = await crossChapterConsistencyIssues(markdown, baseFactsC87, undefined, undefined, embedNone);
+    const equipment = issues.filter(issue => issue.message.includes('高清网络球形摄像机'));
+    expect(equipment).toHaveLength(1);
+    expect(equipment[0]!.level).toBe('warning');
+    expect(issues.some(issue => issue.severity === 'blocker' && issue.message.includes('高清网络球形摄像机'))).toBe(false);
+  });
+
+  it('D 反例：无声明句的同设备多值维持 blocker（真冲突照报，零放松）', async () => {
+    const markdown = '全项目配置高清网络球形摄像机11台，交通监控子系统配置高清网络球形摄像机8台。';
+    const issues = await crossChapterConsistencyIssues(markdown, baseFactsC87, undefined, undefined, embedNone);
+    const equipment = issues.filter(issue => issue.message.includes('高清网络球形摄像机'));
+    expect(equipment).toHaveLength(1);
+    expect(equipment[0]!.severity).toBe('blocker');
+  });
+
+  it('B 正样本：清单多条目（8+3）且正文取值不超条目总和 → 降级 warning（清单原生分层）', async () => {
+    // s28m' 实锤：摄像机清单 2 条（交通视频监控 8台 + 视频控制识别 3台），正文「部位明细+汇总」复述
+    // 属清单原生分层（与 extractStreetLightAuthority 路灯多条目求和同源模式）
+    const facts = {
+      ...(baseFactsC87 as object),
+      billItemFacts: [
+        { key: '清单条目：交通视频监控', fieldName: '清单条目', value: '名称：高清网络球形摄像机（含云台功能）｜工程量：8台' },
+        { key: '清单条目：视频控制识别', fieldName: '清单条目', value: '名称：高清网络球形摄像机（含云台功能）｜工程量：3台' },
+      ],
+    } as unknown as DocumentFactsModel;
+    const markdown = '全项目配置高清网络球形摄像机11台，交通监控子系统配置高清网络球形摄像机8台。';
+    const issues = await crossChapterConsistencyIssues(markdown, facts, undefined, undefined, embedNone);
+    const equipment = issues.filter(issue => issue.message.includes('高清网络球形摄像机'));
+    expect(equipment).toHaveLength(1);
+    expect(equipment[0]!.level).toBe('warning');
+  });
+
+  it('B 反例：正文取值超清单条目总和 → 维持 blocker（零放松：超清单总量必为错误）', async () => {
+    const facts = {
+      ...(baseFactsC87 as object),
+      billItemFacts: [
+        { key: '清单条目：交通视频监控', fieldName: '清单条目', value: '名称：高清网络球形摄像机（含云台功能）｜工程量：8台' },
+        { key: '清单条目：视频控制识别', fieldName: '清单条目', value: '名称：高清网络球形摄像机（含云台功能）｜工程量：3台' },
+      ],
+    } as unknown as DocumentFactsModel;
+    const markdown = '全项目配置高清网络球形摄像机33台，交通监控子系统配置高清网络球形摄像机8台。';
+    const issues = await crossChapterConsistencyIssues(markdown, facts, undefined, undefined, embedNone);
+    const equipment = issues.filter(issue => issue.message.includes('高清网络球形摄像机'));
+    expect(equipment).toHaveLength(1);
+    expect(equipment[0]!.severity).toBe('blocker');
+  });
+
+  it('B 反例：清单仅单条目（无分层数据源）→ 维持 blocker（分母治理）', async () => {
+    const facts = {
+      ...(baseFactsC87 as object),
+      billItemFacts: [
+        { key: '清单条目：交通视频监控', fieldName: '清单条目', value: '名称：高清网络球形摄像机（含云台功能）｜工程量：11台' },
+      ],
+    } as unknown as DocumentFactsModel;
+    const markdown = '全项目配置高清网络球形摄像机11台，交通监控子系统配置高清网络球形摄像机8台。';
+    const issues = await crossChapterConsistencyIssues(markdown, facts, undefined, undefined, embedNone);
+    const equipment = issues.filter(issue => issue.message.includes('高清网络球形摄像机'));
+    expect(equipment).toHaveLength(1);
+    expect(equipment[0]!.severity).toBe('blocker');
   });
 });
 

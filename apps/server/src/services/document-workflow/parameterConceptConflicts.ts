@@ -151,6 +151,12 @@ function extractParamTokens(markdown: string): ParamToken[] {
         prefix = prefix.slice(0, trailingDigits.index).trim();
         valueText = `${trailingDigits[0]}${valueText}`;
       }
+      // C8-7（r28m' 组7 实锤）：「开工日期为2026年9月24日」被 token 化为 prefix「…2026年9月」+
+      // 值 24 + 单位「日」——日期的「日值」进入工程参数口径池，经 bge 桥接与「计划工期90日历天」
+      // 聚簇误报多口径冲突（月份日期是时间锚非工程参数口径，正样本零冲突被误判）。值前紧邻「月」
+      // 字的 token 整体退出池；真工期/天值表述（「90日历天」「30天」）前缀不含「月」字照常参与，
+      // 真冲突（90 vs 60 日历天）仍照报（零放松）。
+      if (/月\s*$/u.test(prefix)) continue;
       const value = Number(valueText);
       const unit = match[3] || '';
       const suffixRaw = (match[4] || '').trim();

@@ -158,6 +158,24 @@ describe('alignSimilarHeadingsToPlan / nearSubsectionTitleMatch', () => {
     expect(nearSubsectionTitleMatch('雨期措施', '雨季措施')).toBe(false);
   });
 
+  it('C8 S4-② 修饰词插入放行：短标题预算 0/1 下「交通专项工程 vs 交通设施专项工程」不判缺失', () => {
+    // s28m' 终检实锤「缺少规划小节：交通专项工程」——差字「设施」为标题修饰字（只改变标题正式度，
+    // 不改变小节所指对象），短标题编辑距离预算不足以放行（实测 6 字/8 字形态距离 2 超预算）；
+    // 修饰词通道放行后对齐链将正文 H4 回写规划原文，缺失判定仍按「完全一致」口径不放松
+    expect(nearSubsectionTitleMatch('交通专项工程', '交通设施专项工程')).toBe(true);
+    expect(nearSubsectionTitleMatch('交通专项', '交通设施专项')).toBe(true);
+    const result = alignSimilarHeadingsToPlan('### 交通组织\n#### 交通设施专项工程\n正文。', ['交通专项工程']);
+    expect(result.markdown).toContain('#### 交通专项工程');
+    expect(result.markdown).not.toContain('交通设施专项工程');
+    expect(result.aligned).toEqual(['交通设施专项工程→交通专项工程']);
+  });
+
+  it('C8 S4-② 反例：非修饰字插入/修饰字超 2 个/短标题仍拒绝（白名单外差异不因通道放宽）', () => {
+    expect(nearSubsectionTitleMatch('交通专项工程', '交通照明专项工程')).toBe(false);
+    expect(nearSubsectionTitleMatch('交通专项工程', '交通设施配套专项工程')).toBe(false);
+    expect(nearSubsectionTitleMatch('绿化', '绿化设施')).toBe(false);
+  });
+
   it('已被精确覆盖的规划标题不被近似行占用（行精确命中的归属优先）', () => {
     const markdown = ['### 施工准备', '#### 雨季施工保证措施', '正文一。'].join('\n');
     const result = alignSimilarHeadingsToPlan(markdown, ['雨季施工保证措施', '雨期施工保证措施']);

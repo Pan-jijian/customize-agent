@@ -1728,7 +1728,7 @@ export function plannedStructureIssues(markdown: string, template: DocumentTempl
 
 /** 正文表名归一（章级授权豁免匹配用）：去空白与标点、去尾「表」字 */
 function normalizeBodyTableTitleKey(title: string) {
-  return (title || '').replace(/[\s:：.。；;，,、（）()【】\[\]「」“”"]/gu, '').replace(/表$/u, '');
+  return (title || '').replace(/[\s:：.。；;，,、（）()【】[\]「」“”"]/gu, '').replace(/表$/u, '');
 }
 
 /** 表名双向包含匹配（提示词必需表格兜底插入的豁免判据） */

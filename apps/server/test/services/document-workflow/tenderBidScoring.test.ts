@@ -321,15 +321,37 @@ describe('buildTenderBidScores 编制规范性与低雷同性', () => {
     expect(scores.normalization).toBe(100);
   });
 
-  it('禁用词命中按词数 ×4 扣分', async () => {
+  it('C8-U 禁用词按语义确认短语种类 ×4 扣分（词面命中但语境正常不计）', async () => {
+    const clean = [
+      '基坑开挖深度8m采用排桩加内支撑围护体系。',
+      '混凝土浇筑完成后12小时内覆盖养护并测温记录。',
+      '脚手架立杆纵距1.5m横距0.9m步距1.8m搭设。',
+      '塔式起重机安装后经检测机构验收合格投入使用。',
+      '钢筋进场按批次见证取样送检力学性能合格。',
+      '防水卷材搭接宽度不小于100mm热熔法施工。',
+      '临时用电采用三级配电两级漏电保护装置。',
+      '模板拆除时混凝土强度达到设计值75%以上。',
+      '基坑监测数据每日汇总分析并报监理单位备案。',
+    ];
     const scores = await buildTenderBidScores({
-      markdown: '我单位精心组织施工。',
+      // 口号句去除模糊应答词根（基本/力争等）以隔离禁用词分量——vague 分量单独由其他用例覆盖
+      markdown: ['本项目按精心组织、科学管理原则推进各项施工工作。', ...clean].join('\n'),
       chapters: [],
       template: null,
       factTraces: [],
       issues: [],
     });
-    expect(scores.uniqueness).toBe(96);
+    // 口号句判 filler（套话占比 1/10 未超 10% 线）→ 精心组织+科学管理 2 种 ×4 = 8 分
+    expect(scores.uniqueness).toBe(92);
+  });
+
+  it("C8-U 防误伤：规范引用/量化措施语境短语词面命中不扣分（s28m' 实机句复刻）", async () => {
+    const markdown = [
+      '工程质量标准必须符合现行国家有关工程施工质量验收规范和标准的要求并精心组织施工。',
+      '基坑周边每2小时巡视一次，发现渗漏立即封堵并及时处理隐患部位。',
+    ].join('\n');
+    const scores = await buildTenderBidScores({ markdown, chapters: [], template: null, factTraces: [], issues: [] });
+    expect(scores.uniqueness).toBe(100);
   });
 
   it('重复句式率按比例 ×60 扣分', async () => {

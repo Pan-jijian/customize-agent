@@ -157,7 +157,7 @@ export function enforceFiveElementClosureBoost(markdown: string): { markdown: st
     let target = segment.endLine;
     while (target >= segment.startLine) {
       const current = (lines[target] ?? '').trim();
-      if (/^#{1,6}\s/u.test(current) || nextNonBlankLine(lines, target).startsWith('|') || /^\*{0,2}图\s*(?:\d|[ 　])/u.test(current)) {
+      if (/^#{1,6}\s/u.test(current) || nextNonBlankLine(lines, target).startsWith('|') || /^\*{0,2}图\s*(?:\d|[ \u3000])/u.test(current)) {
         target -= 1;
         continue;
       }

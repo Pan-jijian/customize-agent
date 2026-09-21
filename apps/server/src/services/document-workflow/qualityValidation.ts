@@ -17,7 +17,7 @@ import { PAIRED_PUNCTUATION_SYMBOLS } from './structureIntegrityRules';
 import type { BlueprintData } from './integratedBlueprint';
 import { drawingFactPlacement, type DrawingFactLock } from './drawingFactLock';
 import { assignBillRowChapter, scanBillExplicitDispositions } from './billFactLock';
-import { buildResourceBreakdownAuthority, scanEquipmentCountClaims, scanResourceBreakdownClaims } from './resourceBreakdownNumbers';
+import { buildResourceBreakdownAuthority, normalizeEquipmentClaimName, scanEquipmentCountClaims, scanEquipmentNamesIn, scanResourceBreakdownClaims } from './resourceBreakdownNumbers';
 import { evidenceSatisfiesSpecField } from './factMatching';
 import { readPromptContents } from './templateStore';
 import { extractSection, nearSubsectionTitleMatch, normalizeSubsectionTitleForDedup, stableHash, stringifyFactValue, WORK_PACKAGE_SECTION_RE } from './utils';
@@ -1495,6 +1495,26 @@ export async function crossChapterConsistencyIssues(markdown: string, factsModel
   // 扩展为通用机械名抽取（scanEquipmentCountClaims 单源：机/吊/泵/车/夯 结尾 + 虚词截断归一 +
   // 量词残留/片段拦截 + 备用租赁辅助配置丢弃 + 否定分句豁免；与 constructionOrgConsistency
   // 机械数量型号规则共用同一名称归一，避免检测口径漂移）
+  // C8-7 声明句归因（s28m' 组2 复算实锤）：「本组配置8台，按全项目总表调度」的设备名在上一
+  // 分句、与计数不邻接（桥接超 12 字且含逗号/数字，claim 扫描不捕获该计数）——S4①b 的
+  // claim 窗口归因对「间隔声明」形态失效，存量数值 claim 语境均无声明致误报 blocker。
+  // 补充 pass：声明词逐处定位取所在整句（。；;\n 边界），句内全部设备名（同一后缀模式 +
+  // 同一归一函数单源）整体标归因——名称与声明同句（不论邻接与先后）即成立。
+  const declaredEquipment = new Set<string>();
+  for (const declaration of markdown.matchAll(new RegExp(SCHEDULE_DECLARATION_RE.source, 'gu'))) {
+    const position = declaration.index ?? 0;
+    const leftBoundary = Math.max(
+      markdown.lastIndexOf('\n', position - 1),
+      markdown.lastIndexOf('。', position - 1),
+      markdown.lastIndexOf('；', position - 1),
+      markdown.lastIndexOf(';', position - 1),
+    );
+    const rightBoundaries = ['\n', '。', '；', ';']
+      .map(char => markdown.indexOf(char, position))
+      .filter(index => index >= 0);
+    const rightBoundary = rightBoundaries.length > 0 ? Math.min(...rightBoundaries) : markdown.length;
+    for (const name of scanEquipmentNamesIn(markdown.slice(leftBoundary + 1, rightBoundary))) declaredEquipment.add(name);
+  }
   const equipmentMatches = new Map<string, { values: string[]; grouped: boolean }>();
   // gap 排除顿号/逗号（4.27.0 A3 校准）：「5台挖掘机，其中3台用于…」的分配语境不得采为「挖掘机3台」口径——
   // 与修复器 CROSS_SECTION_ANCHORS excavator 模式（排除 、，）检测/修复口径对齐，防检测报冲突而修复看不到的拉扯
@@ -1520,10 +1540,35 @@ export async function crossChapterConsistencyIssues(markdown: string, factsModel
     entry.grouped = entry.grouped || grouped;
     equipmentMatches.set(equipment, entry);
   }
+  // C8-7 清单多条目分层感知（s28m' 组2 复算实锤）：「高清网络球形摄像机」清单 2 条（8+3）、
+  // 「数字硬盘录像机」清单 3 条（8+3+10）——正文按「部位明细 + 汇总求和」复述属清单原生分层
+  // （与 extractStreetLightAuthority 路灯多条目求和同源模式）。判据数据源驱动：同设备清单条目
+  // ≥2 且各行工程量可解析、正文取值均不超条目总和 → 合法分层降级 warning；超总和 / 单条目 /
+  // 无清单数据维持 blocker（零放松：正文值大于清单总量必为错误，照报）。
+  const billEntryCounts = new Map<string, number>();
+  const billEntryTotals = new Map<string, number>();
+  for (const fact of factsModel.billItemFacts ?? []) {
+    const raw = stringifyFactValue(fact.value);
+    const nameText = /名称[：:]\s*([^\n｜]+)/u.exec(raw)?.[1] ?? '';
+    const equipmentName = normalizeEquipmentClaimName(nameText.replace(/[（(][^）)]*[）)]/gu, '').trim());
+    if (!equipmentName) continue;
+    const quantityText = raw.split('｜工程量：')[1] ?? '';
+    const quantityMatch = /(\d+(?:\.\d+)?)\s*(?:台|套|辆)/u.exec(quantityText);
+    const quantity = quantityMatch ? Number(quantityMatch[1]) : Number.NaN;
+    if (!Number.isFinite(quantity) || quantity <= 0) continue;
+    billEntryCounts.set(equipmentName, (billEntryCounts.get(equipmentName) || 0) + 1);
+    billEntryTotals.set(equipmentName, (billEntryTotals.get(equipmentName) || 0) + quantity);
+  }
   for (const [equipment, entry] of equipmentMatches) {
     if (entry.values.length < 2) continue;
     const conflictText = entry.values.join('、');
-    if (entry.grouped) {
+    // C8-7 声明句归因（设备级，declaredEquipment）与清单多条目分层（billLayered）：
+    // 与 claim 级窗口归因（entry.grouped）同权，任一成立即整体降级 warning（合法分层不硬阻断）
+    const maxClaimed = Math.max(...entry.values.map(value => Number(value)));
+    const billLayered = (billEntryCounts.get(equipment) ?? 0) >= 2
+      && Number.isFinite(maxClaimed)
+      && maxClaimed <= (billEntryTotals.get(equipment) ?? 0);
+    if (entry.grouped || declaredEquipment.has(equipment) || billLayered) {
       issues.push({ level: 'warning', severity: 'warning', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `设备分组口径提示：正文「${equipment}」存在分组配置台数 ${conflictText} 多值并存，需注明分组与全项目总量的调度关系`, suggestion: `分组配置（组/村级）与全项目总量并存时，必须在正文注明「本组配置、按总表调度」或明确分组数量与总量数量之间的对应关系，避免评标误读为口径矛盾。` });
     } else {
       issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `跨章一致性冲突：正文「${equipment}」配置台数出现互相矛盾的取值 ${conflictText}`, suggestion: `全项目「${equipment}」配置总量必须全文唯一：以全项目机械配置总表为准统一全部表述；分组配置必须显式注明「本组配置、按总表调度」并删除与总表矛盾的全项目口径数字。` });

@@ -104,7 +104,7 @@ function distinctiveTokens(name: string): string[] {
 /** 章内区分性 token 命中分值（出区段正文；单 token 计入上限防通用词刷分） */
 function chapterApplicationScore(content: string, tokens: string[]): number {
   if (tokens.length === 0) return 0;
-  const body = stripBasisSectionLines(content).replace(/[\s\u200b\u200c\u200d\ufeff]/gu, '');
+  const body = stripBasisSectionLines(content).replace(/[\s\u200b-\u200d\ufeff]/gu, '');
   let score = 0;
   for (const token of tokens) {
     let hits = 0;

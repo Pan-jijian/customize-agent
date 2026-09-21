@@ -312,7 +312,7 @@ describe('结构呈现落实（模式感知，v3）', () => {
     expect(report.deliveryProbability).toBe(95);
     expect(report.passed).toBe(true);
     expect(report.summary).not.toContain('标书类型未判定');
-    expect(report.summary).toContain('quality-caliber-c5.0');
+    expect(report.summary).toContain('quality-caliber-c8.0');
   });
 
   it('暗标：正文出现表格按违规处数扣分（2 处 → 87.5 → 88）', async () => {

@@ -186,6 +186,34 @@ describe('D4.2 规格-数值绑定对账（张冠李戴拦截）', () => {
     expect(fixed.fixedCount).toBe(1);
     expect(fixed.markdown).toContain('DN110 UPVC排水管1400米');
   });
+
+  // C8 S4-④ 枚举换项豁免与设备配置豁免扩「套」（s28m' 两处误报实锤）：「安装7kW充电桩、庭院灯5套」
+  // 的 5套 属枚举后项「庭院灯」（其规格量恰为 5套，无豁免即误报张冠李戴）；「7kW 5套慢充桩」的
+  // 5套 是慢充桩配置数。两豁免共用同一 lock：5套 命中 120W 条目值，确保「无豁免必误报」可被测出。
+  const enumDeviceLock = lockOf([
+    lockEntry({ name: '充电桩', quantity: 30, unit: '套', specQuantityPairs: [{ spec: '7kW', quantity: '30套' }] }),
+    lockEntry({ name: '庭院灯', quantity: 5, unit: '套', specQuantityPairs: [{ spec: '120W', quantity: '5套' }] }),
+  ]);
+  const specBinding = (md: string) => factReconciliationIssues({ markdown: md, billFactLock: enumDeviceLock }).filter(issue => issue.message.includes('规格-数值绑定错位'));
+
+  it('S4-④ 枚举换项豁免：7kW充电桩、庭院灯5套（5套属枚举后项）→ 不报张冠李戴', () => {
+    expect(specBinding('配电区安装7kW充电桩、庭院灯5套，沿停车场周边布置。')).toEqual([]);
+  });
+
+  it('S4-④ 枚举换项反例：7kW充电桩、合计5套（末段合计连接语维持原绑定）→ 照报', () => {
+    const issues = specBinding('本工程安装7kW充电桩、合计5套。');
+    expect(issues.some(issue => issue.message.includes('庭院灯'))).toBe(true);
+  });
+
+  it('S4-④ 设备配置豁免扩「套」：7kW慢充桩5套（间隙含充桩）/ 7kW 5套慢充桩（数值后窗含充桩）→ 不报', () => {
+    expect(specBinding('配电区安装7kW慢充桩5套，验收合格后投入使用。')).toEqual([]);
+    expect(specBinding('配电区安装7kW 5套慢充桩已进场，验收后组织安装。')).toEqual([]);
+  });
+
+  it('S4-④ 反例：7kW充电桩5套（「充电桩」非连续「充桩」不入设备词表）→ 张冠李戴照报（防词表过宽）', () => {
+    const issues = specBinding('配电区安装7kW充电桩5套，验收合格后投入使用。');
+    expect(issues.some(issue => issue.message.includes('庭院灯'))).toBe(true);
+  });
 });
 
 describe('D4.3 数值语义槽位对账（埋深误用总长口径拦截）', () => {

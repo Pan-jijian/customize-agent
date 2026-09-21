@@ -1305,6 +1305,43 @@ describe('M26 锚点提取修复（全角％归一 + 「N.N项」编号切片守
   });
 });
 
+// ── C8 S4-⑤：锚点变体归一（s28m' 六条部分响应实锤：招标条款 coreTerms 与正文写作四类合法
+// 变体形态差导致锚点率与响应判定双失真；四类=引号/顿号/的为省略/括号注释省略）──
+describe('tenderRequirementResponseGaps 锚点变体归一（C8 S4-⑤）', () => {
+  it('变体通道四类：引号/顿号/的为/括号省略不假 miss（锚点全覆盖 satisfied）', () => {
+    const entries = [
+      entry('考勤数据应实时上传“钉钉”系统', ['“钉钉”系统']),
+      entry('现场管理应覆盖考勤、考核记录', ['考勤、考核']),
+      entry('施工场地的清理应符合移交要求', ['施工场地的清理']),
+      entry('对竣工保修（养护）期内的质量问题负责修复', ['竣工保修（养护）期内']),
+    ];
+    const md = '本工程考勤数据实时上传钉钉系统平台；现场管理覆盖考勤考核记录；各单位完成施工场地清理后办理移交；我方对竣工保修期内的质量问题负责修复。';
+    const gaps = tenderRequirementResponseGaps(entries, md);
+    for (const gap of gaps) {
+      expect(gap.missing, gap.entry.text).toEqual([]);
+      expect(gap.satisfied, gap.entry.text).toBe(true);
+    }
+  });
+
+  it('反例①：变体坍缩过半防线（钢筋（HRB400）剥离后仅 2 字）→ 变体通道拒绝，真缺失照报', () => {
+    const [gap] = tenderRequirementResponseGaps(
+      [entry('进场钢筋（HRB400）应复检合格', ['钢筋（HRB400）'])],
+      '进场钢筋已复检合格，检验批按规范划分验收。',
+    );
+    expect(gap.missing).toContain('钢筋（HRB400）');
+    expect(gap.satisfied).toBe(false);
+  });
+
+  it('反例②：真缺失（“五一”前 正文未提该时限）→ 变体通道不为缺失背书', () => {
+    const [gap] = tenderRequirementResponseGaps(
+      [entry('绿化工程应在“五一”前完成', ['“五一”前'])],
+      '绿化工程按施工进度计划组织实施。',
+    );
+    expect(gap.missing).toContain('“五一”前');
+    expect(gap.satisfied).toBe(false);
+  });
+});
+
 describe('M14a 判定口径指纹（缓存失效自动防线：口径变更不再依赖人工递增版本）', () => {
   const SRC = path.join(__dirname, '../../../src/services/document-workflow/tenderRequirements.ts');
 

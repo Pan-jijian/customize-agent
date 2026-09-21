@@ -413,3 +413,56 @@ describe('C5 构件细分后缀豁免（r28l/s28l 实机误报：分构件保护
     expect(issues.some(issue => issue.message.includes('板厚度'))).toBe(true);
   });
 });
+
+describe('C8 S4-①a 层数概念词面直比豁免（s28m\' 实机：「层数2层、层数1层」两单体误报阻断）', () => {
+  it('正样本：裸量词「层数」经 normalizeConcept 剥「层」与量词表失配 → 原词面直比前置消解，两单体不互斥', async () => {
+    // s28m' 实锤：normalizeConcept 单位剥离表含「层」——「层数」归一后被剥成「数」，与
+    // GENERIC_MEASURE_WORDS 登记形态「层数」失配恒 false；原词面直比前置后跳过度量词聚类
+    embedMock.mockResolvedValue([[1, 0], [1, 0]]);
+    const markdown = '本工程各单体设计如下。层数2层、层数1层，均按图纸施工。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues).toEqual([]);
+    // 直比豁免在聚类前生效：两 token 均被过滤，无概念可嵌入
+    expect(embedMock).not.toHaveBeenCalled();
+  });
+
+  it('反例：带对象前缀的层数概念仍走归一后比较（真多口径照报，防豁免过宽）', async () => {
+    // 直比豁免只作用于裸量词概念「层数」本体：「主楼结构层数」归一后为「主楼结构数」，
+    // 不在量词表 → 照常进入聚类，同对象多口径（2层 vs 3层）仍报；「栏杆高度」为凑
+    // 第三 token（聚类阈值 3）的无关量，mock 同向量复刻误聚后单位分组隔离（m 组单值不报）
+    embedMock.mockResolvedValue([[1, 0], [1, 0]]);
+    const markdown = '主楼结构层数2层。主楼结构层数3层。栏杆高度1.1m。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues.some(issue => issue.message.includes('主楼结构层数'))).toBe(true);
+  });
+});
+
+describe('C8-7 日期时间锚豁免（r28m\' 组7：「开工日期为2026年9月24日」日值入池误报）', () => {
+  it('正样本：月份日期日值退出参数池 → 与工期天数不聚簇（实机形态零冲突复刻）', async () => {
+    // r28m' 实锤：「开工日期为2026年9月24日」被 token 化为 prefix「…2026年9月」+值 24+单位「日」，
+    // 经 bge 桥接与「计划工期90日历天」聚簇误报多口径；月锚豁免后池内剩同值工期 token（<3 不聚类）
+    const markdown = '计划工期90日历天，开工日期为2026年9月24日，本工程计划工期90日历天。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues).toEqual([]);
+    // 日期 token 在池外：token 数不足聚类门槛，嵌入通道不被调用（强证明退出而非聚类巧合）
+    expect(embedMock).not.toHaveBeenCalled();
+  });
+
+  it('正样本：多个月份日期并存全退出（9月24日/12月8日不互比）→ 不报', async () => {
+    // 豁免按「值前紧邻月字」逐 token 生效（两个日期各自退出）；嵌入若被调用（豁免失效场景）
+    // 日组将出现 90/24/8 多值误报——本断言同时守护逐 token 退出完整性
+    const markdown = '开工日期为2026年9月24日。竣工日期为2026年12月8日。计划工期90日历天。本工程计划工期90日历天。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues).toEqual([]);
+    expect(embedMock).not.toHaveBeenCalled();
+  });
+
+  it('反例：真工期多口径（90 vs 60 日历天）照报——日期豁免不掩盖真冲突（零放松）', async () => {
+    // 围挡 2.5m 与工期不同簇（[0,1] 向量）——同簇会触发簇级倍数门（90 > 2.5×4）整簇跳过，
+    // 与本用例意图无关；工期两 token 同簇（1.5 倍 < 4 门）→ 同单位日组多值照报
+    embedMock.mockResolvedValue([[1, 0], [1, 0], [0, 1]]);
+    const markdown = '计划工期90日历天，开工日期为2026年9月24日。本工程计划工期60日历天。围挡高度2.5m。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues.some(issue => /工期/u.test(issue.message))).toBe(true);
+  });
+});

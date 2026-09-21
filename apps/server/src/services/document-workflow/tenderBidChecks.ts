@@ -53,6 +53,26 @@ export function vagueResponseHits(markdown: string) {
     .map(phrase => ({ phrase, count: markdown.split(phrase).length - 1 }));
 }
 
+// ── 1b. 空话禁用短语（词面召回 + 语义复核口径，C8-U）──
+/** 负面词库（短语级）：《施组设计汇总方案.md》第十一节 + 用户“青天大模型 AI 评标”提示词第十二节禁用词合并，
+ * 生成侧提示词与链尾低雷同性评分共用。单字虚词（合理/充分/完善/切实/尽量/适时/加强/及时等）
+ * 只进生成侧提示词，不纳入确定性评分扣分，避免“及时整改”等正常表述被误伤。
+ * C8-U（s28m' 实锤）：短语纯词面命中是误伤源——规范引用句（“工程质量标准必须符合现行国家有关工程
+ * 施工质量验收规范和标准的要求并精心组织施工”）与有量化信息的措施句中的短语命中全部被误计扣分
+ * （5 处 3 种 -12 分）；评分扣分口径改为词面召回 + 语义复核——短语须出现在被判套话/filler 的句池
+ * 句内才计入种类（见 fillerDensityReport.forbiddenEmptyPhraseHits，评分端禁止回退词面双轨）。 */
+export const FORBIDDEN_EMPTY_PHRASES = [
+  '精心组织', '科学统筹', '科学管理', '精益求精', '全力保障', '高效推进',
+  '力争优质', '力争一流', '一流水平', '完善体系', '最大限度', '显著提升',
+  '大力落实', '严格把控', '充分确保', '竭力打造', '现代化管理', '加强管理',
+  '提高意识', '强化监督', '持续完善', '及时处理', '全方位',
+  '常态化', '提质增效', '高标准', '统筹推进',
+];
+
+/** 生成侧禁写词库（用户提示词第十二节禁用词全量）：FORBIDDEN_EMPTY_PHRASES 基础上
+ * 保留“定期检查/系统性”等语境敏感词——评分不扣分（避免误伤正常表述），但提示词层面继续禁写。 */
+export const FORBIDDEN_PROMPT_PHRASES = [...FORBIDDEN_EMPTY_PHRASES, '定期检查', '系统性'];
+
 // ── 2. 模板化套话检测：套话语义原型 + 套话密度三档（bge 余弦判定，无词表） ──
 /** 套话语义原型（跨项目可替换、无本项目专属参数的空泛表述基准）：14 条族式原型覆盖高频口号变体。
  * 校准（离线实测，bge-small-zh-v1.5）：合成真口号句最高余弦 0.852~0.998、三版真实成稿内容最高 0.769，
@@ -213,13 +233,18 @@ export interface FillerDensityReport {
   vagueCandidateSentences: number;
   /** 模糊应答语义确认句数（语义 gate 复核命中，评分扣分口径） */
   vagueSemanticSentences: number;
+  /** 空话禁用短语命中种类数（C8-U 词面召回 + 语义复核口径：短语须出现在被判套话/filler 的句池
+   * 句内才计入）；低雷同性评分按种类 ×4 扣分的事实源——纯词面命中（规范引用/有信息措施语境）不扣分 */
+  forbiddenEmptyPhraseHits: number;
   /** 套话句原文明细（去重，限 40 条）：模板化修复闭环的锚点源与生成后诊断样本 */
   fillerSentenceDetails: string[];
 }
 
 /** 套话密度统计：核心章节（全文口径，评分器可传核心段落子集）套话句占比。
  * 模糊应答词面命中仅召回（「力争上游」「左右对称」等合法句不得误计）；套话语义原型判定走
- * FILLER_SENTENCE_THRESHOLD（0.80 校准值），句池与修复锚点/生成期质检共享（含目录行过滤）。 */
+ * FILLER_SENTENCE_THRESHOLD（0.80 校准值），句池与修复锚点/生成期质检共享（含目录行过滤）。
+ * C8-U：空话禁用短语同口径（forbiddenEmptyPhraseHits——词面召回 + 命中句被判 filler 才计入种类），
+ * 低雷同性评分消费本字段，禁止评分端保留词面 includes 双轨。 */
 export async function fillerDensityReport(
   markdown: string,
   embedDocuments?: (texts: string[]) => Promise<number[][]>,
@@ -232,9 +257,20 @@ export async function fillerDensityReport(
   const fillerSentences = fillerSentenceFlags.filter(Boolean).length;
   // 套话句原文明细：按首次出现顺序去重，限 40 条——模板化修复闭环用其做锚点/诊断样本
   const fillerSentenceDetails = [...new Set(sentences.filter((_, index) => fillerSentenceFlags[index]))].slice(0, 40);
+  // C8-U：空话短语扣分口径 = 词面召回 + 语义复核（检测事实，评分端单源消费）——短语须出现在被判
+  // filler 的句池句内才计入种类；标题/表格/短句不入句池即不参与（与 C0-1 内容级判定同哲学）。
+  // s28m' 实测：词面 5 处 3 种全部处于规范引用/有信息措施语境，语义复核零确认（-12 分误伤归零）。
+  const confirmedForbiddenPhrases = new Set<string>();
+  sentences.forEach((sentence, index) => {
+    if (!fillerSentenceFlags[index]) return;
+    for (const phrase of FORBIDDEN_EMPTY_PHRASES) {
+      if (sentence.includes(phrase)) confirmedForbiddenPhrases.add(phrase);
+    }
+  });
+  const forbiddenEmptyPhraseHits = confirmedForbiddenPhrases.size;
   const ratio = sentences.length ? fillerSentences / sentences.length : 0;
   const level: TemplatingLevel = ratio >= 0.4 ? 'heavy' : ratio >= 0.2 ? 'medium' : 'light';
-  return { totalSentences: sentences.length, fillerSentences, ratio, level, vagueCandidateSentences, vagueSemanticSentences, fillerSentenceDetails };
+  return { totalSentences: sentences.length, fillerSentences, ratio, level, vagueCandidateSentences, vagueSemanticSentences, forbiddenEmptyPhraseHits, fillerSentenceDetails };
 }
 
 // ── 3. 措施五要素闭合（方案＋流程＋责任人＋时间节点＋验收标准，bge 语义判定，缺 2 项以上判不完整） ──

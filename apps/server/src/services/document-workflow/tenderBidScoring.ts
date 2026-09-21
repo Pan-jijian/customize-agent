@@ -23,22 +23,10 @@ import { countSentencePatternHits, SENTENCE_PATTERN_FAMILIES, sentencePatternThr
  * 全部映射到可计算的确定性指标，与事实安全、污染、结构缺陷类 error 门禁分离。
  */
 
-/** 负面词库（短语级）：《施组设计汇总方案.md》第十一节 + 用户“青天大模型 AI 评标”提示词第十二节禁用词合并，
- * 供低雷同性评分使用。单字虚词（合理/充分/完善/切实/尽量/适时/加强/及时等）
- * 只进生成侧提示词，不纳入确定性评分正则，避免“及时整改”等正常表述被误伤。
- * 十度实测：短语级正则仍会误伤正常语境（“建设单位会同监管部门定期检查”/“智能化系统性调试”），
- * “定期检查”“系统性”移入 FORBIDDEN_PROMPT_PHRASES（仅禁写，不参与评分扣分）。 */
-export const FORBIDDEN_EMPTY_PHRASES = [
-  '精心组织', '科学统筹', '科学管理', '精益求精', '全力保障', '高效推进',
-  '力争优质', '力争一流', '一流水平', '完善体系', '最大限度', '显著提升',
-  '大力落实', '严格把控', '充分确保', '竭力打造', '现代化管理', '加强管理',
-  '提高意识', '强化监督', '持续完善', '及时处理', '全方位',
-  '常态化', '提质增效', '高标准', '统筹推进',
-];
-
-/** 生成侧禁写词库（用户提示词第十二节禁用词全量）：FORBIDDEN_EMPTY_PHRASES 基础上
- * 保留“定期检查/系统性”等语境敏感词——评分不扣分（避免误伤正常表述），但提示词层面继续禁写。 */
-export const FORBIDDEN_PROMPT_PHRASES = [...FORBIDDEN_EMPTY_PHRASES, '定期检查', '系统性'];
+/** 负面词库出口（C8-U）：定义已下移至检测层 tenderBidChecks——fillerDensityReport 词面召回 +
+ * 语义复核生成 forbiddenEmptyPhraseHits 检测事实单源，评分端消费该事实（uniquenessScore 不再
+ * 持有词面 includes 口径）。本处 re-export 仅保持既有 import 路径稳定，禁止在本文件重新定义。 */
+export { FORBIDDEN_EMPTY_PHRASES, FORBIDDEN_PROMPT_PHRASES } from './tenderBidChecks';
 
 /** 闭环三要素（责任岗位＋检查频次＋整改闭环）：由 tenderBidChecks.fiveElementBlockStats
  * 的 role/frequency/acceptance 语义原型复用同一批 bge 嵌入，本文件不再保留要素正则 */
@@ -235,12 +223,14 @@ export function duplicateSentenceStats(markdown: string): DuplicateSentenceStats
  * 低雷同性：空话禁用词命中率 + 模糊应答词（附录一第 3 类，零出现要求）+ 套话密度超标扣分
  * （docx L156：核心章节套话占比≤10%）+ 重复句式率（≥12 字符正文句去标点后重复比例）。
  * 模糊应答扣分走语义复核口径（vagueSemanticSentences）：「力争上游/左右对称」等合法句词面命中不扣分。
+ * C8-U：空话短语扣分同口径升级（filler.forbiddenEmptyPhraseHits——词面召回 + 命中句被判套话/filler
+ * 才计入种类；规范引用/有量化信息措施句中的短语命中不再误伤——s28m' 实测词面 5 处 3 种全为正常语境）。
  * C0-4 长度归一校准：重复句预算 = 每万字 1 条（最少 10 条）——短文档不因个别合理复述被重罚、
  * 长文档按篇幅摊薄（r28l 6 万字 17 条重复在旧口径扣 ~1 分，校准后扣 7 分；s28l 14.5 万字 25 条
  * 校准后扣 10 分）；超出预算部分每条扣 1 分，与原比例扣分取较大值（短文档保持原口径）。
  */
 function uniquenessScore(markdown: string, filler: Awaited<ReturnType<typeof fillerDensityReport>>) {
-  const forbiddenHits = FORBIDDEN_EMPTY_PHRASES.filter(phrase => markdown.includes(phrase)).length;
+  const forbiddenHits = filler.forbiddenEmptyPhraseHits;
   const vagueHitCount = filler.vagueSemanticSentences;
   const fillerPenalty = Math.max(0, filler.ratio - 0.1) * 100;
   const dup = duplicateSentenceStats(markdown);

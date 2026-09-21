@@ -107,7 +107,7 @@ describe('runGlobalConsistencyReviewLoop（v3 统一审查 + 清单冻结）', (
   beforeEach(() => {
     vi.resetAllMocks();
     // 模板化修复闭环默认不触发（套话占比达标、重难点双达标）：既有用例不受影响
-    fillerDensityMock.mockResolvedValue({ totalSentences: 10, fillerSentences: 0, ratio: 0, level: 'light', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
+    fillerDensityMock.mockResolvedValue({ totalSentences: 10, fillerSentences: 0, ratio: 0, level: 'light', vagueCandidateSentences: 0, vagueSemanticSentences: 0, forbiddenEmptyPhraseHits: 0, fillerSentenceDetails: [] });
     difficultyMock.mockResolvedValue({ countermeasures: 0, attributed: 0, quantified: 0, bothCount: 0, ratio: 0, heavyTemplated: false, entries: [] });
     fillerTargetsMock.mockResolvedValue([]);
   });
@@ -184,7 +184,7 @@ describe('repairTemplatingIssues（模板化修复闭环：套话重写 + 重难
   });
 
   it('套话句命中触发修复：零信息口号句确定性删除（不进 anchorTexts），缺要素条目原文进锚点', async () => {
-    fillerDensityMock.mockResolvedValue({ totalSentences: 10, fillerSentences: 3, ratio: 0.3, level: 'medium', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
+    fillerDensityMock.mockResolvedValue({ totalSentences: 10, fillerSentences: 3, ratio: 0.3, level: 'medium', vagueCandidateSentences: 0, vagueSemanticSentences: 0, forbiddenEmptyPhraseHits: 0, fillerSentenceDetails: [] });
     difficultyMock.mockResolvedValue({ countermeasures: 2, attributed: 0, quantified: 0, bothCount: 0, ratio: 0, heavyTemplated: true, entries: [{ text: '基坑降水难度大需控制。', attributed: false, quantified: false }] });
     fillerTargetsMock.mockResolvedValue([{ chapterId: 'ch-1', chapterTitle: '工程概况', section: '概况', sentence: '精心组织科学管理确保工程质量。', channel: 'semantic' }]);
     repairMock.mockResolvedValue({ content: '本工程为办公楼项目。基坑降水需将周边沉降控制在5mm以内。', appliedCount: 1, producedCount: 2, repairType: 'quality' as never });
@@ -201,7 +201,7 @@ describe('repairTemplatingIssues（模板化修复闭环：套话重写 + 重难
   });
 
   it('套话占比达标且重难点双达标：不触发修复（零 LLM 成本）', async () => {
-    fillerDensityMock.mockResolvedValue({ totalSentences: 10, fillerSentences: 0, ratio: 0.05, level: 'light', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
+    fillerDensityMock.mockResolvedValue({ totalSentences: 10, fillerSentences: 0, ratio: 0.05, level: 'light', vagueCandidateSentences: 0, vagueSemanticSentences: 0, forbiddenEmptyPhraseHits: 0, fillerSentenceDetails: [] });
     difficultyMock.mockResolvedValue({ countermeasures: 2, attributed: 2, quantified: 2, bothCount: 2, ratio: 1, heavyTemplated: false, entries: [] });
     const result = await repairTemplatingIssues(makeTemplatingInput([makeChapter('ch-1', '工程概况', '本工程为办公楼项目。')]));
     expect(result.templatingFixApplied).toBe(false);
@@ -209,7 +209,7 @@ describe('repairTemplatingIssues（模板化修复闭环：套话重写 + 重难
   });
 
   it('修复 patch 未落地：不进入第二轮，套话占比未收敛', async () => {
-    fillerDensityMock.mockResolvedValue({ totalSentences: 10, fillerSentences: 3, ratio: 0.3, level: 'medium', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
+    fillerDensityMock.mockResolvedValue({ totalSentences: 10, fillerSentences: 3, ratio: 0.3, level: 'medium', vagueCandidateSentences: 0, vagueSemanticSentences: 0, forbiddenEmptyPhraseHits: 0, fillerSentenceDetails: [] });
     difficultyMock.mockResolvedValue({ countermeasures: 0, attributed: 0, quantified: 0, bothCount: 0, ratio: 0, heavyTemplated: false, entries: [] });
     fillerTargetsMock.mockResolvedValue([{ chapterId: 'ch-1', chapterTitle: '工程概况', section: '概况', sentence: '精心组织科学管理。', channel: 'vague' }]);
     const chapters = [makeChapter('ch-1', '工程概况', '本工程为办公楼项目。精心组织科学管理。')];
@@ -222,8 +222,8 @@ describe('repairTemplatingIssues（模板化修复闭环：套话重写 + 重难
 
   it('F2 回滚保护：修复后套话占比上升且重难点未提升 → 回滚本轮修改', async () => {
     // 轮初检测 0.3 → 修复 → 复检 0.45（变差）→ 回滚
-    fillerDensityMock.mockResolvedValueOnce({ totalSentences: 10, fillerSentences: 3, ratio: 0.3, level: 'medium', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
-    fillerDensityMock.mockResolvedValueOnce({ totalSentences: 10, fillerSentences: 5, ratio: 0.45, level: 'heavy', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
+    fillerDensityMock.mockResolvedValueOnce({ totalSentences: 10, fillerSentences: 3, ratio: 0.3, level: 'medium', vagueCandidateSentences: 0, vagueSemanticSentences: 0, forbiddenEmptyPhraseHits: 0, fillerSentenceDetails: [] });
+    fillerDensityMock.mockResolvedValueOnce({ totalSentences: 10, fillerSentences: 5, ratio: 0.45, level: 'heavy', vagueCandidateSentences: 0, vagueSemanticSentences: 0, forbiddenEmptyPhraseHits: 0, fillerSentenceDetails: [] });
     difficultyMock.mockResolvedValue({ countermeasures: 0, attributed: 0, quantified: 0, bothCount: 0, ratio: 0, heavyTemplated: false, entries: [] });
     // C2 双通道：semantic 零信息口号句确定性删除 + vague 命中句保留交 LLM 重写（保证删除后仍有 LLM 目标，走修复链）
     fillerTargetsMock.mockResolvedValue([
@@ -241,10 +241,10 @@ describe('repairTemplatingIssues（模板化修复闭环：套话重写 + 重难
   });
 
   it('F2 回滚豁免：套话占比上升但重难点双达标提升 → 保留修复', async () => {
-    fillerDensityMock.mockResolvedValueOnce({ totalSentences: 10, fillerSentences: 3, ratio: 0.3, level: 'medium', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
-    fillerDensityMock.mockResolvedValueOnce({ totalSentences: 10, fillerSentences: 4, ratio: 0.35, level: 'medium', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
+    fillerDensityMock.mockResolvedValueOnce({ totalSentences: 10, fillerSentences: 3, ratio: 0.3, level: 'medium', vagueCandidateSentences: 0, vagueSemanticSentences: 0, forbiddenEmptyPhraseHits: 0, fillerSentenceDetails: [] });
+    fillerDensityMock.mockResolvedValueOnce({ totalSentences: 10, fillerSentences: 4, ratio: 0.35, level: 'medium', vagueCandidateSentences: 0, vagueSemanticSentences: 0, forbiddenEmptyPhraseHits: 0, fillerSentenceDetails: [] });
     // round2 轮初检测：套话与重难点双达标 → 收敛 break（序列末尾兑底值）
-    fillerDensityMock.mockResolvedValue({ totalSentences: 10, fillerSentences: 0, ratio: 0.05, level: 'light', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
+    fillerDensityMock.mockResolvedValue({ totalSentences: 10, fillerSentences: 0, ratio: 0.05, level: 'light', vagueCandidateSentences: 0, vagueSemanticSentences: 0, forbiddenEmptyPhraseHits: 0, fillerSentenceDetails: [] });
     difficultyMock.mockResolvedValueOnce({ countermeasures: 2, attributed: 0, quantified: 0, bothCount: 0, ratio: 0, heavyTemplated: true, entries: [{ text: '基坑降水难度大需控制。', attributed: false, quantified: false }] });
     difficultyMock.mockResolvedValue({ countermeasures: 2, attributed: 2, quantified: 2, bothCount: 2, ratio: 1, heavyTemplated: false, entries: [] });
     fillerTargetsMock.mockResolvedValue([{ chapterId: 'ch-1', chapterTitle: '工程概况', section: '概况', sentence: '精心组织科学管理确保工程质量。', channel: 'semantic' }]);
@@ -257,7 +257,7 @@ describe('repairTemplatingIssues（模板化修复闭环：套话重写 + 重难
   });
 
   it('零信息口号句确定性删除单独生效：无剩余 LLM 目标时零修复调用、fixApplied=true', async () => {
-    fillerDensityMock.mockResolvedValue({ totalSentences: 10, fillerSentences: 1, ratio: 0.1, level: 'light', vagueCandidateSentences: 0, vagueSemanticSentences: 0, fillerSentenceDetails: [] });
+    fillerDensityMock.mockResolvedValue({ totalSentences: 10, fillerSentences: 1, ratio: 0.1, level: 'light', vagueCandidateSentences: 0, vagueSemanticSentences: 0, forbiddenEmptyPhraseHits: 0, fillerSentenceDetails: [] });
     difficultyMock.mockResolvedValue({ countermeasures: 0, attributed: 0, quantified: 0, bothCount: 0, ratio: 0, heavyTemplated: false, entries: [] });
     fillerTargetsMock.mockResolvedValue([{ chapterId: 'ch-1', chapterTitle: '工程概况', section: '概况', sentence: '精心组织科学管理确保工程质量。', channel: 'semantic' }]);
     const chapters = [makeChapter('ch-1', '工程概况', '本工程为办公楼项目。精心组织科学管理确保工程质量。')];
@@ -1047,6 +1047,57 @@ describe('mergeDuplicateThematicSections（重复主题小节合并：D-T7 ②�
     const again = mergeDuplicateThematicSections([chapter]);
     expect(again.mergedCount).toBe(0);
     expect(chapter.content).toBe(settled);
+  });
+
+  it('C8 S4-② 数组并发去重：本体+（二）（三）后缀条目全命中同一 H3 行 → 保留本体、后缀删除、正文零改动', () => {
+    // s28m' 机械章实锤：规划条目「道路作业机械配置与调度（二）」类后缀拆分经近名匹配（归一化后
+    // 编辑距离 1，预算 2）全部命中本体同一 H3 行——旧逻辑 unique 化后仅剩首条即 break，数组残留
+    // 后缀条目（正文=规划=目录三源不一致、duplicate-theme-merge 每轮重报空转）；collision 分支
+    // 保留与 H3 行精确对应的本体、删除后缀条目（正文本无对应行，零内容改动）
+    const chapter = makeChapter('ch-1', '道路作业机械配置与调度', [
+      '## 道路作业机械配置与调度',
+      '### 1.1 道路作业机械配置与调度',
+      '机械配置正文。',
+    ].join('\n'));
+    chapter.sections = ['道路作业机械配置与调度', '道路作业机械配置与调度（二）', '道路作业机械配置与调度（三）'];
+    const before = chapter.content;
+    const result = mergeDuplicateThematicSections([chapter]);
+    expect(result.mergedCount).toBe(1);
+    expect(chapter.sections).toEqual(['道路作业机械配置与调度']);
+    expect(chapter.content).toBe(before);
+    expect(result.details[0]).toContain('道路作业机械配置与调度（二）、道路作业机械配置与调度（三）');
+  });
+
+  it('C8 S4-② 数组并发去重回退：无精确对应条目时保留行序首条（宁保勿删）', () => {
+    const chapter = makeChapter('ch-1', '道路作业机械配置与调度', [
+      '## 道路作业机械配置与调度',
+      '### 1.1 道路作业机械配置与调度',
+      '机械配置正文。',
+    ].join('\n'));
+    chapter.sections = ['道路作业机械配置与调度（二）', '道路作业机械配置与调度（三）'];
+    const before = chapter.content;
+    const result = mergeDuplicateThematicSections([chapter]);
+    expect(result.mergedCount).toBe(1);
+    expect(chapter.sections).toEqual(['道路作业机械配置与调度（二）']);
+    expect(chapter.content).toBe(before);
+  });
+
+  it('C8 S4-② collision 后真重复对仍照常合并（continue 不吞后续轮次）', () => {
+    const chapter = makeChapter('ch-1', '绿化工程', [
+      '## 绿化工程',
+      '### 1.1 道路作业机械配置与调度',
+      '机械配置正文。',
+      '### 1.2 苗木吊运与栽植机具',
+      '吊运正文。',
+    ].join('\n'));
+    chapter.sections = ['道路作业机械配置与调度', '道路作业机械配置与调度（二）', '苗木吊运与栽植机具'];
+    const result = mergeDuplicateThematicSections([chapter]);
+    expect(result.mergedCount).toBe(2);
+    expect(chapter.sections).toEqual(['道路作业机械配置与调度']);
+    expect(chapter.content).toContain('吊运正文。');
+    expect(chapter.content).not.toContain('苗木吊运与栽植机具');
+    expect(result.details[0]).toContain('同节对齐去重');
+    expect(result.details[1]).toContain('「苗木吊运与栽植机具」并入「道路作业机械配置与调度」');
   });
 });
 

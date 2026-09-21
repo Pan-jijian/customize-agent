@@ -124,6 +124,19 @@ export function scanEquipmentCountClaims(text: string): EquipmentCountClaim[] {
   return claims;
 }
 
+/** 纯机械名集合抽取（声明句归因等语境判定使用）：与 scanEquipmentCountClaims 同一名称后缀模式
+ * 与同一归一函数单源——C8-7 归因（「本组配置8台，按全项目总表调度」的设备名与计数同句但不邻接，
+ * 计数不进入 claim 扫描）依赖本函数从整句文本识别设备名，不要求台数邻接。 */
+export function scanEquipmentNamesIn(text: string): string[] {
+  const found = new Set<string>();
+  const pattern = new RegExp(`([\\p{Script=Han}A-Za-z0-9]{2,8}(?:${EQUIPMENT_NAME_SUFFIX_SOURCE}))`, 'gu');
+  for (const match of text.matchAll(pattern)) {
+    const name = normalizeEquipmentClaimName(match[1]);
+    if (name) found.add(name);
+  }
+  return [...found];
+}
+
 /** 文末机械名识别（资料事实短值「塔式起重机」类形态）；无匹配或非设备名返回 undefined */
 export function equipmentNameAtEndOf(text: string): string | undefined {
   const match = EQUIPMENT_NAME_END_RE.exec(text);

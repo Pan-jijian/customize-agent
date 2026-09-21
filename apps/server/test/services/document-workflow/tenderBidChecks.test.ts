@@ -344,3 +344,38 @@ describe('extractKeyDifficultySection 提取边界（D-T7 行首锚定 + 逐级�
     expect(section).not.toContain('后续正文。');
   });
 });
+
+describe('C8-U 空话短语语义复核口径（forbiddenEmptyPhraseHits）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('正样本：纯口号句的短语命中经语义确认后按种类计入', async () => {
+    mockSimilarity(0.9);
+    const report = await fillerDensityReport('精心组织施工力量，科学统筹资源配置，全力保障工程按期推进。');
+    expect(report.fillerSentences).toBe(1);
+    expect(report.forbiddenEmptyPhraseHits).toBe(3);
+  });
+
+  it("防误伤：规范引用语境（r28m' 实机句复刻）词面命中不判套话 → 不计", async () => {
+    mockSimilarity(0.1);
+    const markdown = '工程质量标准必须符合现行国家有关工程施工质量验收规范和标准的要求并精心组织施工。';
+    expect(markdown.includes('精心组织')).toBe(true);
+    const report = await fillerDensityReport(markdown);
+    expect(report.fillerSentences).toBe(0);
+    expect(report.forbiddenEmptyPhraseHits).toBe(0);
+  });
+
+  it('防误伤：有量化信息的措施句短语命中不判套话 → 不计', async () => {
+    mockSimilarity(0.1);
+    const report = await fillerDensityReport('基坑周边每2小时巡视一次，发现渗漏立即封堵并及时处理隐患部位。');
+    expect(report.forbiddenEmptyPhraseHits).toBe(0);
+  });
+
+  it('标题行短语不进句池：仅标题命中不计（C0-1 内容级判定同哲学）', async () => {
+    mockSimilarity(0.9);
+    const report = await fillerDensityReport('## 科学统筹\n精心组织科学管理确保工程质量。');
+    expect(report.totalSentences).toBe(1);
+    expect(report.forbiddenEmptyPhraseHits).toBe(2);
+  });
+});

@@ -53,7 +53,7 @@ export function extractRegulationBookNames(text: string): string[] {
 
 /** 编号归一：去空白与零宽字符、破折号统一为连字符、大写（/ 与 - 保留结构语义供年号判定） */
 export function normalizeRegulationCode(raw: string): string {
-  return raw.replace(/[\s\u200b\u200c\u200d\ufeff]/gu, '').replace(/[—–－]/gu, '-').toUpperCase();
+  return raw.replace(/[\s\u200b-\u200d\ufeff]/gu, '').replace(/[—–－]/gu, '-').toUpperCase();
 }
 
 /** 书名归一：去书名号、括号注释（如「（2011年版）」）、空白与零宽字符（保留汉字本体供包含匹配） */
@@ -61,7 +61,7 @@ export function normalizeRegulationName(raw: string): string {
   return raw
     .replace(/《|》/gu, '')
     .replace(/[（(][^）)]{0,40}[）)]/gu, '')
-    .replace(/[\s\u200b\u200c\u200d\ufeff]/gu, '');
+    .replace(/[\s\u200b-\u200d\ufeff]/gu, '');
 }
 
 /** 技术标准类书名判定（归一后以 规范/标准/规程 结尾） */
@@ -127,7 +127,7 @@ export interface BasisRegulationCrossAudit {
 }
 
 /** 连接符白名单（编号与书名之间的合法连接文本；含实质文本说明非同一条目引用对） */
-const PAIR_CONNECTOR_RE = /^[\s（）()【】\[\]、,，;；:：·.及和与]*$/u;
+const PAIR_CONNECTOR_RE = /^[\s（）()【】[\]、,，;；:：·.及和与]*$/u;
 
 /** 行内邻近配对解析：每个编号与最近的未配对书名成对（先左后右；间隔仅连接符/空白）——
  * 顺序配对在多书名单编号行会错位（s28l 实测「《建质规〔2025〕5号》及《智慧工地建设标准》
