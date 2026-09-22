@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { buildAuthoritativeValues, cleanValueForm, extractValueAndShape, normalizeAttributeName, rejectValueNoise, stripTrailingOcrGarbage, sourcePriority } from '@/services/document-workflow/authoritativeValues';
-import { applyOverridesToText, collapseOverrideChains, extractLabeledAuthorityValues, extractValueOverrides } from '@/services/document-workflow/valueOverride';
+import { applyOverridesToRetrieved, applyOverridesToText, collapseOverrideChains, extractLabeledAuthorityValues, extractValueOverrides } from '@/services/document-workflow/valueOverride';
 
 const 答疑 = '巢湖项目/答疑文件/7招标答疑文件（电子签章版）.pdf';
 const 招标 = '巢湖项目/招标文件.pdf';
@@ -303,6 +303,73 @@ describe('判定唯一性自检（真值层 ↔ 正文声明口径）', () => {
   });
 });
 
+/**
+ * 被取代登记的安全边界（4.55.22 实测拦截）：写作前会把「被取代值」在**事实池与全部证据**里
+ * 全局替换成现行值。逐项多值属性（搭设高度/窗材质/厚度…）的候选来自不同分项，
+ * 「胜出值」只是众多分项里被选中一个——其余分项值不是旧口径。
+ * 实测缺陷：不加边界时覆盖表产出「7m→4.5m」「5.7m→4.5m」「1.8mm→1.2mm」「1.6m→2.40m」等，
+ * 证据侧一次替换 51 处技术参数。
+ */
+describe('被取代登记的安全边界（4.55.22 根治）', () => {
+  it('逐项多值属性不登记被取代（分项值的差异不是口径变更）', () => {
+    const audit = buildAuthoritativeValues({
+      facts: [
+        { key: '搭设高度', value: '4.5m', sourceFile: '巢湖项目/答疑文件/1招标答疑文件.pdf' },
+        { key: '搭设高度', value: '7m', sourceFile: '巢湖项目/4-工程量清单各项分类表/清单.xls' },
+        { key: '搭设高度', value: '5.7m', sourceFile: '巢湖项目/4-工程量清单各项分类表/清单.xls' },
+      ],
+    });
+    expect(audit.resolved.find(item => item.attribute === '搭设高度')?.superseded).toEqual([]);
+  });
+
+  it('单值型项目口径仍正常登记（工期/金额/开工日期由带口径标签机制识别）', () => {
+    const audit = buildAuthoritativeValues({
+      facts: [],
+      overrides: [],
+      labeledValues: [
+        { attribute: '计划工期', value: '330日历天', source: 答疑, clarified: true },
+        { attribute: '计划工期', value: '365日历天', source: 招标, clarified: false },
+      ],
+    });
+    expect(audit.resolved.find(item => item.attribute === '计划工期')?.superseded).toContain('365日历天');
+  });
+
+  it('变更链自证：链声明的生效值与裁决胜出值不符时，不登记该链的被取代值', () => {
+    // 「1.8mm→50mm」是清单语境下的跨分项误配；该属性实际胜出值是答疑口径的 1.2mm
+    const override = {
+      superseded: '1.8mm', effective: '50mm', scope: ['厚度'],
+      evidence: [{ source: '巢湖项目/4-工程量清单各项分类表/清单.xls', snippet: '' }], kind: 'override' as const,
+    };
+    const audit = buildAuthoritativeValues({
+      facts: [
+        { key: '窗材质', value: '1.8mm', sourceFile: '巢湖项目/4-工程量清单各项分类表/清单.xls' },
+        { key: '窗材质', value: '1.2mm', sourceFile: 答疑 },
+      ],
+      overrides: [override],
+    });
+    const resolved = audit.resolved.find(item => item.attribute === '窗材质');
+    expect(resolved?.value).toBe('1.2mm');
+    expect(resolved?.superseded).toEqual([]);
+  });
+
+  it('变更链自证通过时正常登记（链生效值 = 裁决胜出值）', () => {
+    const override = {
+      superseded: '1.8mm', effective: '2.5mm', scope: ['窗材质'],
+      evidence: [{ source: '巢湖项目/答疑文件/1招标答疑文件.pdf', snippet: '' }], kind: 'override' as const,
+    };
+    const audit = buildAuthoritativeValues({
+      facts: [
+        { key: '窗材质', value: '1.8mm', sourceFile: '巢湖项目/4-工程量清单各项分类表/清单.xls' },
+        { key: '窗材质', value: '1.2mm', sourceFile: '巢湖项目/4-工程量清单各项分类表/清单2.xls' },
+      ],
+      overrides: [override],
+    });
+    const resolved = audit.resolved.find(item => item.attribute === '窗材质');
+    expect(resolved?.value).toBe('2.5mm');
+    expect(resolved?.superseded).toContain('1.8mm');
+  });
+});
+
 describe('口径残留终检（被取代值不得作为现行口径）', () => {
   const ledger = [{ attribute: '计划工期', value: '330日历天', rule: 'R1', evidence: [{ source: 答疑 }], superseded: ['365日历天'] }];
 
@@ -344,5 +411,25 @@ describe('覆盖表文本应用（写作输入就地替换）', () => {
     const result = applyOverridesToText('1#厂房工期1365日历天，2#厂房2365日历天。', overrides);
     expect(result.text).toBe('1#厂房工期1365日历天，2#厂房2365日历天。');
     expect(result.applied).toEqual([]);
+  });
+
+  it('检索出口收口：章节写作二次检索拿到的切片同样归一（旧值不得从这条通道回流）', () => {
+    const chunks = [
+      { content: '2.8计划工期：365日历天', filePath: '招标文件.pdf' },
+      { content: '本工程计划工期365日历天，质量目标合格。', filePath: '工程概况.docx' },
+      { content: '主体结构施工工艺说明。', filePath: '施工方案.docx' },
+    ];
+    const rewritten = applyOverridesToRetrieved(chunks, overrides);
+    expect(rewritten).toBe(2);
+    expect(chunks[0]!.content).toBe('2.8计划工期：330日历天');
+    expect(chunks[1]!.content).toBe('本工程计划工期330日历天，质量目标合格。');
+    expect(chunks[2]!.content).toBe('主体结构施工工艺说明。');
+  });
+
+  it('检索出口无覆盖表时零改动（不误伤）', () => {
+    const chunks = [{ content: '计划工期365日历天' }];
+    expect(applyOverridesToRetrieved(chunks, undefined)).toBe(0);
+    expect(applyOverridesToRetrieved(chunks, [])).toBe(0);
+    expect(chunks[0]!.content).toBe('计划工期365日历天');
   });
 });

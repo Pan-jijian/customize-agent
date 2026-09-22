@@ -189,13 +189,34 @@ export function applyOverridesToText(text: string, overrides: ValueOverride[]): 
       // 「4000000.00元」里的 000000.00 类同形切片）——误替换会造出非法的第三个数
       if (offset > 0 && /[\d.,]/u.test(result[offset - 1]!)) return match;
       const context = result.slice(Math.max(0, offset - 12), offset + match.length + 12);
-      if (new RegExp(`(?:${CHANGE_CONNECTORS})|原(?:为|值)|此前|由`, 'u').test(context)) return match;
+      // 豁免只认**明确把该值当旧值引用**的标记（原为/原值/原内容/此前/由…变更）——
+      // 不认裸变更连接语：实测「最高投标限价现调整为:172460314.52元」是**单独陈述**一个
+      // 后来才被取代的值（1 号答疑自身文件的现行表述），不是变更过程说明，不得豁免。
+      if (/原(?:为|值|内容|计划|合同|招标)|此前|由[^，。；]{0,12}(?:变更|调整)|变更过程/u.test(context)) return match;
       applied.push({ from: match, to: override.effective });
       return override.effective;
     });
     result = next;
   }
   return { text: result, applied };
+}
+
+/**
+ * 检索结果就地归一到现行口径（**检索出口**用）：章节写作与蓝图推导经 `searchWithCache`
+ * 重新检索知识库、拿到的是原始切片——只在初始证据池上替换会漏掉这条通道，
+ * 旧值（365 / 旧限价 / 旧开工日期）会在章节写作时重新进入写手输入。
+ * 就地修改并返回被替换的条目数（调用侧用于诊断）。
+ */
+export function applyOverridesToRetrieved<T extends { content?: unknown }>(items: T[], overrides: ValueOverride[] | undefined): number {
+  if (!overrides || overrides.length === 0) return 0;
+  let rewritten = 0;
+  for (const item of items) {
+    const result = applyOverridesToText(String(item.content ?? ''), overrides);
+    if (result.applied.length === 0) continue;
+    item.content = result.text;
+    rewritten += 1;
+  }
+  return rewritten;
 }
 
 /** 带标签的权威值（4.55.20 实测：答疑「最高投标限价现调整为:172460314.52元」——

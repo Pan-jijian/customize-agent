@@ -88,9 +88,9 @@ describe('deterministicDefectPrecheck', () => {
     expect(deterministicDefectPrecheck('依据本项目已确认资料确定做法。').some(hit => hit.includes('占位符'))).toBe(true);
   });
 
-  it('D-T5：表格数据格占位符与阻断层同口径（豁免列「—」不判，非豁免列判）', () => {
-    const exempted = '| 设备名称 | 规格型号 | 数量 |\n| --- | --- | --- |\n| 蛙式打夯机 | — | 2台 |';
-    expect(deterministicDefectPrecheck(exempted).some(hit => hit.includes('占位符'))).toBe(false);
+  it('D-T5：表格数据格占位符与阻断层同口径（4.55.22 起规格型号列「—」同判）', () => {
+    const dashed = '| 设备名称 | 规格型号 | 数量 |\n| --- | --- | --- |\n| 蛙式打夯机 | — | 2台 |';
+    expect(deterministicDefectPrecheck(dashed).some(hit => hit.includes('占位符'))).toBe(true);
     const defective = '| 设备名称 | 规格型号 | 数量 |\n| --- | --- | --- |\n| 蛙式打夯机 | — | 待定 |';
     expect(deterministicDefectPrecheck(defective).some(hit => hit.includes('占位符'))).toBe(true);
   });

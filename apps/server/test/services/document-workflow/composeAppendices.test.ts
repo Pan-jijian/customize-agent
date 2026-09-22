@@ -44,7 +44,7 @@ describe('composeTenderAppendixMarkdown（appendixPlan 蓝图直出）', () => {
       equipment: [
         { name: '挖掘机', spec: 'PC200', quantity: 2, basis: '工程量清单' },
         { name: '汽车起重机', spec: 'QY25', min: 1, max: 2, basis: '施工方案推导' },
-        { name: '自卸汽车', basis: '施工方案推导' },
+        { name: '自卸汽车', spec: '15t', quantity: 4, basis: '施工方案推导' },
       ],
       labor: {
         peak: { min: 80, max: 90 },
@@ -69,14 +69,19 @@ describe('composeTenderAppendixMarkdown（appendixPlan 蓝图直出）', () => {
     ],
   });
 
-  it('设备表：数量口径（quantity 优先、min-max 区间、无值 —）+ 依据备注列', () => {
+  // 4.55.22 用户口径：表格单元格不得为空、不得用「—」占位。无权威来源的列（国别产地/制造年份/
+  // 额定功率/生产能力/用于施工部位）**整列不出**（BlueprintEquipmentItem 里根本没有这些字段），
+  // 出的列必须每格有值——数量口径（quantity 优先、min-max 区间）不变。
+  it('设备表：数量口径（quantity 优先、min-max 区间）+ 无源列整列不出 + 依据备注列', () => {
     const section = composeTenderAppendixMarkdown([entry({ title: '附表一 拟投入本标段的主要施工设备表', dataSource: 'blueprint.equipment' })], blueprintData);
     expect(section).toContain('## 附表一 拟投入本标段的主要施工设备表');
-    expect(section).toContain('| 序号 | 设备名称 | 型号规格 | 数量 | 国别产地 | 制造年份 | 额定功率（kW） | 生产能力 | 用于施工部位 | 备注 |');
+    expect(section).toContain('| 序号 | 设备名称 | 型号规格 | 数量 | 备注 |');
+    expect(section).not.toContain('国别产地');
     expect(section).toContain('| 1 | 挖掘机 | PC200 | 2 |');
     expect(section).toContain('| 2 | 汽车起重机 | QY25 | 1-2 |');
-    expect(section).toContain('| 3 | 自卸汽车 | — | — |');
+    expect(section).toContain('| 3 | 自卸汽车 | 15t | 4 |');
     expect(section).toContain('| 工程量清单 |');
+    expect(section).not.toMatch(/\|\s*[—-]\s*\|/u);
   });
 
   it('劳动力表：工种配置 + 分阶段投入两小节（min===max 收敛单值）', () => {
@@ -111,8 +116,8 @@ describe('composeTenderAppendixMarkdown（appendixPlan 蓝图直出）', () => {
       entry({ no: '六', title: '附表六 临时用地表', dataSource: 'blueprint.tempLand' }),
     ];
     const section = composeTenderAppendixMarkdown(plan, blueprintData);
-    // 附表二：仪器直出行（投产信息列留空为 —）
-    expect(section).toContain('| 1 | 水准仪 | DS3 | 2 | — | — | — | 高程控制测量与标高复核 |');
+    // 附表二：仪器直出行（无源列整列不出，不再有「—」占位）
+    expect(section).toContain('| 1 | 水准仪 | DS3 | 2 | 高程控制测量与标高复核 |');
     // 附表四：图件说明 + 工序数据表（起止天序 + 关键线路）
     expect(section).toContain('| 工序 | 持续天数 | 起止天序 | 关键线路 | 说明 |');
     expect(section).toContain('| 主体施工 | 180 | 第21～200天 | 关键线路 |');

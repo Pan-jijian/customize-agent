@@ -49,6 +49,7 @@ import type { BillFactLock } from '../billFactLock';
 import type { DrawingFactLock } from '../drawingFactLock';
 import type { RequirementSemanticPlan } from '../requirementSemantics';
 import type { BidCompositionSpec } from '../bidComposition';
+import type { ValueOverride } from '../valueOverride';
 import type { Semaphore } from '../utils';
 import type { planDocument } from '../agentPlanner';
 import type { buildChapterIntentClassifier } from '../chapterIntentClassifier';
@@ -215,6 +216,13 @@ export interface GenerationSessionPlanning {
   earlyTruthAudit?: { resolved: Array<{ subject: string; attribute: string; value: string; rule: string; evidence: Array<{ source: string; snippet: string }>; superseded: string[]; candidates: unknown[] }>; noiseRejected: unknown[] };
   /** 写作前应用的口径覆盖组数（诊断可见） */
   earlyOverrideCount?: number;
+  /**
+   * 写作前定死的口径覆盖表（现行口径前置的唯一出口）。
+   * **在检索出口也要应用**：章节写作与蓝图推导走 `searchWithCache` 重新检索知识库，
+   * 返回的是原始切片——只在初始证据池上替换会漏掉这条通道，旧值（365/旧限价/旧开工日期）
+   * 会在章节写作时重新进入写手输入。
+   */
+  earlyOverrideList?: ValueOverride[];
   caliberLedger?: string[];
   tenderWritingRulesText: string;
   chapterScopedProjectContext: (chapter: DocumentTemplateChapter) => string;

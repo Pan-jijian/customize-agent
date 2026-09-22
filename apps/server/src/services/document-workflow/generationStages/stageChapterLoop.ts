@@ -20,7 +20,9 @@ import { chapterSectionFactUsageIssues } from '../chapterReview';
 import { retrieveWebEvidence } from '../webResearchService';
 import { buildChapterReadinessPlan } from '../chapterReadiness';
 import { buildCrossChapterDutyDeclaration } from '../chapterDutyDeclaration';
-import { chapterFocusRule, WRITING_INTEGRITY_CONSTRAINTS } from '../documentWritingTaskBrief';
+import { buildWriteTimeFixedBlocks, chapterFocusRule, WRITING_INTEGRITY_CONSTRAINTS } from '../documentWritingTaskBrief';
+import { extractHazardBindings, renderHazardBindingBlock } from '../hazardBinding';
+import { renderClarificationConstraintBlock } from '../clarificationOverrides';
 import { chapterTaskPromptForPlannedStructure, planChapterTask } from '../agentPlanner';
 import { throttleAgentWorkflowNodes } from '../agentWorkflow';
 import { governEvidenceValues, renderScopeOverrideAnchors } from '../factGovernance';
@@ -52,6 +54,13 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
   // C-T5 行级任务清单（每行→责任章→写作证据位）：清单锁按章分配责任行，写作注入与未落位修复定位同源；
   // 全章循环只构建一次（条目×章打分一次完成，避免每章重复计算）
   const billResponsibility = buildBillResponsibilityMap(session.blueprint.billFactLock, session.planning.effectiveChapters);
+  // 危大判定（写作前定死）：从清单实测参数抽「本项目参数 × 规范阈值 → 结论」，全章循环只算一次。
+  // 基线实测缺陷：正文把规范阈值当本项目参数写（「开挖深度超过3m」「搭设高度超过24m」），
+  // 与清单实测（挖土深度 1.0/1.5m 内、脚手架搭设高度 18.05m 以内）直接矛盾。
+  const hazardBindings = extractHazardBindings(
+    session.understanding.writerEvidence,
+    { 基坑开挖深度: session.understanding.canonicalFacts?.byKey?.['excavation_depth']?.value },
+  );
   for (let chapterOffset = 0; chapterOffset < session.planning.effectiveChapters.length; chapterOffset += session.blueprint.chapterConcurrency) {
     const chapterBatch = session.planning.effectiveChapters.slice(chapterOffset, chapterOffset + session.blueprint.chapterConcurrency);
     const batchTasks = await Promise.all(chapterBatch.map(async (chapter, batchIndex): Promise<(() => Promise<void>) | undefined> => {
@@ -387,7 +396,20 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     const chapterFocusContext = focusRule
       ? `【本章写作重点】${focusRule.goal}\n【本章必须覆盖（逐项落位，缺一即判未响应）】\n${focusRule.mustCover.map(item => `- ${item}`).join('\n')}`
       : '';
-    const roleContext = [chapterFocusContext, graphRoleHint, chapterRequirementContext, chapterStructureContext, forcedSectionContext, dutyDeclaration, sixHundredPercentContext, scopeOverrideAnchors.length ? `【数据口径强制约束】${scopeOverrideAnchors.join('；')}` : '', ...WRITING_INTEGRITY_CONSTRAINTS, plan?.writingGoal, plan?.mustCover?.length ? `本章必须覆盖：${plan.mustCover.join('、')}` : '', plan?.mustUseMaterialKinds?.length ? `本章优先使用资料类型：${plan.mustUseMaterialKinds.join('、')}` : '', boqCoverageContext, ...parameterLines, ...billTaskLines, billLockText, drawingLockText].filter(Boolean).join('\n');
+    // 写作前定死块（4.55.22 断链修复）：truthConstraint / 澄清口径 / B8 现行口径铁律 / B7 权威值必须写数字 /
+    // 项目规模事实卡 / 危大判定。此前这些只写进 session.planning.writingTaskBrief，而该字段的全部消费点
+    // 是「传递给 finalize」与「渲染一条给人看的进度节点」——**从未进入任何写作提示词**，
+    // 同样 session.planning.truthConstraint 全仓零读取点。后果：写手从未被告知「只用现行值」→
+    // 终稿 4 处现行「365日历天」；从未被告知「峰值必须写数字」→ 峰值全篇 0 个数字。
+    const writeTimeFixedBlocks = buildWriteTimeFixedBlocks({
+      truthConstraint: session.planning.truthConstraint,
+      clarificationConstraint: session.planning.clarificationOverrides?.length
+        ? renderClarificationConstraintBlock(session.planning.clarificationOverrides)
+        : undefined,
+      globalWritingFocus: session.planning.writingTaskBrief?.globalWritingFocus,
+      hazardBindingBlock: renderHazardBindingBlock(hazardBindings),
+    });
+    const roleContext = [chapterFocusContext, ...writeTimeFixedBlocks, graphRoleHint, chapterRequirementContext, chapterStructureContext, forcedSectionContext, dutyDeclaration, sixHundredPercentContext, scopeOverrideAnchors.length ? `【数据口径强制约束】${scopeOverrideAnchors.join('；')}` : '', ...WRITING_INTEGRITY_CONSTRAINTS, plan?.writingGoal, plan?.mustCover?.length ? `本章必须覆盖：${plan.mustCover.join('、')}` : '', plan?.mustUseMaterialKinds?.length ? `本章优先使用资料类型：${plan.mustUseMaterialKinds.join('、')}` : '', boqCoverageContext, ...parameterLines, ...billTaskLines, billLockText, drawingLockText].filter(Boolean).join('\n');
     const chapterPromptExecution = resolveChapterPromptExecution(session.prepare.promptPlan, chapter);
     if (session.prepare.promptPlan.writerPrompts.length > 0 && !chapterPromptExecution.primaryWriter) throw new Error(`${displayChapterTitle(chapter.title)} 写作主控提示词未进入章节生成阶段`);
     // G 线 P1-10：运行时规则并入写作提示词。`runtimeRulesText`（由用户提示词抽取的禁写项/必需表/

@@ -16,13 +16,17 @@ describe('dangerousApplicabilityIssues', () => {
     expect(dangerousApplicabilityIssues('基坑开挖深度约2m。')).toEqual([]);
   });
 
-  it('高大模板：支撑高度 ≥8m 或线荷载 ≥10kN 判适用', () => {
+  // 4.55.22 阈值单源修正：原用例固化的是 8m/10kN——那是**超过一定规模**档（3.2.2）与一个
+  // 不存在的荷载门槛；31号文 2.2.2 危大档为「搭设高度 5m 及以上，或施工总荷载 15kN/m² 及以上」。
+  it('高大模板：支撑高度 ≥5m 或线荷载 ≥15kN 判适用（2.2.2 危大档）', () => {
     expect(dangerousApplicabilityIssues('模板支撑体系搭设高度为9m。')).toHaveLength(1);
-    expect(dangerousApplicabilityIssues('模板支撑搭设高度约6m。')).toEqual([]);
+    expect(dangerousApplicabilityIssues('模板支撑搭设高度约6m。')).toHaveLength(1);
+    expect(dangerousApplicabilityIssues('模板支撑搭设高度约4m。')).toEqual([]);
     expect(dangerousApplicabilityIssues('集中线荷载约为15kN。')).toHaveLength(1);
   });
 
-  it('脚手架：搭设高度 ≥15m 或悬挑式判适用', () => {
+  // 4.55.22 阈值单源修正：原用例固化 ≥15m，与 31号文 2.4.1（落地式钢管脚手架 24m 及以上）不符
+  it('脚手架：搭设高度 ≥24m 或悬挑式判适用（2.4.1 危大档）', () => {
     expect(dangerousApplicabilityIssues('落地式钢管脚手架搭设高度为24m。')).toHaveLength(1);
     expect(dangerousApplicabilityIssues('脚手架搭设高度约10m。')).toEqual([]);
     expect(dangerousApplicabilityIssues('本工程采用悬挑式脚手架。')).toHaveLength(1);

@@ -201,13 +201,14 @@ describe('formalPlaceholderIssues 占位式表达（h13c 词表扩展 + D-T5 口
     expect(formalPlaceholderIssues('论证通过后按方案实施，应急物资按方案配置。').some(issue => /占位式表达/u.test(issue.message))).toBe(false);
   });
 
-  it('D-T5 #42：表格数据格占位符豁免口径单源（豁免列「—」不报、非豁免列「待定/无」报）', () => {
-    const exempted = [
+  it('D-T5 #42：表格数据格占位符口径（4.55.22 取消规格型号列豁免；「待定/无」照报）', () => {
+    // 4.55.22 用户口径：每格必须有内容且有值——规格型号列「—」与其它列同判
+    const dashed = [
       '| 序号 | 机械或设备名称 | 规格型号 | 数量 |',
       '| --- | --- | --- | --- |',
       '| 1 | 挖掘机 | — | 5台 |',
     ].join('\n');
-    expect(formalPlaceholderIssues(exempted).some(issue => /占位式表达/u.test(issue.message))).toBe(false);
+    expect(formalPlaceholderIssues(dashed).some(issue => /占位式表达/u.test(issue.message))).toBe(true);
     const pending = [
       '| 序号 | 机械或设备名称 | 规格型号 | 数量 |',
       '| --- | --- | --- | --- |',
@@ -231,30 +232,32 @@ describe('formalPlaceholderIssues 占位式表达（h13c 词表扩展 + D-T5 口
     expect(formalPlaceholderIssues(md).some(issue => /占位式表达/u.test(issue.message))).toBe(false);
   });
 
-  it('r28f 实测机械设备附表（9 列）逐字回归：#42 零误报（D-T5 验收形态）', () => {
+  it('r28f 实测机械设备附表（9 列）：4.55.22 起「—」列照报（生成端已改为整列不出）', () => {
+    // 生成端（composeAppendices.renderEquipmentAppendix）4.55.22 起对无权威来源的列
+    // **整列不出**（pruneEmptyColumns），故正常产出不再含「—」；此表为历史形态，现应照报
     const table = [
       '| 序号 | 机械或设备名称 | 规格型号 | 数量 | 国别产地 | 制造年份 | 额定功率 | 生产能力 | 用于施工部位 |',
       '| --- | --- | --- | --- | --- | --- | --- | --- | --- |',
       '| 1 | 挖掘机 | — | 5台 | 国产 | 2023 | — | — | 土方开挖、树穴开挖 |',
       '| 6 | 洒水车 | — | 5台 | 国产 | 2023 | — | 8m³/车 | 绿化养护浇水、降尘 |',
     ].join('\n');
-    expect(formalPlaceholderIssues(table).filter(issue => /占位式表达/u.test(issue.message))).toEqual([]);
-    expect(markdownTableQualityIssues(table).filter(issue => /占位符/u.test(issue.message))).toEqual([]);
+    expect(formalPlaceholderIssues(table).some(issue => /占位式表达/u.test(issue.message))).toBe(true);
+    expect(markdownTableQualityIssues(table).some(issue => /占位符/u.test(issue.message))).toBe(true);
   });
 
-  it('C5 扩围：设备/仪器附表投产信息列「—」全豁免（s28l 实机 8 行×3 列 24 处误报；生成端如实留空不编造 vs 检测端阻断的口径冲突消解）', () => {
-    // composeAppendices renderEquipmentAppendix/renderInstrumentAppendix 对国别产地/制造年份/
-    // 额定功率/生产能力/用于施工部位硬编码「—」（投产信息如实留空不造数据），检测端豁免列未含
-    // 投产信息列致阻断——豁免列与附表生成端表头对齐后生成端直出形态零命中
+  it('C5 扩围：投产信息列「—」口径（4.55.22 起生成端整列不出，检测端照报）', () => {
+    // 历史：生成端对国别产地/制造年份/额定功率/生产能力/用于施工部位硬编码「—」，
+    // 检测端为免自伤而豁免该列。4.55.22 用户口径取消豁免后，**生成端同步改为整列不出**
+    //（pruneEmptyColumns：无权威来源的列不出），两边口径一致——正常产出零命中，历史形态照报
     const equipmentTable = [
       '| 序号 | 设备名称 | 型号规格 | 数量 | 国别产地 | 制造年份 | 额定功率（kW） | 生产能力 | 用于施工部位 | 备注 |',
       '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
       '| 1 | 挖掘机 | 0.6~1.0m³ | 4-6 | — | — | — | — | — | 人机配合开挖 |',
       '| 2 | 振动压路机 | — | 4 | — | — | — | — | — | 路基碾压 |',
     ].join('\n');
-    expect(scanTablePlaceholderCells(equipmentTable)).toEqual([]);
-    expect(formalPlaceholderIssues(equipmentTable).filter(issue => /占位符/u.test(issue.message))).toEqual([]);
-    expect(markdownTableQualityIssues(equipmentTable).filter(issue => /占位符/u.test(issue.message))).toEqual([]);
+    expect(scanTablePlaceholderCells(equipmentTable).length).toBeGreaterThan(0);
+    expect(formalPlaceholderIssues(equipmentTable).some(issue => /占位符/u.test(issue.message))).toBe(true);
+    expect(markdownTableQualityIssues(equipmentTable).some(issue => /占位符/u.test(issue.message))).toBe(true);
   });
 
   it('C5 扩围反例：豁免列仅认破折号形态 + 非豁免列占位词照报（防豁免过宽）', () => {

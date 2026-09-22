@@ -182,7 +182,9 @@ describe('文末附表区：appendixPlan 蓝图直出（composeTenderAppendixMar
     ];
     const section = composeTenderAppendixMarkdown(plan, blueprintData);
     expect(section).toContain('## 附表一 拟投入本标段的主要施工设备表');
-    expect(section).toContain('| 序号 | 设备名称 | 型号规格 | 数量 | 国别产地 | 制造年份 | 额定功率（kW） | 生产能力 | 用于施工部位 | 备注 |');
+    // 4.55.22：无权威来源的列整列不出（不得以「—」占位）
+    expect(section).toContain('| 序号 | 设备名称 | 型号规格 | 数量 | 备注 |');
+    expect(section).not.toContain('国别产地');
     expect(section).toContain('| 1 | 挖掘机 | PC200 | 2 |');
     expect(section).toContain('| 2 | 汽车起重机 | QY25 | 1-2 |');
     expect(section).toContain('工程量清单');

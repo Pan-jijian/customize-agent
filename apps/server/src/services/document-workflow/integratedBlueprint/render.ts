@@ -4,7 +4,7 @@
  * S6 零行为拆分自 integratedBlueprint.ts（门面 re-export，对外导出不变）：仅机械搬迁，未改动任何语句与常量。
  */
 import { buildAuthorityIndex, renderAuthorityDomains, renderAuthorityDomainsForBlock, type AuthorityDomain } from '../authorityIndex';
-import { renderAuthorityPlaceholderCatalog } from './authorityPlaceholders';
+import { renderAuthorityPlaceholderCatalog, renderAuthorityValue } from './authorityPlaceholders';
 import { parseChineseNumber } from '../budget';
 import { THREE_SOURCE_WRITE_RULES } from '../writingSpec';
 import { DEFAULT_SUBSECTION_TARGET_WORDS } from './capacity';
@@ -417,14 +417,16 @@ export function renderBlueprintMustCiteValues(chapter: BlueprintChapter, data: B
   for (const param of mustCiteStrict) {
     if (seen.has(param.path)) continue;
     seen.add(param.path);
-    if (param.path === 'data.contract.total_days' && data.contract.totalDays > 0) {
-      values.push(`总工期 ${data.contract.totalDays} 日历天`);
-      continue;
-    }
-    if (param.path.startsWith('data.quantities.')) {
-      const quantity = data.quantities[param.path.slice('data.quantities.'.length)];
-      if (quantity && quantity.value > 0) values.push(`${param.path.slice('data.quantities.'.length)} ${quantity.value}${quantity.unit}`);
-    }
+    // 4.55.22 单源接通：原先硬编码 `data.contract.total_days` 与 `data.quantities.*` 两个分支，
+    // 其余已登记的 path（如 `data.resources.labor.peak_value` 劳动力峰值）一律渲染为空——
+    // 本函数注释自称与 `renderAuthorityValue` 同源，实际未接通。
+    const rendered = renderAuthorityValue(param.path, data);
+    if (!rendered) continue;
+    // 单源渲染器只给「数值+单位」，反馈清单需带口径名（总工期 / 工程量条目名）
+    const name = param.path === 'data.contract.total_days'
+      ? '总工期'
+      : param.path.startsWith('data.quantities.') ? param.path.slice('data.quantities.'.length) : '';
+    values.push(name ? `${name} ${rendered}` : rendered);
   }
   return values.join('；');
 }

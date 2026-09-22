@@ -941,32 +941,6 @@ export function compactScopedProjectContext(projectContext: string, maxChars = 2
   return truncate(compactBody, maxChars);
 }
 
-/** 危大工程判定规则卡（4.19 闭环）：节含基坑/危大时注入——从项目上下文与节事实卡锁定实际开挖深度，
- * 按住建部令第 37 号强制落位危大/超危大分级结论；深度缺时不得编造，要求从绑定证据锁定。 */
-function excavationHazardRuleCard(sectionTitle: string, projectContext: string, factCardPrompt: string) {
-  if (!/基坑|危大/u.test(sectionTitle)) return '';
-  const contextText = `${projectContext || ''}\n${factCardPrompt || ''}`;
-  // 窗口排除数字防贪婪回溯（「开挖深度5.15m」窗口吞「5.1」后捕获组拿到 5，深度缩水影响分级）
-  const depthValues = [...contextText.matchAll(/(?:开挖深度|基坑深度|坡底线|坑底标高)[^。；;\n\d]{0,16}?-?(\d+(?:\.\d+)?)/gu)]
-    .map(match => Math.abs(Number(match[1])))
-    .filter(value => Number.isFinite(value) && value >= 1 && value < 50);
-  const maxDepth = depthValues.length > 0 ? Math.max(...depthValues) : undefined;
-  const depthFact = maxDepth !== undefined
-    ? `本工程资料基坑开挖深度为 ${maxDepth}m${maxDepth >= 5 ? '（属超过一定规模的危大工程，专项方案必须专家论证）' : maxDepth >= 3 ? '（属危大工程，必须编制专项施工方案）' : '（未达危大工程判定阈值，仍须按一般土方工程管控）'}`
-    : '资料中暂未锁定本工程基坑开挖深度数值：不得编造深度数值，必须从绑定证据（基坑支护设计图/地质勘察报告）锁定实际深度后落位危大分级结论。';
-  return [
-    '【危大工程判定规则卡】依据住建部《危险性较大的分部分项工程安全管理规定》（住建部令第37号）：开挖深度≥3m 的基坑工程属危大工程，必须编制专项施工方案并组织专家论证以外的审核流程；开挖深度≥5m 的基坑工程属超过一定规模的危大工程，专项施工方案必须经专家论证。',
-    depthFact,
-    '本节基坑内容必须同时写明：①本工程实际开挖深度数值，②对应的危大分级判定结论（危大工程/超过一定规模的危大工程+专家论证）与管控要求，不得只写判定规则不落地本项目深度与分级。',
-    // 4.19 外部评审 P1 销项：支护形式与参数必须量化写死，与资料一致；
-    // 「按设计坡率」「放坡或支护」类留白/两可表述是评审扣分点，禁止出现
-    '本节若涉及基坑支护形式与做法，必须写明具体支护参数并与资料支护形式一致：土钉墙写明土钉规格（钢管Φ及壁厚）、长度、竖向/水平间距、喷射混凝土面层厚度与钢筋网规格；放坡开挖写明放坡坡率（如1:0.75）与坡面防护做法；禁止「按设计坡率」「放坡或支护」类参数留白或两可表述。',
-    // R12 舒城第二轮实测：正文声明「无落地式钢管脚手架搭设高度24m及以上」「无10kN及以上起重吊装」
-    // 与危大清单表格行（24m 脚手架、10kN 吊装列为危大工程）自相矛盾
-    '若本节输出危大工程（辨识）清单表格或排除性声明，两者必须同口径：清单只列资料参数确认达到判定阈值的类别；正文声明「本工程无/未涉及某类危大工程」的类别不得再列入危大清单表格（反之亦然），参数阈值表述不得两处不一致。',
-  ].join('\n');
-}
-
 export async function buildLlmSectionContent(input: { template: DocumentTemplate; chapter: DocumentTemplateChapter; sectionTitle: string; evidence: DocumentEvidence[]; missingFacts: string[]; promptTexts: string; projectContext: string; skeletonProjectContext?: string; requirement?: string; roleContext: string; targetWords: number; maxWords?: number; forbidDrawingImages: boolean; factCoverageContext?: string; qualityFeedback?: string; compactProjectContext?: boolean; scopedProjectContext?: boolean; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics; timeoutMs?: number; tablePlanInstruction?: string; blueprintDataText?: string; blueprintSliceText?: string; sharedFactLayerText?: string; sectionRankBoost?: (item: DocumentEvidence) => number }) {
   const sectionEvidence = evidenceForSection(input.sectionTitle, input.chapter, input.evidence);
   const sectionFactCard = await buildSectionFactCard(input.sectionTitle, sectionEvidence);
@@ -1060,7 +1034,6 @@ export async function buildLlmSectionContent(input: { template: DocumentTemplate
       professionalSectionTaskCard(input.chapter.title, input.sectionTitle),
       input.tablePlanInstruction || '',
       sectionFactCard.prompt,
-      excavationHazardRuleCard(input.sectionTitle, input.projectContext, sectionFactCard.prompt),
       ...sectionAnchoredRules(input.sectionTitle),
       processKnowledgePrompt,
       workPackageSkeleton,

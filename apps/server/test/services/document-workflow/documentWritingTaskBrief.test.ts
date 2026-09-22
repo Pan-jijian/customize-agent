@@ -3,7 +3,7 @@
  * 必覆盖/事实域/证据引用/BOQ 目标卡构建、施组全局写作焦点（写作红线约束/规模事实卡/可信事实卡）。
  */
 import { describe, expect, it } from 'vitest';
-import { buildWritingTaskBrief } from '@/services/document-workflow/documentWritingTaskBrief';
+import { B7_AUTHORITY_NUMERIC_RULE, B8_EFFECTIVE_CALIBER_RULE, buildWriteTimeFixedBlocks, buildWritingTaskBrief } from '@/services/document-workflow/documentWritingTaskBrief';
 import type { CanonicalFact, DocumentFactsModel, DocumentTemplateChapter, ProjectGraph } from '@/services/document-workflow/types';
 
 function makeChapter(id: string, title: string, extra: Partial<DocumentTemplateChapter> = {}): DocumentTemplateChapter {
@@ -200,5 +200,64 @@ describe('buildWritingTaskBrief', () => {
     expect(chapter.drawingTargets).toEqual([]);
     expect(chapter.gaps).toEqual([]);
     expect(chapter.boqTargets).toEqual([]);
+  });
+});
+
+/**
+ * 写作前定死块注入（4.55.22 断链修复的护栏用例）。
+ *
+ * 实测缺陷（本会话发现的最根本一条）：`buildWritingTaskBrief` 产出的 `globalWritingFocus`
+ * （含 B8 现行口径铁律 / B7 权威值必须写数字 / 规模事实卡 / 可信事实卡）与
+ * `session.planning.truthConstraint`（真值层现行口径硬约束）**从未进入任何写作提示词**——
+ * 前者的全部消费点是「传递给 finalize」与「渲染一条给人看的进度节点」，后者全仓零读取点。
+ * 后果：终稿 4 处现行「365日历天」、劳动力峰值全篇 0 个数字。
+ *
+ * 本组用例守住「写作前定死块必须可达且不重复」这一契约，防止断链再次发生。
+ */
+describe('写作前定死块（4.55.22 断链修复护栏）', () => {
+  it('真值层硬约束与澄清口径必须进块（值在写作前定死的唯一载体）', () => {
+    const blocks = buildWriteTimeFixedBlocks({
+      truthConstraint: '【现行口径（真值层裁决，硬约束）】计划工期：现行为「330日历天」；被取代（不得作为现行口径）：365日历天',
+      clarificationConstraint: '【答疑澄清生效口径】最高投标限价 157166591.34元',
+    });
+    expect(blocks.join('\n')).toContain('330日历天');
+    expect(blocks.join('\n')).toContain('157166591.34元');
+  });
+
+  it('B7/B8 铁律与规模事实卡随块注入（从任务书单源引用）', () => {
+    const brief = buildWritingTaskBrief({
+      chapters: [makeChapter('c1', '第一章 工程概况')],
+      templateName: '施工组织设计',
+    });
+    const blocks = buildWriteTimeFixedBlocks({ globalWritingFocus: brief.globalWritingFocus });
+    const text = blocks.join('\n');
+    expect(text).toContain('B8 现行口径铁律');
+    expect(text).toContain('B7 蓝图权威值必须写具体数字');
+    expect(text).toContain('禁止出现被取代的旧值');
+  });
+
+  it('B8 铁律不得写死具体数值（曾内嵌被取代的旧值 172460314.52元）', () => {
+    expect(B8_EFFECTIVE_CALIBER_RULE).not.toMatch(/\d{6,}/u);
+    expect(B8_EFFECTIVE_CALIBER_RULE).toContain('禁止出现被取代的旧值');
+    expect(B7_AUTHORITY_NUMERIC_RULE).toContain('劳动力峰值');
+  });
+
+  it('不注入整份 globalWritingFocus（WRITING_INTEGRITY_CONSTRAINTS 已在 roleContext 单独注入，避免重复）', () => {
+    const brief = buildWritingTaskBrief({
+      chapters: [makeChapter('c1', '第一章 工程概况')],
+      templateName: '施工组织设计',
+    });
+    const blocks = buildWriteTimeFixedBlocks({ globalWritingFocus: brief.globalWritingFocus });
+    expect(blocks.join('\n')).not.toContain('【结构完整性红线】');
+  });
+
+  it('危大判定块随块注入', () => {
+    const blocks = buildWriteTimeFixedBlocks({ hazardBindingBlock: '【危大判定（写作前已按清单实测参数定死，硬约束）】- 脚手架工程：结论：**不属危大**' });
+    expect(blocks.join('\n')).toContain('不属危大');
+  });
+
+  it('空输入返回空数组（不产出空块）', () => {
+    expect(buildWriteTimeFixedBlocks({})).toEqual([]);
+    expect(buildWriteTimeFixedBlocks({ truthConstraint: '   ' })).toEqual([]);
   });
 });

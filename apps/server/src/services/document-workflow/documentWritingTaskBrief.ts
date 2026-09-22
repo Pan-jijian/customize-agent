@@ -60,11 +60,69 @@ export function chapterFocusRule(chapterTitle: string) {
  */
 export const WRITING_INTEGRITY_CONSTRAINTS: readonly string[] = [
   '【结构完整性红线】有序列表编号必须从「1.」起连续、不得跳号或重号，小节内列表独立起编、不得继承父级编号；编号后必须紧跟实质内容（禁止孤立编号）；禁止双重冒号「：：」「；：」「。：」等行尾标点残留；禁止句子中途截断（行尾无终止标点）与整段重复行；每个小节必须有实质正文，禁止只写标题的空小节',
-  '【表格规范红线】每张表只允许一个表头行（禁止重复表头），表名必须独立成行（禁止混入表头首格）；数据行不得留空单元格；禁止用「—/若干/约/待定/暂无/待补充」等占位或模糊表达代替具体数据（合计行的「—」与规格型号列「机具无型号」的「—」除外）；合计行数值必须可由明细行相加推导；列数与表头一致；说明性内容必须用段落承载，禁止用表格单元格堆砌正文',
+  '【表格规范红线】每张表只允许一个表头行（禁止重复表头），表名必须独立成行（禁止混入表头首格）；**数据行不得留空单元格，也不得用「—/——」占位**——每格必须有内容且有值；禁止用「若干/约/待定/暂无/待补充」等模糊表达代替具体数据；合计行数值必须可由明细行相加推导；列数与表头一致；说明性内容必须用段落承载，禁止用表格单元格堆砌正文。规格型号列尤其注意：机械设备由投标人自行选型时，**选型结论本身就是必须写出的值**（写具体型号，或招标/图纸给出的规格），不得以「—」留空搪塞',
   '【数据口径红线（宁缺毋假）】同一指标（劳动力总数、机械台数、工期阶段划分、班组人数等）全文档只允许一套口径，禁止在不同章节或表格中并列矛盾数值；禁止自行取平均值、保守值、众数等在多套口径中盲选统一；无法从资料锁定唯一数值时不得写具体数值（改用定性表述或显式标注待核），严禁编造数值或将候选值随手择一写入',
   '【禁止资料堆砌伪段落】禁止以「本项目主要施工内容包括：X的Y量为Z……」「经识别，本项目工程量为：……」式清单罗列句充当正文段落；禁止把资料条目用顿号/分号首尾相接拼成伪句子；每段必须是连贯的施工描述（含施工对象、工序逻辑、工艺做法、参数落位），工程量清单类明细如需呈现应使用规范表格，不得用罗列句复制表格内容',
   '【工期时序与分批口径红线】时间表述必须符合施工时序逻辑：前期准备动作（施工方案编制报审、图纸会审、交底、考察、封样、检测、培训演练、采购调查等）的完成时限必须落在施工准备阶段内，禁止出现「开工令下发后第 N 日内」且 N 达到或超过总工期的写法（等同于把前期动作排到竣工日）；机械、设备、劳动力分批进场表述（首批/剩余/补充进场）各批次数量必须能合计推导为进场总数且与资源配置表同口径，禁止分批数量与总数互相矛盾',
 ];
+
+/**
+ * B8 现行口径铁律（单源常量）。
+ * **不得在本条里写死具体数值**：原文曾把「合同金额以澄清后为准（如调整为 172460314.52 元）」写进示例，
+ * 而 172460314.52 元正是 1 号答疑中**已被 5 号答疑取代的旧值**——铁律自己带着旧口径。
+ * 生效值与被取代值一律由真值层硬约束块（`renderTruthConstraintBlock`）携带，本条只讲**纪律**。
+ */
+export const B8_EFFECTIVE_CALIBER_RULE =
+  'B8 现行口径铁律：正文只陈述**现行值**——计划工期、合同金额、开工日期等以真值层裁决后的生效值为准'
+  + '（具体生效值与被取代值见下文「现行口径」硬约束块，逐条照办）；'
+  + '**禁止出现被取代的旧值，也禁止叙述变更过程**（不得写「原365日历天现变更修改为330日历天」'
+  + '「招标澄清文件明确…」类说明——评标人只看现行口径）；'
+  + '以工期为参照的时限（如「开工后第N日内完成…」）必须落在现行工期之内';
+
+/** B7 蓝图权威值必须写具体数字（单源常量） */
+export const B7_AUTHORITY_NUMERIC_RULE =
+  'B7 蓝图权威值必须写具体数字：劳动力峰值、机械设备台数、里程碑节点天数等由系统蓝图统一裁决的数值，'
+  + '必须原样写出（如「劳动力峰值 XX 人」「挖掘机 X 台」），不得只写「按总进度计划控制」「按施工部署确定」'
+  + '类控制原则，也不得自行推算另设';
+
+/**
+ * 写作前定死块（**写作侧单一入口**）：把「写作前已经定好的值与铁律」拼成注入 `roleContext` 的文本块。
+ *
+ * ## 为什么必须有这个函数
+ *
+ * `buildWritingTaskBrief` 产出 `globalWritingFocus`（含 B8 现行口径铁律、B7 权威值必须写数字、
+ * 项目规模事实卡、项目可信基础事实），并被 `stageOutlinePlanning:372` 存进
+ * `session.planning.writingTaskBrief`。但该 session 字段的全部消费点是
+ * `documentGenerator:153` / `documentPipeline:290`（仅传递给 finalize）与
+ * `finalGate:55`（**只用来渲染一条给人看的进度节点**）——
+ * **没有任何一处把它注入章节写作提示词**，同样 `session.planning.truthConstraint` 全仓零读取点。
+ *
+ * 后果（基线实测）：写手从未被告知「只用现行值」→ 终稿 4 处现行「365日历天」；
+ * 从未被告知「峰值必须写数字」→ 峰值全篇 0 个数字。值在输入侧被替换了，但**指令层是断的**。
+ *
+ * 本函数是该断链的**唯一修复点**：只取「值/口径」类硬约束（章级覆盖项由 `chapterFocusRule` 承担），
+ * 在 `stageChapterLoop` 组装 `roleContext` 时注入。
+ *
+ * @returns 非空文本块数组（调用侧与 `roleContext` 其余项一起 `.filter(Boolean)` 拼接）
+ */
+export function buildWriteTimeFixedBlocks(input: {
+  /** 真值层现行口径硬约束块（`renderTruthConstraintBlock` 产物） */
+  truthConstraint?: string;
+  /** 答疑澄清生效口径块（`renderClarificationConstraintBlock` 产物） */
+  clarificationConstraint?: string;
+  /** 任务书全局写作焦点（取其「值/口径」类条目，单源引用，不复制字符串） */
+  globalWritingFocus?: readonly string[];
+  /** 危大判定块（`hazardBinding.renderHazardBindingBlock` 产物） */
+  hazardBindingBlock?: string;
+}): string[] {
+  // 只挑「值/口径」类条目：B7/B8 铁律 + 项目规模事实卡 + 项目可信基础事实。
+  // **不注入整份 globalWritingFocus**：基础条目里的 WRITING_INTEGRITY_CONSTRAINTS 已在
+  // roleContext 单独注入，整份会重复并推高每个块的 token。
+  const valueRules = (input.globalWritingFocus || [])
+    .filter(line => /^B[78]\s|^项目规模事实卡|^项目可信基础事实/u.test(line));
+  return [input.truthConstraint, input.clarificationConstraint, ...valueRules, input.hazardBindingBlock]
+    .filter((block): block is string => Boolean(block && block.trim()));
+}
 
 export function buildWritingTaskBrief(input: {
   chapters: DocumentTemplateChapter[];
@@ -118,8 +176,8 @@ export function buildWritingTaskBrief(input: {
   return {
     documentType: isConstructionOrg ? '施工组织设计' : '专业文档',
     globalWritingFocus: isConstructionOrg
-      ? [...globalWritingFocus, 'B8 现行口径铁律（实测缺陷：正文仍出现被澄清前的旧值 365日历天与旧金额 22303.66万元）：正文只陈述**现行值**——计划工期以澄清后为准（如 330 日历天）、合同金额以澄清后的最高投标限价为准（如调整为 172460314.52 元）；**禁止出现被取代的旧值，也禁止叙述变更过程**（不得写「原365日历天现变更修改为330日历天」「招标澄清文件明确…」类说明，评标人只看现行口径）；以工期为参照的时限（如「开工后第N日内完成…」）必须落在现行工期之内', '招标硬性要求必须逐项明确响应：质量标准、计划工期、缺陷责任期与保修、安全文明目标、项目经理及组织机构；工期/质量/保修类承诺可在概况与质量章节落位，不得遗漏', ...(scaleFactLines.length ? [`项目规模事实卡（口径裁决值，正文引用规模数据必须与之一致，不得混淆总占地与建筑总量口径）：${scaleFactLines.join('；')}`] : []), ...(canonicalLines.length ? [`项目可信基础事实（写作时必须优先落位）：${canonicalLines.slice(0, 10).join('；')}`] : []), 'B7 蓝图权威值必须写具体数字（实测缺陷：正文 4 处「劳动力峰值按…控制/为口径锁定」全无人数，蓝图裁决的峰值一次未落位）：劳动力峰值、机械设备台数、里程碑节点天数等由系统蓝图统一裁决的数值，必须原样写出（如「劳动力峰值 XX 人」「挖掘机 X 台」），不得只写「按总进度计划控制」「按施工部署确定」类控制原则，也不得自行推算另设']
-      : [...globalWritingFocus.slice(0, 2), 'B8 现行口径铁律：正文只陈述现行值（澄清后的计划工期/最高投标限价），禁止出现被取代的旧值、禁止叙述变更过程', 'B7 蓝图权威值必须写具体数字：劳动力峰值、机械设备台数、里程碑节点天数等由系统蓝图统一裁决的数值必须原样写出（如「劳动力峰值 XX 人」），不得只写控制原则',],
+      ? [...globalWritingFocus, B8_EFFECTIVE_CALIBER_RULE, '招标硬性要求必须逐项明确响应：质量标准、计划工期、缺陷责任期与保修、安全文明目标、项目经理及组织机构；工期/质量/保修类承诺可在概况与质量章节落位，不得遗漏', ...(scaleFactLines.length ? [`项目规模事实卡（口径裁决值，正文引用规模数据必须与之一致，不得混淆总占地与建筑总量口径）：${scaleFactLines.join('；')}`] : []), ...(canonicalLines.length ? [`项目可信基础事实（写作时必须优先落位）：${canonicalLines.slice(0, 10).join('；')}`] : []), B7_AUTHORITY_NUMERIC_RULE]
+      : [...globalWritingFocus.slice(0, 2), B8_EFFECTIVE_CALIBER_RULE, B7_AUTHORITY_NUMERIC_RULE],
     chapters,
   };
 }

@@ -93,23 +93,38 @@ const SCHEDULE_HEADER = ['工序', '持续天数', '起止天序', '关键线路
 /** C2 附表五表格化表头（施工总平面设施数据表；面积按设施配置或劳动力人均指标推导） */
 const SITE_FACILITY_HEADER = ['设施', '面积（平方米）', '位置', '说明'];
 
-/** 设备附表：拟投入本标段的主要施工设备表（蓝图 resources.equipment 直出；备注列承载蓝图依据） */
+/**
+ * 列裁剪（4.55.22 用户口径）：**只输出每一行都有真实值的列**。
+ *
+ * 原实现把「国别产地/制造年份/额定功率/生产能力/用于施工部位」五列**硬编码为「—」**
+ * （注释称"如实留空不造数据"）。用户口径：表格单元格不得为空、不得用「—/——」占位，
+ * **每格必须有内容且有值**。而 `BlueprintEquipmentItem` 只有 `name/spec/quantity/basis`——
+ * 这五列在数据模型里**根本没有权威来源**，留空与编造都不允许，唯一诚实的做法是**不出该列**。
+ * 列裁剪是确定性的：全列有值才出，任一行为空即整列不出（不留半空列）。
+ */
+function pruneEmptyColumns<T>(header: string[], rows: T[][]): { header: string[]; rows: T[][] } {
+  const keep = header.map((_, columnIndex) => rows.every(row => String(row[columnIndex] ?? '').trim() !== '' && String(row[columnIndex] ?? '').trim() !== DASH));
+  return {
+    header: header.filter((_, columnIndex) => keep[columnIndex]),
+    rows: rows.map(row => row.filter((_, columnIndex) => keep[columnIndex])),
+  };
+}
+
+/** 设备附表：拟投入本标段的主要施工设备表（蓝图 resources.equipment 直出；备注列承载蓝图依据）
+ * 无权威来源的列（国别产地/制造年份/额定功率/生产能力/用于施工部位）整列不出——见 pruneEmptyColumns */
 function renderEquipmentAppendix(data?: BlueprintData): string[] | '' {
   const items = data?.resources?.equipment || [];
   if (items.length === 0) return appendixGapSkeleton(EQUIPMENT_HEADER, '施工设备配置');
   const rows = items.map((item, index) => [
     String(index + 1),
     item.name,
-    item.spec || DASH,
+    item.spec || '',
     quantityText(item),
-    DASH,
-    DASH,
-    DASH,
-    DASH,
-    DASH,
-    item.basis || DASH,
+    '', '', '', '', '',
+    item.basis || '',
   ]);
-  return renderTable(EQUIPMENT_HEADER, rows);
+  const pruned = pruneEmptyColumns(EQUIPMENT_HEADER, rows);
+  return renderTable(pruned.header, pruned.rows);
 }
 
 /** 劳动力附表：劳动力计划表（蓝图 resources.labor 直出：工种配置 + 分阶段投入两小节，口径同源） */
@@ -141,15 +156,15 @@ function renderInstrumentAppendix(data?: BlueprintData): string[] | '' {
   const rows = items.map((item, index) => [
     String(index + 1),
     item.name,
-    item.spec || DASH,
+    item.spec || '',
     quantityText(item),
-    DASH,
-    DASH,
-    DASH,
-    item.purpose || DASH,
-    item.basis || DASH,
+    '', '', '',
+    item.purpose || '',
+    item.basis || '',
   ]);
-  return renderTable(INSTRUMENT_HEADER, rows);
+  // 同设备附表：无权威来源的列（国别产地/制造年份/已使用台时数）整列不出（见 pruneEmptyColumns）
+  const pruned = pruneEmptyColumns(INSTRUMENT_HEADER, rows);
+  return renderTable(pruned.header, pruned.rows);
 }
 
 /** C2 附表四：进度计划表（图类附表表格化：图件说明 + 工序数据表，图件按表绘制）。

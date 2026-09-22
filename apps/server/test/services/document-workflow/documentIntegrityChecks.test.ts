@@ -2036,9 +2036,13 @@ describe('markdownTableQualityIssues 规格型号列「—」豁免（丰乐镇�
     `| 蛙式打夯机 | ${specValue} | ${qtyValue} |`,
   ].join('\n');
 
-  it('规格型号列「—」不判占位符（机具无型号合法）', () => {
+  // 4.55.22 用户口径收紧：**取消规格型号列的破折号豁免**。
+  // 原口径（丰乐镇 r28g）：源资料不提供型号时强填会诱导修复轮编造（实测编造出 HW-60），故豁免。
+  // 现口径：机械设备由投标人自行选型，**选型结论本身就是必须写出的值**——
+  // 且实测该豁免是终稿里唯一的占位来源（巢湖成稿 4 处「—」全在「规格型号」列）。
+  it('规格型号列「—」判占位符（用户口径：每格必须有内容且有值）', () => {
     const issues = markdownTableQualityIssues(table('—'));
-    expect(issues.filter(issue => issue.message.includes('占位符'))).toEqual([]);
+    expect(issues.some(issue => issue.message.includes('占位符'))).toBe(true);
   });
 
   it('非规格型号列「—」仍判占位符（如数量列）', () => {
@@ -2060,12 +2064,13 @@ describe('markdownTableQualityIssues 规格型号列「—」豁免（丰乐镇�
     `| 蛙式打夯机 | — | ${qtyValue} | ${powerValue} | — |`,
   ].join('\n');
 
-  it('额定功率/生产能力列「—」不判占位符（设备出厂参数，源资料不提供）', () => {
+  // 4.55.22：额定功率/生产能力列同样取消豁免（与规格型号列同族口径）
+  it('额定功率/生产能力列「—」判占位符（用户口径：不得留空）', () => {
     const issues = markdownTableQualityIssues(wideTable('—'));
-    expect(issues.filter(issue => issue.message.includes('占位符'))).toEqual([]);
+    expect(issues.some(issue => issue.message.includes('占位符'))).toBe(true);
   });
 
-  it('非豁免列「—」仍判占位符（数量列；豁免列扩围未过宽）', () => {
+  it('数量列「—」判占位符', () => {
     const issues = markdownTableQualityIssues(wideTable('90kW', '—'));
     expect(issues.some(issue => issue.message.includes('占位符'))).toBe(true);
   });
@@ -2081,19 +2086,20 @@ describe('markdownTableQualityIssues 规格型号列「—」豁免（丰乐镇�
     expect(issues.some(issue => issue.message.includes('占位符'))).toBe(true);
   });
 
-  it('D-T5 扩围边界：规格型号列「无」仍判占位符（破折号豁免不扩展词形，与「若干」同口径）', () => {
+  it('规格型号列「无」判占位符（与「若干」同口径）', () => {
     const issues = markdownTableQualityIssues(table('无'));
     expect(issues.some(issue => issue.message.includes('占位符'))).toBe(true);
   });
 
-  it('D-T5 「规格/强度等级」列「—」豁免（r28f 清单表实测形态：/规格/ 头词命中豁免）', () => {
+  // 4.55.22：清单表「规格/强度等级」列的破折号同样不再豁免——规格必须写清单/图纸给出的具体值
+  it('「规格/强度等级」列「—」判占位符（清单已给出规格，无留空理由）', () => {
     const table = [
       '| 物资名称 | 规格/强度等级 | 单位 | 数量 |',
       '| --- | --- | --- | --- |',
       '| 塑料检查井 | — | 座 | 555 |',
     ].join('\n');
     const issues = markdownTableQualityIssues(table);
-    expect(issues.filter(issue => issue.message.includes('占位符'))).toEqual([]);
+    expect(issues.some(issue => issue.message.includes('占位符'))).toBe(true);
   });
 });
 

@@ -763,7 +763,11 @@ export function isNonExemptTablePlaceholderCell(cell: string, refs: { rowFirstCe
   if (refs.headerCell && /存在问题|整改措施|整改情况|复查结果|处理情况|检查情况|落实情况|验收结论|备注|说明/u.test(refs.headerCell) && /^无+$/u.test(cell)) return false;
   if (!/^(?:—+|-+)$/u.test(cell)) return true;
   if (refs.cellIndex > 0 && /^(?:合计|小计|总计|累计)/u.test(refs.rowFirstCell || '')) return false;
-  if (refs.headerCell && /规格型号|规格|型号|额定功率|功率|生产能力|产能|国别产地|制造年份|用于施工部位|已使用台时数/u.test(refs.headerCell)) return false;
+  // 4.55.22 用户口径收紧：**取消「规格型号/额定功率/生产能力/国别产地…」列的破折号豁免**。
+  // 原豁免理由是「源资料不提供、强填诱导编造」（蛙式打夯机无型号，修复轮曾编造 HW-60），
+  // 但实测该豁免正是用户终稿里**唯一**的占位来源（巢湖成稿 4 处「—」全在「规格型号」列）。
+  // 现口径：该列必须写具体型号，或写招标/图纸给出的规格，或投标人自定的具体设备型号
+  //（机械设备由投标人自行选型时，选型结论本身就是可写且必须写的值）——不得以「—」留空。
   return true;
 }
 
@@ -3025,9 +3029,19 @@ export function hollowTableCellIssues(markdown: string): ValidationIssue[] {
     const cells = line.split('|').slice(1, -1).map(cell => cell.trim());
     if (header.length === 0) { header = cells; continue; }
     cells.forEach((cell, columnIndex) => {
-      if (!cell || /\d/u.test(cell)) return;
-      if (!HOLLOW_TABLE_CELL_RE.test(cell)) return;
       const column = header[columnIndex] || `第${columnIndex + 1}列`;
+      // 4.55.22 用户口径：**空单元格同样不可接受**——原实现 `if (!cell ...) return` 直接跳过空值，
+      // 于是「表格有空格」这类缺陷在门禁里完全不可见（实测：成稿虽为 0 处，但检测盲区是真实的）。
+      if (!cell) {
+        const key = `${tableIndex}\u0000${column}`;
+        const entry = findings.get(key) || { tableIndex, column, count: 0, samples: [] };
+        entry.count += 1;
+        if (entry.samples.length < 3) entry.samples.push('（空单元格）');
+        findings.set(key, entry);
+        return;
+      }
+      if (/\d/u.test(cell)) return;
+      if (!HOLLOW_TABLE_CELL_RE.test(cell)) return;
       const key = `${tableIndex}\u0000${column}`;
       const entry = findings.get(key) || { tableIndex, column, count: 0, samples: [] };
       entry.count += 1;
@@ -3044,7 +3058,7 @@ export function hollowTableCellIssues(markdown: string): ValidationIssue[] {
       owner: 'llm',
       repairability: 'llm_repairable',
       provenance: { detectorId: 'hollow-table-cell', fingerprint: stableHash(markdown) },
-      message: `表格空话单元格：第 ${finding.tableIndex} 张表的「${finding.column}」列有 ${finding.count} 格写的是空话而非数据（如「${finding.samples.join('」「')}」）——字段名承诺的是数据，写「按…」等价于留空`,
+      message: `表格空话/空单元格：第 ${finding.tableIndex} 张表的「${finding.column}」列有 ${finding.count} 格无具体数据（如「${finding.samples.join('」「')}」）——每格必须有内容且有值，空单元格与「按…」式表述等价于留空`,
       suggestion: `请把该列的「按…」式表述替换为具体值：工程量列写清单原值（数值+单位，如 12792.800m3）；规格/尺寸/净距列写图纸或清单给出的具体数值；确实无该字段数据时写可追溯来源（如「按施工图结施-03」），不得用“按清单工程量/按设计标高”类表述搪塞。同类数据在同章正文中通常已存在，请直接引用同一口径。`,
     });
   }

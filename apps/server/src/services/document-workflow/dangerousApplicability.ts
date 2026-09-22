@@ -1,3 +1,4 @@
+import { HAZARD_THRESHOLDS } from './hazardBinding';
 import type { ValidationIssue } from './types';
 
 /**
@@ -34,7 +35,8 @@ export const DANGEROUS_APPLICABLE_ITEMS = [
     aliases: ['基坑支护', '基坑工程', '降排水', '降水井'],
     applicable: (body: string) => {
       const depth = extractNumberNear(body, /(?:基坑)?开挖深度[约为达至]{0,3}(\d+(?:\.\d+)?)\s*m/u);
-      return depth !== undefined && depth >= 3;
+      // 阈值单源（4.55.22）：与 hazardBinding.HAZARD_THRESHOLDS 同源，禁止此处另立一份
+      return depth !== undefined && depth >= (HAZARD_THRESHOLDS.基坑工程.hazardous[0]!.value ?? 3);
     },
   },
   {
@@ -43,7 +45,11 @@ export const DANGEROUS_APPLICABLE_ITEMS = [
     applicable: (body: string) => {
       const height = extractNumberNear(body, /(?:模板)?支撑(?:体系)?(?:搭设)?高度[约为达至]{0,3}(\d+(?:\.\d+)?)\s*m/u);
       const load = extractNumberNear(body, /(?:施工(?:总)?荷载|集中线荷载)[约为达至]{0,3}(\d+(?:\.\d+)?)\s*kN/u);
-      return (height !== undefined && height >= 8) || (load !== undefined && load >= 10) || /高支模|高大模板/u.test(body);
+      // 阈值单源（4.55.22 修正）：原为 高度≥8m（那是**超过一定规模**档）与 荷载≥10kN——
+      // 与 31号文 2.2.2（搭设高度 5m 及以上 / 总荷载 15kN/m² 及以上）不一致，会把 5~8m 的
+      // 模板支撑误判为"不适用"而漏掉危大内容
+      return (height !== undefined && height >= (HAZARD_THRESHOLDS.模板工程及支撑体系.hazardous[0]!.value ?? 5))
+        || (load !== undefined && load >= 15) || /高支模|高大模板/u.test(body);
     },
   },
   {
@@ -51,7 +57,9 @@ export const DANGEROUS_APPLICABLE_ITEMS = [
     aliases: ['脚手架', '落地式钢管脚手架', '悬挑式脚手架', '悬挑脚手架'],
     applicable: (body: string) => {
       const height = extractNumberNear(body, /(?:落地式|悬挑式)?(?:钢管)?脚手架(?:搭设)?高度[约为达至]{0,3}(\d+(?:\.\d+)?)\s*m/u);
-      return (height !== undefined && height >= 15) || /悬挑(?:式)?脚手架/u.test(body);
+      // 阈值单源（4.55.22 修正）：原写 ≥15m，与 31号文 2.4.1（落地式钢管脚手架 24m 及以上）
+      // 及 stagePrepare/任务书两处文案互不一致
+      return (height !== undefined && height >= (HAZARD_THRESHOLDS.脚手架工程.hazardous[0]!.value ?? 24)) || /悬挑(?:式)?脚手架/u.test(body);
     },
   },
   {

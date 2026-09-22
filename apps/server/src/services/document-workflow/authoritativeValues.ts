@@ -283,6 +283,22 @@ function valueEquivalenceKey(value: string): string {
  * 候选集 → R1 变更链（被取代值出局）→ R2 载体优先级 → R3 时序 → R4 同源条款序
  * → R5 形态类型专属权威 → R6 证据计数 → R7 兜底（按形态定义）→ 唯一值
  */
+/**
+ * 命中本属性候选的变更链（被取代值 → 链声明的生效值）。
+ * 调用侧用它做**变更链自证**：链声明的生效值必须与裁决胜出值一致，链才可信——
+ * 实测反例：「1.8mm → 50mm」（清单「0.60/反面/厚度」语境下的跨分项误配）在「窗材质」属性上
+ * 命中候选 1.8mm，但该属性实际胜出值是 1.2mm → 链与裁决结果不符 → 不是真正的口径变更。
+ */
+function matchedOverrideChains(candidates: TruthCandidate[], overrides: ValueOverride[]): Map<string, string> {
+  const matched = new Map<string, string>();
+  for (const override of overrides) {
+    if (override.kind !== 'override') continue;
+    if (!candidates.some(candidate => candidate.value.includes(override.superseded))) continue;
+    matched.set(override.superseded, override.effective);
+  }
+  return matched;
+}
+
 function arbitrate(candidates: TruthCandidate[], overrides: ValueOverride[]): { winner: TruthCandidate; rule: string; superseded: string[] } | undefined {
   if (candidates.length === 0) return undefined;
   const supersededSet = new Set<string>();
@@ -504,6 +520,19 @@ export function buildAuthoritativeValues(input: {
     }
     pushCandidate(attribute, normalizedValue);
   });
+  /**
+   * 带口径标签机制识别出的属性集合 = **单值型项目口径**（原文句式声明：「最高投标限价…」
+   * 「计划工期…」「开工日期…」）。它们才具备「被取代」语义（一个项目只有一个现行工期/金额/开工日期）。
+   *
+   * **为什么落选登记必须限定在这个集合**（4.55.22 实测缺陷）：逐项多值属性（搭设高度/窗材质/
+   * 厚度/柱截面尺寸/管径…）的候选来自**不同分项**，「胜出值」只是众多分项里被选中一个——
+   * 其余分项值不是"被取代的旧口径"。不加边界时覆盖表产出「7m→4.5m」「5.7m→4.5m」「3.6m→4.5m」
+   * 「1.8mm→1.2mm」「1.6m→2.40m」等，把分项技术数据当旧口径**全局替换**（证据侧一次替换 51 处），
+   * 会在下一轮真实生成里污染技术参数。判据取自机制本身（带标签抽取），不预设字段白名单。
+   */
+  const caliberAttributes = new Set((input.labeledValues || [])
+    .map(labeled => normalizeAttributeName(labeled.attribute, labeled.attribute))
+    .filter(Boolean));
   // 带标签权威值并入候选：作废声明（「原资料全部作废，以本次答疑为准」）者给最高优先级+澄清标记
   for (const labeled of input.labeledValues || []) {
     const attribute = normalizeAttributeName(labeled.attribute, labeled.attribute);
@@ -529,18 +558,25 @@ export function buildAuthoritativeValues(input: {
     const result = arbitrate(candidates, overrides);
     if (!result) continue;
     // 4.55.20：落选候选登记为被取代值（非文本形态）——同一口径的旧值必须被禁止再出现在正文
-    //（实测：1/5 号答疑各有最高投标限价，正文不得再用作废的 22303.66万元/172460314.52元）
+    //（实测：1/5 号答疑各有最高投标限价，正文不得再用作废的 22303.66万元/172460314.52元）。
+    // 4.55.22 安全边界：**仅单值型项目口径**登记（见 caliberAttributes）——逐项多值属性的落选值
+    // 是别的分项的值，登记成"被取代"会导致全库文本误替换。
     const winnerShape = classifyValueShape(result.winner.value);
-    const losers = ['measure', 'money', 'date', 'standard'].includes(winnerShape)
+    const losers = caliberAttributes.has(attribute) && ['measure', 'money', 'date', 'standard'].includes(winnerShape)
       ? candidates.map(candidate => candidate.value).filter(value => value !== result.winner.value)
       : [];
+    // R1 出局值同样受安全边界约束：单值型项目口径（带标签识别）无条件登记；
+    // 其余属性须**变更链自证**（链声明的生效值 = 本次裁决胜出值）才登记。
+    const chains = matchedOverrideChains(candidates, overrides);
+    const chainedLosers = result.superseded.filter(value =>
+      caliberAttributes.has(attribute) || chains.get(value) === result.winner.value);
     resolved.push({
       subject: result.winner.subject,
       attribute,
       value: result.winner.value,
       rule: result.rule,
       evidence: [{ source: result.winner.source, snippet: result.winner.value.slice(0, 120) }],
-      superseded: [...new Set([...result.superseded.filter(value => value !== result.winner.value), ...losers])],
+      superseded: [...new Set([...chainedLosers.filter(value => value !== result.winner.value), ...losers])],
       candidates,
     });
   }

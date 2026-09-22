@@ -25,7 +25,7 @@ import { retrievalCoverageRisk } from '../documentEvidenceRetrieval';
 import { buildBidProcedureJudge, evidenceSafetyKey, partitionEvidenceByContentSafety } from '../evidenceContentSafety';
 import { buildFactsModel, extractLocalFactPool } from '../factsModel';
 import { arbitrateFactPool, buildCanonicalFactModel, extractDrawingAnnotationFacts, PROJECT_BASIC_FIELD_SPECS } from '../factGovernance';
-import { applyOverridesToText, collapseOverrideChains, extractLabeledAuthorityValues, extractValueOverrides } from '../valueOverride';
+import { applyOverridesToRetrieved, applyOverridesToText, collapseOverrideChains, extractLabeledAuthorityValues, extractValueOverrides } from '../valueOverride';
 import { buildAuthoritativeValues } from '../authoritativeValues';
 import { emptyTenderRequirements, extractTenderRequirements, hasTenderRequirements, readCachedTenderRequirements, tenderRequirementsCacheKey, tenderRequirementsSummary, writeCachedTenderRequirements } from '../tenderRequirements';
 import { bidCompositionSummary, extractBidCompositionSpec } from '../bidComposition';
@@ -119,6 +119,11 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
     });
     if (result === null) return [];
     const results = result.results || [];
+    // 4.55.22 现行口径在**检索出口**收口：章节写作/蓝图推导经本函数重新检索知识库，拿到的是原始切片；
+    // 只在初始证据池（writerEvidence）上替换会漏掉这条通道——旧值会在章节写作时重新进入写手输入
+    //（实测：4 处「计划工期365日历天」正是写手写作时抄到招标原文 2.8 条的结果）。
+    // 覆盖表在真值层裁决后写入 session（见下方「现行口径前置」块），此处按调用时取用。
+    applyOverridesToRetrieved(results, session.planning.earlyOverrideList);
     searchCache.set(key, results);
     return results;
   };
@@ -218,6 +223,8 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
       for (const item of session.understanding.writerEvidence) item.content = rewrite(item.content);
       session.planning.earlyTruthAudit = truthAudit;
       session.planning.earlyOverrideCount = overrideList.length;
+      // 供检索出口（searchWithCache）逐条施加：章节写作与蓝图推导的二次检索同口径
+      session.planning.earlyOverrideList = overrideList;
       if (applied > 0) {
         upsertProgressStage(session.global.progressStages, displayStage({
           type: 'fact_extraction', roleId: 'effective-value-preposition', status: 'success',
