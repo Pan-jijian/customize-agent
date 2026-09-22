@@ -257,6 +257,8 @@ export function buildChapterStructureFromBlueprint(input: {
   evidence?: DocumentEvidence[];
 }): PlannedChapterStructure {
   const { blueprintChapter, inputSections, chapterTitle, targetWords } = input;
+  /** 4.55.14：章级小节归并屏障（本次调用内由吸收提取路径填充，容量规划消费） */
+  let chapterSectionBarriers: string[] = [];
   let blocks: PlannedChapterBlock[] = [];
   let coveredSections: string[] = [];
   let fallbackSections: string[];
@@ -285,37 +287,43 @@ export function buildChapterStructureFromBlueprint(input: {
     } else {
       coveredSections = inputSections.filter(section => blocks.some(block => sameSectionText(block.title, section) || block.subPoints.some(point => point.sources.some(source => sameSectionText(source, section)) || sameSectionText(point.title, section))));
       fallbackSections = inputSections.filter(section => !coveredSections.includes(section));
-      // 4.55.14 章级小节必须独立成块（巢湖实测根因）：章级小节是 H3，蓝图工作包是块内 H4——
-      // 旧口径下小节只要被任一工作包「同名吸收」就算覆盖，于是用户的 OUTLINE 固定小节被吞进块内：
-      // 「工程概况」写成块内 `#### 5 工程概况`（H4，挂在外安装分项下、正文大纲里消失），
-      // 「编制依据与说明」整节丢失（章草稿 0 次）。现口径：**只有被块标题承接才算落位**；
-      // 仅被块内要点吸收的章级小节提取为独立块，并从吸收块中移除同名要点（防重复写作）。
+      // 4.55.14 章级小节必须独立成块（巢湖实测根因，完整链路）：
+      // ① 旧口径下「被任一工作包同名吸收」也算落位 → OUTLINE 固定小节被吞进块内 H4 要点；
+      // ② 未被吸收的走 fallbackStructureForSections 语义域分组，同域小节共用「域内首个小节名」作块标题
+      //    （「编制依据与说明/工程概况/现场踏勘」三块同名），追加时的去重守卫把后两块**静默丢弃**；
+      // ③ 即便侥幸成块，其后的容量规划归并又会把它吸收回邻块。
+      // 现口径：凡 inputSections 中未以「块标题」身份存在的章级小节，一律各自独立成块并按声明顺序置前；
+      // 同时从各块要点中移除同名要点（防重复写作），并登记归并屏障（capacityPlanChapterBlocks 消费）。
       const absorbed = inputSections.filter(section => !blocks.some(block => sameSectionText(block.title, section))
         && blocks.some(block => block.subPoints.some(point => point.sources.some(source => sameSectionText(source, section)) || sameSectionText(point.title, section))));
-      if (absorbed.length > 0) {
+      const unrepresented = inputSections.filter(section => !blocks.some(block => sameSectionText(block.title, section)));
+      if (unrepresented.length > 0) {
         for (const block of blocks) {
-          block.subPoints = block.subPoints.filter(point => !absorbed.some(section => point.sources.some(source => sameSectionText(source, section)) || sameSectionText(point.title, section)));
-        }
-        // 吸收块可能因此变成空要点块：补回自身标题为唯一要点（单点块形态），避免空块进入容量规划
-        for (const block of blocks) {
+          block.subPoints = block.subPoints.filter(point => !unrepresented.some(section => point.sources.some(source => sameSectionText(source, section)) || sameSectionText(point.title, section)));
           if (block.subPoints.length === 0) block.subPoints = [{ title: block.title, sources: [block.title], tier: 'core' as const }];
         }
-        const absorbedBlocks: PlannedChapterBlock[] = absorbed.map(section => ({ title: section, subPoints: [{ title: section, sources: [section], tier: 'core' as const }], facts: [], targetWords: 0 }));
-        // 位置守恒：锁定/章级小节按声明顺序置前（与「锁定小节置于小节清单最前」的规划约定同序）
-        blocks = [...absorbedBlocks, ...blocks];
-        coveredSections = [...coveredSections.filter(section => !absorbed.includes(section)), ...absorbed];
-        fallbackSections = fallbackSections.filter(section => !absorbed.includes(section));
+        const ownBlocks: PlannedChapterBlock[] = unrepresented.map(section => ({ title: section, subPoints: [{ title: section, sources: [section], tier: 'core' as const }], facts: [], targetWords: 0 }));
+        blocks = [...ownBlocks, ...blocks];
+        coveredSections = [...coveredSections.filter(section => !unrepresented.includes(section)), ...unrepresented];
+        fallbackSections = fallbackSections.filter(section => !unrepresented.includes(section));
+        chapterSectionBarriers = unrepresented.slice();
+        void absorbed;
       }
     }
   }
   // 模板小节零丢失：蓝图路径覆盖不到的模板小节（如「市政工程专项施工工艺」）语义域分组挂回为追加主题块
+  // 章级小节已在上方统一独立成块（unrepresented）：此处仅处理蓝图路径下「模板小节零丢失」的残余挂回
   if (fallbackSections.length > 0) {
-    const appendedBlocks = fallbackStructureForSections(fallbackSections, chapterTitle, targetWords).blocks;
+    const appendedBlocks: PlannedChapterBlock[] = fallbackSections.map(section => ({
+      title: section,
+      subPoints: [{ title: section, sources: [section], tier: 'core' as const }],
+      facts: [],
+      targetWords: 0,
+    }));
     for (const block of appendedBlocks) {
-      const duplicated = blocks.some(existing => sameSectionText(existing.title, block.title)
-        || block.subPoints.some(point => existing.subPoints.some(existingPoint => sameSectionText(existingPoint.title, point.title))));
-      if (!duplicated) blocks.push(block);
+      if (!blocks.some(existing => sameSectionText(existing.title, block.title))) blocks.push(block);
     }
+    chapterSectionBarriers = [...chapterSectionBarriers, ...fallbackSections];
     coveredSections = [...coveredSections, ...fallbackSections];
     fallbackSections = [];
   }
@@ -388,7 +396,8 @@ export function buildChapterStructureFromBlueprint(input: {
   blocks.forEach((block, index) => { block.title = governedTitles[index]!; });
   // 容量规划（规划层唯一结构/字数决策点）：块数 × 块预算 × 点配额一次成型；
   // 块数超容量时在规划层按点数均衡归并（容器块标题优先保留），写作层收到的即最终结构，无事后折叠
-  capacityPlanChapterBlocks(blocks, targetWords);
+  // 4.55.14：章级小节块（barrierTitles）为归并屏障——不得被相邻块吸收
+  capacityPlanChapterBlocks(blocks, targetWords, { barrierTitles: chapterSectionBarriers });
   // C1 管线收敛补齐：空章节确定性兜底（模板细目被大纲主题过滤全部剔除、且无蓝图切片时，
   // 语义域分组无输入可聚 → blocks 为空素下游规划块管线无块可写将阻断整章）。退化为
   // 「整章单块」结构：块标题=章标题、无 H4 要点（正文直接展开），块目标=整章目标（封顶单块上限）——

@@ -41,6 +41,10 @@ const PROCEDURE_STRONG_RE = /中标查询|中标公示|中标结果(?:查询|公
 /** ③ 商务与计价强形态 */
 const COMMERCIAL_STRONG_RE = /投标报价|报价明细|综合单价|下浮率|暂列金额|暂估价|计日工|规费|税金|税率|增值税|预付款(?:比例|支付|申请)|进度款(?:支付|申请|计量)|履约保证金|投标保证金|投标担保|电子保函|价格波动调整|材料调差/u;
 
+/** 声明/承诺碎片（评分表条目的截断产物，非施组小节）：「我公司计划参与招标项目名称：…」类片段
+ * 一旦被补挂成小节，正文会写出无技术语义的声明句（巢湖实测：该碎片进入第一章小节清单）。 */
+const DECLARATION_FRAGMENT_RE = /^(?:我|本)(?:公司|单位|方|投标人|项目部)(?:计划|承诺|将|拟)/u;
+
 /** ④ 合同条件强形态 */
 const CONTRACT_STRONG_RE = /违约责任|违约金|索赔(?:期限|程序|条款|意向)|争议解决|合同解除|通用合同条款|专用合同条款|(?:特别|有关)约定[:：]|(?:的)约定[:：]/u;
 
@@ -50,6 +54,7 @@ export function classifyTenderContent(text: string): TenderContentClass {
   if (!normalized) return 'technical';
   // 创优目标（确保/争创…杯奖）是技术响应项，优先于资信获奖判据
   if (QUALITY_GOAL_RE.test(normalized)) return 'technical';
+  if (DECLARATION_FRAGMENT_RE.test(normalized)) return 'contract_terms';
   if (PROCEDURE_STRONG_RE.test(normalized)) return 'tender_procedure';
   if (QUALIFICATION_STRONG_RE.test(normalized)) return 'bidder_qualification';
   if (COMMERCIAL_STRONG_RE.test(normalized)) return 'commercial';

@@ -1460,3 +1460,29 @@ describe('blueprintCitationVerdict：蓝图引用一致性（S5 语义判定版�
     expect(batches[1]![0]!.authorityValue).toBe(8205.53);
   });
 });
+
+describe('4.55.14 章级规划小节不得被吸收/归并（巢湖实测：OUTLINE 固定小节消失）', () => {
+  // 蓝图章切片用既有 fixture 构造器产出（真实形态），避免手写字面量偏离类型定义
+  const blueprintChapter = (() => {
+    const outline = buildBlueprintOutline({ chapterTitles: ['主要施工方法与技术措施'], boq: parseFixture(), docType: '单位工程施工组织设计' });
+    return outline.chapters[0]!;
+  })();
+  const inputSections = ['编制依据与说明', '工程概况', '现场踏勘', '主要施工内容', '施工部署', '劳动力材料机械设备配置'];
+
+  it('锁定/章级小节各自独立成块（H3），顺序置于最前', () => {
+    const structure = buildChapterStructureFromBlueprint({ blueprintChapter, inputSections, chapterTitle: '主要施工方法与技术措施', targetWords: 20000 });
+    const titles = structure.blocks.map(block => block.title);
+    for (const section of inputSections) {
+      expect(titles.some(title => title.includes(section) || section.includes(title))).toBe(true);
+    }
+    expect(titles[0]).toContain('编制依据与说明');
+  });
+
+  it('容量归并（块数超上限）时章级小节块不被相邻块吸收（归并屏障）', () => {
+    const structure = buildChapterStructureFromBlueprint({ blueprintChapter, inputSections, chapterTitle: '主要施工方法与技术措施', targetWords: 4000 });
+    const titles = structure.blocks.map(block => block.title);
+    for (const section of ['编制依据与说明', '工程概况', '现场踏勘']) {
+      expect(titles.some(title => title.includes(section) || section.includes(title))).toBe(true);
+    }
+  });
+});

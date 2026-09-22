@@ -318,10 +318,14 @@ describe('容量规划（替代 4.34 章结构容量压缩）', () => {
     expect(structure.blocks.every(block => block.subPoints.length <= 6)).toBe(true);
     expect(structure.blocks.every(block => block.subPoints.length <= Math.max(1, Math.floor(block.targetWords / 300)))).toBe(true);
     // 块数实测 18（方案预测 18 = ceil(103/6)）：6 点密度封顶 + 保序贪心在真实块序下的确定性结果
-    expect(structure.blocks.length).toBe(18);
-    // 每块预算：公平份额 floor(32400/18)=1800 恰为单块可写下限 → 全块贴下限均分（Σ 精确守恒）；
-    // 6 点 × 300 字/点 = 1800 恰好达到密度达标线，无超密度守卫裁剪
-    expect(structure.blocks.every(block => block.targetWords >= 1700 && block.targetWords <= 4500)).toBe(true);
+    // 4.55.15 口径变更：章级小节（模板/OUTLINE 声明）各自独立成块 → 块数 18 → 25
+    //（块数上限为软约束：设计允许超 maxBlocks，扩容由软下限 floorValue 与 Σ 守恒收口吸收；
+    //  固定小节不得被容量归并吸收，否则 H3 身份丢失、块内 H4 常整点漏写——巢湖实证）
+    expect(structure.blocks.length).toBeGreaterThanOrEqual(18);
+    // 块预算摊薄：4.55.15 起章级小节各自成块（25 块），公平份额 floor(32400/25)=1296——低于旧口径的单块
+    // 可写下限 1800，但**按节计**反而更宽：单块只写一个小节（旧口径一块写 3 个要点、每点 ~600 字），
+    // 「小节必写」优先于「单块字数贴下限」；Σ 精确守恒不变（下方断言）
+    expect(structure.blocks.every(block => block.targetWords >= 1200 && block.targetWords <= 4500)).toBe(true);
     expect(structure.blocks.reduce((sum, block) => sum + block.targetWords, 0)).toBe(32400);
     // 4.34 阻断块形态不可再现：「公共广场提升改造工程」12 个工作包在任何单块内 ≤6
     const squarePackages = subSectionSpecs[0]!.packages;
@@ -330,13 +334,11 @@ describe('容量规划（替代 4.34 章结构容量压缩）', () => {
     // 96 工作包要点零丢失（归并/守卫合并均不丢源——sources 全量保留，名字可在标题或 sources 中命中）
     const carried = new Set(structure.blocks.flatMap(block => block.subPoints.flatMap(point => [point.title, ...point.sources])));
     for (const spec of subSectionSpecs) for (const name of spec.packages) expect(carried.has(name)).toBe(true);
-    // 模板小节覆盖为既有 fallback 边界（非本方案引入）：语义域聚合块被容量规划拆为单点块时保留父块标题，
-    // append 阶段同题去重丢弃后块——「检查井与防坠网施工 / 道路提升与破路恢复工艺 / 公厕及门卫土建施工方法 /
-    // 雨水污水管线敷设方法」4 小节不进结构；下方反向对照按 4.34 原预算实测同界同集（4.35 未改变覆盖行为）。
-    // estimateChapterMinFeasibleWords 按 7 小节计点（103）相对实际结构点数（99）为高估——预算偏充足，安全侧
-    //（近似边界已在函数注释声明）。
+    // 4.55.15 口径修正：模板小节（章级声明小节）此前因「语义域聚合块同名 → append 去重丢弃」而整节
+    // 不进结构（本测试旧断言把该缺陷固化为 expected(false)），交付稿里用户的固定小节即由此消失。
+    // 现口径：章级小节各自独立成块，7 个模板小节全部进入结构（块标题即小节名）。
     for (const section of ['拆除改造与清运施工方法', '填方压实与场平作业工序', '安装工程与设备调试方法']) expect(carried.has(section)).toBe(true);
-    for (const section of ['雨水污水管线敷设方法', '检查井与防坠网施工', '道路提升与破路恢复工艺', '公厕及门卫土建施工方法']) expect(carried.has(section)).toBe(false);
+    for (const section of ['雨水污水管线敷设方法', '检查井与防坠网施工', '道路提升与破路恢复工艺', '公厕及门卫土建施工方法']) expect(carried.has(section)).toBe(true);
     expect(structure.blocks.flatMap(block => block.subPoints).every(point => (point.quotaWords ?? 0) > 0)).toBe(true);
 
     // 反向对照（4.34 原始预算 15603、未重校准）：密度封顶 + 守卫保证不失败——最坏情况降级为 brief 概览合并

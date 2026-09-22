@@ -158,7 +158,10 @@ export function sameSectionText(left: string, right: string) {
  *    回收（4.35 下限保护）→ Σ块预算 = 章目标精确守恒（向下取整余量补最大块；不可拆块触硬上限
  *    时接受章级欠产显式暴露）；
  * 5. 点配额 = 块预算 × tier 权重归一（软下限 100，保底溢出时严格归一）→ Σ点配额 = 块预算。 */
-export function capacityPlanChapterBlocks(blocks: PlannedChapterBlock[], targetWords: number) {
+export function capacityPlanChapterBlocks(blocks: PlannedChapterBlock[], targetWords: number, options: { barrierTitles?: readonly string[] } = {}) {
+  // 4.55.14 章级小节归并屏障（巢湖实测）：章级规划小节（用户提示词/OUTLINE 声明的小节）必须各自
+  // 保留 H3 身份——被相邻块吸收会降为块内 H4 要点，而块内 H4 常常整点漏写（实测「编制依据与说明」
+  // 章草稿 0 次），用户的固定小节就此在交付稿里消失。与容器块/气候块同为归并屏障。
   /** 降级治理：超密度守卫把要点合并为「概览要点」＝细节丢失，须可被上层渲染（原仅 console.warn） */
   const densityMergeWarnings: string[] = [];
   if (blocks.length === 0) return;
@@ -184,7 +187,7 @@ export function capacityPlanChapterBlocks(blocks: PlannedChapterBlock[], targetW
     for (const block of planned) {
       // 4.44 C2：气候/特殊时段独立单点块（outline 提取）同为归并屏障——被邻块吸收会复活
       // 「要点拒写」故障模式（块标题≠要点标题即恢复 H4 要求）
-      if (isContainerSectionTitle(block.title) || isClimateClassPointTitle(block.title)) {
+      if (isContainerSectionTitle(block.title) || isClimateClassPointTitle(block.title) || (options.barrierTitles || []).some(title => sameSectionText(block.title, title))) {
         if (current.length > 0) {
           groups.push(current);
           current = [];
