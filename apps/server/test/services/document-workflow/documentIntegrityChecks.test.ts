@@ -4,6 +4,7 @@
  * 无不可用降级路径。语义通道全部 mock（避免测试加载 Transformers.js 重依赖）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { missingPlannedSections, promotePlannedSectionHeadings } from '@/services/document-workflow/chapterPostProcessing';
 import { ambiguousEitherOrIssues, scanSpecLocationMismatchHits, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, invertedDateRangeIssues, paragraphTailRepeatIssues, scanParagraphTailRepeats, collisionNumberedHeadingIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixInvertedDateRanges, fixZeroLengthDayRanges, fixParagraphOpeningRepeats, fixParagraphTailRepeats, fixCollisionNumberedHeadings, fixEmbeddedHeadingLines, fixPlaceholderTableCells, fixTruncatedSentenceArtifacts, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
 import { markdownTableQualityIssues } from '@/services/document-workflow/qualityValidation';
 import { normalizeTableTitleInHeaders, repairTableBlockLines } from '@/services/document-workflow/tableRepairHelpers';
@@ -2534,5 +2535,38 @@ describe('4.55.12 规格错位多义权威：限定词自洽消歧（巢湖实�
     const hits = scanSpecLocationMismatchHits(md, 涂料Map());
     expect(hits).toHaveLength(2);
     expect(hits.every(hit => hit.replacement === undefined)).toBe(true);
+  });
+});
+
+// ═══ 4.55.14 章级规划小节落位（巢湖实测：OUTLINE 固定小节被降级/漏写） ═══
+
+describe('promotePlannedSectionHeadings / missingPlannedSections（章级小节落位收口）', () => {
+  it('同名 H4 降级形态 → 就地提升为 H3（巢湖「#### 5 工程概况」）', () => {
+    const content = ['### 1.1 室外安装工程', '', '正文。', '', '#### 5 工程概况', '', '本工程为…'].join('\n');
+    const result = promotePlannedSectionHeadings(['工程概况', '编制依据与说明'], content);
+    expect(result.promoted).toEqual(['工程概况']);
+    expect(result.markdown).toContain('### 工程概况');
+    expect(result.markdown).not.toContain('#### 5 工程概况');
+    expect(result.missing).toEqual(['编制依据与说明']);
+  });
+
+  it('整节漏写 → 记入 missing（供终检报出，不静默）', () => {
+    const result = promotePlannedSectionHeadings(['工程概况', '编制依据与说明'], '### 1.1 基础工程\n\n正文。');
+    expect(result.promoted).toEqual([]);
+    expect(result.missing).toEqual(['工程概况', '编制依据与说明']);
+  });
+
+  it('已是 H3 → 幂等零改动', () => {
+    const content = '### 1.1 编制依据与说明\n\n正文。\n\n### 1.2 工程概况\n\n正文。';
+    const result = promotePlannedSectionHeadings(['编制依据与说明', '工程概况'], content);
+    expect(result.markdown).toBe(content);
+    expect(result.missing).toEqual([]);
+  });
+
+  it('不同名 H4（工作包）不受影响（零误伤）', () => {
+    const content = '### 1.1 主要施工内容\n\n#### 土石方工程\n\n正文。\n\n#### 桩基工程\n\n正文。';
+    const result = promotePlannedSectionHeadings(['主要施工内容'], content);
+    expect(result.markdown).toBe(content);
+    expect(result.promoted).toEqual([]);
   });
 });

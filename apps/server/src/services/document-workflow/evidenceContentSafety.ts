@@ -1,6 +1,7 @@
 import { buildSemanticSimilarity } from './semanticSimilarity';
 import { buildSemanticGate } from './semanticGate';
 import { isTenderClauseFragmentTitle } from './outline';
+import { classifyTenderContent } from './technicalBidAdmission';
 import type { DocumentEvidence, DocumentTemplateChapter } from './types';
 
 /**
@@ -67,7 +68,10 @@ const CONSTRUCTION_SEMANTIC_PROTOTYPES = [
  * （实测评分报告原文"我公司对参与本项目投标及施工组织设计编制的工作人员实行严格的
  * 纪律管理"无任何禁词词面；"评审争议处理与澄清配合"标题同理）。
  */
-const BID_PROCEDURE_LEXICAL_HINTS_RE = /评标|投标|行贿|打招呼|递条子|廉洁|串标|围标|弄虚作假|干扰评标|纪律|澄清|中标|报价|清单计量|评审|保证金|开标|递交|争议|异常低价|评标基准价|预付款|进度款|担保|价格波动|材料调差|暂列金额|暂估价|计税|税金|发票|违约/u;
+// 4.55.14 技术标准入闸扩围（与 technicalBidAdmission 强形态同源）：资信/资格证照/招标程序类
+// 切片不进写作链——巢湖实况：答疑与资格文件里的「业绩证明材料/中标查询网址/获奖情况」被当证据
+// 引用进正文大纲。词面召回仅作候选筛（是否排除仍由下方双向语义比对裁决），故扩围低风险。
+const BID_PROCEDURE_LEXICAL_HINTS_RE = /评标|投标|行贿|打招呼|递条子|廉洁|串标|围标|弄虚作假|干扰评标|纪律|澄清|中标|报价|清单计量|评审|保证金|开标|递交|争议|异常低价|评标基准价|预付款|进度款|担保|价格波动|材料调差|暂列金额|暂估价|计税|税金|发票|违约|业绩证明|类似(?:工程)?业绩|获奖|荣获|协会颁发|营业执照|资质证书|安全生产许可证|认证证书|管理体系认证|审计报告|信用等级|信用评价|社保证明|无行贿犯罪|中标查询|中标公示|中标结果|电子交易系统|公共资源交易|质疑投诉|评标委员会/u;
 
 /** 语义判定阈值：与 SEMANTIC_COVERAGE_THRESHOLD 同值（bge 余弦 ≥0.6 视为语义命中） */
 const EVIDENCE_SAFETY_THRESHOLD = 0.6;
@@ -213,6 +217,11 @@ export function isQualificationSectionTitle(title: string): boolean {
   const stripped = normalized.replace(/^\d{1,3}(?:[.．]\d{1,3})*[、.．]?/u, '');
   if (/^具备(?:有效|相应|满足)/u.test(stripped)) return true;
   if (/^(?:须|应|需|得)?提供[^，,。；]{0,12}(?:证明|材料|文件|证件|证书|报告)/u.test(stripped)) return true;
+  // 4.55.14 强形态优先（单源 technicalBidAdmission）：资信/资格/程序/商务/合同类**自带语境**的
+  // 标题直接判禁，不再走「技术语境词放行」——巢湖实证漏点：「业绩证明材料中要求提供：（2）中标
+  // 查询网址及查询路径披露」中「业绩证明**材料**」的「材料」命中旧技术语境词表 → 判「有技术语境」
+  // 放行 → 该小节进入正文大纲并拖垮整章（规划块全部失败）
+  if (classifyTenderContent(normalized) !== 'technical') return true;
   const hasQualification = /营业执照|资质证书|安全生产许可证|资格预审|资格审查|资质审查|财务状况|业绩证明|业绩要求|银行资信|审计报告|信用记录|信用评价|不良行为记录|联合体投标|联合体协议/u.test(normalized);
   if (!hasQualification) return false;
   const hasTechnicalContext = /施工|技术|方案|措施|管理|控制|验收|工艺|流程|计划|组织|进度|质量|工期|文明|绿色|环保|节能|材料|设备|机械|人员|劳务|检验|检测|试验|保证|落实|制度/u.test(normalized);

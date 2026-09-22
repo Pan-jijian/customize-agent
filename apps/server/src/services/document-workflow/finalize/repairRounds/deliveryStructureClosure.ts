@@ -13,8 +13,10 @@
  * 之后、stageFinalGate 之前——终门禁所检 = 交付所存 = 收口后成稿。
  */
 import { cleanAppendixInternalPhrases } from '../../composeAppendices';
+import { missingPlannedSections, promotePlannedSectionHeadings } from '../../chapterPostProcessing';
 import { fixTocFromBody } from '../../documentIntegrityChecks';
 import { splitOverlengthBodyParagraphs } from '../../helpers/markdownCleanup';
+import { displayChapterTitle } from '../../outline';
 import { displayStage, upsertProgressStage } from '../../progress';
 import { recordRepairActions } from '../../rolePipeline';
 import type { FinalizeSession } from '../finalizeSession';
@@ -29,6 +31,43 @@ export async function stageDeliveryStructureClosure(session: FinalizeSession): P
     session.finalMarkdown = cleaned;
     repairActions += 1;
     details.push('附表区内部话术清洗：内部推导口径已中性化（唯一口径/经验工效区间/清单批注等）');
+  }
+  // 4.55.14 章级规划小节落位收口（巢湖实测：用户 OUTLINE 固定小节被降级写成块内 H4 或整节漏写）：
+  // 按章定位正文区间，把与规划小节逐字同名的 H4/H5 就地提升为 H3；真正缺失的登记进 details 供复核。
+  {
+    const chapterPlans = (session.effectiveChapters || []).map(chapter => ({ title: displayChapterTitle(chapter.title), sections: (chapter.sections || []).filter(Boolean) }));
+    if (chapterPlans.length > 0) {
+      const lines = session.finalMarkdown.split(/\r?\n/u);
+      const h2Indexes: Array<{ index: number; title: string }> = [];
+      lines.forEach((line, index) => {
+        const heading = /^##\s+(.+?)\s*$/u.exec(line.trim());
+        if (heading && !/^(目录|附表)/u.test(heading[1])) h2Indexes.push({ index, title: heading[1].replace(/\s+/gu, '') });
+      });
+      let promotedTotal = 0;
+      const missingAll: string[] = [];
+      for (let order = chapterPlans.length - 1; order >= 0; order -= 1) {
+        const plan = chapterPlans[order];
+        const normalizedTitle = plan.title.replace(/\s+/gu, '');
+        const start = h2Indexes.find(item => item.title.includes(normalizedTitle) || normalizedTitle.includes(item.title));
+        if (!start) continue;
+        const next = h2Indexes.find(item => item.index > start.index);
+        const end = next ? next.index : lines.length;
+        const block = lines.slice(start.index + 1, end).join('\n');
+        const result = promotePlannedSectionHeadings(plan.sections, block);
+        if (result.promoted.length === 0 && result.missing.length === 0) continue;
+        if (result.promoted.length > 0) {
+          lines.splice(start.index + 1, end - start.index - 1, ...result.markdown.split(/\r?\n/u));
+          promotedTotal += result.promoted.length;
+          details.push(`规划小节层级提升：${plan.title}（${result.promoted.join('、')}）`);
+        }
+        if (result.missing.length > 0) missingAll.push(`${plan.title}：${result.missing.join('、')}`);
+      }
+      if (promotedTotal > 0) {
+        session.finalMarkdown = lines.join('\n');
+        repairActions += promotedTotal;
+      }
+      if (missingAll.length > 0) details.push(`规划小节未落位（交终门禁复核）：${missingAll.join('；')}`);
+    }
   }
   // ③ 超长段落切分先于目录重建：切分不改标题行，目录重建基于切分后正文（同一次 recompute 收口）
   const split = splitOverlengthBodyParagraphs(session.finalMarkdown);

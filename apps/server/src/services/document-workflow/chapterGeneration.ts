@@ -402,8 +402,11 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
   }
   const userFactBlock = userRequirementFactsPrompt(requirement);
   // 即使 evidenceText 和 roleContext 为空，也让 LLM 基于 projectContext 和 promptTexts 尝试生成
+  // 4.55.14 小节清单下发硬化（巢湖实测）：旧措辞「请完整包含并展开以下小节」+ 编号清单形态，
+  // 使模型把清单当成「要点枚举」——章级小节被写成块内 `#### 5 工程概况`（H4，用户 OUTLINE 固定
+  // 小节在正文大纲里消失），或整节漏写（「编制依据与说明」章草稿 0 次）。现明确标题层级与序号语义。
   const sectionInstruction = chapter.sections?.length
-    ? `本章小节由生成前规划得到，请完整包含并展开以下小节：\n${chapter.sections.map(section => `- ${section}`).join('\n')}`
+    ? `本章小节由生成前规划得到（含用户提示词/大纲声明的固定小节），必须**逐节**以下列名称输出为三级标题（形如「### X.X 小节名」），顺序与之保持一致：\n${chapter.sections.map(section => `- ${section}`).join('\n')}\n约束：小节名必须与本清单逐字一致（不得改名、不得合并、不得省略）；下列条目的列表符号仅用于排序，禁止把编号或列表符号写进标题；禁止把小节降级为四级标题、也禁止把小节名写成正文中的列举条目；每个小节标题下必须有实质正文。`
     : '本章没有预设小节；请按用户提示词、模板章节、角色要求和绑定材料自然组织正文。';
   const sectionBudgetInstruction = buildSectionBudgetInstruction(chapter, options.targetWords || options.minWords || 0, options.sectionQuotas);
   // 标书编制规格（阶段 1 证据判定）：正文禁表（bodyTablePolicy=forbidden，招标显式禁表句）时表格计划指令短路；
@@ -477,7 +480,7 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     // ── 块级变化段起点（同章各块以下内容互不相同；保持其在 prompt 尾部，共享前缀到此为止恒定）──
     `章节标题：${chapter.title}`,
     lengthContractLine,
-    chapter.sections?.length ? '- 必须完整包含已规划小节；不要新增未规划的二级小节。' : '- 未预设小节时，不要为了凑结构强行新增小节。',
+    chapter.sections?.length ? '- 必须完整包含已规划小节，每节以「### X.X 小节名」三级标题逐节输出（小节名逐字一致，不得改名/合并/省略，不得降级为四级标题或写成列举条目）；不要新增未规划的二级小节。' : '- 未预设小节时，不要为了凑结构强行新增小节。',
     isBodyTableForbidden(options.bidComposition) ? '' : chapter.tablePlans?.length ? '- 本章存在结构化表格规划时，必须输出正式 Markdown 表格；表头必须严格使用规划字段，不得擅自改字段、删字段或增加后台溯源列。' : chapter.tableSections?.length ? `- 以下小节可使用表格辅助表达：${chapter.tableSections.join('、')}。` : '',
     isBodyTableForbidden(options.bidComposition) ? '' : chapter.tablePlans?.length ? '- 表格字段值必须优先来自项目图谱、可信事实和绑定材料；projectFactOnly 字段不得编造，也不得写任何固定占位话术。' : '',
     sectionInstruction,

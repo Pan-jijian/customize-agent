@@ -9,6 +9,7 @@ import { buildSemanticSimilarity, SEMANTIC_COVERAGE_THRESHOLD } from './semantic
 import type { ContentNeedKey, DepthDimension, ProfessionalDepthAnalysis } from './professionalDepthClassifier';
 import { documentTextLength, estimateDocumentPages } from './budget';
 import { extractEngineeringMeasureTokens, normalizeEngineeringTextForFactMatch } from './engineeringUnits';
+import { missingPlannedSections } from './chapterPostProcessing';
 import { buildBoqRowTraces, classifyNumericTraceToken } from './documentFactTrace';
 import { displayChapterTitle, isTenderClauseFragmentTitle } from './outline';
 import { extractGeneratedSections, mergeTableLineBreaks, sectionHeadingIdentityKey } from './markdownComposer';
@@ -2677,17 +2678,23 @@ export async function boqPlacementIssues(markdown: string, chapters: DocumentDra
   // 现口径：残留缺口产出**清单型 warning**（不阻断、不额外触发修复轮——语义/说明已承接的部分补写
   // 收益低，成本在修复轮），按「语义已承接 / 未承接」二分列明，供人工复核与下一轮生成定位。
   if (remainingUnplaced.length === 0) return issues;
-  const semanticRescued = unplacedTraces.filter(trace => semanticPlacedNames.has(trace.itemName));
+  // 语义兜底只在落位率 <90% 时运行（成本闸）：未运行时不得把残留缺口表述为「未承接」——
+  // 那是把「没检查」说成「检查了不通过」（诊断说真话口径）
+  const semanticRan = unplacedTraces.length > 0 && placedTotal / totalRows < 0.9;
+  const semanticRescued = semanticRan ? unplacedTraces.filter(trace => semanticPlacedNames.has(trace.itemName)) : [];
   const semanticOnlyGroups = new Set(semanticRescued.map(trace => trace.itemName.slice(0, 40)));
   const notCarried = groupList.filter(group => !semanticOnlyGroups.has(group.name.slice(0, 40)));
   const gapSummary = notCarried.slice(0, 20).map(group => `${group.name.slice(0, 40)}${group.rows > 1 ? `×${group.rows}` : ''}${group.sample.quantity ? ` ${group.sample.quantity}` : ''}（未落位${responsibleChapterOf(group.sample)}）`).join('；');
+  const splitNote = semanticRan
+    ? `其中语义已承接 ${semanticRescued.length} 行（${semanticOnlyGroups.size} 类），未承接 ${notCarried.reduce((sum, group) => sum + group.rows, 0)} 行（${notCarried.length} 类）`
+    : `（落位率已达线，语义兜底通道未触发——下列缺口均为字面未落位，是否已被同义表述承接需人工判断）`;
   issues.push({
     level: 'warning',
     category: 'evidence_coverage',
     owner: 'user',
     repairability: 'manual_review',
     provenance: { detectorId: 'boq-placement', fingerprint: stableHash(markdown) },
-    message: `清单落位缺口清单（已达落位率线，残留缺口供复核）：${placedTotal}/${totalRows} 项（${Math.round(rate * 100)}%），字面未落位 ${remainingUnplaced.length} 行 / ${groupList.length} 类；其中语义已承接 ${semanticRescued.length} 行（${semanticOnlyGroups.size} 类），未承接 ${notCarried.reduce((sum, group) => sum + group.rows, 0)} 行（${notCarried.length} 类）${gapSummary ? `。未承接项：${gapSummary}` : ''}`,
+    message: `清单落位缺口清单（已达落位率线，残留缺口供复核）：${placedTotal}/${totalRows} 项（${Math.round(rate * 100)}%），字面未落位 ${remainingUnplaced.length} 行 / ${groupList.length} 类；${splitNote}${gapSummary ? `。缺口项：${gapSummary}` : ''}`,
     suggestion: `以下未落位项须逐条给出处置：补写进对应章节、或显性说明（不涉及/利旧/甲供/由厂家配套）。${gapSummary}${auditNote ? `〔落位审计：${auditNote}〕` : ''}`,
   });
   return issues;
@@ -2952,4 +2959,44 @@ export function promptExampleLeakIssues(markdown: string, promptBindings: Prompt
     if (normalizedMarkdown.includes(block)) return [{ level: 'error', message: '正文疑似包含提示词示例内容', suggestion: '请删除提示词样例数据，仅保留基于当前绑定材料生成的正文。' }];
   }
   return [];
+}
+
+/**
+ * 规划小节未落位检测（4.55.14，章级结构硬项；巢湖实测根因）：
+ * 章级规划小节（含用户提示词/OUTLINE 声明的固定小节）必须作为三级标题落地。链尾已有确定性
+ * 提升收口（promotePlannedSectionHeadings：把同名 H4 提升为 H3），本检测针对**提升后仍整节缺失**
+ * 的形态——写作模型整节漏写（实测「编制依据与说明」章草稿 0 次）却无任何检测器覆盖，
+ * qualityRules 里「章节必须覆盖规划小节」此前只是一句声明。缺失即 blocker（进修复轮与人工复核清单）。
+ */
+export function plannedSectionPlacementIssues(markdown: string, chapters: Array<{ title: string; sections?: string[] }> = []): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  if (!markdown || chapters.length === 0) return issues;
+  const lines = markdown.split(/\r?\n/u);
+  const h2Indexes: Array<{ index: number; title: string }> = [];
+  lines.forEach((line, index) => {
+    const heading = /^##\s+(.+?)\s*$/u.exec(line.trim());
+    if (heading && !/^(目录|附表)/u.test(heading[1])) h2Indexes.push({ index, title: heading[1].replace(/\s+/gu, '') });
+  });
+  for (const chapter of chapters) {
+    const planned = (chapter.sections || []).filter(Boolean);
+    if (planned.length === 0) continue;
+    const normalizedTitle = chapter.title.replace(/\s+/gu, '');
+    const start = h2Indexes.find(item => item.title.includes(normalizedTitle) || normalizedTitle.includes(item.title));
+    if (!start) continue;
+    const next = h2Indexes.find(item => item.index > start.index);
+    const block = lines.slice(start.index + 1, next ? next.index : lines.length).join('\n');
+    const missing = missingPlannedSections(planned, block);
+    if (missing.length === 0) continue;
+    issues.push({
+      level: 'error',
+      severity: 'blocker',
+      category: 'structure',
+      owner: 'llm',
+      repairability: 'llm_repairable',
+      provenance: { detectorId: 'planned-section-placement', fingerprint: stableHash(markdown) },
+      message: `规划小节未落位：「${displayChapterTitle(chapter.title)}」缺少 ${missing.length} 个规划小节（${missing.slice(0, 6).join('、')}${missing.length > 6 ? ' 等' : ''}）——章级规划小节必须以三级标题逐节落地，不得漏写或降级为四级标题`,
+      suggestion: `请补齐以下小节并各自成节（三级标题「### X.X 小节名」，小节名与规划逐字一致，每节下写实质内容）：${missing.join('、')}。`,
+    });
+  }
+  return issues;
 }

@@ -285,6 +285,27 @@ export function buildChapterStructureFromBlueprint(input: {
     } else {
       coveredSections = inputSections.filter(section => blocks.some(block => sameSectionText(block.title, section) || block.subPoints.some(point => point.sources.some(source => sameSectionText(source, section)) || sameSectionText(point.title, section))));
       fallbackSections = inputSections.filter(section => !coveredSections.includes(section));
+      // 4.55.14 章级小节必须独立成块（巢湖实测根因）：章级小节是 H3，蓝图工作包是块内 H4——
+      // 旧口径下小节只要被任一工作包「同名吸收」就算覆盖，于是用户的 OUTLINE 固定小节被吞进块内：
+      // 「工程概况」写成块内 `#### 5 工程概况`（H4，挂在外安装分项下、正文大纲里消失），
+      // 「编制依据与说明」整节丢失（章草稿 0 次）。现口径：**只有被块标题承接才算落位**；
+      // 仅被块内要点吸收的章级小节提取为独立块，并从吸收块中移除同名要点（防重复写作）。
+      const absorbed = inputSections.filter(section => !blocks.some(block => sameSectionText(block.title, section))
+        && blocks.some(block => block.subPoints.some(point => point.sources.some(source => sameSectionText(source, section)) || sameSectionText(point.title, section))));
+      if (absorbed.length > 0) {
+        for (const block of blocks) {
+          block.subPoints = block.subPoints.filter(point => !absorbed.some(section => point.sources.some(source => sameSectionText(source, section)) || sameSectionText(point.title, section)));
+        }
+        // 吸收块可能因此变成空要点块：补回自身标题为唯一要点（单点块形态），避免空块进入容量规划
+        for (const block of blocks) {
+          if (block.subPoints.length === 0) block.subPoints = [{ title: block.title, sources: [block.title], tier: 'core' as const }];
+        }
+        const absorbedBlocks: PlannedChapterBlock[] = absorbed.map(section => ({ title: section, subPoints: [{ title: section, sources: [section], tier: 'core' as const }], facts: [], targetWords: 0 }));
+        // 位置守恒：锁定/章级小节按声明顺序置前（与「锁定小节置于小节清单最前」的规划约定同序）
+        blocks = [...absorbedBlocks, ...blocks];
+        coveredSections = [...coveredSections.filter(section => !absorbed.includes(section)), ...absorbed];
+        fallbackSections = fallbackSections.filter(section => !absorbed.includes(section));
+      }
     }
   }
   // 模板小节零丢失：蓝图路径覆盖不到的模板小节（如「市政工程专项施工工艺」）语义域分组挂回为追加主题块

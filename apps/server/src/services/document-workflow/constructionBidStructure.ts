@@ -2,6 +2,7 @@ import type { DocumentTemplate, DocumentTemplateChapter } from './types';
 import { displayChapterTitle, isFragmentLikeSectionTitle, isInstructionLikeOutlineTitle } from './outline';
 import { isHardBannedSectionTitle } from './evidenceContentSafety';
 import { inferConstructionOrgProjectTypes, type ConstructionOrgProjectType } from './constructionOrgProjectTypes';
+import { classifyTenderContent } from './technicalBidAdmission';
 
 /**
  * L1 结构引擎：评标结构知识库与前置结构校验。
@@ -209,6 +210,13 @@ export function extractEvaluationCriteriaItems(texts: string[]): EvaluationCrite
     // （评标程序/异常低价计算方式/电子保函/保证金/资格审查）属商务评审内容，不属于施工组织设计正文
     // 响应范围；证据层已断流（写作链拿不到证据），承接审计若继续要求承接必然永久误报无法收敛
     if (/公共资源|电子交易|加密|投标|开标|评标委员会|评标价|中标候选|中标人|评标程序|评标流程|异常低价|保函|保证金|资格审查|资格后审/u.test(raw)) continue;
+    // 4.55.14 技术标准入闸（评分条目二分，单源 technicalBidAdmission）：评标办法里的
+    // **资信加分项**（业绩/获奖/认证/信用/注册资本）与资格/程序/商务/合同类条目不是施工组织设计
+    // 的响应范围——承接审计若继续要求承接，必然永久误报（章节永远无法以施工内容承接资信条目），
+    // 且会经「未承接→补挂小节」把资信条目编成施工小节（巢湖实况：「我单位获得中国施工企业管理
+    // 协会颁发的2022年度…」成小节标题并拖垮该章）。资信加分项按用户口径走「限定形态」另册
+    //（isCreditScoringContent：承诺句/证明材料清单，暗标一律剔除），不进本章承接审计。
+    if (classifyTenderContent(raw) !== 'technical') continue;
     const index = Number(match[1]);
     if (!items.has(index)) {
       const cleanedTitle = cleanEvaluationItemTitle(raw);

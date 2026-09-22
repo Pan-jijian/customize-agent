@@ -1,4 +1,4 @@
-import { closedLoopDensityIssues, plannedAutoSpecGateIssues, basisRegulationsCoverageIssues, resourceBreakdownConsistencyIssues, punctuationArtifactIssues, boqPlacementIssues, crossChapterConsistencyIssues, degenerateContentIssues, drawingReferenceIssues, duplicateBasicInfoIssues, evaluationCriteriaCoverageIssues, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, formalStyleIssues, generatedFactVerificationIssuesAsync, genericProfessionalContentIssues, headingDuplicateIssues, innovationTechCoverageIssues, instructionLikeHeadingIssues, managementMeasureNumberIssues, markdownTableQualityIssues, minChapterSectionIssues, preciseFactUsageIssues, processSpecConflictIssues, professionalContentIssues, professionalScoreIssues, promptExampleLeakIssues, sectionContentIntegrityIssues, sectionCountOverflowIssues, sectionNumberingIssues, tableSpamIssues, tocBodyConsistencyIssues, tocHierarchyIssues } from './qualityValidation';
+import { closedLoopDensityIssues, plannedAutoSpecGateIssues, basisRegulationsCoverageIssues, resourceBreakdownConsistencyIssues, punctuationArtifactIssues, boqPlacementIssues, crossChapterConsistencyIssues, degenerateContentIssues, drawingReferenceIssues, duplicateBasicInfoIssues, evaluationCriteriaCoverageIssues, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, formalStyleIssues, generatedFactVerificationIssuesAsync, genericProfessionalContentIssues, headingDuplicateIssues, innovationTechCoverageIssues, instructionLikeHeadingIssues, managementMeasureNumberIssues, markdownTableQualityIssues, minChapterSectionIssues, preciseFactUsageIssues, processSpecConflictIssues, professionalContentIssues, professionalScoreIssues, promptExampleLeakIssues, sectionContentIntegrityIssues, sectionCountOverflowIssues, sectionNumberingIssues, tableSpamIssues, tocBodyConsistencyIssues, tocHierarchyIssues, plannedSectionPlacementIssues} from './qualityValidation';
 import { majorContentGovernanceIssues } from './constructionOrgQualityRules';
 import type { FactTokenScopeClassifier } from './factTokenClassifier';
 import type { ProfessionalDepthAnalysis, ProfessionalDepthClassifier } from './professionalDepthClassifier';
@@ -324,6 +324,8 @@ export async function buildStandardFinalValidationIssues(input: {
     ...await det('formal-style', () => formalStyleIssues(input.markdown)),
     ...det('tertiary-heading', () => tertiaryHeadingIssues(input.markdown)),
     ...det('min-chapter-section', () => minChapterSectionIssues(input.chapters)),
+    // 4.55.14 规划小节未落位（巢湖实测：用户 OUTLINE 固定小节被整节漏写且无检测器覆盖）
+    ...det('planned-section-placement', () => plannedSectionPlacementIssues(input.markdown, input.chapters)),
     // Q11 事实落位（关键参数抽查）：字面匹配 + 本地 bge 语义兜底
     ...await det('precise-fact-usage', () => preciseFactUsageIssues(input.markdown, input.factsModel, input.chapters)),
     // C3-4 可靠参数义务落位（参数池净化后义务满足率 <90% → error）：与报告出口 parameterUsageAudit.rate /

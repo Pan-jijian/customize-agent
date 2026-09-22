@@ -18,6 +18,7 @@ import { cleanPdfHeadingNoise } from './factsModel';
 import type { SemanticSimilarityFn } from './semanticSimilarity';
 import { isBidDisciplineSentence, isBidEvaluationRuleText, stableHash, systemConstraintLine } from './utils';
 import { isBidderQualificationText, isContractProcedureClause } from './evidenceContentSafety';
+import { classifyTenderContent, isCreditScoringContent } from './technicalBidAdmission';
 import { docSystemPrefix } from './markdownComposer';
 import { classifyPoolNoiseText, POOL_CONSTRAINT_WORD_RE, POOL_NOISE_RULE_SOURCES } from './poolNoise';
 
@@ -763,6 +764,18 @@ export async function judgeTenderClauses(
         excluded.push({ text: clause.text, source: formatClauseSource(clause), reason: 'out_of_scope' });
         return;
       }
+      // 4.55.14 技术标准入闸（四类非技术内容出池，单源 technicalBidAdmission）：
+      // 资格与资信（含评分表资信加分项）/ 招标程序与评标纪律 / 商务与计价 / 合同条件——
+      // 都不是技术标（施工组织设计）的响应义务。巢湖实况：旧判据缺锚定词被「业绩证明**材料**」
+      // 的「材料」子串骗过，该类条款入池后路由成施工小节（「业绩证明材料中要求提供：（2）中标
+      // 查询网址及查询」）并把整章拖到规划块全失败。资信加分项按「限定形态」另册（见
+      // isCreditScoringContent：需以承诺/材料清单形态响应，不得编成施工小节）。
+      // 商务与计价类不走本闸：交下方 isCommercialScopeClause（其带「技术工艺语义救回」，不得抢道）
+      const admissionClass = classifyTenderContent(clause.text);
+      if (admissionClass !== 'technical' && admissionClass !== 'commercial') {
+        excluded.push({ text: clause.text, source: formatClauseSource(clause), reason: isCreditScoringContent(clause.text) ? 'credit_scoring' : 'out_of_scope' });
+        return;
+      }
       // M26 合同附件来源域兜底（section 信号；r28k 45 条未满足中 21 条来自该域，文本被 PDF 切碎时 section 仍可识别）：
       // 合同/通用条款/保修/安全生产合同/管养协议域条款属合同履约管理范畴，LLM 漏判时本地纠正
       if (isContractAttachmentSectionClause(clause.section)) {
@@ -905,6 +918,9 @@ const COMMERCIAL_TECHNICAL_RESCUE_RE = /工艺试验|工艺评定|试验段|复�
  * （外部 const 词表不影响函数源码序列化，必须直接入表方能触发缓存失效）。 */
 const CACHE_JUDGE_FINGERPRINT_SOURCES: ReadonlyArray<unknown> = [
   clauseFragmentLike,
+  // 4.55.14 技术标准入闸（池纯度判据）：分类器函数入表，口径变更自动失效缓存
+  classifyTenderContent,
+  isCreditScoringContent,
   EMPTY_CLAUSE_VALUE_RE,
   clauseSentenceHasNoValue,
   BARE_REPLY_RE,
@@ -1014,6 +1030,17 @@ export function tenderRequirementsSummary(model: TenderRequirementModel | undefi
   const commercialScopeCount = model.excluded.filter(item => item.reason === 'commercial_scope').length;
   if (commercialScopeCount > 0) {
     summary.push(`商务域排除 ${commercialScopeCount} 条（付款/保证金/结算/报价/税金等，技术标正文零商务句）`);
+  }
+  // 4.55.14 技术标准入闸可见性：四类非技术内容（资格与资信/招标程序与评标纪律/商务与计价/合同条件）
+  // 单列可见——用户口径「招标文件里不是我们都要写」需要可审计：资信加分项（业绩/获奖/认证）单独
+  // 提示须按招标要求以**承诺句/证明材料清单**形态另行处理，不得编成施工小节，暗标一律剔除。
+  const creditScoringCount = model.excluded.filter(item => item.reason === 'credit_scoring').length;
+  const outOfScopeCount = model.excluded.filter(item => item.reason === 'out_of_scope').length;
+  if (outOfScopeCount > 0 || creditScoringCount > 0) {
+    summary.push(`技术标准入闸排除 ${outOfScopeCount + creditScoringCount} 条（投标人资格与资信/招标程序与评标纪律/合同条件——非施工组织设计响应义务，响应由资格文件或商务标承接）`);
+  }
+  if (creditScoringCount > 0) {
+    summary.push(`其中资信加分项 ${creditScoringCount} 条（业绩/获奖/认证类）：按招标要求以承诺句或证明材料清单形态另行处理，不得编成施工小节${'；暗标项目一律剔除'}`);
   }
   // A-T1 结构/呈现要求可见性（第三态通道：含被排除格式类条款的呈现信号）
   const structureRequirements = model.structureRequirements || [];

@@ -314,6 +314,10 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   { id: 'formal-style', scope: 'full-document', category: 'style' },
   { id: 'tertiary-heading', scope: 'full-document', category: 'structure', deterministicSafe: true },
   { id: 'min-chapter-section', scope: 'chapter', category: 'structure', fixerDisposition: 'fixed', fixerDispositionReason: 'mergeDuplicateThematicSections 与检测共用桶键 classifyThematicSectionKey，接线 duplicate-theme-merge 轮；精确同名小节族另由 heading-duplicate-merge 覆盖' },
+  // 4.55.14 章级规划小节落位（巢湖实测：用户 OUTLINE 固定小节被降级为块内 H4 / 整节漏写）：
+  // 链尾 delivery-structure-closure 先做确定性层级提升（promotePlannedSectionHeadings，同名 H4→H3），
+  // 本检测针对提升后仍整节缺失的形态；修复路径为 LLM 定向补写小节
+  { id: 'planned-section-placement', scope: 'chapter', category: 'structure', fixerDisposition: 'manual', fixerDispositionReason: '链尾确定性提升覆盖「降级为 H4」形态（delivery-structure-closure）；整节漏写属写作缺项，交 LLM 定向补写小节（provenance 已打点）' },
   { id: 'precise-fact-usage', scope: 'full-document', category: 'fact_consistency' },
   // C3-4 可靠参数义务落位验收（chapterParameterFacts.parameterObligationUsageIssues）：参数池净化后
   // 义务满足率 <90% 即 error（兑现报告出口 parameterUsageAudit / 修复出口 assignMissingParameterChapters

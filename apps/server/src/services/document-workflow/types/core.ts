@@ -430,7 +430,10 @@ export interface TenderRequirementEntry {
 export interface TenderRequirementExclusion {
   text: string;
   source?: string;
-  reason: 'non_requirement' | 'out_of_scope' | 'no_value' | 'duplicate' | 'commercial_scope' | 'noise';
+  reason: 'non_requirement' | 'out_of_scope' | 'no_value' | 'duplicate' | 'commercial_scope' | 'noise'
+    /** 4.55.14 资信加分项（评分表里的业绩/获奖/认证类）：按招标要求须响应但限定形态
+     * （承诺句/证明材料清单），不得编成施工小节——单独出池类别供复核清单另册展示 */
+    | 'credit_scoring';
 }
 
 /** 提取对账：条款总数 = entries 覆盖 + excluded + 重复合并 + undecidedCount（必须为 0 才对账闭合） */

@@ -786,3 +786,53 @@ export function acceptExpandedChapter(previous: string, next: string, chapterTit
   if (normalizedTitle && !next.includes(normalizedTitle)) return false;
   return true;
 }
+
+/**
+ * 4.55.14 章级规划小节落位对账（巢湖实测根因）：
+ *
+ * 「章级规划小节」是 H3，蓝图工作包是块内 H4——写作模型会把前者降级写成块内 H4
+ * （实测「#### 5 工程概况」：既降级又串到别的分项下），或整节漏写（实测「编制依据与说明」章草稿 0 次），
+ * 而链上唯一的对齐机制 `alignSimilarHeadingsToPlan` 只扫块内 H4 要点、`globalQualityGates` 的漂移对齐
+ * 只扫 H3 —— 两头都看不见这种形态，用户的 OUTLINE 固定小节因此在交付稿里消失。
+ *
+ * 本函数做确定性收口：章范围内，凡**标题名与规划小节逐字一致**的 H4/H5 行就地提升为 H3
+ * （只改层级、不动正文与顺序；同名 H3 已存在时不重复提升）。真正缺失（全章无同名标题）
+ * 的规划小节原样返回，由检测端报出（plannedSectionPlacementIssues）并进人工复核清单。
+ */
+export function promotePlannedSectionHeadings(plannedSections: string[], content: string): { markdown: string; promoted: string[]; missing: string[] } {
+  const planned = plannedSections.map(section => String(section || '').trim()).filter(Boolean);
+  if (planned.length === 0 || !content) return { markdown: content, promoted: [], missing: [] };
+  const lines = content.split(/\r?\n/u);
+  const h3Keys = new Set<string>();
+  for (const line of lines) {
+    const heading = /^###\s+(.+?)\s*$/u.exec(line.trim());
+    if (heading) h3Keys.add(normalizeSubsectionTitleForDedup(heading[1]));
+  }
+  const promoted: string[] = [];
+  const output = lines.map(line => {
+    const heading = /^(#{4,5})\s+(.+?)\s*$/u.exec(line.trim());
+    if (!heading) return line;
+    const key = normalizeSubsectionTitleForDedup(heading[2]);
+    const plannedMatch = planned.find(section => normalizeSubsectionTitleForDedup(section) === key);
+    if (!plannedMatch || h3Keys.has(key)) return line;
+    h3Keys.add(key);
+    promoted.push(plannedMatch);
+    return `### ${plannedMatch}`;
+  });
+  const missing = planned.filter(section => !h3Keys.has(normalizeSubsectionTitleForDedup(section)));
+  return { markdown: output.join('\n'), promoted, missing };
+}
+
+/** 规划小节未落位检测（章级；与 promotePlannedSectionHeadings 同口径）：
+ * 章正文三级标题集合 ⊉ 规划小节 → 返回缺失小节名（供终检报出，进修复轮与人工复核清单）。
+ * 与「漂移对齐」互补：对齐处理近名变体，本判据处理**整节缺失**（用户 OUTLINE 固定小节被静默丢弃的形态）。 */
+export function missingPlannedSections(plannedSections: string[], content: string): string[] {
+  const planned = plannedSections.map(section => String(section || '').trim()).filter(Boolean);
+  if (planned.length === 0 || !content) return [];
+  const h3Keys = new Set<string>();
+  for (const line of String(content).split(/\r?\n/u)) {
+    const heading = /^###\s+(.+?)\s*$/u.exec(line.trim());
+    if (heading) h3Keys.add(normalizeSubsectionTitleForDedup(heading[1]));
+  }
+  return planned.filter(section => !h3Keys.has(normalizeSubsectionTitleForDedup(section)));
+}
