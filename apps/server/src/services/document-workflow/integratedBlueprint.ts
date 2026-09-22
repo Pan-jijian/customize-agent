@@ -80,7 +80,7 @@ export function buildIntegratedBlueprint(input: BuildIntegratedBlueprintInput): 
       sourceFile: boq.sourceFile,
       totalEntries: boq.totalEntries,
       complete: boq.complete,
-      villageCount: boq.villages.length,
+      groupCount: boq.villages.length,
       pagesMissingTotal: boq.villages.reduce((sum, village) => sum + village.pagesMissing.length, 0),
     };
     if (!boq.complete) diagnostics.warnings.push('清单解析完整性校验未通过（序号缺口/页码缺失），蓝图覆盖校验将兜底报告');
@@ -91,6 +91,9 @@ export function buildIntegratedBlueprint(input: BuildIntegratedBlueprintInput): 
   const boqForData = boq || emptyBoq;
   // 工程类型策略解析（确定性双信号，零 LLM）→ 各推导函数按策略组参数执行
   const strategy = resolveDerivationStrategy({ basicFacts: input.basicFacts, templateName: input.templateName, chapterTitles: input.chapterTitles, boq: boqForData });
+  // 4.55.23：把分组维度的**正确标签**回填进诊断（取自策略：building=「单位工程」、villageMunicipal=「村」…）——
+  // 原实现界面无条件写「N 村」，房建项目把 8 个单位工程显示成「8 村」（用户实测提问"这个项目有村吗"）
+  if (diagnostics.boq) diagnostics.boq.groupLabel = strategy.groupLabel;
   const dataResult = buildBlueprintData({
     boq: boqForData,
     basicFacts: input.basicFacts,

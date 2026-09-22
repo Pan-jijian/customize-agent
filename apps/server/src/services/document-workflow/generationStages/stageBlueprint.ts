@@ -78,7 +78,9 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
       details: [
         `耗时 ${Date.now() - blueprintStartedAt}ms`,
         `落盘：${blueprintAssetPath}`,
-        `清单解析：${session.blueprint.integratedBlueprint.diagnostics.boq ? `${session.blueprint.integratedBlueprint.diagnostics.boq.totalEntries} 条目 / ${session.blueprint.integratedBlueprint.diagnostics.boq.villageCount} 村 / 完整性校验${session.blueprint.integratedBlueprint.diagnostics.boq.complete ? '通过' : '未通过'}` : '未解析（见警告）'}`,
+        // 4.55.23：分组维度的**标签随项目类型**——原实现无条件写「N 村」，房建项目把 8 个单位工程
+        // 显示成「8 村」（用户实测提问"这个项目有村吗"）。乡村类项目仍称「村」，其余称「个单位工程/分组」。
+        `清单解析：${session.blueprint.integratedBlueprint.diagnostics.boq ? `${session.blueprint.integratedBlueprint.diagnostics.boq.totalEntries} 条目 / ${session.blueprint.integratedBlueprint.diagnostics.boq.groupCount} ${session.blueprint.integratedBlueprint.diagnostics.boq.groupLabel || '个分组'} / 完整性校验${session.blueprint.integratedBlueprint.diagnostics.boq.complete ? '通过' : '未通过'}` : '未解析（见警告）'}`,
         `标书编制规格：${compositionLabel}`,
         `校验链：${session.blueprint.integratedBlueprint.validation.checks.map(check => `${check.name}${check.passed ? '✓' : '✗'}`).join(' / ')}`,
         // 上限治理：蓝图降级警告**全量上屏**（原 slice(0,6)：第 7 条起用户永远看不到）

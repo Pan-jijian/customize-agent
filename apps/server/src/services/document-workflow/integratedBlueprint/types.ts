@@ -321,7 +321,14 @@ export interface BlueprintValidationReport {
 
 export interface BlueprintBuildDiagnostics {
   stage: string;
-  boq?: { sourceFile: string; totalEntries: number; complete: boolean; villageCount: number; pagesMissingTotal: number };
+  /**
+   * 清单解析诊断。`groupCount` 是**清单分组数**（表/单位工程维度）——
+   * 对乡村类项目恰为「自然村数」，对房建/市政类则是单位工程/分部数。
+   * 4.55.23 由 `villageCount` 改名：旧名会让读者（与后续消费者）把房建项目的
+   * 8 个单位工程误读成「8 个自然村」（用户实测在界面看到「清单解析：946 条目 / 8 村」）。
+   * **自然村数量须走 `strategy.villageOriented` 守卫**（见 derive.ts），不得直接用本字段。
+   */
+  boq?: { sourceFile: string; totalEntries: number; complete: boolean; groupCount: number; pagesMissingTotal: number; /** 分组维度的正确标签（取自派生策略 groupLabel：房建=单位工程、乡村=村…） */ groupLabel?: string };
   laborDerivationBasis: string;
   llmCalls: number;
   fallbackUsed: string[];
