@@ -30,6 +30,16 @@ export interface ValueOverride {
   kind: 'override' | 'addition';
 }
 
+/** 全局正则缓存（同一 source 只编译一次；高频调用路径避免重复 new RegExp） */
+const GLOBAL_PATTERN_CACHE = new Map<string, RegExp>();
+function globalPatternFor(source: string): RegExp {
+  const cached = GLOBAL_PATTERN_CACHE.get(source);
+  if (cached) { cached.lastIndex = 0; return cached; }
+  const created = new RegExp(source, 'gu');
+  GLOBAL_PATTERN_CACHE.set(source, created);
+  return created;
+}
+
 /** 值形态识别（用于 R5/R7 的类型专属权威；由值本身形态判定，不依赖字段名） */
 export type ValueShape = 'measure' | 'spec' | 'date' | 'money' | 'standard' | 'text';
 
@@ -74,6 +84,10 @@ function scopeFromSentence(sentence: string): string[] {
  * @param sources [{ text, source }]：source 为文件路径（含"答疑/澄清/补疑"者按答疑侧处理）
  */
 export function extractValueOverrides(sources: Array<{ text: string; source: string }>): ValueOverride[] {
+  // 编译一次、循环内复用（原实现每句 new RegExp，1.8 万条证据时成为瓶颈）
+  const CONNECTOR_WITH_VALUE_RE = new RegExp(`(${CHANGE_CONNECTORS})\\s*[:：]?\\s*(${VALUE_TOKEN_RE.source}|[\\u4e00-\\u9fa5]{2,12})`, 'u');
+  const VALUE_TOKEN_SCAN_RE = new RegExp(VALUE_TOKEN_RE.source, 'gu');
+  const TABLE_PAIR_RE = new RegExp(`([\\u4e00-\\u9fa5]{2,8})\\s*[:：]\\s*(${VALUE_TOKEN_RE.source})`, 'gu');
   const overrides: ValueOverride[] = [];
   const seen = new Set<string>();
   const push = (override: ValueOverride) => {
@@ -82,15 +96,18 @@ export function extractValueOverrides(sources: Array<{ text: string; source: str
     seen.add(key);
     overrides.push(override);
   };
+  // 性能：绝大多数证据不含变更语义——整体预筛（单次 includes）后再逐句解析；
+  // 无预筛时 1.8 万条证据 × 每句 2 个 new RegExp 会让 finalize 阶段卡住（实测 11 分钟无进展）
+  const CONTAINER_RE = /变更|澄清|补疑|补遗|调整为|修改为|更正/;
   for (const item of sources) {
     const text = String(item.text || '');
-    if (!text) continue;
+    if (!text || !CONTAINER_RE.test(text)) continue;
     for (const rawSentence of text.split(SENTENCE_SPLIT_RE)) {
       const sentence = rawSentence.replace(/\s+/gu, '');
       if (sentence.length < 4) continue;
       const scope = scopeFromSentence(sentence);
       // ① 变更连接语 / ② 原现对举：连接语后紧跟的值为生效值；同句其余值为被取代值
-      const connector = new RegExp(`(${CHANGE_CONNECTORS})\\s*[:：]?\\s*(${VALUE_TOKEN_RE.source}|[\\u4e00-\\u9fa5]{2,12})`, 'u').exec(sentence);
+      const connector = CONNECTOR_WITH_VALUE_RE.exec(sentence);
       if (connector) {
         const effective = connector[2]!.trim();
         // 生效值侧必须是**值**（含数字/单位/日期）或短名词且本身不含变更标记
@@ -98,7 +115,7 @@ export function extractValueOverrides(sources: Array<{ text: string; source: str
         if (!/\d/u.test(effective) || new RegExp(CHANGE_CONNECTORS, 'u').test(effective)) continue;
         const effectiveShape = classifyValueShape(effective);
         const before = sentence.slice(0, connector.index);
-        const candidates = [...before.matchAll(new RegExp(VALUE_TOKEN_RE.source, 'gu'))].map(match => match[0].trim());
+        const candidates = [...before.matchAll(VALUE_TOKEN_SCAN_RE)].map(match => match[0].trim());
         // 同类替换：被取代值必须与生效值**同形态**（工期只被工期取代，不被"变更发生日期"取代——
         // 实测垃圾对：「2026年08月05日 → 330日历天」，08-05 是澄清发生日而非旧工期）
         for (const superseded of candidates) {
@@ -115,7 +132,7 @@ export function extractValueOverrides(sources: Array<{ text: string; source: str
         continue;
       }
       // ③ 澄清表行：「XX：A」后紧跟同条款「XX：B」的复写形态（OCR 双写）——同句内取最后一次出现为生效
-      const tablePairs = [...sentence.matchAll(new RegExp(`([\\u4e00-\\u9fa5]{2,8})\\s*[:：]\\s*(${VALUE_TOKEN_RE.source})`, 'gu'))];
+      const tablePairs = [...sentence.matchAll(TABLE_PAIR_RE)];
       if (tablePairs.length >= 2) {
         const byKey = new Map<string, string[]>();
         for (const pair of tablePairs) {

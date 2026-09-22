@@ -532,7 +532,9 @@ export async function stageRebuildAndRecompute(session: FinalizeSession): Promis
   // 修复后重算问题组会重新计算，修复基线只保留基础累计问题，避免重复累加
   // 4.55.19 真值层读侧（方案 v3 §2-§3）：实体-属性图 + 噪声闸 + 决定性裁决 → 口径账本
   // （只读产出，不改写作；后续步骤切写侧消费）
-  {
+  // 4.55.20 性能：finalize 期本阶段会被多次重跑（每个修复轮后 rebuild），而证据在 finalize 期不变
+  // ——口径账本缓存到会话上，只算一次（实测：不做缓存时 1.8 万条证据 × 多轮 rebuild 会让阶段卡住）
+  if (!session.caliberLedger) {
     const truthFacts = [
       ...(session.factsModel?.preciseFacts || []), ...(session.factsModel?.project || []),
       ...(session.factsModel?.schedule || []), ...(session.factsModel?.quality || []),

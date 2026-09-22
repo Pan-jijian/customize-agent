@@ -164,6 +164,17 @@ export function unpackEmbeddedFields(key: string, label: string | undefined, val
  * 需取「330日历天」（变更连接语后的 token）而非整句。
  * 规则：① 若值中含变更连接语 → 取连接语后第一个该形态 token；② 否则取最后一个该形态 token。
  */
+const CHANGE_CONNECTOR_RE = new RegExp(`${CHANGE_CONNECTORS}\\s*[:：]?`, 'u');
+/** 全局正则缓存（同一 source 只编译一次；高频调用路径避免重复 new RegExp——1.8 万条证据下为性能瓶颈） */
+const GLOBAL_PATTERN_CACHE = new Map<string, RegExp>();
+function globalPatternFor(source: string): RegExp {
+  const cached = GLOBAL_PATTERN_CACHE.get(source);
+  if (cached) { cached.lastIndex = 0; return cached; }
+  const created = new RegExp(source, 'gu');
+  GLOBAL_PATTERN_CACHE.set(source, created);
+  return created;
+}
+
 export function extractValueToken(value: string, shape: string): string {
   const text = String(value || '').trim();
   const patterns: Record<string, RegExp> = {
@@ -175,9 +186,9 @@ export function extractValueToken(value: string, shape: string): string {
   };
   if (shape === 'text') return text.slice(0, 80);
   const source = (patterns[shape] || patterns.measure!).source;
-  const tokens = [...text.matchAll(new RegExp(source, 'gu'))].map(match => match[0].trim());
+  const tokens = [...text.matchAll(globalPatternFor(source))].map(match => match[0].trim());
   if (tokens.length === 0) return text.slice(0, 80);
-  const connector = new RegExp(`${CHANGE_CONNECTORS}\\s*[:：]?`, 'u').exec(text);
+  const connector = CHANGE_CONNECTOR_RE.exec(text);
   if (connector) {
     const after = text.slice(connector.index + connector[0].length);
     const next = new RegExp(source, 'u').exec(after);
@@ -195,7 +206,7 @@ export function extractValueToken(value: string, shape: string): string {
 export function extractValueAndShape(value: string): { value: string; shape: string } {
   const text = String(value || '').trim();
   if (!text) return { value: '', shape: 'text' };
-  const connector = new RegExp(`${CHANGE_CONNECTORS}\\s*[:：]?`, 'u').exec(text);
+  const connector = CHANGE_CONNECTOR_RE.exec(text);
   const scanText = connector ? text.slice(connector.index + connector[0].length) : text;
   // 候选形态优先级：日期/金额/规范 是"整值型"；measure/spec 是"数值型"
   const shapeOrder: Array<{ shape: string; re: RegExp }> = [
