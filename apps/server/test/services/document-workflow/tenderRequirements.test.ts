@@ -12,7 +12,9 @@ vi.mock('@/services/document-workflow/llmClient', async () => {
   const actual = (await vi.importActual('@/services/document-workflow/llmClient')) as typeof LlmClientModule;
   return { ...actual, callDocumentLlmJson: vi.fn() };
 });
-vi.mock('@/services/document-workflow/semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn() }));
+// 语义阈值随模块单源（tenderRequirements 判定用 SEMANTIC_COVERAGE_THRESHOLD 常量而非字面量 0.6），
+// mock 工厂须一并给出该导出，与 semanticSimilarity.ts 真实值同值（其余测试同此写法）
+vi.mock('@/services/document-workflow/semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
 
 import type * as LlmClientModule from '@/services/document-workflow/llmClient';
 import { callDocumentLlmJson } from '@/services/document-workflow/llmClient';

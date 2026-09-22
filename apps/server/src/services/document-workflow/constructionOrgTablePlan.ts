@@ -137,33 +137,6 @@ export function unassignedSectionTablePlans(chapter: DocumentTemplateChapter, se
   return plans.filter(plan => !sectionTitles.some(title => sectionTablePlans(chapter, title).some(assigned => assigned.id === plan.id)));
 }
 
-/** 组级表格计划过滤：组级成稿链路（主题块并发）每组只注入本组小节承接的表计划，
- * 末组额外承接全章未分配表（allSectionTitles 传全章小节标题时计算未分配表并入），
- * 避免每组都看到全章表计划导致跨组重复输出同一张表或归属错位 */
-export function groupTablePlansForSections(chapter: DocumentTemplateChapter, groupSectionTitles: string[], allSectionTitles: string[]): PlannedTablePlan[] {
-  const plans = chapter.tablePlans || [];
-  if (plans.length === 0) return plans;
-  const matchedIds = new Set<string>();
-  const matched: PlannedTablePlan[] = [];
-  for (const title of groupSectionTitles) {
-    for (const plan of sectionTablePlans(chapter, title)) {
-      if (!matchedIds.has(plan.id)) {
-        matchedIds.add(plan.id);
-        matched.push(plan);
-      }
-    }
-  }
-  if (allSectionTitles.length > 0) {
-    for (const plan of unassignedSectionTablePlans(chapter, allSectionTitles)) {
-      if (!matchedIds.has(plan.id)) {
-        matchedIds.add(plan.id);
-        matched.push(plan);
-      }
-    }
-  }
-  return matched;
-}
-
 /** 文档中的 markdown 表格数量（分隔行计数） */
 function markdownTableCount(markdown: string) {
   let count = 0;

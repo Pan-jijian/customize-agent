@@ -15,7 +15,7 @@ import {
   deriveLaborFromBoq,
   deriveMilestonesFromBoq,
   deriveTempUtilitiesFromBoq,
-  renderBlueprintDataText,
+  renderBlueprintDataTextForBlock,
   validateBlueprint,
 } from '@/services/document-workflow/integratedBlueprint';
 import { blueprintLaborPeakAuthority } from '@/services/document-workflow/authorityIndex';
@@ -209,7 +209,7 @@ describe('Q8 渲染层公式值化与 byTrade 单值', () => {
   ]);
   const basicFacts = '项目名称：测试村建设项目 计划工期：90日历天 质量标准：合格 计价依据：合造价〔2018〕13号文 合同估算价：1100万元';
   const { data } = buildBlueprintData({ boq, basicFacts, projectName: '测试村建设项目', strategy: villageMunicipalStrategy });
-  const text = renderBlueprintDataText(data);
+  const text = renderBlueprintDataTextForBlock(data, { blockTokens: ['塑料管铺设', '村庄道路铺装'] });
 
   it('渲染文本不含任何公式符号（P =/Σ/cosφ/K1/K2/q =/×）', () => {
     expect(text).not.toMatch(FORMULA_SYMBOL_RE);

@@ -7,39 +7,11 @@ import { buildAuthorityIndex, renderAuthorityDomains, renderAuthorityDomainsForB
 import { renderAuthorityPlaceholderCatalog, renderAuthorityValue } from './authorityPlaceholders';
 import { parseChineseNumber } from '../budget';
 import { THREE_SOURCE_WRITE_RULES } from '../writingSpec';
-import { DEFAULT_SUBSECTION_TARGET_WORDS } from './capacity';
 import type { BlueprintChapter, BlueprintData, BlueprintRequiredParam, BlueprintWorkPackage, IntegratedBlueprint } from './types';
 
 // ═══════════════════════════════ 渲染函数（二期执行层输入） ═══════════════════════════════
 
-/** 参数桶渲染：全文恒定段（各章写作 prompt 注入，同文档逐字节一致 → prefix cache 可命中） */
-export function renderBlueprintDataText(data: BlueprintData): string {
-  const lines: string[] = ['【一体化蓝图参数桶——全项目口径唯一权威源，正文引用必须与此一致，不得自行推导不同数值】'];
-  lines.push('计划类数值（劳动力人数/工期/工程量/养护期）必须且只能引用以下锚点值：禁止将各工种人数相加推导峰值、禁止按定额自行估算、禁止改写锚点数值。');
-  lines.push(`- 项目：${data.project.name}（${data.project.scope}）`);
-  // V5 P2 数据驱动渲染：权威条目全量渲染（删除手写行与 12/15/10 物理截断——凡进蓝图 data 的
-  // 对象自动进桶，渲染覆盖率测试防“数据有而桶无”复发）；非索引对象（检验批/决策锁/部署/重难点）紧随其后
-  lines.push(...renderAuthorityDomains(buildAuthorityIndex(data)));
-  if (data.inspectionBatches.length > 0) {
-    lines.push(`- 检验批划分：${data.inspectionBatches.map(item => `${item.scope}——${item.planDesc}`).join('；')}`);
-  }
-  lines.push(`- 临时用电：${data.tempUtilities.powerLoad}`);
-  lines.push(`- 临时用水：${data.tempUtilities.waterUsage}`);
-  if (data.decisionLock.entries.length > 0) {
-    lines.push(`- 关键决策锁：${data.decisionLock.entries.map(entry => `${entry.label}：${entry.values.join('、')}`).join('；')}`);
-  }
-  if (data.constructionDeployment.sections.length > 0) {
-    lines.push(`- 施工部署：${data.constructionDeployment.flow}；施工顺序 ${data.constructionDeployment.sequence}`);
-  }
-  if (data.keyDifficulties.length > 0) {
-    lines.push(`- 重难点（逐项列明）：${data.keyDifficulties.map(item => `${item.name}——${item.measure}`).join('；')}`);
-  }
-  lines.push(`- 金额禁区：${data.amountRule}`);
-  lines.push(data.drawingNote);
-  return lines.join('\n');
-}
-
-/** 块级聚焦参数桶（s1-slim 单块输入瘦身）：与 renderBlueprintDataText 同构、行文案同源，
+/** 块级聚焦参数桶（s1-slim 单块输入瘦身）：行文案与全量口径同源（DOMAIN_RENDERERS 单点），
  * 差异仅 quantity/material 域按块 token 条目级筛选 + 字符封顶（全量桶 36413 字符 → 块相关数千字符）。
  * 计划类恒定行（工期/劳动力峰值/机械/红线等）全量保留——它们是「计划类数值唯一口径」的可见性保障。 */
 export function renderBlueprintDataTextForBlock(data: BlueprintData, options: { blockTokens: string[]; quantityCharsCap?: number; materialCharsCap?: number }): string {
@@ -198,27 +170,6 @@ export function renderBlueprintChapterAuthorityCard(chapter: BlueprintChapter, d
   ].join('\n');
 }
 
-/** 章切片渲染：该章 sub_sections + work_packages 展开为「本项目专属事实」文本（执行层只读切片写作）。
- * data 传入时尾部追加章级数值锚点卡。 */
-export function renderBlueprintChapterSlice(chapter: BlueprintChapter, data?: BlueprintData): string {
-  // M4·写作三源规则：章切片权威提示与全局写作提示词（FORMAL_WRITING_RULES）共用同一份三源规则模板，
-  // 写作层在本章看到的全部计划类数值均以切片与章域卡为准，禁止按定额重算（跨工程串位/口径分裂的提示词级防线）
-  const lines: string[] = [
-    `【第 ${chapter.id} 章「${chapter.title}」蓝图切片——以下项目专属事实由蓝图冻结锁定，正文必须一致引用】`,
-    THREE_SOURCE_WRITE_RULES,
-  ];
-  for (const subSection of chapter.subSections) {
-    lines.push(`\n## ${subSection.id} ${subSection.title}（目标 ${subSection.targetWords ?? DEFAULT_SUBSECTION_TARGET_WORDS} 字）`);
-    const mustCite = subSection.requiredParams.filter(param => param.mode === 'must_cite').map(param => param.path);
-    if (mustCite.length > 0) lines.push(`must_cite 参数（正文必须出现且与蓝图一致）：${mustCite.join('、')}`);
-    for (const workPackage of subSection.workPackages) {
-      lines.push(...renderWorkPackageLines(workPackage));
-    }
-  }
-  const authorityCard = data ? renderBlueprintChapterAuthorityCard(chapter, data) : '';
-  return [lines.join('\n'), authorityCard].filter(Boolean).join('\n\n');
-}
-
 /** 工作包详情行渲染（章切片/块级切片共用，行文案单一来源） */
 function renderWorkPackageLines(workPackage: BlueprintWorkPackage): string[] {
   const lines: string[] = [`\n### 工作包：${workPackage.name}（${workPackage.kind === 'major' ? '主要' : '一般'}工作包）`];
@@ -305,21 +256,10 @@ export function renderBlueprintBlockSlice(chapter: BlueprintChapter, data: Bluep
   return [...head, bodyText, authorityCard].filter(Boolean).join('\n\n');
 }
 
-/** 正则元字符转义（蓝图引用对齐锚定词安全） */
-function escapeRegexForAlign(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-}
-
-/** 单位变体归一（与修复器 quantityUnitVariants 同源，零漂移实测）：清单单位 m2/m3/t 与正文
- *  上标写法（m²/㎡/m³）同义——检测正则只认一种写法时，上标值不入候选，分部拆分豁免
- *  （压膜 404.4+730=1134.4）无法触发导致误报「压膜 404.4」 */
-export function quantityUnitDetectVariants(unit: string): string {
-  const normalized = unit.trim().toLowerCase();
-  if (/(?:m2|m²|㎡)/.test(normalized)) return '(?:㎡|m²|m2)';
-  if (/(?:m3|m³)/.test(normalized)) return '(?:m³|m3)';
-  if (normalized === 't' || normalized === '吨') return '(?:吨|t)';
-  return escapeRegexForAlign(unit);
-}
+// 单位变体归一 quantityUnitDetectVariants 已删除（原为与权威层 quantityUnitVariants 逐字重复的副本，
+// 注释称「同源」却无共享 import）：单位口径单源 = integrity/authorities/authorities.quantityUnitVariants，
+// 引用定位（本目录 citation.ts）直接 import 该实现——清单 m2/m3/t 与正文上标 m²/㎡/m³ 同义归一，
+// 检测正则只认一种写法时上标值不入候选、分部拆分豁免（压膜 404.4+730=1134.4）无法触发误报「压膜 404.4」。
 
 /** 章切片匹配：按模板章标题在蓝图大纲中定位章切片（构建时 title 即模板原始标题） */
 export function findBlueprintChapter(blueprint: IntegratedBlueprint, chapterTitle: string): BlueprintChapter | undefined {

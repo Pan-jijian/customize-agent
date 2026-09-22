@@ -5,12 +5,9 @@
  *
  * 核心原则：
  * 1. 对于 LLM 输入 — 使用 token 计数 + 语义边界（段落/句子）截断
- * 2. 对于数组 — 使用 selectByScore 评分排序后选择
- * 3. 对于显示文本 — 明确标注为 display truncation
- * 4. 所有截断都必须记录丢弃日志
+ * 2. 对于显示文本 — 明确标注为 display truncation
+ * 3. 所有截断都必须记录丢弃日志
  */
-
-import { selectByScore, type SelectionResult } from './selection';
 
 /** 粗略估算中文文本的 token 数（中文 ≈1.5 字符/token，英文 ≈4 字符/token） */
 export function estimateTokens(text: string): number {
@@ -76,32 +73,4 @@ export function truncateToTokenBudget(
     : '';
 
   return { truncated: result, droppedChars, droppedLog };
-}
-
-/**
- * 在 token 预算内从数组中评分选择最重要的项
- * 这是 selectByScore 的 token 感知包装
- */
-export function selectForTokenBudget<T>(
-  items: T[],
-  scoreFn: (item: T) => number,
-  maxTokens: number,
-  formatFn: (item: T) => string = item => String(item),
-  label = 'items',
-): SelectionResult<T> & { totalTokens: number } {
-  const result = selectByScore(
-    items,
-    scoreFn,
-    {
-      maxItems: items.length, // 不按数量截断
-      maxChars: maxTokens * 2, // 粗略估算：2 字符 ≈ 1 token
-      charFn: item => estimateTokens(formatFn(item)),
-    },
-    label,
-  );
-
-  return {
-    ...result,
-    totalTokens: result.selected.reduce((sum, item) => sum + estimateTokens(formatFn(item)), 0),
-  };
 }

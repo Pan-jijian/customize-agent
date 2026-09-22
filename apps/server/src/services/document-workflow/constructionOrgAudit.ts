@@ -1,4 +1,5 @@
 import type { DocumentDraftChapter, ValidationIssue } from './types';
+import { BLOCK_FACT_DENSITY_PER1000 } from './blockQualityExecutors';
 import { stripTableCellInvisibleChars } from './helpers/markdownCleanup';
 import { DEVICE_SPEC_RE, PROCESS_PARAMETER_RE } from './parameterPatterns';
 import { buildSemanticGate } from './semanticGate';
@@ -84,6 +85,11 @@ async function buildFillerParagraphGate(embedDocuments?: (texts: string[]) => Pr
 const WORK_PACKAGE_SECTION_PATTERNS = [/主要分部分项工程施工方案/u, /主要施工方法/u, /主要施工内容/u, /施工方案/u];
 
 const BASIC_FACT_RE = /(?:建筑面积|面积|总建筑面积)[约]?\s*\d+(?:\.\d+)?\s*(?:㎡|m²)|计划工期\s*\d+|日历天|地上\s*\d+\s*层|框架结构|质量标准[:：]?\s*合格/giu;
+
+/** 拆除类小节的工艺参数密度放宽线（每千字）：拆除作业以工程量与保护措施参数为主，
+ * 不按新建工程档 mm/MPa 级工艺参数要求计密度，故单列一条更低的下限。
+ * 仅拆除小节使用；新建/一般小节统一走 BLOCK_FACT_DENSITY_PER1000（块质检/容量供给核算同源单常量）。 */
+const DEMOLITION_SECTION_DENSITY_PER1000 = 0.3;
 
 function extractSectionBlocks(content: string): Array<{ heading: string; body: string }> {
   const lines = content.split('\n');
@@ -407,7 +413,7 @@ export function processParameterDensityIssues(chapters: DocumentDraftChapter[]):
           message: `${chapter.title} / ${block.heading} 无工艺参数：全文只有概况性数字，缺乏 mm/MPa/间距/偏差/试验压力等工艺级参数`,
           suggestion: '必须写入工艺参数（如桩位偏差≤50mm、搭接宽度≥100mm、闭水试验48h），参数来自绑定资料或行业规范值。',
         });
-      } else if (density < (isDemolitionSection ? 0.3 : 1.5)) {
+      } else if (density < (isDemolitionSection ? DEMOLITION_SECTION_DENSITY_PER1000 : BLOCK_FACT_DENSITY_PER1000)) {
         issues.push({
           level: 'warning',
           severity: 'warning',

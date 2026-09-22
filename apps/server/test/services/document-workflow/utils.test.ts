@@ -21,7 +21,6 @@ import {
   isBidEvaluationRuleText,
   nearSubsectionTitleMatch,
   normalizeSubsectionTitleForDedup,
-  removeExtraneousBlockSections,
   runWithAdaptiveConcurrency,
   safePlanId,
   stableHash,
@@ -283,48 +282,6 @@ describe('findExtraneousBlockTitles（块成稿清单外标题检测）', () => 
     expect(findExtraneousBlockTitles(markdown2, '施工部署', [], [])).toEqual([]);
     // 真串章 H3 仍拦截（宽松比较不放宽串章防线）
     expect(findExtraneousBlockTitles(markdown, '施工部署', ['模板工程施工方法'], [])).toEqual(['主要分部分项工程施工方案']);
-  });
-});
-
-describe('removeExtraneousBlockSections（块成稿清单外标题块删除）', () => {
-  it('串章 H4 块连同正文删除，本块要点与块标题保留', () => {
-    const markdown = [
-      '### 周边环境与管线保护管控',
-      '#### 周边环境、管线与既有建构筑物保护',
-      '正文一',
-      '#### 施工部署与施工流水组织',
-      '串章正文',
-      '| 表头 | 列 |',
-      '| --- | --- |',
-      '| 行 | 1 |',
-    ].join('\n');
-    const result = removeExtraneousBlockSections(markdown, '周边环境与管线保护管控', ['周边环境、管线与既有建构筑物保护']);
-    expect(result).toContain('正文一');
-    expect(result).not.toContain('串章正文');
-    expect(result).not.toContain('表头');
-    expect(result).not.toContain('施工部署与施工流水组织');
-  });
-
-  it('串章 H3 整块删除', () => {
-    const markdown = ['### 文明施工与绿色施工管控', '串章正文', '### 周边环境与管线保护管控', '正文二'].join('\n');
-    const result = removeExtraneousBlockSections(markdown, '周边环境与管线保护管控', []);
-    expect(result).not.toContain('串章正文');
-    expect(result).toContain('正文二');
-  });
-
-  it('评分细目原标题 H4 块（sources 白名单）保留，其余清单外仍删除', () => {
-    const markdown = [
-      '### 项目理解与编制边界',
-      '#### 编制说明与工程概况',
-      '细目正文',
-      '#### 自由发挥小节',
-      '自由发挥正文',
-    ].join('\n');
-    const result = removeExtraneousBlockSections(markdown, '项目理解与编制边界', ['项目理解与编制边界'], ['编制说明与工程概况']);
-    expect(result).toContain('细目正文');
-    expect(result).toContain('编制说明与工程概况');
-    expect(result).not.toContain('自由发挥正文');
-    expect(result).not.toContain('自由发挥小节');
   });
 });
 

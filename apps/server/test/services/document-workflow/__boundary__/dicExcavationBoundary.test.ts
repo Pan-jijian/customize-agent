@@ -308,13 +308,13 @@ describe('O4 基坑深度锁定与危大分级', () => {
   });
   it('O4-24 危大分级：5m有危大无超危大报1条', () => {
     const model = factsOf({ canonical: { byKey: { excavation_depth: { value: '5.5m' } } } as never });
-    const issues = excavationHazardClassificationIssues('本工程属危大工程。', model);
+    const issues = excavationHazardClassificationIssues('本工程基坑开挖深度5.5m，属危大工程。', model);
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('超过一定规模');
   });
   it('O4-25 危大分级：5m两者齐全不报', () => {
     const model = factsOf({ canonical: { byKey: { excavation_depth: { value: '5.5m' } } } as never });
-    expect(excavationHazardClassificationIssues('本工程属危大工程，属于超过一定规模需专家论证。', model)).toHaveLength(0);
+    expect(excavationHazardClassificationIssues('本工程基坑开挖深度5.5m，属危大工程，属于超过一定规模需专家论证。', model)).toHaveLength(0);
   });
 });
 

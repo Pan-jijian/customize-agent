@@ -833,21 +833,50 @@ export async function detSafe(id: string, run: () => ValidationIssue[] | Promise
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     console.error(`[gen] detector degraded: ${id} failed, fallback to warning issue:`, error);
+    // 4.55.22 根修盲区：降级本身是刻意设计（不因单个检测器的基础设施异常炸掉整篇），
+    // 但**必须被计数并暴露**——否则导出照报 passed，而 N 个检测维度其实从未运行，
+    // 缺陷从"被检出"变成"没人查"（检测器静默退役的通道）。
+    degradedDetectorIds.add(id);
     return [{
       level: 'warning',
       severity: 'warning',
       category: 'format',
       owner: 'system',
       repairability: 'manual_review',
+      provenance: { detectorId: id, fingerprint: '' },
       message: `交付前检测器「${id}」执行失败，已降级为待复核：${detail}`,
-      suggestion: '此为检测器基础设施异常，非正文内容缺陷；其余交付前检查已照常完成。可稍后重新生成复核，或人工复核该检测维度。',
+      suggestion: `此为检测器基础设施异常，非正文内容缺陷——该检测维度**本次未执行**（已计入降级检测器清单，见「交付前检测器执行情况」节点）。可稍后重新生成复核，或人工复核该检测维度。`,
     }];
   }
+}
+
+/** 本次生成中因异常降级（=未执行）的检测器 id；交付前执行情况节点与验收脚本据此判断覆盖完整度 */
+const degradedDetectorIds = new Set<string>();
+
+/** 已降级的检测器 id 快照（排序稳定，便于报告与断言） */
+export function degradedDetectors(): string[] {
+  return [...degradedDetectorIds].sort();
+}
+
+/**
+ * 交付前检测器**执行情况**摘要：本次实际执行 / 降级未执行 两组 id。
+ * 消费方：finalize 的「交付前检测器执行情况」节点与交付报告——让"哪些维度没查"成为可见事实，
+ * 而不是靠日志里一行 console.error。
+ */
+export function detectorExecutionSummary(group: 'full-validation' | 'standard-final'): { executed: string[]; degraded: string[]; declaredMissing: string[] } {
+  const groupDetectors = (group === 'full-validation' ? FULL_VALIDATION_DETECTORS : STANDARD_FINAL_DETECTORS).map(entry => entry.id);
+  return {
+    executed: groupDetectors.filter(id => usedDetectorIds.has(id) && !degradedDetectorIds.has(id)),
+    degraded: groupDetectors.filter(id => degradedDetectorIds.has(id)),
+    // 声明了却从未执行：死检测器（原 `assertDetectorUsageCoverage` 的判据，但那里只在测试调用）
+    declaredMissing: groupDetectors.filter(id => !usedDetectorIds.has(id)),
+  };
 }
 
 /** 单测专用：清空执行侧引用登记（断言前重置，避免跨用例污染） */
 export function resetDetectorUsage(): void {
   usedDetectorIds.clear();
+  degradedDetectorIds.clear();
 }
 
 const ALL_DETECTORS: readonly DetectorEntry[] = [

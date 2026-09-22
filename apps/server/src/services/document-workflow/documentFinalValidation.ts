@@ -249,7 +249,7 @@ export async function buildStandardFinalValidationIssues(input: {
     // R12 危大排除声明 vs 危大清单表格矛盾（舒城第二轮实测：声明无24m脚手架/无10kN吊装，
     // 危大清单表格却列为危大工程——评标专家可直接质疑辨识可靠性，llm 修复轮二选一归并口径）
     ...det('hazard-exclusion-contradiction', () => hazardExclusionContradictionIssues(input.markdown)),
-    ...await det('six-hundred-percent-coverage', () => sixHundredPercentCoverageIssues(input.markdown)),
+    ...await det('six-hundred-percent-coverage', () => sixHundredPercentCoverageIssues(input.markdown, { chapterTitles: (input.effectiveChapters || input.template.chapters || []).map(chapter => chapter.title) })),
     ...await det('self-undermining-candidate', () => selfUnderminingCandidateIssues(input.markdown)),
     ...det('paragraph-opening-repeat', () => paragraphOpeningRepeatIssues(input.markdown)),
     // WS3 分部分项章相邻块工序表达形式重复（写作侧 index%4 轮换指定与首轮块质检的生后验收兜底）
@@ -285,7 +285,7 @@ export async function buildStandardFinalValidationIssues(input: {
     ...det('table-spam', () => tableSpamIssues(input.markdown)),
     // 十度实测缺陷：编制依据法规/规范四段式（国家法规、地方性法规、验收规范、招标文件法规）LLM 偶发漏写，
     // 交付前确定性兑底（法规/条例/规范由写作模型自行列写，本检测只兑底具体条目存在），漏写即 error 进修复轮
-    ...det('basis-regulations-coverage', () => basisRegulationsCoverageIssues(input.markdown, input.blueprintData)),
+    ...det('basis-regulations-coverage', () => basisRegulationsCoverageIssues(input.markdown, input.blueprintData, { chapterTitles: (input.effectiveChapters || input.template.chapters || []).map(chapter => chapter.title) })),
     // C5 一致性类（P6）：编制依据↔正文双向对账（声明未用/用了未声明逐条带证据）——
     // coverage 查条目存在性（五类各自 ≥1），本检测查双向引用一致性（缺口独立成 blocker/warning，
     // 修复轮 basis-regulations-cross-repair 同源消费；区段/匹配原语与修复端单源）

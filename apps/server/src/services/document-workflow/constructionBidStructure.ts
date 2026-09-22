@@ -2,6 +2,7 @@ import type { DocumentTemplate, DocumentTemplateChapter } from './types';
 import { displayChapterTitle, isFragmentLikeSectionTitle, isInstructionLikeOutlineTitle } from './outline';
 import { isHardBannedSectionTitle } from './evidenceContentSafety';
 import { inferConstructionOrgProjectTypes, type ConstructionOrgProjectType } from './constructionOrgProjectTypes';
+import { SEMANTIC_COVERAGE_THRESHOLD } from './semanticSimilarity';
 import { classifyTenderContent } from './technicalBidAdmission';
 
 /**
@@ -266,7 +267,7 @@ export function auditEvaluationCriteriaCoverage(
     if (options?.semanticSimilarity) {
       for (const text of chapterTexts) bestSimilarity = Math.max(bestSimilarity, options.semanticSimilarity(title, text));
     }
-    if (bestSimilarity >= 0.6) continue;
+    if (bestSimilarity >= SEMANTIC_COVERAGE_THRESHOLD) continue;
     uncovered.push({ item, title, bestSimilarity: options?.semanticSimilarity ? bestSimilarity : undefined });
   }
   return { items, uncovered };

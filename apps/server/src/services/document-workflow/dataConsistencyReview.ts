@@ -92,10 +92,21 @@ export function numericSentencesForReview(markdown: string): string[] {
     .map(entry => entry.sentence);
 }
 
-/** 全文数据一致性批量审查：数值句清单 → LLM 输出矛盾清单 JSON（置信度 <0.7 丢弃，最多 6 条） */
-export async function reviewDataConsistency(markdown: string, options: { signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics } = {}): Promise<DataConsistencyConflict[]> {
+/**
+ * 全文数据一致性批量审查：数值句清单 → LLM 输出矛盾清单 JSON（置信度 <0.7 丢弃）。
+ *
+ * 4.55.22 两处根修：
+ * ① **去掉 `.slice(0, 6)`** —— schema 注释明写「防爆量属展示层职责，不得以截断检测结果实现」，
+ *    而函数末尾正是用截断实现的：第 7 条起的矛盾永不成为修复目标。展示层限幅不属检测职责。
+ * ② **调用失败不得冒充「全文一致」** —— 原 `if (!raw?.conflicts?.length) return []` 把
+ *    「LLM/传输失败」与「确实无矛盾」压成同一个空数组。现经 `outFailure` 区分并显式回报
+ *    `failure`，由调用侧转成可见问题条目（不抛错：调用点在 Promise.all 中，抛出会连带
+ *    整轮统一审查失败——失败要可见，但不能以炸整篇为代价）。
+ */
+export async function reviewDataConsistency(markdown: string, options: { signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics } = {}): Promise<{ conflicts: DataConsistencyConflict[]; failure?: string }> {
   const numericLines = numericSentencesForReview(markdown);
-  if (numericLines.length < 2) return [];
+  if (numericLines.length < 2) return { conflicts: [] };
+  const failure: { value?: string } = {};
   const raw = await callDocumentLlmJson<{ conflicts?: DataConsistencyConflict[] }>(
     [
       docSystemPrefix('你是施工组织设计数据一致性审查器。'),
@@ -115,13 +126,15 @@ export async function reviewDataConsistency(markdown: string, options: { signal?
       diagnostics: options.diagnostics,
       schema: CONFLICTS_JSON_SCHEMA,
       taskKind: 'structuredGeneration',
+      outFailure: failure,
     },
   );
-  if (!raw?.conflicts?.length) return [];
-  return raw.conflicts
-    .filter(conflict => typeof conflict.itemA === 'string' && typeof conflict.itemB === 'string' && conflict.itemA.trim() && conflict.itemB.trim())
-    .filter(conflict => (conflict.confidence ?? 0) >= 0.7)
-    .slice(0, 6);
+  if (!raw) return { conflicts: [], failure: failure.value || 'LLM 未返回有效结果' };
+  return {
+    conflicts: (raw.conflicts || [])
+      .filter(conflict => typeof conflict.itemA === 'string' && typeof conflict.itemB === 'string' && conflict.itemA.trim() && conflict.itemB.trim())
+      .filter(conflict => (conflict.confidence ?? 0) >= 0.7),
+  };
 }
 
 /** 矛盾条目转交付阻断 ValidationIssue（消息携带矛盾数值对原文，供修复指令精确定位） */

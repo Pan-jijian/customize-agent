@@ -114,7 +114,7 @@ describe('runGlobalConsistencyReviewLoop（v3 统一审查 + 清单冻结）', (
 
   it('统一审查合并：全局一致性冲突与数据一致性矛盾并入同一问题清单（初检各一次）', async () => {
     reviewGlobalMock.mockResolvedValue({ issues: ['跨章一致性冲突：总工期口径不一致'], stage: REVIEW_STAGE });
-    dataReviewMock.mockResolvedValue([{ kind: 'labor', itemA: '高峰期80人', itemB: '高峰期120人', description: '劳动力峰值两处不一致', confidence: 0.9 }]);
+    dataReviewMock.mockResolvedValue({ conflicts: [{ kind: 'labor', itemA: '高峰期80人', itemB: '高峰期120人', description: '劳动力峰值两处不一致', confidence: 0.9 }] });
     const input = makeInput();
     const result = await runGlobalConsistencyReviewLoop(input);
     expect(result.issues.some(issue => issue.includes('跨章一致性冲突：总工期口径不一致'))).toBe(true);
@@ -127,7 +127,7 @@ describe('runGlobalConsistencyReviewLoop（v3 统一审查 + 清单冻结）', (
 
   it('清单冻结：修复落地后仅末轮统一复检一次，修复轮不重审全文、每章只修一次', async () => {
     reviewGlobalMock.mockResolvedValue({ issues: ['工程概况：总工期与计划口径不符'], stage: REVIEW_STAGE });
-    dataReviewMock.mockResolvedValue([]);
+    dataReviewMock.mockResolvedValue({ conflicts: [] });
     repairMock.mockResolvedValue({ content: '修复后的工程概况正文，已按计划口径统一。', appliedCount: 1, producedCount: 1, repairType: 'quality' as never });
     const result = await runGlobalConsistencyReviewLoop(makeInput());
     // 初检 + 末轮统一复检 = 2 次；修复轮内不再重审全文
@@ -141,7 +141,7 @@ describe('runGlobalConsistencyReviewLoop（v3 统一审查 + 清单冻结）', (
 
   it('确定性去重：重复段落删除后重算检测快照（dedupRan=true，重复条目清零）', async () => {
     reviewGlobalMock.mockResolvedValue({ issues: [], stage: REVIEW_STAGE });
-    dataReviewMock.mockResolvedValue([]);
+    dataReviewMock.mockResolvedValue({ conflicts: [] });
     const repeated = '本工程按照统筹规划与科学管理的总体原则组织各项施工任务，确保工程质量安全与进度目标全面受控实现。';
     const chapter = makeChapter('ch-2', '施工部署', `${repeated}\n\n${repeated}\n\n施工部署按照总进度计划组织流水施工。`);
     const input = makeInput({ chapterDraftsFinal: [makeChapter('ch-1', '工程概况', '本工程为办公楼项目，位于市中心区域。'), chapter] });
@@ -155,7 +155,7 @@ describe('runGlobalConsistencyReviewLoop（v3 统一审查 + 清单冻结）', (
 
   it('零冲突直接通过：审查零检出 → 零修复、清单为空、去重照常收口', async () => {
     reviewGlobalMock.mockResolvedValue({ issues: [], stage: REVIEW_STAGE });
-    dataReviewMock.mockResolvedValue([]);
+    dataReviewMock.mockResolvedValue({ conflicts: [] });
     const result = await runGlobalConsistencyReviewLoop(makeInput());
     expect(result.issues).toEqual([]);
     expect(result.dedupRan).toBe(true);

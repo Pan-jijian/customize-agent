@@ -7,7 +7,7 @@
  * 判定为 L2 确定性纯函数：无 LLM 无 IO。
  */
 import { describe, expect, it } from 'vitest';
-import { classifyPoolNoiseText, isPoolNoiseText, POOL_NOISE_RULE_SOURCES } from '@/services/document-workflow/poolNoise';
+import { classifyPoolNoiseText, POOL_NOISE_RULE_SOURCES } from '@/services/document-workflow/poolNoise';
 
 describe('classifyPoolNoiseText（D6 池噪声形态判定与防误伤）', () => {
   it('图签：无约束词的印章/证书编号行判 drawing_signature；含约束词的真实条款不误伤（守卫统一）', () => {
@@ -84,9 +84,7 @@ describe('classifyPoolNoiseText（D6 池噪声形态判定与防误伤）', () =
     expect(classifyPoolNoiseText('确保一次性成活率95%')).toBeUndefined();
   });
 
-  it('isPoolNoiseText 布尔包装与规则源清单（缓存指纹源非空）', () => {
-    expect(isPoolNoiseText('R6C4项目特征描述')).toBe(true);
-    expect(isPoolNoiseText('确保一次性成活率95%')).toBe(false);
+  it('规则源清单（缓存指纹源非空）', () => {
     expect(POOL_NOISE_RULE_SOURCES.length).toBeGreaterThan(10);
     expect(POOL_NOISE_RULE_SOURCES.every(source => String(source).length > 0)).toBe(true);
   });

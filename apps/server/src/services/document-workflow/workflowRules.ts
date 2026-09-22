@@ -94,7 +94,7 @@ export const DEFAULT_WORKFLOW_RULES: WorkflowRulesConfig = {
     },
     // M4·写作三源规则：旧全局提示词“计划类字段必须自行推导具体数值”与系统“计划值由蓝图统一推导、写作层只引用锚点”
     // 的体系直接矛盾，是写作层自算（跨工程串位/口径分裂）的话术根源；改为 F/D/P 三源模板，
-    // 由全局写作提示词（FORMAL_WRITING_RULES）与章切片权威提示（renderBlueprintChapterSlice）共用同一份单点文案
+    // 由全局写作提示词（FORMAL_WRITING_RULES）与块级切片权威提示（renderBlueprintBlockSlice）共用同一份单点文案
     threeSourceRules: [
       '【写作三源规则】正文中的每一个数字与事实只有三种合法来源，三源之外一律不得写入：',
       'F·项目事实源：来自绑定材料、工程量清单、图纸与权威锚点的项目专属事实（工程量、规格、数量、工期、金额、地点、单位名称），一律原样引用，数值、单位、口径与源完全一致，不得改写、拆分或近似。',

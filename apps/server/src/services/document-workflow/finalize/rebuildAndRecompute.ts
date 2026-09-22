@@ -27,6 +27,7 @@ import { internalTerminologyAnchorIssues } from '../internalTerminologyAnchors';
 import { auditAuthorityCoverage, authorityAuditDetails, authorityAuditIssues, authorityAuditSummary, type AuthorityAuditReport } from '../authorityAudit';
 import { buildNumericAuthority } from './repairRounds/numericVerification';
 import { buildStandardFinalValidationIssues } from '../documentFinalValidation';
+import { detectorExecutionSummary } from '../detectorFixerRegistry';
 import { buildKnowledgeCoverageReport, knowledgeCoverageIssues } from '../documentKnowledgeCoverage';
 import { buildBoqRowTraces, buildDocumentFactTraces, factTraceIssues } from '../documentFactTrace';
 import { buildChapterCoverageReports, chapterCoverageIssues } from '../documentChapterCoverage';
@@ -365,6 +366,30 @@ export async function stageValidationPack(session: FinalizeSession): Promise<voi
     return issues.length > 0 ? [{ level: 'warning' as const, message: `${chapter.title} 小节事实或量化参数落位可继续优化：${issues.slice(0, 5).join('；')}`, suggestion: '建议在 Agent Writer 阶段扩大定向证据，不得在导出阶段补写。' }] : [];
   }));
   session.validationIssues = collectValidationIssueGroups(session.validationIssues, factUsageWarnings.flat());
+
+  // 4.55.22 根修盲区：**交付前检测器执行情况**显性上屏。
+  // 原状：`detSafe` 把检测器异常降级为一条非阻断 warning（设计使然，不炸整篇），
+  // 但没有任何聚合视图——导出照报 passed，而 N 个检测维度其实从未执行，
+  // 缺陷从「被检出」变成「没人查」。此节点把 已执行/降级未执行/声明未执行 三组公开，
+  // 并写明降级=该维度本次未查（不阻断导出，但不再是隐形的）。
+  {
+    const summary = detectorExecutionSummary('standard-final');
+    const degradedText = summary.degraded.length > 0 ? summary.degraded.join('、') : '无';
+    upsertProgressStage(session.executionStages, displayStage({
+      type: 'validation',
+      roleId: 'detector-execution-summary',
+      status: summary.degraded.length > 0 ? 'failed' : 'success',
+      message: summary.degraded.length > 0
+        ? `交付前检测器执行情况：已执行 ${summary.executed.length} 个、**降级未执行 ${summary.degraded.length} 个**（该 ${summary.degraded.length} 个检测维度本次未查，导出不受阻断但需复核）`
+        : `交付前检测器执行情况：${summary.executed.length} 个全部执行完成`,
+      details: [
+        `降级未执行（基础设施异常）：${degradedText}`,
+        ...(summary.declaredMissing.length > 0 ? [`声明但未执行（疑为死检测器，请核查接线）：${summary.declaredMissing.join('、')}`] : []),
+        '说明：降级为检测器基础设施异常而非正文内容缺陷，不阻断导出；重跑可恢复该维度检查。',
+      ],
+    }, { subtitle: '交付前检测器执行情况' }));
+    session.emitProgress?.();
+  }
 
   session.assets = [];
   // chapterGenerationStages 是各章成稿的最终版 stage（success/failed），progressStages 里还残留同 identity 的

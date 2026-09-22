@@ -20,7 +20,12 @@ import { assessDifficultyEntries, buildFillerSentencePool, judgeFillerSentences,
 
 // ═══════════════════ ② 密度：事实落位比例口径（≥1.5/千字） ═══════════════════
 
-/** 密度执行线（每千字不同量化参数个数）：提示词指令线 2/千字，验收线 1.5/千字留 25% 裕度 */
+/** 密度执行线（每千字不同量化参数个数）：提示词指令线 2/千字，验收线 1.5/千字留 25% 裕度。
+ * **唯一权威来源**：本常量同时是块质检（factDensityVerdict/assessBlockFactDensity）、蓝图章级
+ * 供给核算（integratedBlueprint/capacity.assessChapterSupplyDemand）与施工组织审计工艺参数密度
+ * （constructionOrgAudit.processParameterDensityIssues，新建工程档）的验收线——三处必须一起动。
+ * 历史上三处各自声明一份（容量侧名 CHAPTER_PARAMETER_DENSITY_PER_1000，审计侧为 inline 字面量），
+ * 数值巧合相等，改一处即静默分裂判定，现统一为本常量（capacity/constructionOrgAudit 直接 import）。 */
 export const BLOCK_FACT_DENSITY_PER1000 = 1.5;
 
 /** 量化参数提取（数字+计量单位/计数单位封闭词表，与 criticalSectionFactDensityIssues 同口径风格） */

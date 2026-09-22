@@ -4,7 +4,7 @@
  * 问题」的收敛路径；此处以 key 序列快照锁死两条链的过滤结果。
  */
 import { describe, expect, it } from 'vitest';
-import { SURFACE_FIX_STEPS, stage5FixSteps, round2FixSteps } from '../../../src/services/document-workflow/deterministicFixChains';
+import { SURFACE_FIX_STEPS } from '../../../src/services/document-workflow/deterministicFixChains';
 
 describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
   it('注册键唯一且无空修复函数', () => {
@@ -18,7 +18,7 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
   });
 
   it('stage5 逐章链顺序与原硬编码清单一致', () => {
-    expect(stage5FixSteps().map(step => step.key)).toEqual([
+    expect(SURFACE_FIX_STEPS.filter(step => step.stage5).map(step => step.key)).toEqual([
       'table-line-residue',
       'templated-labels',
       // V2 批1 结构完整性确定性清理（与检测器 structure-integrity 同源单扫描）
@@ -73,7 +73,7 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
   });
 
   it('round-2 全文链顺序与原硬编码清单一致', () => {
-    expect(round2FixSteps().map(step => step.key)).toEqual([
+    expect(SURFACE_FIX_STEPS.filter(step => step.round2).map(step => step.key)).toEqual([
       'table-line-residue',
       'templated-labels',
       // V2 批1 结构完整性确定性清理（与检测器 structure-integrity 同源单扫描）

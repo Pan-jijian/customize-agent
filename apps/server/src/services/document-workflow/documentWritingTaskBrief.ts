@@ -119,7 +119,11 @@ export function buildWriteTimeFixedBlocks(input: {
   // **不注入整份 globalWritingFocus**：基础条目里的 WRITING_INTEGRITY_CONSTRAINTS 已在
   // roleContext 单独注入，整份会重复并推高每个块的 token。
   const valueRules = (input.globalWritingFocus || [])
-    .filter(line => /^B[78]\s|^项目规模事实卡|^项目可信基础事实/u.test(line));
+    // 4.55.22：**规范术语显性落位**与**B5 属地创优目标**两条此前被本过滤丢掉，且全仓无其它
+    // 写作侧来源（grep `规范术语`/`实名制管理`/`属地` 在提示词产出模块中零命中）——义务只存在于
+    // 检测端与链尾插入器，即「写手从未被告知、检测器照抓、链尾用固定句补」的老路。
+    // 现纳入写作前定死块（写入侧单源）。
+    .filter(line => /^B[78]\s|^项目规模事实卡|^项目可信基础事实|^【规范术语显性落位】|^B5 属地创优目标/u.test(line));
   return [input.truthConstraint, input.clarificationConstraint, ...valueRules, input.hazardBindingBlock]
     .filter((block): block is string => Boolean(block && block.trim()));
 }

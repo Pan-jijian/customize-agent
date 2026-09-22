@@ -1338,15 +1338,19 @@ export async function runGlobalConsistencyReviewLoop(input: {
     // 矛盾清单直接并入统一问题清单冻结（初稿即修复基准，阶段 3 只消费清单不再重审全文）。
     const runUnifiedLlmReview = async (): Promise<{ issues: string[]; stage: Awaited<ReturnType<typeof runGlobalReview>>['stage'] }> => {
       const fullReviewMarkdown = chapterDraftsFinal.map(chapter => chapter.content).join('\n\n');
-      const [globalResult, dataConflicts] = await Promise.all([
+      const [globalResult, dataReview] = await Promise.all([
         runGlobalReview(),
         reviewDataConsistency(fullReviewMarkdown, { diagnostics: generationDiagnostics, signal }),
       ]);
+      const dataConflicts = dataReview.conflicts;
       return {
         issues: [...new Set([...globalResult.issues, ...dataConflicts.map(conflict => {
           const issue = dataConsistencyConflictIssue(conflict);
           return `${issue.message}；${issue.suggestion || ''}`;
-        })])],
+        }), ...(dataReview.failure
+          // 审查未执行 ≠ 全文一致：显式进入问题清单（改前静默为空数组，缺陷从"没人查"变成"查过没问题"）
+          ? [`数据一致性审查本次未执行（${dataReview.failure}）：全文数值矛盾未经 LLM 复核，请复核清单后重跑或人工核查`]
+          : [])])],
         stage: globalResult.stage,
       };
     };

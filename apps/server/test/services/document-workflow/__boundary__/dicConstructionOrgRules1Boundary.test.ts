@@ -1,6 +1,6 @@
 /**
  * t2-cq YY 组：constructionOrgQualityRules 全函数族边界枚举。
- * 覆盖：constructionOrgChapterRulePrompt / constructionOrgBlueprintRuleLines（Y1）、
+ * 覆盖：constructionOrgChapterRulePrompt（Y1）、
  * constructionOrgProjectTypePrompt（Y2）、constructionOrgGenericLanguageIssues（Y3，语义 gate mock）、
  * constructionOrgControlLoopIssues（Y4）、constructionOrgProfessionalChainIssues（Y5）、
  * constructionOrgBonusModulePrompt / constructionOrgBonusModuleIssues（Y6）、
@@ -12,7 +12,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   CONSTRUCTION_ORG_GENERIC_PHRASES,
-  constructionOrgBlueprintRuleLines,
   constructionOrgBonusModuleIssues,
   constructionOrgBonusModulePrompt,
   constructionOrgChapterRulePrompt,
@@ -97,18 +96,6 @@ describe('Y1 constructionOrgChapterRulePrompt / BlueprintRuleLines', () => {
 
   it('隐蔽语境 → 加分模块：影像资料', () => {
     expect(constructionOrgChapterRulePrompt(tplChapter('施工方案', ['隐蔽工程验收']))).toContain('影像资料');
-  });
-
-  it('blueprintRuleLines：空提示词 → 空数组', () => {
-    expect(constructionOrgBlueprintRuleLines(tplChapter('工程概况'))).toEqual([]);
-  });
-
-  it('blueprintRuleLines：每行加「   - 」前缀且行数一致', () => {
-    const prompt = constructionOrgChapterRulePrompt(tplChapter('安全管理'));
-    const lines = constructionOrgBlueprintRuleLines(tplChapter('安全管理'));
-    expect(lines).toHaveLength(prompt.split('\n').length);
-    expect(lines[0]).toBe(`   - ${prompt.split('\n')[0]}`);
-    expect(lines.every(line => line.startsWith('   - '))).toBe(true);
   });
 });
 

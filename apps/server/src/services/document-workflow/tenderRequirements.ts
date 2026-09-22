@@ -15,7 +15,10 @@ import type {
 import { callDocumentLlmJson, type DocumentJsonSchema } from './llmClient';
 import { generatedRoot } from '../document-core/generatedDocumentService';
 import { cleanPdfHeadingNoise } from './factsModel';
+import { SEMANTIC_COVERAGE_THRESHOLD } from './semanticSimilarity';
 import type { SemanticSimilarityFn } from './semanticSimilarity';
+// 扬尘六个百分百词表/拆迁豁免判定单源（检测器侧定义）：本文件的词面兜底与检测器必须同一口径
+import { sixHundredPercentLexicalHitCount } from './integrity/detectors/detectors';
 import { isBidDisciplineSentence, isBidEvaluationRuleText, stableHash, systemConstraintLine } from './utils';
 import { isBidderQualificationText, isContractProcedureClause } from './evidenceContentSafety';
 import { classifyTenderContent, isCreditScoringContent } from './technicalBidAdmission';
@@ -1163,7 +1166,11 @@ export interface TenderRequirementAssignment {
   lowConfidence: boolean;
 }
 
-/** 路由相似度下限：低于该值标记低置信（仍分配主责章；argmax 兜底保证未分配=0） */
+/** 路由相似度下限：低于该值标记低置信（仍分配主责章；argmax 兜底保证未分配=0）。
+ * **与 `STRUCTURE_ROUTE_SCORE_MIN`（0.35）语义不同，数值不得统一**：本线 0.45 是「标记」
+ * （flag）——低置信要求照常挂主责章、照常注入写作、照常参与验收，仅多一个 lowConfidence 标记供审计；
+ * 结构线 0.35 是「丢弃」（drop）——低于线即不挂章、不注入写作、不参与验收（宁缺不误挂）。
+ * 后果一个是标记一个是丢弃，故两条线各自取值（源文件里数值相近纯属巧合，不是同一概念的副本）。 */
 const ROUTE_SCORE_MIN = 0.45;
 
 /**
@@ -1359,7 +1366,10 @@ export interface TenderStructureAssignment {
   lowConfidence: boolean;
 }
 
-/** 结构路由相似度下限：低于该值的要素不挂章（语义不贴近任何章节，宁缺不误挂） */
+/** 结构路由相似度下限：低于该值的要素不挂章（语义不贴近任何章节，宁缺不误挂）。
+ * **与 `ROUTE_SCORE_MIN`（0.45）语义不同，数值不得统一**：本线是「丢弃」（drop，存疑不挂章——
+ * 不注入写作、不参与验收），要求线是「标记」（flag，低置信仍挂主责章并照常注入/验收）。
+ * 判定后果不同故取值不同；详见同文件 `ROUTE_SCORE_MIN` 处的对照说明。 */
 export const STRUCTURE_ROUTE_SCORE_MIN = 0.35;
 
 /**
@@ -1749,16 +1759,11 @@ export async function requirementAcceptanceIssues(input: {
   // C8 S4-⑤ 变体 haystack 一次归一（全文 20 万字级，逐锚点归一开销不可接受；与修复轮复检同源）
   const variant = normalizeAnchorCompareText(normalized);
   // 六项词面兜底：「扬尘治理六个百分百」体系基准条款语义稀释误报——正文已逐项落位六项措施词面
-  // （100%围挡/覆盖/冲洗/硬化/密闭运输）时判响应，与 sixHundredPercentCoverageIssues 词面兜底同源。
-  const DUST_SIX_LEXICAL: Array<RegExp> = [
-    /100%围挡|周边100%围挡/u,
-    /物料堆放100%覆盖|物料堆放.{0,8}覆盖|密目网.*覆盖|覆盖.{0,4}密目网/u,
-    /出入车辆100%冲洗|车辆.{0,10}冲洗|冲洗.{0,10}车辆|冲洗点/u,
-    /施工现场地面100%硬化|地面100%硬化/u,
-    /拆迁工地100%湿法作业|拆迁.{0,10}湿法作业|湿法作业.{0,10}拆迁|无拆迁|不涉及拆迁/u,
-    /渣土车辆100%密闭运输|密闭运输|密闭式/u,
-  ];
-  const dustSixLexicalHitCount = () => DUST_SIX_LEXICAL.filter(re => re.test(markdown)).length;
+  // （100%围挡/覆盖/冲洗/硬化/密闭运输）时判响应。词表与拆迁项豁免判定**同源引用检测器**
+  // （SIX_HUNDRED_PERCENT_LEXICAL_ITEMS + sixHundredPercentLexicalHitCount），不再自持一份副本：
+  // 原副本的拆迁项额外收了裸「无拆迁|不涉及拆迁」，裸短语在任意语境（如「临时设施布置不涉及拆迁补偿」）
+  // 即把该项记为已落实、硬凑够 ≥4 项放行本条款；现只认工程主语＋短距否定的豁免句（检测侧口径）。
+  const dustSixLexicalHitCount = () => sixHundredPercentLexicalHitCount(markdown);
   const chapterLines = markdown.split(/\n/u).filter(line => /^#{2,4}\s/u.test(line.trim())).map(line => normalizeChapterTitleLine(line)).filter(Boolean);
   const targets = input.bodyTexts && input.bodyTexts.length > 0 ? [...chapterLines, ...input.bodyTexts] : (chapterLines.length > 0 ? chapterLines : [markdown.slice(0, 2000)]);
   const partialResponseCandidates: Array<{ item: TenderRequirementEntry; kind: string; bestSimilarity: number; hit: string[]; missing: string[] }> = [];
@@ -1774,7 +1779,7 @@ export async function requirementAcceptanceIssues(input: {
       const score = input.semanticSimilarity(query, target);
       if (score > bestSimilarity) bestSimilarity = score;
     }
-    if (bestSimilarity >= 0.6) {
+    if (bestSimilarity >= SEMANTIC_COVERAGE_THRESHOLD) {
       // 语义命中仅证明主题已响应：条款内锚点仍须逐条落位（dangling 修复——语义放行但锚点缺失此前静默，
       // 报告锚点率与修复链消费面分裂：s28l 138 条 unsatisfied 中多数即此类）；或/及条款由 LLM 判定兜底放行
       if (clauseSatisfied(entry, normalized, variant)) continue;

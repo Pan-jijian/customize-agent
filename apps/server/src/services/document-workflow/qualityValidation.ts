@@ -248,7 +248,10 @@ export function evaluationCriteriaCoverageIssues(
   const chapterLines = options.semanticSimilarity
     ? markdown.split(/\n/u).filter(line => /^#{2,4}\s/u.test(line.trim())).map(line => line.trim().replace(/^#{2,4}\s+/u, '').replace(/^\d+(?:\.\d+)*[\s、.]+/u, '').trim()).filter(Boolean).slice(0, 80)
     : [];
-  for (const item of items.slice(0, 8)) {
+  // 4.55.22 根修盲区：原 `items.slice(0, 8)` **静默截断检测输入**——评分表 15 条时，
+  // 第 9 条起永远不被检查（且全条只出 warning，导出与人工复核清单都不收），
+  // 「第 9~15 项完全未响应」在整条链上零检出。限幅属展示层职责，检测不得截断。
+  for (const item of items) {
     const keywords = evaluationCriteriaCoreKeywords(item);
     if (keywords.length === 0) continue;
     if (keywords.some(keyword => normalized.includes(keyword))) continue;
@@ -512,7 +515,20 @@ function collectBodySectionEntries(markdown: string) {
 export function tocBodyConsistencyIssues(markdown: string): ValidationIssue[] {
   const tocEntries = collectTocSectionEntries(markdown);
   const bodyEntries = collectBodySectionEntries(markdown);
-  if (tocEntries.length === 0 || bodyEntries.length === 0) return [];
+  // 4.55.22 根修盲区：原判据「目录条目空 **或** 正文条目空 → 整体 return []」，
+  // 于是**只列章名、不列小节**的目录（「## 目录 / 第一章 工程概况 / 第二章 …」）逃过下面
+  // 全部守恒与编号对应校验（collectTocSectionEntries 只认 `X.Y` 行 → 0 条 → 早退）。
+  // 正文有节而目录无节 = 目录粒度不符，必须报；正文本身无节才真正无可校验。
+  if (bodyEntries.length === 0) return [];
+  if (tocEntries.length === 0) {
+    // 无「## 目录」区段时不在此报（由 formal-content-integrity 的「缺少目录页」负责，避免重复报同一事实）
+    if (!/^#{1,6}\s*目录\s*$/mu.test(markdown)) return [];
+    return [{
+      level: 'error',
+      message: `目录未列出正文小节：正文有 ${bodyEntries.length} 个二级小节，而目录未列任何小节条目（只列到章名）`,
+      suggestion: '目录必须按正文二级小节逐条列出「编号 + 标题」，不得只列章名；目录小节数量与编号须与正文全集一致。',
+    }];
+  }
   const tocTitles = tocEntries.map(entry => entry.title);
   const bodyTitles = bodyEntries.map(entry => entry.title);
   const bodySet = new Set(bodyTitles);
@@ -950,9 +966,44 @@ export function extractBasisRegulationSection(markdown: string): string {
  * 国家法律、条例、验收规范三类条目各自 ≥1，建设地点含省/市时须有含该地名的书名号条目；
  * 招标文件提取法规（项目专属事实）须至少出现一条。
  * 无「编制依据/编制说明」小节标题时静默跳过（模板结构差异，不误伤）。 */
-export function basisRegulationsCoverageIssues(markdown: string, blueprintData?: BlueprintData): ValidationIssue[] {
+export function basisRegulationsCoverageIssues(markdown: string, blueprintData?: BlueprintData, options: { chapterTitles?: string[] } = {}): ValidationIssue[] {
   const sectionText = extractBasisRegulationSection(markdown);
-  if (!sectionText) return [];
+  // 4.55.22 根修盲区：原判据「无编制依据区段 → return []」——**整章缺失**这一最严重的形态
+  // 反而无任何检出（五类条目规则全部跳过）。义务来自文档类型：技术标/施组必须有编制依据章节。
+  // 判定：文档存在「编制依据/编制说明」**标题**却抽不到区段正文 → 报空章；完全无该标题 →
+  // 报缺失（与写作侧 chapterFocusRule 的「编制依据与适用范围逐项列全」义务同源）。
+  if (!sectionText) {
+    const hasHeading = /^#{1,6}\s*[^\n]{0,12}(?:编制依据|编制说明|编制原则)/mu.test(markdown);
+    // 义务来源 = **规划结构**：大纲规划了编制依据类章节才要求（未规划的模板不误伤——
+    // 既有用例「无编制依据小节 → 静默跳过（模板结构差异不误伤）」的合理性保留，
+    // 只是不再把"规划了却整章丢失"也一并放过）
+    const planned = (options.chapterTitles || []).some(title => /编制依据|编制说明|编制原则/u.test(title));
+    const mentioned = /编制依据|编制说明/u.test(markdown);
+    if (!hasHeading && !mentioned) return planned ? [{
+        level: 'error',
+        severity: 'blocker',
+        category: 'structure',
+        owner: 'llm',
+        repairability: 'llm_repairable',
+        provenance: { detectorId: 'basis-regulations-coverage', fingerprint: stableHash(markdown) },
+        message: '缺少编制依据章节：正文未见「编制依据/编制说明」章节，五类依据（招标文件及补疑、国家法律法规、现行规范标准、地方法规规章、企业管理体系）无从逐项列全',
+      suggestion: '补充「编制依据」章节并按五类逐项列全：招标文件及补疑补遗、国家法律法规、国家/行业现行规范标准、地方法规规章、企业管理体系；地方法规须结合工程所在地属地。',
+    }] : [];
+    if (hasHeading) {
+      return [{
+        level: 'error',
+        severity: 'blocker',
+        category: 'structure',
+        owner: 'llm',
+        repairability: 'llm_repairable',
+        provenance: { detectorId: 'basis-regulations-coverage', fingerprint: stableHash(markdown) },
+      message: '编制依据章节为空：存在标题但未列出任何依据条目',
+      suggestion: '在编制依据章节下逐项列出五类依据的具体条目（法规/条例/规范须含名称与编号）。',
+    }];
+    }
+    // 词锚只出现在目录等非章节处（模板差异）→ 静默，不误报
+    return [];
+  }
   const issues: ValidationIssue[] = [];
   const bookNames = (sectionText.match(/《[^《》]{2,40}(?:法|条例|办法|规程|规范|标准)》/gu) || []).map(entry => entry.replace(/《|》/gu, ''));
   const bookNameOf = (entry: string) => (entry.match(/《([^》]+)》/u) || [])[1] || '';
@@ -2550,7 +2601,7 @@ export async function preciseFactUsageIssues(markdown: string, factsModel: Docum
         .slice(0, 300);
       if (sentences.length > 0) {
         const similarity = await buildSemanticSimilarity(missingCritical.slice(0, 10), sentences);
-        missingCritical = missingCritical.filter(token => !sentences.some(sentence => similarity(token, sentence) >= 0.6));
+        missingCritical = missingCritical.filter(token => !sentences.some(sentence => similarity(token, sentence) >= SEMANTIC_COVERAGE_THRESHOLD));
         criticalUsed = criticalTokens.length - missingCritical.length;
       }
     }
@@ -3211,8 +3262,31 @@ export function hazardParameterBindingIssues(markdown: string, truthValues: Arra
     .map(item => ({ attribute: item.attribute, token: String(item.value || '').replace(/\s+/gu, '') }))
     .filter(item => /\d/u.test(item.token) && item.token.length >= 3);
   // 只绑定**工程测量类**参数（深度/高度/跨度/重量/支护/层高）：无此类参数时不判（不误伤无参数项目）
-  const relatedAttributes = measureValues.filter(item => /深度|高度|跨度|重量|支护|层高/u.test(item.attribute));
-  if (relatedAttributes.length === 0) return issues;
+  // 4.55.22：token 长度门槛放宽——原 `length >= 3` 会把「3m」这类**短但合法**的工程实参
+  //（本项目唯一测量属性恰为短值时）整体丢掉，该项目的绑定门禁因此永不生效。
+  // 现改为「含数字且（长度≥3 或 数字+单位形态）」。
+  const relatedAttributes = measureValues
+    .filter(item => /深度|高度|跨度|重量|支护|层高/u.test(item.attribute))
+    .filter(item => item.token.length >= 3 || /\d\s*(?:m|米|mm|cm|t|吨|kg|kN|%)/u.test(item.token));
+  // 4.55.22 根修盲区：真值层无工程测量类实参时，原实现 `return issues`（空）→ 整条门禁静默失效，
+  // 只抄规范阈值、不落本项目实参的正文**完全不受检**。此时无法"判定"（没有可比对的实参），
+  // 但可以也必须"报告"：正文出现危大阈值断言而无可绑定实参 = 该维度**未经核对**，显性告警不阻断。
+  if (relatedAttributes.length === 0) {
+    const thresholdProbe = /(?:开挖深度|搭设高度|支撑高度|吊装重量|跨度|基坑深度)[^。；]{0,14}?(?:超过|达到|不小于|大于)\s*\d+(?:\.\d+)?\s*(?:m|米|t|吨|kg)/u;
+    if (thresholdProbe.test(markdown)) {
+      return [{
+        level: 'warning',
+        severity: 'warning',
+        category: 'fact_consistency',
+        owner: 'system',
+        repairability: 'manual_review',
+        provenance: { detectorId: 'hazard-parameter-binding', fingerprint: stableHash(markdown) },
+        message: '危大参数绑定未能核对：正文出现危大判定阈值表述，但真值层无「深度/高度/跨度/重量/支护/层高」类工程测量实参可比对——本项目是否以规范阈值充作项目实参，本次无法判定',
+        suggestion: '请在资料中确认本项目实际测量参数（开挖深度/支撑高度/搭设高度/起吊重量等）并使其进入真值层，再重跑；本次该维度按未核对处理。',
+      }];
+    }
+    return issues;
+  }
   const samples: string[] = [];
   // 危大判定阈值句式（规范阈值，非项目实参）
   const thresholdRe = /(?:开挖深度|搭设高度|支撑高度|吊装重量|跨度|基坑深度)[^。；]{0,14}?(?:超过|达到|不小于|大于)\s*\d+(?:\.\d+)?\s*(?:m|米|t|吨|kg)/gu;
@@ -3256,15 +3330,29 @@ export function blueprintValuePlacementIssues(markdown: string, blueprintData?: 
   if (!markdown || !blueprintData) return issues;
   const normalized = markdown.replace(/\s+/gu, '');
   const missing: string[] = [];
+  // 4.55.22 根修盲区：原判据用 `normalized.includes(String(peak))` —— **裸数字子串**匹配，
+  // 于是「劳动力峰值 45 人」会被 `45日历天`/`DN45`/`1450m³` 判为"已落位"（设备台数同理被
+  // `11台`/`21台` 命中），本阻断器对最该拦的形态整体失效。改为**数值边界 + 量词**判据：
+  // 数字前后不得紧邻数字/小数点，且（峰值）须带「人」或处于「峰值…N」语境。
+  const hasNumberToken = (value: number, unit: string, requireUnit: boolean): boolean => {
+    const token = String(value);
+    const escaped = escapeRegExpLiteral(token);
+    const unitAlt = unit ? escapeRegExpLiteral(unit) : '';
+    const withUnit = unitAlt ? new RegExp(`(?<![\\d.])${escaped}\\s*${unitAlt}`, 'u') : undefined;
+    if (withUnit?.test(normalized)) return true;
+    if (requireUnit) return false;
+    return new RegExp(`(?<![\\d.])${escaped}(?![\\d.])`, 'u').test(normalized);
+  };
   const peak = blueprintData.resources?.labor?.peakValue;
   if (typeof peak === 'number' && peak > 0) {
     const token = String(peak);
-    const hasPeak = normalized.includes(token) || normalized.includes(`${token}人`) || new RegExp(`峰值[^。；]{0,20}${token}`, 'u').test(normalized);
+    // 峰值必须落在「N 人」或「峰值…N」语境里，裸数字不算
+    const hasPeak = hasNumberToken(peak, '人', true) || new RegExp(`峰值[^。；]{0,20}(?<![\\d.])${escapeRegExpLiteral(token)}(?![\\d.])`, 'u').test(normalized);
     if (!hasPeak) missing.push(`劳动力峰值 ${peak} 人`);
   }
   for (const item of (blueprintData.resources?.equipment || []).slice(0, 12)) {
     if (typeof item.count !== 'number' || item.count <= 0) continue;
-    if (!normalized.includes(`${item.count}台`)) missing.push(`${item.name} ${item.count} 台`);
+    if (!hasNumberToken(item.count, '台', true)) missing.push(`${item.name} ${item.count} 台`);
   }
   if (missing.length === 0) return issues;
   issues.push({

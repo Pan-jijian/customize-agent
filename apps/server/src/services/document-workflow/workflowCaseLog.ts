@@ -20,15 +20,6 @@ export interface ArbitrationCaseRecord {
   manualReviewRequired: boolean;
 }
 
-export interface DeterministicFixCaseRecord {
-  caseType: 'deterministic_fix';
-  recordedAt: number;
-  fixName: string;
-  chapter?: string;
-  section?: string;
-  detail: string;
-}
-
 function caseLogRoot() {
   const dir = path.join(os.homedir(), '.customize-agent', 'cache', 'document-workflow', 'case-log');
   fs.mkdirSync(dir, { recursive: true });
@@ -46,9 +37,4 @@ function appendRecord(fileName: string, record: object) {
 /** 记录同口径数值冲突裁决案例（含置信度与是否转人工），供事后复盘裁决口径演化 */
 export function recordArbitrationCases(cases: ArbitrationCaseRecord[]) {
   for (const item of cases) appendRecord('arbitration-cases.jsonl', item);
-}
-
-/** 记录确定性修复案例（何种检测器、修复了什么），供复盘检测器覆盖盲区 */
-export function recordDeterministicFixCases(cases: DeterministicFixCaseRecord[]) {
-  for (const item of cases) appendRecord('deterministic-fix-cases.jsonl', item);
 }

@@ -26,8 +26,6 @@ import { stageBasisRegulationsRepair } from './basisRegulationsRepair';
 import { stageBasisRegulationsCrossRepair } from './basisRegulationsCrossRepair';
 import { stageDangerousApplicabilityRepair } from './dangerousApplicabilityRepair';
 import { stageQuotationBalanceRepair } from './quotationBalanceRepair';
-import { enforceCanonicalTermAnchorsInSections, isolateCanonicalAnchorLines } from './canonicalTermAnchors';
-import { enforceFiveElementClosureBoost } from './fiveElementClosureBoost';
 import { stripDuplicateParagraphs } from '../../integrity/fixers/fixers';
 import { replayRequirementTailClosure, stageRequirementResponseRepair } from './requirementResponseRepair';
 import type { FinalizeSession } from '../finalizeSession';
@@ -416,31 +414,23 @@ export async function runSurfaceDeterministicCleans(session: FinalizeSession): P
   // 承载的项跳过，其余在目标小节标题后插入含术语原词的引导句，评分重算时块级相似度 ≥0.6
   // 命中；不改 H2/H3 结构与目录；同步章 drafts 防 rebuild 回退（幂等可重放）。本块为函数内
   // 净变更点（后续尚有五要素闭合补强等追加块，均不回改小节正文段）
-  const canonicalAnchors = enforceCanonicalTermAnchorsInSections({
-    markdown: session.finalMarkdown,
-    chapters: session.finalChapterDrafts,
-  });
-  if (canonicalAnchors) {
-    recordRepairActions(session.generationDiagnostics, canonicalAnchors.inserted.length);
-    session.finalMarkdown = canonicalAnchors.markdown;
-    await session.recomputeFinalValidationBundle();
-    const canonicalAnchorStage = displayStage({ type: 'validation', roleId: 'canonical-term-anchor', status: 'success', message: `规范术语显性落位链尾兜底：插入 ${canonicalAnchors.inserted.length} 处术语锚句（${canonicalAnchors.inserted.join('、')}）` }, { subtitle: '评审后兜底' });
-    upsertProgressStage(session.progressStages, canonicalAnchorStage);
-    upsertProgressStage(session.finalGateRepairStages, canonicalAnchorStage);
-  }
+  // 4.55.22 删除「规范术语显性落位链尾兜底」（原 enforceCanonicalTermAnchorsInSections）：
+  // 它按硬编码锚句清单在目标小节插入**固定句子**把块级 bge 相似度推过 0.6——即"为评分而插句"，
+  // 而非把内容写对。且锚句与项目无关：fallback 模式 `/施工方法|主要施工|施工方案|监测/` 会把
+  // 「施工过程监测与监控量测：对基坑边坡、沟槽支护与周边管线定期量测巡查…」插进**没有基坑**的项目，
+  // 构成项目事实层面的假陈述。
+  // 现口径：「规范术语显性落位」已作为**写作前硬要求**注入 roleContext（见 buildWriteTimeFixedBlocks），
+  // 由写手在成稿时用本项目实际内容落实；未落实由检测端照常报出交修复轮，不再由链尾代笔。
   // 可落地性五要素闭合补强（r14 丰乐镇实测）：executability 按空行块五要素词面命中 ≥4 项统计
   // 闭合块密度，成稿块普遍「差一项」（r14 实测 3 项块 22 个全部缺 plan）停在 48 分；链尾对
   // 未达标非表格块确定性补一句措施句推过 4 项线（表格/目录块零触碰，句池轮换避开骨架指纹
   // 「由技术负责人组织/合格后方可/验收合格后」与闭环密度上限）；同为纯追加零删改。
-  const closureBoost = enforceFiveElementClosureBoost(session.finalMarkdown);
-  if (closureBoost) {
-    recordRepairActions(session.generationDiagnostics, closureBoost.fixedCount);
-    session.finalMarkdown = closureBoost.markdown;
-    await session.recomputeFinalValidationBundle();
-    const closureBoostStage = displayStage({ type: 'validation', roleId: 'five-element-closure-boost', status: 'success', message: `五要素闭合补强：${closureBoost.fixedCount} 个措施块补句达标` }, { subtitle: '评审后兜底' });
-    upsertProgressStage(session.progressStages, closureBoostStage);
-    upsertProgressStage(session.finalGateRepairStages, closureBoostStage);
-  }
+  // 4.55.22 删除「五要素闭合补强」（原 enforceFiveElementClosureBoost）：
+  // 其常量自述「句子设计避开三族骨架指纹…单句全文复用上限 3 —— sectionDuplicateIssues 需
+  // 同对章节重合 ≥3 句才命中」——即刻意规避其它检测器把分数推过线，属为指标而插句。
+  // 交付稿里塞入与项目无关的通用管理句，评标人视角即填充语。
+  // 现口径：五要素闭环句式本就是写作前硬要求（WRITING_INTEGRITY_CONSTRAINTS + 写作焦点），
+  // 由写手落实；未落实由 closure-phrase-density 检测器照常报出。
   // 表格题注链尾收口（r26c 丰乐镇门禁归因，r26d 接线）：链尾章级 patch 与 rebuild（事实扩散/表格
   // 补名等 draft-mutating 阶段）可能使终稿表格丢失表题行（r26c 实测：终稿风险表无题名行、草稿同表头
   // 表仍带题名——「正文 1 张表格缺少题注编号」blocker 直坠门禁）。①以章草稿表头归一键反查同表
@@ -476,17 +466,12 @@ export async function runSurfaceDeterministicCleans(session: FinalizeSession): P
     upsertProgressStage(session.progressStages, duplicateParagraphStage);
     upsertProgressStage(session.finalGateRepairStages, duplicateParagraphStage);
   }
-  // r27 锚句行独立化（r26d 归因：章级紧凑化删空行致锚句与正文行粘连成大块、bge 相似度
-  // 被稀释至 0.56~0.59 卡线）：链尾对锚句行前后确保独立空行（仅补空行不改字，幂等；
-  // 此后无 rebuild，空行存活至终稿）。纯结构判据（锚表 lead 前 20 字前缀），零项目语义
-  const anchorIsolation = isolateCanonicalAnchorLines(session.finalMarkdown);
-  if (anchorIsolation.isolated > 0) {
-    session.finalMarkdown = anchorIsolation.markdown;
-    await session.recomputeFinalValidationBundle();
-    const anchorIsolationStage = displayStage({ type: 'validation', roleId: 'canonical-anchor-isolation', status: 'success', message: `锚句行独立化：补 ${anchorIsolation.isolated} 个空行保障块级命中` }, { subtitle: '评审后兜底' });
-    upsertProgressStage(session.progressStages, anchorIsolationStage);
-    upsertProgressStage(session.finalGateRepairStages, anchorIsolationStage);
-  }
+  // r27 锚句行独立化 —— **4.55.22 随锚句机制一并移除**。
+  //
+  // 该块只对「锚表 lead 前 20 字前缀」开头的行生效，即为**上一步插入的锚句**服务；
+  // 锚句插入已删除（理由同 4.55.22 注释：为评分插固定句、且锚句与项目无关会构成假陈述），
+  // 本块随之成为空转——保留它只会留下一条「宣称已做、实际不做」的进度事件，
+  // 与本文件 C-T2 整块移除的处置口径一致。
   // C-T2 未溯源数值链尾确定性改定性 —— **G 线 P2-2 整块移除**。
   //
   // 原块调用 demoteUnsourcedNumericTokens 把「可删单位类」未溯源数值直接删除、改成定性表述，

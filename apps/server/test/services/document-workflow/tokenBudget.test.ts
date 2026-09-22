@@ -1,8 +1,8 @@
 /**
- * tokenBudget 单测：token 预算估算/段落与句子边界截断/评分选择包装。
+ * tokenBudget 单测：token 预算估算/段落与句子边界截断。
  */
 import { describe, expect, it } from 'vitest';
-import { estimateTokens, selectForTokenBudget, truncateToTokenBudget } from '@/services/document-workflow/tokenBudget';
+import { estimateTokens, truncateToTokenBudget } from '@/services/document-workflow/tokenBudget';
 
 describe('estimateTokens', () => {
   it('中文按 1.5 字符/token 估算', () => {
@@ -44,30 +44,5 @@ describe('truncateToTokenBudget', () => {
     const result = truncateToTokenBudget(text, 10);
     expect(result.truncated).toBe('第一段内容。\n\n这是第二段。');
     expect(result.droppedChars).toBe(5);
-  });
-});
-
-describe('selectForTokenBudget', () => {
-  it('预算充足全选并汇总 token', () => {
-    const result = selectForTokenBudget(['aaa', 'bbbbbb'], () => 1, 100);
-    expect(result.selected).toEqual(['aaa', 'bbbbbb']);
-    expect(result.dropped).toHaveLength(0);
-    expect(result.totalTokens).toBe(estimateTokens('aaa') + estimateTokens('bbbbbb'));
-  });
-
-  it('预算不足时丢弃低分项', () => {
-    // maxChars = maxTokens*2 = 2；每项 2 tokens → 只选 1 项
-    const result = selectForTokenBudget(['一二三', '四五六'], () => 1, 1);
-    expect(result.selected).toEqual(['一二三']);
-    expect(result.dropped).toEqual(['四五六']);
-    expect(result.totalTokens).toBe(2);
-  });
-
-  it('按分数降序优先保留高分项', () => {
-    const items = [{ t: '短', score: 1 }, { t: '长内容', score: 10 }];
-    const result = selectForTokenBudget(items, item => item.score, 1, item => item.t);
-    // maxChars = 2；'长内容' 3 字 → 2 tokens 选中，'短' 1 token 但预算已满 → 丢弃
-    expect(result.selected).toEqual([{ t: '长内容', score: 10 }]);
-    expect(result.dropped).toEqual([{ t: '短', score: 1 }]);
   });
 });

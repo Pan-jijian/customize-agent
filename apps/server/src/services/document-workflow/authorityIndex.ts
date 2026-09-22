@@ -1,7 +1,8 @@
 /**
  * V5 P1 · AuthorityIndex 单一权威索引：蓝图数据全量权威投影。
  *
- * 背景（体系根因）：原"权威"是 4 张互不同步的人工白名单——renderBlueprintDataText 手写行 /
+ * 背景（体系根因）：原"权威"是 4 张互不同步的人工白名单——蓝图参数桶手写行
+ * （原 renderBlueprintDataText，4.55.22 已删除，现仅余块级渲染器 renderBlueprintDataTextForBlock）/
  * CHAPTER_AUTHORITY_ANCHORS 章锚点卡 / blueprintPlanAuthorities 映射（机械仅 7 类、规格仅垫层）/
  * alignChapterContentToBlueprint 域锚点；外加数据层/渲染层多处物理截断。蓝图 data 增对象、白名单
  * 不跟进 → 漏对象是设计使然（挖掘机矛盾 1 vs 5 无修复通道即此断点）。
@@ -596,12 +597,6 @@ export function renderAuthorityDomainsForBlock(index: AuthorityIndex, options: B
     }
   }
   return rows;
-}
-
-/** 数量分组明细辅助：分村多值合法性判定（值 ∈ 分组值 ∪ 合计 → 合法分层口径） */
-export function quantityValueIsLegal(entry: AuthorityEntry, value: number): boolean {
-  if (typeof entry.value === 'number' && Math.abs(entry.value - value) < 1e-6) return true;
-  return (entry.groups ?? []).some(group => Math.abs(group.value - value) < 1e-6);
 }
 
 /** 劳动力峰值单值 getter（检测器/注册表/终检等单点消费：同一权威投影口径，防各消费点私取蓝图字段） */

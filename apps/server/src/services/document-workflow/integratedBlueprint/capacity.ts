@@ -6,6 +6,8 @@
 import { composeBlockTitle } from '../sectionNamingGovernance';
 import { workPackageThemeLabel } from '../utils';
 import { DIVISION_SECTION_RE, MAJOR_CONTENT_SECTION_RE } from '../writingSpec';
+// 密度验收线单源（块质检/构造审计/本章供给核算同一条线；本文件不再自持一份常量）
+import { BLOCK_FACT_DENSITY_PER1000 } from '../blockQualityExecutors';
 
 // ═══════════════════════════════ 三期收口：章规划确定性转换 + 蓝图引用一致性 ═══════════════════════════════
 // （原 blueprintPlanAuthorities 蓝图权威映射已删除：V5 P4 起权威由 AuthorityIndex 全量投影机制生成，见 authorityIndex.ts）
@@ -383,11 +385,11 @@ export function mergeUniqueSkeletonNames(names: string[], cap: number): string[]
  * 参数密度线去扣分：写作端要不到料、检测端照样判不及格，两端各自成立、合起来无解。
  *
  * **现口径**：在容量规划期核算「章可用量化参数数 ÷ 章目标字数」，与检测端**同源常量**
- *（`CHAPTER_PARAMETER_DENSITY_PER_1000`，每千字所需量化参数数）。不足时给出**二选一**的
+ *（`BLOCK_FACT_DENSITY_PER1000`，每千字所需量化参数数——块质检/构造审计/本核算单源引用，
+ * 定义在 blockQualityExecutors）。不足时给出**二选一**的
  * 同源处置：① 扩注入预算（把本章参数池优先级提前/加大限额）；② **同步下调**该章的
  * 密度要求与目标字数——二者必须一起动，只动一端就会重新制造「要不到料却照常扣分」。
  */
-export const CHAPTER_PARAMETER_DENSITY_PER_1000 = 1.5;
 
 export interface ChapterSupplyDemandAssessment {
   chapterTitle: string;
@@ -475,14 +477,14 @@ export function assessChapterSupplyDemand(input: {
   const targetWords = Math.max(0, Math.round(input.targetWords));
   const availableParameters = Math.max(0, Math.round(input.availableParameters));
   const densityPer1000 = targetWords > 0 ? (availableParameters / targetWords) * 1000 : 0;
-  const requiredParameters = Math.ceil((targetWords / 1000) * CHAPTER_PARAMETER_DENSITY_PER_1000);
+  const requiredParameters = Math.ceil((targetWords / 1000) * BLOCK_FACT_DENSITY_PER1000);
   const parameterShortfall = Math.max(0, requiredParameters - availableParameters);
   const sufficient = targetWords === 0 || parameterShortfall === 0;
   const channelLine = supplyChannelLine(input.supplyChannels);
   const remediation = sufficient ? [] : [
-    `本章目标 ${targetWords} 字，可用量化参数 ${availableParameters} 个（${densityPer1000.toFixed(2)}/千字），低于本条要求线 ${CHAPTER_PARAMETER_DENSITY_PER_1000}/千字（与块质检/构造审计同值），缺 ${parameterShortfall} 个。`,
+    `本章目标 ${targetWords} 字，可用量化参数 ${availableParameters} 个（${densityPer1000.toFixed(2)}/千字），低于本条要求线 ${BLOCK_FACT_DENSITY_PER1000}/千字（与块质检/构造审计同值），缺 ${parameterShortfall} 个。`,
     ...(channelLine ? [channelLine] : []),
-    '二选一（端点必须一起动，只动一端会重新制造「要不到料却照常扣分」）：① 扩供给——把本章责任清单行/证据的取用优先级提前、放宽本章参数配额上限；② 同步下调——把本章目标字数降到 ' + `${Math.floor((availableParameters / CHAPTER_PARAMETER_DENSITY_PER_1000) * 1000)} 字` + ' 附近，使供给与要求对齐（目标字数与密度要求必须一起改）。',
+    '二选一（端点必须一起动，只动一端会重新制造「要不到料却照常扣分」）：① 扩供给——把本章责任清单行/证据的取用优先级提前、放宽本章参数配额上限；② 同步下调——把本章目标字数降到 ' + `${Math.floor((availableParameters / BLOCK_FACT_DENSITY_PER1000) * 1000)} 字` + ' 附近，使供给与要求对齐（目标字数与密度要求必须一起改）。',
   ];
-  return { chapterTitle: input.chapterTitle, targetWords, availableParameters, densityPer1000, requiredDensityPer1000: CHAPTER_PARAMETER_DENSITY_PER_1000, sufficient, requiredParameters, parameterShortfall, remediation, supplyChannels: input.supplyChannels };
+  return { chapterTitle: input.chapterTitle, targetWords, availableParameters, densityPer1000, requiredDensityPer1000: BLOCK_FACT_DENSITY_PER1000, sufficient, requiredParameters, parameterShortfall, remediation, supplyChannels: input.supplyChannels };
 }

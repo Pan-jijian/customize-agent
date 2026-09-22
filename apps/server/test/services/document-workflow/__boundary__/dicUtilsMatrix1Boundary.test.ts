@@ -3,7 +3,7 @@
  * 断言按源码规则推导（hasProcessSequenceExpression/workPackage 三要素/标题去重族）。
  */
 import { describe, expect, it } from 'vitest';
-import { dedupeRepeatedSubsections, findDuplicateH4Titles, findExtraneousBlockTitles, hasProcessSequenceExpression, looseTitleFamilyMatch, normalizeSubsectionTitleForDedup, removeExtraneousBlockSections, stripExtraneousBlockHeadings, workPackageContentElementFlags, workPackageContentElementsComplete } from '@/services/document-workflow/utils';
+import { dedupeRepeatedSubsections, findDuplicateH4Titles, findExtraneousBlockTitles, hasProcessSequenceExpression, looseTitleFamilyMatch, normalizeSubsectionTitleForDedup, stripExtraneousBlockHeadings, workPackageContentElementFlags, workPackageContentElementsComplete } from '@/services/document-workflow/utils';
 
 // ── W1. hasProcessSequenceExpression 谱系 ──
 
@@ -227,38 +227,6 @@ describe('W7 清单外标题检测', () => {
   it('W7 编号变体 H4 归一匹配清单', () => {
     const md = '### 主体结构工程\n#### 1. 施工准备';
     expect(findExtraneousBlockTitles(md, '主体结构工程', ['施工准备'], [])).toEqual([]);
-  });
-});
-
-// ── W8. removeExtraneousBlockSections 谱系 ──
-
-describe('W8 清单外标题块确定性删除', () => {
-  it('W8 清单外 H4 整块删除（标题+正文）', () => {
-    const md = '### 主体结构工程\n#### 施工准备\n正文A\n#### 自由发挥\n正文B';
-    const result = removeExtraneousBlockSections(md, '主体结构工程', ['施工准备']);
-    expect(result).toContain('正文A');
-    expect(result).not.toContain('自由发挥');
-    expect(result).not.toContain('正文B');
-  });
-  it('W8 串章 H3 标题行删、其下合法 H4 块恢复输出（行为锁定）', () => {
-    const md = '### 装饰装修工程\n#### 施工准备\n正文A\n### 主体结构工程\n#### 施工准备\n正文B';
-    const result = removeExtraneousBlockSections(md, '主体结构工程', ['施工准备']);
-    expect(result).not.toContain('装饰装修工程');
-    expect(result).toContain('正文A');
-    expect(result).toContain('正文B');
-  });
-  it('W8 H3 变体保留', () => {
-    const md = '### 主体结构\n#### 施工准备\n正文A';
-    const result = removeExtraneousBlockSections(md, '主体结构工程', ['施工准备']);
-    expect(result).toContain('### 主体结构');
-    expect(result).toContain('正文A');
-  });
-  it('W8 串章 H3 下的合法 H4 块保留（标题行删）', () => {
-    const md = '### 装饰装修工程\n#### 施工准备\n正文A\n### 主体结构工程\n#### 施工准备\n正文B';
-    const result = removeExtraneousBlockSections(md, '主体结构工程', ['施工准备']);
-    expect(result).not.toContain('### 装饰装修工程');
-    expect(result).toContain('正文A');
-    expect(result).toContain('正文B');
   });
 });
 

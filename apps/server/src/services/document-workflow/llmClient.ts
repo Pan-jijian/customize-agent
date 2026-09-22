@@ -53,11 +53,6 @@ export function resetEmptyStormStreak() {
   consecutiveEmptyResponses = 0;
 }
 
-/** 当前连续空响应计数（导出供单测断言接线） */
-export function currentEmptyStormStreak() {
-  return consecutiveEmptyResponses;
-}
-
 /** 可中止的等待（用户中止立即 reject，不阻塞取消） */
 function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {

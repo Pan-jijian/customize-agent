@@ -4,7 +4,7 @@
  * 另有阶段五模糊应答语义升级单测：词面命中仅召回，语义 gate 复核才计套话句（负例零误杀）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildVagueResponseGate, difficultyCountermeasureReport, extractKeyDifficultySection, fillerDensityReport, fiveElementBlockStats, isTemplatePrefixSentence, isZeroInfoSloganSentence, judgeFillerSentences, scanFillerSentences, scanTemplatePrefixSentences } from '@/services/document-workflow/tenderBidChecks';
+import { buildVagueResponseGate, difficultyCountermeasureReport, extractKeyDifficultySection, fillerDensityReport, fiveElementBlockStats, isTemplatePrefixSentence, isZeroInfoSloganSentence, judgeFillerSentences, scanTemplatePrefixSentences } from '@/services/document-workflow/tenderBidChecks';
 
 vi.mock('@/services/document-workflow/semanticSimilarity', () => ({
   buildSemanticSimilarity: vi.fn(),
@@ -150,14 +150,6 @@ describe('fillerDensityReport 校准口径（0.80 阈值 + 14 原型 + 共享判
     mockSimilarity(0.1);
     const vague = await judgeFillerSentences(['本工程力争在合同工期内完成全部施工内容']);
     expect(vague[0]).toMatchObject({ semantic: false, vague: true, filler: true });
-  });
-
-  it('scanFillerSentences：仅返回语义命中句（去重）且低于阈值返回空', async () => {
-    buildSimilarityMock.mockResolvedValue(((left: string) => (left.includes('精心组织') ? 0.9 : 0.1)) as SimilarityFn);
-    const hits = await scanFillerSentences('精心组织科学管理确保工程质量。\n精心组织科学管理确保工程质量。\n混凝土浇筑后洒水养护并形成记录。');
-    expect(hits).toEqual(['精心组织科学管理确保工程质量']);
-    mockSimilarity(0.75);
-    expect(await scanFillerSentences('精心组织科学管理确保工程质量。')).toEqual([]);
   });
 
   it('isZeroInfoSloganSentence：零信息短口号可删，携带数字/岗位/频次/合规锚点或超长不删', () => {

@@ -5,14 +5,13 @@
  *   · 「我单位获得中国施工企业管理协会颁发的2022年度…」
  */
 import { describe, expect, it } from 'vitest';
-import { classifyTenderContent, isCreditScoringContent, isTechnicalBidAdmissible } from '@/services/document-workflow/technicalBidAdmission';
+import { classifyTenderContent, isCreditScoringContent } from '@/services/document-workflow/technicalBidAdmission';
 import { isHardBannedSectionTitle, isQualificationSectionTitle } from '@/services/document-workflow/evidenceContentSafety';
 
 describe('classifyTenderContent（四类非技术内容）', () => {
   it('实锤①：业绩证明材料 + 中标查询网址 → 招标程序类（旧判据被「材料」子串放行）', () => {
     const title = '业绩证明材料中要求提供：（2）中标查询网址及查询路径披露';
     expect(classifyTenderContent(title)).toBe('tender_procedure');
-    expect(isTechnicalBidAdmissible(title)).toBe(false);
   });
 
   it('实锤②：我单位获得…协会颁发的获奖情况 → 资信类', () => {
@@ -53,7 +52,6 @@ describe('技术评审要点不受影响（零误伤守卫）', () => {
     ];
     for (const text of technical) {
       expect(classifyTenderContent(text)).toBe('technical');
-      expect(isTechnicalBidAdmissible(text)).toBe(true);
       expect(isHardBannedSectionTitle(text)).toBe(false);
     }
   });

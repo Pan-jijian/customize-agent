@@ -62,19 +62,6 @@ export function classifyTenderContent(text: string): TenderContentClass {
   return 'technical';
 }
 
-/** 技术标正文可写判定（= 分类为 technical） */
-export function isTechnicalBidAdmissible(text: string): boolean {
-  return classifyTenderContent(text) === 'technical';
-}
-
-/** 非技术类内容的中文标签（报告/审计/复核清单展示用） */
-export const TENDER_CONTENT_CLASS_LABEL: Record<Exclude<TenderContentClass, 'technical'>, string> = {
-  bidder_qualification: '投标人资格与资信（属资格文件/商务标）',
-  tender_procedure: '招标程序与评标纪律（属招标程序约定）',
-  commercial: '商务与计价（属商务标）',
-  contract_terms: '合同条件（属合同文件）',
-};
-
 /**
  * 资信加分项判定（评分表条目专用）：招标文件把业绩/获奖/认证类放进**施工组织设计评分表**时，
  * 按用户口径「按招标要求响应，但限定形态」——不得编成施工小节（会污染技术标正文、暗标触红线），

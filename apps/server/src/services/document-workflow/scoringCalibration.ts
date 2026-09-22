@@ -117,13 +117,6 @@ export const QUALITY_REPORT_CALIBER: ScoringCaliberStamp = {
 };
 
 
-/** 招标六项口径（从属展示） */
-export const TENDER_BID_SCORES_CALIBER: ScoringCaliberStamp = {
-  version: SCORING_CALIBRATION_VERSION,
-  role: 'secondary',
-  relatedTo: 'quality-report',
-};
-
 /** 专业分七维口径（从属展示） */
 export const PROFESSIONAL_SCORE_CALIBER: ScoringCaliberStamp = {
   version: SCORING_CALIBRATION_VERSION,

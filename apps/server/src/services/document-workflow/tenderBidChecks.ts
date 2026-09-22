@@ -204,20 +204,6 @@ export function scanTemplatePrefixSentences(markdown: string): string[] {
     .filter(sentence => sentence.length >= 12 && isTemplatePrefixSentence(sentence));
 }
 
-/**
- * 套话句扫描（block-qc 生成期质检专用）：共享句池 + 共享判定器，返回语义原型命中句原文
- * （去重、限 20 条），供首轮阻断反馈定向重写（生成期拦截成本远低于成稿后修复）。
- */
-export async function scanFillerSentences(
-  text: string,
-  embedDocuments?: (texts: string[]) => Promise<number[][]>,
-): Promise<string[]> {
-  const sentences = buildFillerSentencePool(text);
-  if (sentences.length === 0) return [];
-  const judgements = await judgeFillerSentences(sentences, embedDocuments);
-  return [...new Set(judgements.filter(item => item.semantic).map(item => item.sentence))].slice(0, 20);
-}
-
 export type TemplatingLevel = 'heavy' | 'medium' | 'light';
 
 export interface FillerDensityReport {
@@ -625,23 +611,6 @@ export function emergencyStructureCheck(markdown: string): EmergencyStructureRep
     coverage: coveredParts.length / EMERGENCY_EIGHT_PARTS.length,
     planHits: [...planHits],
   };
-}
-
-// ── 8. 四节一环保量化基准值（附录八，核验绿色施工指标达标承诺） ──
-export const GREEN_BENCHMARK_CHECKS = [
-  { name: '节能：施工用电损耗率≤5%', pattern: /用电损耗.{0,8}5\s*%|损耗率.{0,8}≤\s*5/u },
-  { name: '节能：节能灯具占比100%', pattern: /节能(?:型)?灯.{0,12}100\s*%|照明.{0,12}100\s*%节能/u },
-  { name: '节地：场内土方平衡率≥70%', pattern: /土方平衡.{0,8}7\d\s*%|土方(?:平衡|回填).{0,10}70/u },
-  { name: '节水：非传统水源利用率', pattern: /非传统水源|中水|雨水(?:收集|利用)/u },
-  { name: '节材：模板周转次数≥8次', pattern: /周转.{0,8}(?:8|[89]\d)\s*次|周转次数.{0,6}\d/u },
-  { name: '环保：扬尘六个百分百', pattern: /六个百分百|6个100%|六个100%|扬尘.{0,10}100\s*%/u },
-  { name: '环保：废水三级沉淀', pattern: /三级沉淀/u },
-] as const;
-
-export interface GreenBenchmarkReport {
-  hits: string[];
-  /** 基准值达标命中率（≥60% 视为绿色施工指标基本达标） */
-  coverage: number;
 }
 
 // ── 9. 跨项目内容残留（docx L151：零残留要求） ──

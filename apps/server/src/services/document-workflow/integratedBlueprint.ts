@@ -40,7 +40,7 @@ export { deriveLaborFromBoq, deriveEquipmentFromBoq, deriveMaterialsPlanFromBoq,
 export { extractDecisionLockEntries, decisionLockCategoryMeta, matchDecisionCategory, locateDecisionOptionAnchor, decisionMentionNegated, buildBlueprintDecisionLock } from './integratedBlueprint/decisionLock';
 export { buildBlueprintOutline, buildWorkPackageFromBoqSection, fallbackStructureForSections, buildChapterStructureFromBlueprint, estimateChapterMinFeasibleWords } from './integratedBlueprint/outline';
 export type { PlannedChapterSubPoint, PlannedChapterBlock, PlannedChapterStructure } from './integratedBlueprint/capacity';
-export { renderBlueprintDataText, renderBlueprintDataTextForBlock, AUTHORITY_DOMAIN_CHAPTER_ROUTES, renderBlueprintChapterAuthorityCard, renderBlueprintChapterSlice, renderBlueprintBlockSlice, findBlueprintChapter, alignChapterContentToBlueprint, renderBlueprintMustCiteValues } from './integratedBlueprint/render';
+export { renderBlueprintDataTextForBlock, AUTHORITY_DOMAIN_CHAPTER_ROUTES, renderBlueprintChapterAuthorityCard, renderBlueprintBlockSlice, findBlueprintChapter, alignChapterContentToBlueprint, renderBlueprintMustCiteValues } from './integratedBlueprint/render';
 export { blueprintDataForChapterInjection, filterBlueprintDataByAvailability } from './integratedBlueprint/validate';
 export { AUTHORITY_PLACEHOLDER_RE, fillAuthorityPlaceholders, renderAuthorityPlaceholderCatalog, renderAuthorityValue, type AuthorityPlaceholderFillResult } from './integratedBlueprint/authorityPlaceholders';
 export type { BlueprintBlockSliceOptions } from './integratedBlueprint/render';

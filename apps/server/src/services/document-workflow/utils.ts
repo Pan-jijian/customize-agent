@@ -370,29 +370,6 @@ export function findExtraneousBlockTitles(markdown: string, blockTitle: string, 
   return extraneous;
 }
 
-/** 4.19 块成稿清单外标题块确定性删除：H3 只保留块标题块，H4 只保留本块要点清单内标题块，
- * 其余（串章骨架/自由发挥）整块连同正文与表格删除。与 findExtraneousBlockTitles 同判定口径（含细目标题白名单）。 */
-export function removeExtraneousBlockSections(markdown: string, blockTitle: string, sectionTitles: string[], allowedExtraTitles: string[] = []): string {
-  const normalizedBlockTitle = normalizeSubsectionTitleForDedup(blockTitle);
-  const normalizedSections = new Set(sectionTitles.map(normalizeSubsectionTitleForDedup).filter(Boolean));
-  const normalizedAllowed = new Set(allowedExtraTitles.map(normalizeSubsectionTitleForDedup).filter(Boolean));
-  const output: string[] = [];
-  let dropping = false;
-  for (const rawLine of markdown.split(/\r?\n/u)) {
-    const heading = /^(#{3,4})\s+(.+)$/u.exec(rawLine.trim());
-    if (heading) {
-      const normalized = normalizeSubsectionTitleForDedup(heading[2].trim());
-      if (heading[1].length === 3) {
-        dropping = normalized !== normalizedBlockTitle && !looseTitleFamilyMatch(normalized, normalizedBlockTitle);
-      } else {
-        dropping = Boolean(normalized) && !normalizedSections.has(normalized) && !normalizedAllowed.has(normalized);
-      }
-    }
-    if (!dropping) output.push(rawLine);
-  }
-  return output.join('\n');
-}
-
 /** 4.19.1 块成稿清单外标题确定性修复（标题层对齐、正文零丢失）：
  * 质检兜底优先级「确定性修复 > LLM 重试」——清单外 H3/H4 只删除标题行、保留全部正文，
  * 避免「整块删除 → 字数不足 → 重试 → 块死亡 → 章失败 → 整次生成作废」的浪费链

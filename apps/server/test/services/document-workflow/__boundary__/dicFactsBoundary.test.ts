@@ -359,12 +359,12 @@ describe('E3 excavationHazardClassification 分级矩阵', () => {
   const cases = [
     { label: 'depth=2.9 无标注', depth: 2.9, md: '基坑支护方案。', expectCount: 0 },
     { label: 'depth=3 无标注→报危大', depth: 3, md: '基坑支护方案。', expectCount: 1, keyword: '危大工程判定缺失' },
-    { label: 'depth=3 有危大→不报', depth: 3, md: '基坑属危大工程。', expectCount: 0 },
+    { label: 'depth=3 有危大→不报', depth: 3, md: '基坑开挖深度3m，属危大工程。', expectCount: 0 },
     { label: 'depth=4.9 无标注→报危大', depth: 4.9, md: '基坑支护方案。', expectCount: 1 },
     { label: 'depth=5 全无→报两条', depth: 5, md: '基坑支护方案。', expectCount: 2 },
-    { label: 'depth=5 有危大缺超规模→报1', depth: 5, md: '基坑属危大工程。', expectCount: 1, keyword: '超过一定规模' },
-    { label: 'depth=5 有超规模缺危大→报1', depth: 5, md: '基坑支护方案属超过一定规模需专家论证。', expectCount: 1, keyword: '危大工程判定缺失' },
-    { label: 'depth=5 双标注→不报', depth: 5, md: '基坑属危大工程且超过一定规模需专家论证。', expectCount: 0 },
+    { label: 'depth=5 有危大缺超规模→报1', depth: 5, md: '基坑开挖深度5m，属危大工程。', expectCount: 1, keyword: '超过一定规模' },
+    { label: 'depth=5 有超规模缺危大→报1', depth: 5, md: '基坑开挖深度5m，属超过一定规模需专家论证。', expectCount: 1, keyword: '危大工程判定缺失' },
+    { label: 'depth=5 双标注→不报', depth: 5, md: '基坑开挖深度5m，属危大工程且超过一定规模需专家论证。', expectCount: 0 },
     { label: 'depth=10 全无→报两条', depth: 10, md: '基坑支护方案。', expectCount: 2 },
     { label: '无深度事实→不报', depth: undefined, md: '基坑支护方案。', expectCount: 0 },
   ];

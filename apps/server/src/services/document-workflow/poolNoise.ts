@@ -155,11 +155,6 @@ export function classifyPoolNoiseText(text: string): PoolNoiseCategory | undefin
   return undefined;
 }
 
-/** 布尔包装（消费侧简写） */
-export function isPoolNoiseText(text: string): boolean {
-  return classifyPoolNoiseText(text) !== undefined;
-}
-
 /**
  * 缓存指纹源（D6 形态判据变更须失效 LLM 判定缓存）：形态正则表源码序列化——
  * 判据口径任何变更自动 invalidate（消费侧 tenderRequirements.CACHE_JUDGE_FINGERPRINT_SOURCES 入表）。

@@ -2685,8 +2685,19 @@ describe('hazardParameterBindingIssues（危大须写本项目实参 + 阈值对
     expect(hazardParameterBindingIssues(md, truth)).toEqual([]);
   });
 
-  it('真值层无工程测量值 → 静默（不误伤无参数项目）', () => {
-    expect(hazardParameterBindingIssues('开挖深度超过3m的沟槽土方开挖工程。', [{ attribute: '合同金额', value: '100万元' }])).toEqual([]);
+  // 4.55.22 根修盲区：真值层无工程测量实参时，原实现 `return []` → **整条门禁静默失效**：
+  // 只抄规范阈值、不落本项目实参的正文完全不受检（本用例原断言正是"静默"）。
+  // 此时无法"判定"（没有可比对的实参），但可以也必须"报告"——按未核对处理，warning 不阻断。
+  it('真值层无工程测量值但正文出现危大阈值断言 → 报「未核对」（不阻断）', () => {
+    const issues = hazardParameterBindingIssues('开挖深度超过3m的沟槽土方开挖工程。', [{ attribute: '合同金额', value: '100万元' }]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.level).toBe('warning');
+    expect(issues[0]!.message).toContain('未能核对');
+    expect(issues[0]!.message).toContain('无法判定');
+  });
+
+  it('真值层无工程测量值且正文无危大阈值断言 → 仍静默（不误伤无参数项目）', () => {
+    expect(hazardParameterBindingIssues('本项目主要施工内容包括土方开挖与回填。', [{ attribute: '合同金额', value: '100万元' }])).toEqual([]);
   });
 });
 

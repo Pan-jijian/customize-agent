@@ -5,9 +5,9 @@
  */
 import { buildCitationSentenceContext, defaultCitationAdjudicator } from '../semanticAdjudication';
 import type { AdjudicationRecord, CitationAdjudicationCandidate, CitationAdjudicator, CitationCandidateKind } from '../semanticAdjudication';
-import { flexNameOptionalPattern, flexNamePattern } from '../integrity/authorities/authorities';
+// 单位口径单源：quantityUnitVariants 定义在权威层（检测定位=修复定位同源），本文件不再自持一份
+import { flexNameOptionalPattern, flexNamePattern, quantityUnitVariants } from '../integrity/authorities/authorities';
 import type { DocumentGenerationDiagnostics, ValidationIssue } from '../types';
-import { quantityUnitDetectVariants } from './render';
 import type { BlueprintData, BlueprintQuantity } from './types';
 
 /**
@@ -206,7 +206,7 @@ export function collectBlueprintCitationCandidates(markdown: string, data: Bluep
     const unit = quantity.unit || '';
     // 单位变体归一（结构定位）：清单 m2/m3/t 与正文上标写法（m²/㎡/m³）同义；
     // 右边界断言排除「直径不小于10m」类 10mm 的 m 子串误匹配
-    const unitSuffix = unit ? `${quantityUnitDetectVariants(unit)}(?![0-9A-Za-z])` : '';
+    const unitSuffix = unit ? `${quantityUnitVariants(unit)}(?![0-9A-Za-z])` : '';
     // 值窗口（结构定位）：名后 40 字、截断于列举分隔符/换行/下一个条目名起点，取第一个「数值+本单位」
     // （左边界断言排除数字串截取；不跨名字取数防短名误绑，见上方 nameHitStarts 注释）
     const rawWindow = masked.slice(ne, ne + 40);

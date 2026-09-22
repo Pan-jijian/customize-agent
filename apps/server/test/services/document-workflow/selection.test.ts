@@ -2,7 +2,7 @@
  * selection 单测：评分选择器（不静默丢弃 + 丢弃日志）与文本/事实重要性评分口径。
  */
 import { describe, expect, it } from 'vitest';
-import { factImportanceScore, selectByScore, textImportanceScore } from '@/services/document-workflow/selection';
+import { selectByScore, textImportanceScore } from '@/services/document-workflow/selection';
 
 describe('selectByScore', () => {
   it('按分数降序选择并遵守 maxItems 预算', () => {
@@ -49,21 +49,5 @@ describe('textImportanceScore', () => {
 
   it('空文本 0 分', () => {
     expect(textImportanceScore('')).toBe(0);
-  });
-});
-
-describe('factImportanceScore', () => {
-  it('必需 + 数值 + 基础字段 + 单位加权', () => {
-    // required 10 + 数值 5 + 计划工期 4 + 日历天 3 = 22
-    expect(factImportanceScore({ key: '计划工期', value: '300日历天', required: true })).toBe(22);
-  });
-
-  it('招标来源与货币单位加权', () => {
-    // 数值 5 + 万元 3 + 招标文件 2 = 10
-    expect(factImportanceScore({ fieldName: '金额', value: '5000万元', fieldId: '招标文件附件1' })).toBe(10);
-  });
-
-  it('空事实 0 分', () => {
-    expect(factImportanceScore({})).toBe(0);
   });
 });

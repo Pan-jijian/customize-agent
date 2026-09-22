@@ -152,7 +152,7 @@ describe('EE3 危大分级：精确边界与消息注入', () => {
     expect(excavationHazardClassificationIssues('正文无标注。', depthModel('5.0m'))).toHaveLength(2);
   });
   it('EE3 3m 正文已有危大标注 → 不报', () => {
-    expect(excavationHazardClassificationIssues('本工程属危大工程。', depthModel('3.5m'))).toHaveLength(0);
+    expect(excavationHazardClassificationIssues('本工程基坑开挖深度3.5m，属危大工程。', depthModel('3.5m'))).toHaveLength(0);
   });
   it('EE3 message 与 suggestion 注入实际深度值', () => {
     const issues = excavationHazardClassificationIssues('正文无标注。', depthModel('5.5m'));

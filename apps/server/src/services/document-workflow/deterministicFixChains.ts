@@ -205,13 +205,3 @@ export const SURFACE_FIX_STEPS: readonly SurfaceFixStep[] = [
   // 注入章序走片段模式；round-2 全文链不注入（走「## 第N章」解析）
   { key: 'section-renumber', stage5: true, round2: true, fix: (markdown, ctx) => { const r = renumberSectionHeadings(markdown, { chapterNumber: ctx.chapterNumber }); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
 ];
-
-/** stage5 逐章链修复步骤（注册表顺序过滤） */
-export function stage5FixSteps(): SurfaceFixStep[] {
-  return SURFACE_FIX_STEPS.filter(step => step.stage5);
-}
-
-/** round-2 全文链修复步骤（注册表顺序过滤） */
-export function round2FixSteps(): SurfaceFixStep[] {
-  return SURFACE_FIX_STEPS.filter(step => step.round2);
-}

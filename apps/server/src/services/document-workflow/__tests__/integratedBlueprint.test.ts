@@ -30,9 +30,8 @@ import {
   findBlueprintChapter,
   rebaseCitationAnchorsForChapters,
   renderBlueprintChapterAuthorityCard,
-  renderBlueprintChapterSlice,
   renderBlueprintBlockSlice,
-  renderBlueprintDataText,
+  renderBlueprintDataTextForBlock,
   renderBlueprintMustCiteValues,
   resolveBillOfQuantities,
   validateBlueprint,
@@ -564,7 +563,7 @@ describe('物资计划规格提取（材料型号规格是清单事实数据，�
   it('参数桶物资计划行携带规格：名称（规格）数量单位', () => {
     const boq = parseFixture();
     const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目', strategy: villageMunicipalStrategy });
-    const text = renderBlueprintDataText(data);
+    const text = renderBlueprintDataTextForBlock(data, { blockTokens: ['混凝土管道DN200'] });
     const materialLine = text.split('\n').find(line => line.includes('物资计划'))!;
     expect(materialLine).toBeDefined();
     expect(materialLine).toContain('混凝土管道DN200（C20 DN200）');
@@ -615,7 +614,7 @@ describe('渲染函数（执行层输入）', () => {
   it('参数桶渲染：金额类红线事实只进「商务禁区」行，不进正文口径行', () => {
     const boq = parseFixture();
     const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目', strategy: villageMunicipalStrategy });
-    const text = renderBlueprintDataText(data);
+    const text = renderBlueprintDataTextForBlock(data, { blockTokens: ['道路工程', '排水工程'] });
     expect(text).toContain('评审红线事实');
     expect(text).toContain('二级养护');
     // 金额禁区：暂列金额仅出现在禁区声明行（must_cite 行过滤掉 amount 条目）
@@ -625,12 +624,13 @@ describe('渲染函数（执行层输入）', () => {
     expect(text).toContain('金额类红线事实（商务禁区，不进正文）');
   });
 
-  it('章切片渲染：must_cite 参数显性声明，工作包工序链/参数原样展开', () => {
+  it('块级切片渲染：must_cite 参数显性声明，工作包工序链/参数原样展开', () => {
     const boq = parseFixture();
+    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目', strategy: villageMunicipalStrategy });
     const outline = buildBlueprintOutline({ chapterTitles: ['主要分部分项工 程施工方案'], boq, docType: '单位工程施工组织设计' });
     const chapter = outline.chapters[0]!;
     expect(chapter.subSections.length).toBeGreaterThan(0);
-    const slice = renderBlueprintChapterSlice(chapter);
+    const slice = renderBlueprintBlockSlice(chapter, data, { blockTitle: chapter.title, subPointTitles: chapter.subSections.flatMap(section => section.workPackages.map(workPackage => workPackage.name)) });
     expect(slice).toContain('must_cite');
     expect(slice).toContain('工序链');
     const pipeSub = chapter.subSections.find(section => section.title === '排水工程');
@@ -638,10 +638,12 @@ describe('渲染函数（执行层输入）', () => {
     expect(pipeSub?.workPackages[0]?.coveredSeqs).toEqual([2, 4]);
   });
 
-  it('章切片头部注入写作三源规则（与全局提示词共用同一份模板）', () => {
+  it('块级切片头部注入写作三源规则（与全局提示词共用同一份模板）', () => {
     const boq = parseFixture();
-    const outline = buildBlueprintOutline({ chapterTitles: ['主要分部分项工 程施工方案'], boq, docType: '单位工程施工组织设计' });
-    const slice = renderBlueprintChapterSlice(outline.chapters[0]!);
+    const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目', strategy: villageMunicipalStrategy });
+    const blueprintOutline = buildBlueprintOutline({ chapterTitles: ['主要分部分项工 程施工方案'], boq, docType: '单位工程施工组织设计' });
+    const headChapter = blueprintOutline.chapters[0]!;
+    const slice = renderBlueprintBlockSlice(headChapter, data, { blockTitle: headChapter.title, subPointTitles: headChapter.subSections.flatMap(section => section.workPackages.map(workPackage => workPackage.name)) });
     expect(slice).toContain('【写作三源规则】');
     expect(slice).toContain('D·系统推导源');
     expect(slice).toContain('三源之外一律不得写入');
@@ -852,7 +854,7 @@ describe('二期蓝图接管（执行层切换）', () => {
 
   it('蓝图参数桶渲染：取代主表口径的权威文本包含工期/劳动力峰值唯一口径/金额禁区声明', () => {
     const { data } = buildChapterSliceWithData();
-    const text = renderBlueprintDataText(data);
+    const text = renderBlueprintDataTextForBlock(data, { blockTokens: ['道路工程', '排水工程'] });
     expect(text).toContain('总工期：360 日历天');
     expect(text).toContain('金额禁区');
     // 劳动力峰值不再渲染区间，只渲染唯一口径值
@@ -1258,7 +1260,7 @@ describe('P3.6 源头修复（A1 工期锚点 / A2 村数正则 / A3 序号前�
   it('A4 参数桶渲染不泄漏区间端点：工种构成渲染单值人数、机械台数只渲染单值', () => {
     const boq = parseFixture();
     const { data } = buildBlueprintData({ boq, basicFacts: '项目名称：丰乐镇建设项目 工期：360日历天 质量标准：合格', projectName: '丰乐镇建设项目', strategy: villageMunicipalStrategy });
-    const text = renderBlueprintDataText(data);
+    const text = renderBlueprintDataTextForBlock(data, { blockTokens: ['道路工程', '排水工程'] });
     const tradeLine = text.split('\n').find(line => line.includes('工种构成'))!;
     expect(tradeLine).toBeDefined();
     // 丰乐镇第 4 轮：工种构成行 = composition 归一化单值人数（合计恒等于峰值），不再只渲染名单

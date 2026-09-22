@@ -1,5 +1,5 @@
 import type { BlueprintAuthorityId } from './integratedBlueprint';
-import { getLocalSemanticProvider } from './semanticSimilarity';
+import { getLocalSemanticProvider, SEMANTIC_COVERAGE_THRESHOLD } from './semanticSimilarity';
 
 /**
  * P17 章标题意图语义分类器（第 4 期）：三处标题意图判定从正则关键词封闭集迁移到
@@ -81,7 +81,7 @@ export async function buildChapterIntentClassifier(chapterTitles: readonly strin
 
   const semanticHit = (title: string, anchorVecs: number[][]): boolean => {
     const vector = titleVectors.get(title);
-    return Boolean(vector && vector.length > 0 && maxSimilarity(vector, anchorVecs) >= 0.6);
+    return Boolean(vector && vector.length > 0 && maxSimilarity(vector, anchorVecs) >= SEMANTIC_COVERAGE_THRESHOLD);
   };
 
   return {

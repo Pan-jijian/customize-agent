@@ -47,7 +47,7 @@ const MATERIAL_WRITE_RULES = [DEFAULT_WRITING_SPEC.writeRules.material];
 // ═══════ 写作三源规则（M4：全局提示词与章切片共用的单点文案） ═══════
 // F 项目事实原样引用 / D 系统推导值原样引用且禁重算 / P 公共规范附编号 / 三源外不写。
 // 消费点：markdownComposer.FORMAL_WRITING_RULES（全局写作提示词，替换旧“计划类字段必须自行推导”矛盾条目）
-// 与 integratedBlueprint.renderBlueprintChapterSlice（章切片权威提示头部）。
+// 与 integratedBlueprint.renderBlueprintBlockSlice（块级切片权威提示头部）。
 export const THREE_SOURCE_WRITE_RULES = DEFAULT_WRITING_SPEC.threeSourceRules;
 
 /** 小节锚定写法规则统一入口：按标题查表，返回应注入的专项规则行（无命中返回空数组） */

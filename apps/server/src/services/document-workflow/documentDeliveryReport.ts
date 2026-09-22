@@ -115,6 +115,23 @@ export function chapterDependencyIssues(chapters: Array<Pick<DocumentDraftChapte
 }
 
 export function documentDeliveryScoreIssues(markdown: string, chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>, factsModel: DocumentFactsModel, analyses?: Map<string, ProfessionalDepthAnalysis>): ValidationIssue[] {
+  /**
+   * 4.55.22 根修「未执行 = 满分」：原实现每个维度都是 `issues.length === 0 ? 2 : 1`，
+   * 而底层四个检查函数在**输入缺失**时都返回 `[]`（无分析、正文过短、事实桶为空…）——
+   * 于是「检查根本没跑」与「检查通过」同分。极端形态：空章草稿 + 无分析 →
+   * 事实 2 + 结构 1 + 专业 2 + 可执行 2 + 证据 2 = **9/10 且建议「可交付」**，
+   * 而实际上没有任何一项被真正核过（历史缺陷：重建时 finalChapterDrafts 为空）。
+   * 现口径：先判**该维度是否具备可测输入**，不具备即记 `未测`（不计分、不计入满分分母），
+   * 并在消息中显式列出未测维度；「可交付」只在**全部维度均已测且达标**时给出。
+   */
+  const analysesUsable = (analyses?.size ?? 0) > 0;
+  const applicable = {
+    factuality: documentTextLength(markdown) >= 80,
+    structure: chapters.length > 0,
+    depth: analysesUsable,
+    executable: analysesUsable,
+    evidence: chapters.length > 0,
+  } as const;
   const scoreParts = {
     factuality: generatedFactVerificationIssues(markdown, factsModel).some(issue => issue.level === 'error') ? 0 : 2,
     structure: chapters.length > 0 && chapters.every(chapter => markdown.includes(chapter.title) && documentTextLength(chapter.content) >= 600) ? 2 : 1,
@@ -122,11 +139,20 @@ export function documentDeliveryScoreIssues(markdown: string, chapters: Array<Pi
     executable: chapterDependencyIssues(chapters, analyses).length === 0 ? 2 : 1,
     evidence: evidenceUsageCoverageIssues(markdown, factsModel).length === 0 ? 2 : 1,
   };
-  const total = scoreParts.factuality + scoreParts.structure + scoreParts.depth + scoreParts.executable + scoreParts.evidence;
+  const measuredKeys = (Object.keys(scoreParts) as Array<keyof typeof scoreParts>).filter(key => applicable[key]);
+  const unmeasuredKeys = (Object.keys(scoreParts) as Array<keyof typeof scoreParts>).filter(key => !applicable[key]);
+  const total = measuredKeys.reduce((sum, key) => sum + scoreParts[key], 0);
+  const full = measuredKeys.length * 2;
+  const label: Record<keyof typeof scoreParts, string> = { factuality: '事实', structure: '结构', depth: '专业', executable: '可执行', evidence: '证据' };
+  const unmeasuredText = unmeasuredKeys.map(key => label[key]).join('、');
   return [{
     // 交付评分汇总报告是元信息而非正文缺陷，按 info 计入，避免污染缺陷计分
     level: 'info',
-    message: `文档交付评分报告：总分 ${total}/10，事实${scoreParts.factuality}，结构${scoreParts.structure}，专业${scoreParts.depth}，可执行${scoreParts.executable}，证据${scoreParts.evidence}`,
-    suggestion: total >= 8 ? '可交付，但建议继续优化证据使用覆盖率和章节依赖链路。' : '建议优先修复低分维度后再导出。',
+    message: `文档交付评分报告：总分 ${total}/${full}（已测 ${measuredKeys.length}/5 维），`
+      + measuredKeys.map(key => `${label[key]}${scoreParts[key]}`).join('，')
+      + (unmeasuredKeys.length > 0 ? `；**未测维度（本次无输入，未计分）**：${unmeasuredText}` : ''),
+    suggestion: unmeasuredKeys.length > 0
+      ? `存在未测维度（${unmeasuredText}）：该部分本次**未被核验**，本分数不构成放行依据；请补齐输入（章草稿/AI 分析）后重跑。`
+      : total >= full * 0.8 ? '可交付，但建议继续优化证据使用覆盖率和章节依赖链路。' : '建议优先修复低分维度后再导出。',
   }];
 }

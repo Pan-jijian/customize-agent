@@ -10,7 +10,6 @@ import {
   authorityCoverageGaps,
   buildAuthorityIndex,
   collectNumericLeaves,
-  quantityValueIsLegal,
   renderAuthorityDomains,
 } from '@/services/document-workflow/authorityIndex';
 import type { AuthorityIndex } from '@/services/document-workflow/authorityIndex';
@@ -170,24 +169,6 @@ describe('覆盖契约（collectNumericLeaves ↔ 条目 paths 双向断言）',
     const data = makeBlueprintData();
     const gaps = authorityCoverageGaps(data);
     expect(gaps.filter(path => /\.seq$/u.test(path))).toEqual([]);
-  });
-});
-
-describe('quantityValueIsLegal（分村多值合法性判定）', () => {
-  it('合计值与分组值均合法；范围外值不合法', () => {
-    const index = buildAuthorityIndex(makeBlueprintData());
-    const trench = entryOf(index, '挖沟槽土方');
-    expect(quantityValueIsLegal(trench, 20420.39)).toBe(true);
-    expect(quantityValueIsLegal(trench, 838.81)).toBe(true);
-    expect(quantityValueIsLegal(trench, 213.99)).toBe(true);
-    expect(quantityValueIsLegal(trench, 999.99)).toBe(false);
-  });
-
-  it('无分组明细的条目只认合计值', () => {
-    const index = buildAuthorityIndex(makeBlueprintData());
-    const well = entryOf(index, '塑料检查井');
-    expect(quantityValueIsLegal(well, 555)).toBe(true);
-    expect(quantityValueIsLegal(well, 100)).toBe(false);
   });
 });
 

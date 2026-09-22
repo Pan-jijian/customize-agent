@@ -74,7 +74,8 @@ describe('reviewDataConsistency（LLM 批量审查）', () => {
 
   it('数值句不足 2 条 → 不调用 LLM', async () => {
     const result = await reviewDataConsistency('本段无任何数字。');
-    expect(result).toEqual([]);
+    expect(result.conflicts).toEqual([]);
+    expect(result.failure).toBeUndefined();
     expect(llmMock).not.toHaveBeenCalled();
   });
 
@@ -87,20 +88,30 @@ describe('reviewDataConsistency（LLM 批量审查）', () => {
       ],
     });
     const result = await reviewDataConsistency('高峰期投入80人。\n高峰期投入120人。');
-    expect(result).toHaveLength(1);
-    expect(result[0].kind).toBe('labor');
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0].kind).toBe('labor');
   });
 
-  it('LLM 返回空清单 → 空数组', async () => {
+  it('LLM 返回空清单 → 空数组且无 failure（确实无矛盾）', async () => {
     llmMock.mockResolvedValue({ conflicts: [] });
     const result = await reviewDataConsistency('高峰期投入80人。\n高峰期投入120人。');
-    expect(result).toEqual([]);
+    expect(result.conflicts).toEqual([]);
+    expect(result.failure).toBeUndefined();
   });
 
-  it('最多保留 6 条', async () => {
+  // 4.55.22：原 `.slice(0, 6)` 与 schema 注释「不得以截断检测结果实现防爆量」自相矛盾，
+  // 第 7 条起的矛盾永不成为修复目标。截断已删除，展示层限幅不属检测职责。
+  it('不截断：8 条矛盾全部保留（原实现截到 6 条）', async () => {
     llmMock.mockResolvedValue({ conflicts: Array.from({ length: 8 }, (_, index) => conflict({ description: `矛盾${index}`, confidence: 0.9 })) });
     const result = await reviewDataConsistency('高峰期投入80人。\n高峰期投入120人。');
-    expect(result).toHaveLength(6);
+    expect(result.conflicts).toHaveLength(8);
+  });
+
+  it('LLM 调用失败 → 返回 failure，不得冒充「全文一致」', async () => {
+    llmMock.mockResolvedValue(undefined);
+    const result = await reviewDataConsistency('高峰期投入80人。\n高峰期投入120人。');
+    expect(result.conflicts).toEqual([]);
+    expect(result.failure).toBeTruthy();
   });
 });
 

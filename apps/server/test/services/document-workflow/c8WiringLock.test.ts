@@ -186,7 +186,7 @@ describe('C8 评分口径版本锁定', () => {
     expect(calibrationSrc).toContain('评分口径变更点：');
   });
 
-  it('全出口常量派生（主尺/从属/专业分均引用 SCORING_CALIBRATION_VERSION）', () => {
-    expect(calibrationSrc.match(/version: SCORING_CALIBRATION_VERSION,/gu)?.length ?? 0).toBeGreaterThanOrEqual(3);
+  it('全出口常量派生（主尺/专业分均引用 SCORING_CALIBRATION_VERSION）', () => {
+    expect(calibrationSrc.match(/version: SCORING_CALIBRATION_VERSION,/gu)?.length ?? 0).toBeGreaterThanOrEqual(2);
   });
 });

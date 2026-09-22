@@ -428,7 +428,10 @@ export function extractProjectScaleSummary(factsModel?: DocumentFactsModel | nul
 
 /** 单位归一（权威单位 → 正文匹配单位集）：清单单位口径与正文写法对齐（m2/m²/㎡ 同义）。
  * V5 P4b：自 fixers.ts 提升至权威层，检测器（crossProjectValueCopyIssues）与修复器
- * （fixQuantityAuthorityConflicts）共用同一单位匹配口径（检测定位=修复定位，双份实现会漂移）。 */
+ * （fixQuantityAuthorityConflicts）共用同一单位匹配口径（检测定位=修复定位，双份实现会漂移）。
+ * **唯一权威来源**：蓝图引用结构定位（integratedBlueprint/citation.collectBlueprintCitationCandidates）
+ * 亦 import 本实现——此前 render.ts 另有一份逐字副本 quantityUnitDetectVariants（注释称同源但无共享
+ * import），已删除，单位口径只此一处。 */
 
 export function quantityUnitVariants(unit: string): string {
   const normalized = unit.trim().toLowerCase();

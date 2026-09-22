@@ -97,29 +97,3 @@ export function textImportanceScore(text: string): number {
 
   return score;
 }
-
-/**
- * 事实重要性评分：优先保留数值型、项目基础型、必需型事实
- */
-export function factImportanceScore(fact: { key?: string; fieldName?: string; fieldId?: string; value?: unknown; required?: boolean }): number {
-  let score = 0;
-  const label = `${fact.key || ''}${fact.fieldName || ''}${fact.fieldId || ''}`;
-  const value = typeof fact.value === 'string' ? fact.value : typeof fact.value === 'number' ? String(fact.value) : '';
-
-  // 必需事实 → 最高优先级
-  if (fact.required) score += 10;
-
-  // 含数值 → 高优先级
-  if (/\d/u.test(value)) score += 5;
-
-  // 项目基础事实
-  if (/项目名称|工程名称|项目编号|招标人|建设单位|发包人|建设地点|建设规模|招标范围|施工范围|计划工期|合同工期|质量标准|合同估算|投资估算|最高投标限价/u.test(label)) score += 4;
-
-  // 有单位的值
-  if (/m[23²³]?|mm|cm|km|t|kg|台|套|个|万元|元|%|MPa|日历天/u.test(value)) score += 3;
-
-  // 来源来自招标文件
-  if (/招标文件|招标公告|投标人须知|前附表/u.test(fact.fieldId || '')) score += 2;
-
-  return score;
-}

@@ -754,9 +754,22 @@ export function hazardExclusionContradictionIssues(markdown: string): Validation
 
 // ── 7. 六个百分百逐项覆盖（R8）：扬尘治理六项要求逐项命中，零散措施不等于体系响应 ──
 
+/** 拆迁工地项条目名（六项中的唯一可豁免项）：条目表、词表、豁免判定与覆盖面判定共用同一字面，
+ * 防三处各写一份条目名字面导致判定错位（此前写作注入/招标词面兜底/检测三份词表各抄一份）。 */
+
+export const SIX_HUNDRED_PERCENT_DEMOLITION_ITEM = '拆迁工地100%湿法作业';
+
+/** 拆迁项豁免句（**写作侧按此原句下发**，检测侧豁免判定必须命中本句）：
+ * 新建工程无拆迁内容时，正文显式说明本句即视为该项闭环，不得判定缺失
+ * （评分报告问题3：六项必须逐项落实或显式豁免，不得省略）。 */
+
+export const SIX_HUNDRED_PERCENT_DEMOLITION_EXEMPT_SENTENCE = '本项目无拆迁工程，不涉及拆迁工地湿法作业';
+
 /** 扬尘六个百分百六项（招标规范固定封闭集）：每项一条语义判定 query（国家规范固定条目名）。
  * 判定口径（四层分离架构，W2/P1 改造）：纯语义判定，本地 bge 余弦 ≥0.6（本地 ONNX 推理恒可用，
- * 无不可用降级路径，判定语义全权由 bge 负责）。 */
+ * 无不可用降级路径，判定语义全权由 bge 负责）。
+ * **条目名唯一权威来源**：写作侧逐项注入（generationStages/stageChapterLoop）与招标条款词面兜底
+ * （tenderRequirements）均 import 本表渲染条目名，不得再各自抄一份字面。 */
 
 export const SIX_HUNDRED_PERCENT_ITEMS = [
   { name: '施工工地周边100%围挡', query: '施工工地周边设置围挡封闭管理' },
@@ -765,9 +778,12 @@ export const SIX_HUNDRED_PERCENT_ITEMS = [
   { name: '施工现场地面100%硬化', query: '施工现场场地地面硬化' },
   // query 必须限定“拆迁工地”语义：不限定时土方开挖“湿法作业”会被误命中，
   // 掩盖真缺失（评分报告问题3：拆迁工地100%湿法作业未落实）
-  { name: '拆迁工地100%湿法作业', query: '拆迁工地湿法作业洒水降尘' },
+  { name: SIX_HUNDRED_PERCENT_DEMOLITION_ITEM, query: '拆迁工地湿法作业洒水降尘' },
   { name: '渣土车辆100%密闭运输', query: '渣土车辆密闭运输防止遗撒' },
 ] as const;
+
+/** 条目名 → 词面判定模式（Record 键即条目名：以条目名联合类型约束键集，条目表增删项时编译期暴露漏配） */
+type SixHundredPercentItemName = (typeof SIX_HUNDRED_PERCENT_ITEMS)[number]['name'];
 
 /** requirements-coverage 交付门禁语义通道句集上限（全量档，r11 链尾滑移治理）：
  * 采样额度变化即 stride 变化、采样集整体洗牌——边缘条款最佳相似度 0.60x→0.57 滑出 0.6 阈值，
@@ -805,37 +821,74 @@ export function bodySentencesForSemantic(markdown: string, limit = 400): string[
 export async function judgeQueryCoverage(queries: Array<{ key: string; text: string }>, sentences: string[]): Promise<Map<string, boolean>> {
   if (sentences.length === 0 || queries.length === 0) return new Map();
   const similarity = await buildSemanticSimilarity(queries.map(item => item.text), sentences);
-  return new Map(queries.map(item => [item.key, sentences.some(sentence => similarity(item.text, sentence) >= 0.6)] as [string, boolean]));
+  return new Map(queries.map(item => [item.key, sentences.some(sentence => similarity(item.text, sentence) >= SEMANTIC_COVERAGE_THRESHOLD)] as [string, boolean]));
 }
 
 /** B6 六个百分百词面确定性判定（丰乐镇第五轮实测）：六项规范条目名为封闭词表，
  * 枚举句（“施工工地周边100%围挡、物料堆放100%覆盖、…”六项标准逐项落位）词面全命中，
- * 但 bge 对长枚举句语义稀释判缺失（5/6 误报）；词面命中即该项落实，与岗位词表口径同源。 */
+ * 但 bge 对长枚举句语义稀释判缺失（5/6 误报）；词面命中即该项落实，与岗位词表口径同源。
+ * **唯一权威词表**：写作侧注入条目名（stageChapterLoop）与招标条款词面兜底（tenderRequirements）同源引用本表。
+ * 拆迁项刻意**不**收裸「无拆迁|不涉及拆迁」：裸短语出现在任意语境（如「临时设施布置不涉及拆迁补偿」）
+ * 不代表项目整体无拆迁工程，不得自豁免——豁免只认工程主体＋短距否定的豁免句（见下）。 */
 
-const SIX_HUNDRED_PERCENT_LEXICAL: Record<string, RegExp> = {
+export const SIX_HUNDRED_PERCENT_LEXICAL: Record<SixHundredPercentItemName, RegExp> = {
   '施工工地周边100%围挡': /100%围挡|周边100%围挡/u,
   '物料堆放100%覆盖': /物料堆放100%覆盖|物料堆放.{0,8}覆盖|密目网.*覆盖|覆盖.{0,4}密目网/u,
   '出入车辆100%冲洗': /出入车辆100%冲洗|车辆.{0,10}冲洗|冲洗.{0,10}车辆|冲洗点/u,
   '施工现场地面100%硬化': /施工现场地面100%硬化|地面100%硬化/u,
-  '拆迁工地100%湿法作业': /拆迁工地100%湿法作业|拆迁.{0,10}湿法作业|湿法作业.{0,10}拆迁/u,
+  [SIX_HUNDRED_PERCENT_DEMOLITION_ITEM]: /拆迁工地100%湿法作业|拆迁.{0,10}湿法作业|湿法作业.{0,10}拆迁/u,
   '渣土车辆100%密闭运输': /渣土车辆100%密闭运输|密闭运输|密闭式/u,
 };
+
+/** 六项词面项（按规范条目顺序，条目名 + 词面模式）：消费者（写作注入/招标条款词面兜底）按本表遍历，
+ * 不再各自持一份「名字 + 正则」副本——词表与条目顺序单源，检测/写作/招标三侧恒同。 */
+
+export const SIX_HUNDRED_PERCENT_LEXICAL_ITEMS: ReadonlyArray<{ name: string; pattern: RegExp }> =
+  SIX_HUNDRED_PERCENT_ITEMS.map(item => ({ name: item.name, pattern: SIX_HUNDRED_PERCENT_LEXICAL[item.name] }));
 
 /** 六项词面兜底命中判定：任一词面命中即判该项落实（封闭词表确定性层，bge 判定前） */
 
 export function sixHundredPercentLexicalHit(name: string, sentences: string[]): boolean {
-  const re = SIX_HUNDRED_PERCENT_LEXICAL[name];
+  const re: RegExp | undefined = (SIX_HUNDRED_PERCENT_LEXICAL as Record<string, RegExp>)[name];
   if (!re) return false;
   return sentences.some(sentence => re.test(sentence));
 }
 
-export async function sixHundredPercentCoverageIssues(markdown: string): Promise<ValidationIssue[]> {
+/** 拆迁项豁免判定（D2）：新建工程无拆迁内容时，正文显式说明“本项目无拆迁工程，不涉及拆迁工地湿法作业”
+ * 即视为该项闭环，不得判定缺失（评分报告问题3：六项必须逐项落实或显式豁免，不得省略）。
+ * 豁免句必须带工程主语（本项目/本工程等）+ 短距否定词：任意语境出现「不涉及拆迁」类短语
+ * （如“临时设施布置不涉及拆迁补偿”）不代表项目整体无拆迁工程，不得豁免——**裸短语不得自豁免**。 */
+
+export const SIX_HUNDRED_PERCENT_DEMOLITION_EXEMPT_RE = /(?:本项目|本工程|该工程|该项目|本标段|本施工项目)[^。；;\n]{0,30}(?:无拆迁|不涉及拆迁|无房屋拆除|无拆除)/u;
+
+export function sixHundredPercentDemolitionExempt(text: string): boolean {
+  return SIX_HUNDRED_PERCENT_DEMOLITION_EXEMPT_RE.test(text);
+}
+
+/** 六项词面兜底命中数（全文本口径，含拆迁项豁免）：与 sixHundredPercentCoverageIssues 的逐项判定同源——
+ * 每项词面命中即算落实，「拆迁工地100%湿法作业」另接受工程主体＋短距否定的豁免句。
+ * 写作侧注入（stageChapterLoop）与招标条款词面兜底（tenderRequirements）必须与本计数同源：
+ * 写作侧指令的豁免句必须能被本计数认下，检测侧不得比写作侧更严（否则「写了却判缺失」）。 */
+
+export function sixHundredPercentLexicalHitCount(text: string): number {
+  return SIX_HUNDRED_PERCENT_LEXICAL_ITEMS.filter(item =>
+    item.pattern.test(text) || (item.name === SIX_HUNDRED_PERCENT_DEMOLITION_ITEM && sixHundredPercentDemolitionExempt(text))).length;
+}
+
+export async function sixHundredPercentCoverageIssues(markdown: string, options: { chapterTitles?: string[] } = {}): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = [];
-  // 文档没有任何扬尘/环保治理内容时不检测（非施组类文档不制造义务）
-  if (!/扬尘|环保|文明施工|绿色施工/u.test(markdown)) return issues;
+  // 4.55.22 根修 fail-open：原判据「正文没提扬尘/环保就整体跳过」——**越不写越不查**：
+  // 把整章文明施工/环保删掉（全文零「扬尘/环保/文明施工/绿色施工」）反而无任何阻断，
+  // 正是本门禁要拦的形态。义务来源应是**规划结构/招标要求**，不是"正文恰好提到了"。
+  // 现口径：大纲规划了文明施工/环保/绿色/扬尘类章节 → 无条件检查（该章为空即报缺失）；
+  // 未规划该类章节且正文亦无相关内容 → 非施组类文档，不制造义务（保持原豁免）。
+  const plannedEnvironmentChapter = (options.chapterTitles || []).some(title => /文明|环保|绿色|扬尘|环境/u.test(title));
+  if (!plannedEnvironmentChapter && !/扬尘|环保|文明施工|绿色施工/u.test(markdown)) return issues;
   // 语义判定句集：按扬尘治理词面预筛全量句，不使用 bodySentencesForSemantic 均匀采样——
   // 采样 stride 会跳过中后部扬尘句（4.19.3 真实回归：6.2.2 小节「物料堆放100%覆盖」句不在
   // 400 句采样内 → 5/6 误报缺失）。预筛句数量级小，bge 全量判定无性能压力。
+  // 注：表格行与标题行**不**入语义池（Z6 边界决策，有锁定用例）——表格逐项呈现六个百分百
+  // 时不满足本门禁，属既有口径；如需变更须先验证其真实影响，不在本次范围内。
   const dustSentences = [...new Set(markdown.split(/\r?\n/u).flatMap(line => {
     const trimmed = line.trim();
     if (!trimmed || /^#{1,6}\s/u.test(trimmed) || /^\s*\|/u.test(trimmed)) return [];
@@ -843,14 +896,12 @@ export async function sixHundredPercentCoverageIssues(markdown: string): Promise
     return trimmed.split(/(?<=[。！？!?；;])/u).map(part => part.trim()).filter(sentence => sentence.length >= 8 && sentence.length <= 120);
   }))];
   const coverage = await judgeQueryCoverage(SIX_HUNDRED_PERCENT_ITEMS.map(item => ({ key: item.name, text: item.query })), dustSentences);
-  // 拆迁工地豁免（D2）：新建工程无拆迁内容时，正文显式说明“本项目无拆迁工程，不涉及拆迁工地湿法作业”
-  // 即视为该项闭环，不得判定缺失（评分报告问题3：六项必须逐项落实或显式豁免，不得省略）。
-  // 豁免句必须带工程主语（本项目/本工程等）+ 短距否定词：任意语境出现「不涉及拆迁」类短语
-  // （如“临时设施布置不涉及拆迁补偿”）不代表项目整体无拆迁工程，不得豁免
-  const demolitionExempt = /(?:本项目|本工程|该工程|该项目|本标段|本施工项目)[^。；;\n]{0,30}(?:无拆迁|不涉及拆迁|无房屋拆除|无拆除)/u.test(markdown);
+  // 拆迁工地豁免（D2）：判定与判据单源——sixHundredPercentDemolitionExempt（工程主语 + 短距否定，
+  // 裸「不涉及拆迁」短语不自豁免），语义说明见该常量处
+  const demolitionExempt = sixHundredPercentDemolitionExempt(markdown);
   const missing = SIX_HUNDRED_PERCENT_ITEMS
     .filter(item => !coverage.get(item.name) && !sixHundredPercentLexicalHit(item.name, dustSentences))
-    .filter(item => !(item.name === '拆迁工地100%湿法作业' && demolitionExempt))
+    .filter(item => !(item.name === SIX_HUNDRED_PERCENT_DEMOLITION_ITEM && demolitionExempt))
     .map(item => item.name);
   if (missing.length === 0) return issues;
   issues.push({
@@ -2823,25 +2874,49 @@ export function excavationHazardClassificationIssues(markdown: string, factsMode
   const maxDepth = excavationDepthFromFacts(factsModel);
   if (maxDepth === undefined || maxDepth < 3) return [];
   const issues: ValidationIssue[] = [];
-  if (maxDepth >= 3 && !/危大工程/u.test(markdown)) {
+  /**
+   * 4.55.22 根修盲区：原判据是「全文是否出现『危大工程』四个字」——
+   * 而规范套话（「危险性较大的分部分项工程按住建部令第37号管理…超过一定规模的危大工程须专家论证」）
+   * 本身就含这四个字，于是**照抄规范、零项目判定**的正文反被判为"判定已落地"，
+   * 与本检测器自己的 suggestion（「不得只写判定规则不落地本项目」）恰好相反。
+   * 现口径：**同句内必须同时出现判定词与本项目实测深度值**（数值边界匹配，防 5.15 被 15 命中）。
+   */
+  const depthToken = escapeRegexLiteral(String(maxDepth));
+  const depthNumberRe = new RegExp(`(?<![\\d.])${depthToken}(?![\\d])`, 'u');
+  // 判据窗口 = 关键词所在句及其**前后各一句**（±150 字）：既排除"规范套话远在千里之外"
+  // 的假落地，又不强求深度与分级结论挤在同一句（实测常见写法是「本工程基坑开挖深度 5.15m。
+  // 依据规定…属危大工程」——分句陈述，同句判据会误报）。
+  // 判据窗口 = 关键词**前后各 120 字**（归一化后）：既排除「规范套话远在千里之外」的假落地，
+  // 又不强求深度与分级结论挤在同一句——实测常见写法是「本工程基坑开挖深度 5.15m。依据规定…属危大工程」，
+  // 严格同句会误报。数值边界匹配防 5.15 被 15/51 命中。
+  const normalizedMarkdown = markdown.replace(/\s+/gu, '');
+  const hasProjectBoundClaim = (keyword: string): boolean => {
+    for (const match of normalizedMarkdown.matchAll(new RegExp(keyword, 'gu'))) {
+      const offset = match.index ?? 0;
+      const window = normalizedMarkdown.slice(Math.max(0, offset - 120), offset + match[0].length + 120);
+      if (depthNumberRe.test(window)) return true;
+    }
+    return false;
+  };
+  if (maxDepth >= 3 && !hasProjectBoundClaim('危大工程')) {
     issues.push({
       level: 'error',
       severity: 'blocker',
       category: 'fact_consistency',
       owner: 'llm',
       repairability: 'llm_repairable',
-      message: `危大工程判定缺失：资料基坑开挖深度 ${maxDepth}m（≥3m），正文必须出现危大工程判定标注`,
+      message: `危大工程判定缺失：资料基坑开挖深度 ${maxDepth}m（≥3m），正文未在判定结论邻近处给出本工程实际深度值（仅出现判定规则套话不算落地）`,
       suggestion: `依据住建部令第37号，开挖深度≥3m 属危大工程：在基坑支护/危大工程清单小节写明本工程实际深度 ${maxDepth}m 与危大工程判定结论，不得只写判定规则不落地本项目。`,
     });
   }
-  if (maxDepth >= 5 && !/超过一定规模/u.test(markdown)) {
+  if (maxDepth >= 5 && !hasProjectBoundClaim('超过一定规模')) {
     issues.push({
       level: 'error',
       severity: 'blocker',
       category: 'fact_consistency',
       owner: 'llm',
       repairability: 'llm_repairable',
-      message: `超危大工程判定缺失：资料基坑开挖深度 ${maxDepth}m（≥5m），正文必须出现「超过一定规模」判定与专家论证要求`,
+      message: `超危大工程判定缺失：资料基坑开挖深度 ${maxDepth}m（≥5m），正文未在「超过一定规模」判定邻近处给出本工程实际深度值（须同时写明专家论证要求）`,
       suggestion: `开挖深度≥5m 属超过一定规模的危大工程：写明本工程深度 ${maxDepth}m 对应分级结论，专项施工方案必须经专家论证，不得只写判定规则不落地分级。`,
     });
   }

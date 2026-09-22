@@ -5,9 +5,8 @@
  * 1. 运行遥测：真实草稿 executionStages 中的 writer-block 调用输入明细
  *    （`writer-block:章 17次/186.6万字（L3 3.8万字）` → 平均每调用输入字符 = 判断单块输入是否超标）；
  * 2. 资产渲染：真实蓝图资产（assets/blueprint.json）经写作层真实渲染器
- *    renderBlueprintDataText / renderBlueprintChapterSlice / renderBlueprintMustCiteValues 输出的字符量
- *    （改造前全量口径基线），以及 s1-slim 块级聚焦渲染 renderBlueprintDataTextForBlock /
- *    renderBlueprintBlockSlice 的块内最大值（改造后逐块注入 prompt 的实际量）。
+ *    renderBlueprintMustCiteValues 输出的字符量，以及 s1-slim 块级聚焦渲染 renderBlueprintDataTextForBlock /
+ *    renderBlueprintBlockSlice 的块内最大值（逐块注入 prompt 的实际量）。
  *
  * 运行：npx vitest run --config vitest.manual.config.ts apps/server/test/slim-block-input.manual.ts
  * env：PROJECT_ROOT（默认本仓库根）；DOC_ID（指定遥测草稿，默认自动取最近含 writer-block 遥测的一篇）。
@@ -16,7 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { findBlueprintChapter, loadBlueprintAsset, renderBlueprintBlockSlice, renderBlueprintChapterSlice, renderBlueprintDataText, renderBlueprintDataTextForBlock, renderBlueprintMustCiteValues } from '@/services/document-workflow/integratedBlueprint';
+import { findBlueprintChapter, loadBlueprintAsset, renderBlueprintBlockSlice, renderBlueprintDataTextForBlock, renderBlueprintMustCiteValues } from '@/services/document-workflow/integratedBlueprint';
 import type { IntegratedBlueprint } from '@/services/document-workflow/integratedBlueprint';
 import { buildAuthorityIndex, renderAuthorityDomains } from '@/services/document-workflow/authorityIndex';
 import type { AuthorityDomain } from '@/services/document-workflow/authorityIndex';
@@ -123,21 +122,16 @@ describe('s1-slim 单块输入探针（实测与超标定位）', () => {
   it('2) 真实蓝图渲染段尺寸（逐块注入 prompt 的恒定量主体）', () => {
     const blueprint = loadBlueprintAsset(PROJECT_ROOT);
     expect(blueprint, '未找到蓝图资产（generatedRoot/assets/blueprint.json）').toBeDefined();
-    const pass = Boolean(blueprint!.validation?.passed);
-    const dataText = pass ? renderBlueprintDataText(blueprint!.data) : '';
-    console.log(`\n[蓝图] validation.passed=${pass}`);
-    console.log(`[蓝图] blueprintDataText（L1 恒定段，同文档所有块逐块注入）：${dataText.length} 字符`);
+    console.log(`\n[蓝图] validation.passed=${Boolean(blueprint!.validation?.passed)}`);
     const rows = (blueprint!.outline?.chapters ?? []).map(chapter => {
       const slice = findBlueprintChapter(blueprint!, chapter.title);
-      const sliceText = slice ? renderBlueprintChapterSlice(slice, blueprint!.data) : '';
       const mustCite = slice ? renderBlueprintMustCiteValues(slice, blueprint!.data) : '';
-      return { title: chapter.title, slice: sliceText.length, mustCite: mustCite.length };
-    }).sort((left, right) => right.slice - left.slice);
-    console.log(`[蓝图] 章切片（L2 章级段，逐章注入）：${rows.length} 章`);
-    for (const row of rows.slice(0, 12)) console.log(`    ${row.title}: slice=${row.slice} mustCite=${row.mustCite}`);
-    const maxSlice = rows[0]?.slice ?? 0;
+      return { title: chapter.title, mustCite: mustCite.length };
+    }).sort((left, right) => right.mustCite - left.mustCite);
+    console.log(`[蓝图] mustCite 清单（块质检反馈段）：${rows.length} 章`);
+    for (const row of rows.slice(0, 12)) console.log(`    ${row.title}: mustCite=${row.mustCite}`);
     const maxMustCite = Math.max(0, ...rows.map(row => row.mustCite));
-    console.log(`[蓝图] 最大章切片：${maxSlice}；最大 mustCite：${maxMustCite}；蓝图类合计上界：${dataText.length + maxSlice + maxMustCite}`);
+    console.log(`[蓝图] 最大 mustCite：${maxMustCite}`);
     // domain 分解：参数桶 36413 字符的主体定位（瘦身改造靶点）
     const index = buildAuthorityIndex(blueprint!.data);
     console.log('[蓝图] 参数桶 domain 分解：');
@@ -146,16 +140,6 @@ describe('s1-slim 单块输入探针（实测与超标定位）', () => {
       const rows = renderAuthorityDomains(index, [domain]);
       const chars = rows.join('\n').length;
       if (chars > 0) console.log(`    ${domain}: ${chars} 字符 / ${index.byDomain.get(domain)?.length ?? 0} 条目`);
-    }
-    // 最大章切片内部分解（行级大头定位）
-    const biggest = rows[0];
-    const biggestSlice = biggest ? findBlueprintChapter(blueprint!, biggest.title) : undefined;
-    if (biggestSlice) {
-      const sliceText = renderBlueprintChapterSlice(biggestSlice, blueprint!.data);
-      const lineStats = sliceText.split('\n').map(line => ({ line, chars: line.length })).sort((left, right) => right.chars - left.chars);
-      const workPackageCount = biggestSlice.subSections.reduce((sum, sub) => sum + sub.workPackages.length, 0);
-      console.log(`[蓝图] 最大章切片「${biggest.title}」分项：subSections=${biggestSlice.subSections.length} workPackages=${workPackageCount} 总字符=${sliceText.length}`);
-      for (const stat of lineStats.slice(0, 10)) console.log(`    ${stat.chars} 字：${stat.line.slice(0, 100)}`);
     }
     // s1-slim 块级聚焦实测（改造后口径）：以蓝图小节为块代理，遍历全部章节取块内最大值
     const blockMax = blockLevelMaxChars(blueprint!);

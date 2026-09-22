@@ -134,13 +134,13 @@ describe('documentDeliveryScoreIssues（交付评分报告）', () => {
     const issues = documentDeliveryScoreIssues(markdown, chapters, factsModel());
     expect(issues).toHaveLength(1);
     expect(issues[0].level).toBe('info');
-    expect(issues[0].message).toMatch(/总分 \d+\/10/);
+    expect(issues[0].message).toMatch(/总分 \d+\/\d+/);
   });
 
   it('结构不满足时结构分降档', () => {
     const shortChapters = [{ title: '第一章 工程概况', content: '短内容。' }];
     const issues = documentDeliveryScoreIssues('第一章 工程概况\n短内容。', shortChapters, factsModel());
-    expect(issues[0].message).toMatch(/总分 \d+\/10/);
+    expect(issues[0].message).toMatch(/总分 \d+\/\d+/);
     expect(issues[0].message).toContain('结构1');
   });
 });

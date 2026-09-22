@@ -229,11 +229,6 @@ export function constructionOrgChapterRulePrompt(chapter: DocumentTemplateChapte
   ].join('\n');
 }
 
-export function constructionOrgBlueprintRuleLines(chapter: DocumentTemplateChapter) {
-  const prompt = constructionOrgChapterRulePrompt(chapter);
-  return prompt ? prompt.split('\n').map(line => `   - ${line}`) : [];
-}
-
 export function constructionOrgProjectTypePrompt(input: { templateName: string; outputTitle?: string; requirement?: string; chapters: DocumentTemplateChapter[]; materialText?: string }) {
   const runtimeTemplate = { id: 'runtime', name: input.templateName, outputTitle: input.outputTitle || '', description: '', category: '', chapters: [] as DocumentTemplateChapter[] };
   // D-T9 两级判定（章级优先）：章标题+小节标题命中即按本章域注入（混合项目中「公厕装饰装修工程」章

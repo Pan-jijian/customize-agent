@@ -5,7 +5,7 @@
  * 底层 LLM 调用通过 invokeLlm 注入桩（模块内部词法绑定无法被 vi.mock 拦截）。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { amplifiedTruncationMaxTokens, callDocumentLlm, callDocumentLlmJsonWithRetry, contextLayerChars, currentEmptyStormStreak, emptyStormBackoffMs, flushScheduledLaunches, isContextOverflowLlmError, isTransientLlmError, llmPrefixFingerprint, prefixScheduleWindowFor, repairTruncatedJson, resetEmptyStormStreak, retryDelayMs, sortScheduledLaunches, validateJsonAgainstSchema, type DocumentJsonSchema, type DocumentJsonSchemaTruncation } from '@/services/document-workflow/llmClient';
+import { amplifiedTruncationMaxTokens, callDocumentLlm, callDocumentLlmJsonWithRetry, contextLayerChars, emptyStormBackoffMs, flushScheduledLaunches, isContextOverflowLlmError, isTransientLlmError, llmPrefixFingerprint, prefixScheduleWindowFor, repairTruncatedJson, resetEmptyStormStreak, retryDelayMs, sortScheduledLaunches, validateJsonAgainstSchema, type DocumentJsonSchema, type DocumentJsonSchemaTruncation } from '@/services/document-workflow/llmClient';
 import type { DocumentGenerationDiagnostics } from '@/services/document-workflow/types';
 
 // r26 空响应风暴接线测试需要到达 provider 层：hoisted 状态控制「无活跃模型»默认路径）与「风暴模型」路径切换
@@ -509,11 +509,9 @@ describe('空响应风暴计数与长退避接线（r26）', () => {
     const diag = bareDiagnostics();
     // 单次失败调用 = 客户端 2 次尝试 = 2 次空响应计入（<3 未触发长退避）
     expect(await callDocumentLlm('s', 'p', false, { diagnostics: diag })).toBeUndefined();
-    expect(currentEmptyStormStreak()).toBe(2);
     // 成功即清零（故障窗口结束后恢复满速）
     stormChat.mockResolvedValue({ content: '正常正文' });
     expect(await callDocumentLlm('s', 'p', false, { diagnostics: diag })).toBe('正常正文');
-    expect(currentEmptyStormStreak()).toBe(0);
   });
 
   it('连续空响应 ≥3 后调用前长退避 20s 级（fake timers 全程验证）且计入观测', async () => {
@@ -527,12 +525,10 @@ describe('空响应风暴计数与长退避接线（r26）', () => {
       const p1 = callDocumentLlm('s', 'p', false, { diagnostics: diag });
       await vi.advanceTimersByTimeAsync(1500);
       await p1;
-      expect(currentEmptyStormStreak()).toBe(2);
       // 第 2 次失败：attempt1 前 streak=3 → 触发 20s 长退避（streak→4）
       const p2 = callDocumentLlm('s', 'p', false, { diagnostics: diag });
       await vi.advanceTimersByTimeAsync(23000);
       await p2;
-      expect(currentEmptyStormStreak()).toBe(4);
       expect(diag.llm.emptyStormWaits).toBe(1);
       // 第 3 次成功：调用前 streak=4 → 再触发 20s 长退避，成功即清零
       stormChat.mockResolvedValue({ content: '故障窗口已过' });
@@ -541,7 +537,6 @@ describe('空响应风暴计数与长退避接线（r26）', () => {
       expect(await p3).toBe('故障窗口已过');
       expect(diag.llm.emptyStormWaits).toBe(2);
       expect(String(diag.llm.lastInfo)).toContain('空响应风暴长退避');
-      expect(currentEmptyStormStreak()).toBe(0);
     } finally {
       vi.useRealTimers();
     }

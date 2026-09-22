@@ -47,6 +47,8 @@ import { fixPhaseLaborValues } from '../documentIntegrityChecks';
 import { governChapterBlockNames } from '../sectionNamingGovernance';
 import { loadFingerprintPool } from '../sectionFingerprint';
 import { extractGeneratedSections } from '../markdownComposer';
+// 扬尘六个百分百条目名/豁免句单源：与检测侧（sixHundredPercentCoverageIssues）同源，防止写作指令与检测判定分裂
+import { SIX_HUNDRED_PERCENT_DEMOLITION_EXEMPT_SENTENCE, SIX_HUNDRED_PERCENT_DEMOLITION_ITEM, SIX_HUNDRED_PERCENT_ITEMS } from '../integrity/detectors/detectors';
 
 export async function stageChapterLoop(session: GenerationSession): Promise<void> {
   // 4.2 阶段瀑布：规划期收口 → 成稿期起点（成稿主循环含章级审查修复流水线重叠，合并记 phase:draft）
@@ -372,15 +374,12 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     // 逐项补写（后期修复模式），写作 LLM 凭记忆编写必漏项（4.17.7 实测缺 2 项）；写作时即注入六项
     // 原文要求逐项落实，缺项从源头消失——修复是辅助，写作是主力
     // P17 语义化：扬尘类章判定迁移 chapterIntentClassifier（章标题语义优先，标题+用途组合正则兑底保持原命中集）
+    // 词表与豁免句单源引用检测器（SIX_HUNDRED_PERCENT_ITEMS/词面表/豁免句）：写作侧指令的条目名与
+    // 豁免句必须就是检测侧认下的那一份，否则「照指令写了却判缺失」——三份各抄一份词表即漂移根源
     const sixHundredPercentContext = session.planning.chapterIntentClassifier.needsDustControl(chapter.title)
       || session.planning.chapterIntentClassifier.needsDustControl(`${chapter.title}${chapter.purpose || ''}`)
-      ? ['【扬尘治理六个百分百——规范固定条目，必须逐项落实并写入正文，每项一句具体措施，六项不得缺项；若本项目无拆迁工程，对“拆迁工地100%湿法作业”必须显性写明“本项目无拆迁工程，不涉及拆迁工地湿法作业”，不得省略】',
-        '- 施工工地周边100%围挡',
-        '- 物料堆放100%覆盖',
-        '- 出入车辆100%冲洗',
-        '- 施工现场地面100%硬化',
-        '- 拆迁工地100%湿法作业',
-        '- 渣土车辆100%密闭运输'].join('\n')
+      ? [`【扬尘治理六个百分百——规范固定条目，必须逐项落实并写入正文，每项一句具体措施，六项不得缺项；若本项目无拆迁工程，对“${SIX_HUNDRED_PERCENT_DEMOLITION_ITEM}”必须显性写明“${SIX_HUNDRED_PERCENT_DEMOLITION_EXEMPT_SENTENCE}”，不得省略】`,
+        ...SIX_HUNDRED_PERCENT_ITEMS.map(item => `- ${item.name}`)].join('\n')
       : '';
     // B5 强制规划小节注入（丰乐镇第三轮实测：主要施工方法缺「主要分部分项工程施工方案」、
     // 劳动力安排计划缺「资源配置计划」，规划小节仅混在 mustCover 里被 LLM 漏输出）：

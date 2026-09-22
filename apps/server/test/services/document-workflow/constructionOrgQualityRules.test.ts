@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   CONSTRUCTION_ORG_GENERIC_PHRASES,
-  constructionOrgBlueprintRuleLines,
   constructionOrgBonusModuleIssues,
   constructionOrgBonusModulePrompt,
   constructionOrgChapterRulePrompt,
@@ -68,15 +67,6 @@ describe('constructionOrgChapterRulePrompt（章节级专项写作规则）', ()
   it('安全类章节注入安全闭环提示', () => {
     const prompt = constructionOrgChapterRulePrompt(templateChapter('安全管理措施'));
     expect(prompt).toContain('安全类内容必须形成');
-  });
-});
-
-describe('constructionOrgBlueprintRuleLines（蓝图规则行）', () => {
-  it('施组章节规则行带前缀，非施组为空', () => {
-    const lines = constructionOrgBlueprintRuleLines(templateChapter('施工组织设计总说明'));
-    expect(lines.length).toBeGreaterThan(0);
-    expect(lines.every(line => line.startsWith('   - '))).toBe(true);
-    expect(constructionOrgBlueprintRuleLines(templateChapter('普通说明'))).toEqual([]);
   });
 });
 

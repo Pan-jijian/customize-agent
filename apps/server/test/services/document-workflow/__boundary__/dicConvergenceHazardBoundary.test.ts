@@ -243,15 +243,15 @@ describe('Z4 excavationHazardClassificationIssues 危大分级矩阵', () => {
     expect(issues[1].message).toContain('5.85');
   });
   it('Z4 3m 正文已有危大标注 → 0 条', () => {
-    expect(excavationHazardClassificationIssues('本工程属危大工程。', depthModel('3m'))).toHaveLength(0);
+    expect(excavationHazardClassificationIssues('本工程基坑开挖深度3m，属危大工程。', depthModel('3m'))).toHaveLength(0);
   });
   it('Z4 5.5m 有危大无超危大 → 报 1 条超危大', () => {
-    const issues = excavationHazardClassificationIssues('本工程属危大工程。', depthModel('5.5m'));
+    const issues = excavationHazardClassificationIssues('本工程基坑开挖深度5.5m，属危大工程。', depthModel('5.5m'));
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('超过一定规模');
   });
   it('Z4 5.5m 有超危大无危大 → 报 1 条危大', () => {
-    const issues = excavationHazardClassificationIssues('本工程属于超过一定规模需专家论证。', depthModel('5.5m'));
+    const issues = excavationHazardClassificationIssues('本工程基坑开挖深度5.5m，属于超过一定规模需专家论证。', depthModel('5.5m'));
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('危大工程判定缺失');
   });

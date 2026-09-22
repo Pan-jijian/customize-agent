@@ -18,7 +18,8 @@ import { displayStage, upsertProgressStage } from '../progress';
 import { Semaphore, runWithAdaptiveConcurrency, stringifyFactValue } from '../utils';
 import { PROJECT_BASIC_FACT_QUERIES, resolveChapterPromptExecution } from '../documentGeneratorHelpers';
 import { tuningProfile } from '../tuningProfile';
-import { assessChapterSupplyDemand, collectChapterParameterSupply, CHAPTER_PARAMETER_DENSITY_PER_1000 } from '../integratedBlueprint/capacity';
+import { assessChapterSupplyDemand, collectChapterParameterSupply } from '../integratedBlueprint/capacity';
+import { BLOCK_FACT_DENSITY_PER1000 } from '../blockQualityExecutors';
 
 export async function stageBlueprint(session: GenerationSession): Promise<void> {
   const avgChapterTarget = Math.round(([...session.planning.documentBudget.chapterTargets.values()].reduce((sum, value) => sum + value, 0) || session.planning.documentBudget.targetChars || 0) / Math.max(1, session.planning.effectiveChapters.length));
@@ -357,8 +358,8 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
       roleId: 'supply-demand-alignment',
       status: underSupplied.length === 0 ? 'success' : 'failed',
       message: underSupplied.length === 0
-        ? `供给面 ↔ 要求面对齐核算通过：${assessments.length} 章可用量化参数均达 ${CHAPTER_PARAMETER_DENSITY_PER_1000}/千字`
-        : `供给面不足：${underSupplied.length}/${assessments.length} 章可用量化参数低于 ${CHAPTER_PARAMETER_DENSITY_PER_1000}/千字（按蓝图 must_cite ＋ 清单责任行规格 ＋ 本章证据精确 token 去重计）`,
+        ? `供给面 ↔ 要求面对齐核算通过：${assessments.length} 章可用量化参数均达 ${BLOCK_FACT_DENSITY_PER1000}/千字`
+        : `供给面不足：${underSupplied.length}/${assessments.length} 章可用量化参数低于 ${BLOCK_FACT_DENSITY_PER1000}/千字（按蓝图 must_cite ＋ 清单责任行规格 ＋ 本章证据精确 token 去重计）`,
       details: underSupplied.slice(0, 8).flatMap(item => [`【${item.chapterTitle}】`, ...item.remediation]),
     }, { subtitle: '章预算可行性校准', order: session.global.progressStages.length }));
     session.global.emitProgress();
