@@ -3000,3 +3000,53 @@ export function plannedSectionPlacementIssues(markdown: string, chapters: Array<
   }
   return issues;
 }
+
+/**
+ * 表格空话单元格检测（4.55.16 巢湖实测）：表格单元格写「按清单工程量」「按设计标高控制」类搪塞语
+ * ——字段名承诺的是数据，此类写法等价于留空，且**同段正文往往已有真实数值**（实测：表「工程量」列
+ * 6 格全写「按清单工程量」，而同分项正文写着「机械运土方12792.800m3」）。按「表 × 列」聚合报出
+ * （逐格报会刷屏），带 provenance 供修复轮按列定向补写真实值（清单/图纸/蓝图数据）。
+ * 判据保守：仅纯空话短语（无数字、无具体来源编号）命中；「按施工图结施-03 基础平面图」含具体编号
+ * 不判（那是可追溯的来源表述）。
+ */
+const HOLLOW_TABLE_CELL_RE = /^(?:按(?:清单|设计|图纸|规范|方案|要求|合同|实际|甲方|业主)[^，。；]{0,14}|符合(?:设计|规范|标准|要求)[^，。；]{0,8}|根据(?:实际|现场)情况[^，。；]{0,10}|视(?:现场)?情况[^，。；]{0,10}|详见(?:图纸|设计|招标文件|清单)|相关(?:人员|部门|岗位)(?:及时)?[^，。；]{0,10}|及时(?:处理|整改|跟进|上报)|加强管理|严格控制|按需(?:配置|投入)|按实(?:计算|结算)|综合考虑|按有关规定)$/u;
+
+export function hollowTableCellIssues(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  if (!markdown) return issues;
+  const lines = markdown.split(/\r?\n/u);
+  const findings = new Map<string, { tableIndex: number; column: string; count: number; samples: string[] }>();
+  let tableIndex = 0;
+  let header: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!/^\s*\|/.test(line)) { header = []; continue; }
+    if (/^\s*\|[\s:|-]+\|\s*$/u.test(line)) { tableIndex += 1; continue; }
+    const cells = line.split('|').slice(1, -1).map(cell => cell.trim());
+    if (header.length === 0) { header = cells; continue; }
+    cells.forEach((cell, columnIndex) => {
+      if (!cell || /\d/u.test(cell)) return;
+      if (!HOLLOW_TABLE_CELL_RE.test(cell)) return;
+      const column = header[columnIndex] || `第${columnIndex + 1}列`;
+      const key = `${tableIndex}\u0000${column}`;
+      const entry = findings.get(key) || { tableIndex, column, count: 0, samples: [] };
+      entry.count += 1;
+      if (entry.samples.length < 3) entry.samples.push(cell);
+      findings.set(key, entry);
+    });
+  }
+  for (const [key, finding] of findings) {
+    void key;
+    issues.push({
+      level: 'error',
+      severity: 'blocker',
+      category: 'table',
+      owner: 'llm',
+      repairability: 'llm_repairable',
+      provenance: { detectorId: 'hollow-table-cell', fingerprint: stableHash(markdown) },
+      message: `表格空话单元格：第 ${finding.tableIndex} 张表的「${finding.column}」列有 ${finding.count} 格写的是空话而非数据（如「${finding.samples.join('」「')}」）——字段名承诺的是数据，写「按…」等价于留空`,
+      suggestion: `请把该列的「按…」式表述替换为具体值：工程量列写清单原值（数值+单位，如 12792.800m3）；规格/尺寸/净距列写图纸或清单给出的具体数值；确实无该字段数据时写可追溯来源（如「按施工图结施-03」），不得用“按清单工程量/按设计标高”类表述搪塞。同类数据在同章正文中通常已存在，请直接引用同一口径。`,
+    });
+  }
+  return issues;
+}

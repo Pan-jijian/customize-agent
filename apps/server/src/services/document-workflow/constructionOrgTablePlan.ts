@@ -921,6 +921,9 @@ const TABLE_FORMAT_RULES = [
   '每个表格前必须写 1～2 句引导叙述（说明该表的作用、数据口径与关键结论），表格不能替代所在小节全部正文；表格输出后还应围绕表中关键节点、责任分工与纠偏措施展开至少一段实施性正文。',
   '只输出表格/清单本体和用户提示词明确要求的文字；不得输出系统来源说明、后台溯源列、固定表前后说明或占位话术。',
   '【字段填写约束】项目特有数字、日期、工程量、规格必须来自项目资料或项目图谱，不得编造；人数、台班、进度时间等计划类数值必须原样引用蓝图权威锚点（劳动力峰值、工种构成、分阶段投入、机械台数、总工期节点），不得基于工程量或定额自行推算另设，不得留空、不得写“按需配置”“根据进度灵活调配”等空话。',
+  // 4.55.16 空话单元格扩围（巢湖实测：工程量列 6 格全写「按清单工程量」，而同段正文已有 12792.800m3）：
+  // 「按X」式搪塞在表格里等价于留空——字段名承诺的是数据，不是免责声明
+  '【空话禁令】下列写法在表格单元格中一律禁止（视同留空，终检阻断）：“按清单工程量”“按设计标高/按图纸/按设计”“按规范”“按方案”“符合设计要求/规范要求”“根据现场情况”“相关人员及时处理”“加强管理”“严格控制”。工程量列必须写**清单原值（数值+单位）**（如 12792.800m3、1200m2），规格/净距列必须写**图纸或清单给出的具体数值**；资料未给出该字段值的，写具体来源与判定依据（如“按施工图结施-03 基础平面图”），不得用“按……”搪塞。',
 ];
 
 function tablePlanLines(plan: PlannedTablePlan, index: number) {
@@ -1311,6 +1314,9 @@ export function ensureFigurePlaceholders(markdown: string, specs: FigurePlacehol
   };
   const insertAt = new Map<number, string[]>();
   const inserted: string[] = [];
+  // 4.55.16 替代表去重（巢湖实测：横道图/总进度计划图/网络图三个图位共用同一份 schedule 数据，
+  // 注入三张完全相同的表）：同章内同一数据源（表头签名相同）只出一次表，后续图位改为指向该表
+  const tableSignatureByChapter = new Map<number, string>();
   for (const spec of missing) {
     const end = locateChapterEnd(spec.chapterTitle);
     const bucket = insertAt.get(end) || [];
@@ -1319,7 +1325,15 @@ export function ensureFigurePlaceholders(markdown: string, specs: FigurePlacehol
     bucket.push(`图 ${injectedName}`);
     // 4.55.12 W5：图位注入即带等效数据表（图题 + 数据行，数据源为一体化蓝图，零编造）
     const table = options.substituteTable?.(injectedName);
-    if (table && table.length > 0) bucket.push('', ...table, '');
+    if (table && table.length > 0) {
+      const signature = table[0] || '';
+      if (tableSignatureByChapter.get(end) === signature) {
+        bucket.push('', '> 说明：本图工序数据与本章前述进度数据表同源，见该表（不重复列出）。', '');
+      } else {
+        tableSignatureByChapter.set(end, signature);
+        bucket.push('', ...table, '');
+      }
+    }
     insertAt.set(end, bucket);
     inserted.push(`${spec.chapterTitle}：「${injectedName}」`);
   }

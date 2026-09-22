@@ -1,4 +1,4 @@
-import { closedLoopDensityIssues, plannedAutoSpecGateIssues, basisRegulationsCoverageIssues, resourceBreakdownConsistencyIssues, punctuationArtifactIssues, boqPlacementIssues, crossChapterConsistencyIssues, degenerateContentIssues, drawingReferenceIssues, duplicateBasicInfoIssues, evaluationCriteriaCoverageIssues, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, formalStyleIssues, generatedFactVerificationIssuesAsync, genericProfessionalContentIssues, headingDuplicateIssues, innovationTechCoverageIssues, instructionLikeHeadingIssues, managementMeasureNumberIssues, markdownTableQualityIssues, minChapterSectionIssues, preciseFactUsageIssues, processSpecConflictIssues, professionalContentIssues, professionalScoreIssues, promptExampleLeakIssues, sectionContentIntegrityIssues, sectionCountOverflowIssues, sectionNumberingIssues, tableSpamIssues, tocBodyConsistencyIssues, tocHierarchyIssues, plannedSectionPlacementIssues} from './qualityValidation';
+import { closedLoopDensityIssues, plannedAutoSpecGateIssues, basisRegulationsCoverageIssues, resourceBreakdownConsistencyIssues, punctuationArtifactIssues, boqPlacementIssues, crossChapterConsistencyIssues, degenerateContentIssues, drawingReferenceIssues, duplicateBasicInfoIssues, evaluationCriteriaCoverageIssues, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, formalStyleIssues, generatedFactVerificationIssuesAsync, genericProfessionalContentIssues, headingDuplicateIssues, innovationTechCoverageIssues, instructionLikeHeadingIssues, managementMeasureNumberIssues, markdownTableQualityIssues, minChapterSectionIssues, preciseFactUsageIssues, processSpecConflictIssues, professionalContentIssues, professionalScoreIssues, promptExampleLeakIssues, sectionContentIntegrityIssues, sectionCountOverflowIssues, sectionNumberingIssues, tableSpamIssues, tocBodyConsistencyIssues, tocHierarchyIssues, plannedSectionPlacementIssues, hollowTableCellIssues} from './qualityValidation';
 import { majorContentGovernanceIssues } from './constructionOrgQualityRules';
 import type { FactTokenScopeClassifier } from './factTokenClassifier';
 import type { ProfessionalDepthAnalysis, ProfessionalDepthClassifier } from './professionalDepthClassifier';
@@ -324,6 +324,8 @@ export async function buildStandardFinalValidationIssues(input: {
     ...await det('formal-style', () => formalStyleIssues(input.markdown)),
     ...det('tertiary-heading', () => tertiaryHeadingIssues(input.markdown)),
     ...det('min-chapter-section', () => minChapterSectionIssues(input.chapters)),
+    // 4.55.16 表格空话单元格（巢湖实测：工程量列 6 格全写「按清单工程量」）
+    ...det('hollow-table-cell', () => hollowTableCellIssues(input.markdown)),
     // 4.55.14 规划小节未落位（巢湖实测：用户 OUTLINE 固定小节被整节漏写且无检测器覆盖）
     ...det('planned-section-placement', () => plannedSectionPlacementIssues(input.markdown, input.chapters)),
     // Q11 事实落位（关键参数抽查）：字面匹配 + 本地 bge 语义兜底

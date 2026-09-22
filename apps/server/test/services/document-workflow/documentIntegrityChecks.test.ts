@@ -5,6 +5,8 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { missingPlannedSections, promotePlannedSectionHeadings } from '@/services/document-workflow/chapterPostProcessing';
+import { hollowTableCellIssues } from '@/services/document-workflow/qualityValidation';
+import { cleanInlineFactValue } from '@/services/document-workflow/helpers/projectBasicInfo';
 import { ambiguousEitherOrIssues, scanSpecLocationMismatchHits, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, invertedDateRangeIssues, paragraphTailRepeatIssues, scanParagraphTailRepeats, collisionNumberedHeadingIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixInvertedDateRanges, fixZeroLengthDayRanges, fixParagraphOpeningRepeats, fixParagraphTailRepeats, fixCollisionNumberedHeadings, fixEmbeddedHeadingLines, fixPlaceholderTableCells, fixTruncatedSentenceArtifacts, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
 import { markdownTableQualityIssues } from '@/services/document-workflow/qualityValidation';
 import { normalizeTableTitleInHeaders, repairTableBlockLines } from '@/services/document-workflow/tableRepairHelpers';
@@ -2568,5 +2570,45 @@ describe('promotePlannedSectionHeadings / missingPlannedSections（章级小节�
     const result = promotePlannedSectionHeadings(['主要施工内容'], content);
     expect(result.markdown).toBe(content);
     expect(result.promoted).toEqual([]);
+  });
+});
+
+// ═══ 4.55.16 表格空话单元格（巢湖实测：工程量列 6 格全写「按清单工程量」） ═══
+
+describe('hollowTableCellIssues（表格空话检测，按表×列聚合）', () => {
+  it('工程量列写「按清单工程量」→ 报空话（同列多格聚合为一条）', () => {
+    const md = [
+      '| 分项部位 | 工程量 | 控制指标 |',
+      '| --- | --- | --- |',
+      '| 平整场地 | 按清单工程量 | 碾压至设计标高 |',
+      '| 挖一般土方 | 按清单工程量 | 机械开挖至设计标高 |',
+      '| 挖沟槽土方 | 12792.800m3 | 槽底标高偏差±20mm |',
+    ].join('\n');
+    const issues = hollowTableCellIssues(md);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toContain('工程量');
+    expect(issues[0]!.message).toContain('按清单工程量');
+  });
+
+  it('具体数值/可追溯来源不误伤', () => {
+    const md = [
+      '| 分项部位 | 工程量 | 交叉净距控制 |',
+      '| --- | --- | --- |',
+      '| 平整场地 | 1200m2 | 按施工图结施-03 基础平面图 |',
+      '| 挖沟槽土方 | 12792.800m3 | 净距不小于0.5m |',
+    ].join('\n');
+    expect(hollowTableCellIssues(md)).toEqual([]);
+  });
+
+  it('含数字的单元格一律不判（避免把「按3m控制」类误伤）', () => {
+    const md = ['| 项目 | 要求 |', '| --- | --- |', '| 沟槽 | 按3m分层开挖 |'].join('\n');
+    expect(hollowTableCellIssues(md)).toEqual([]);
+  });
+});
+
+describe('4.55.16 孤立尾括号清洗（项目编号「2026AFMGZ50828））」）', () => {
+  it('尾部孤立右括号删除；配平括号保留', () => {
+    expect(cleanInlineFactValue('2026AFMGZ50828）')).toBe('2026AFMGZ50828');
+    expect(cleanInlineFactValue('巢湖市（居巢经开区）')).toBe('巢湖市（居巢经开区）');
   });
 });

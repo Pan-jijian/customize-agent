@@ -51,18 +51,36 @@ export function projectBasicValueFor(facts: DocumentFact[], patterns: RegExp[]) 
   return candidates[0]?.value;
 }
 
+/** 孤立尾括号清洗（4.55.16 巢湖实测：项目编号值「2026AFMGZ50828）」——表格串格把右括号带进值尾）：
+ * 尾部为右括号/右引号且其中无对应左括号时删除；配平括号（「巢湖市（居巢经开区）」）保留。 */
+function stripOrphanTrailingBracket(text: string): string {
+  const match = /[）)】」』”]+$/u.exec(text);
+  if (!match) return text;
+  const tail = match[0];
+  const body = text.slice(0, text.length - tail.length);
+  const pairs: Record<string, string> = { '）': '（', ')': '(', '】': '【', '」': '「', '』': '『', '”': '“' };
+  let orphan = false;
+  for (const char of tail) {
+    const opener = pairs[char];
+    if (!opener) return text;
+    const openCount = body.split(opener).length - 1;
+    const closeCount = body.split(char).length - 1;
+    // 该右括号在值体内有对应左括号 → 属配平括号，保留整值；无对应左括号 → 孤立尾括号，删除
+    if (openCount > closeCount) return text;
+    orphan = true;
+  }
+  return orphan ? body : text;
+}
+
 export function cleanInlineFactValue(value: string) {
-  return normalizeOcrFactText(value)
-    // 完整页码引用（“PDF 第N页”含“第 5-8 页”范围形态）与正文侧 normalizeTenderSourcePageRefs
-    // 同口径归一为“相关资料”，避免落入下方残片删除分支被误删成“ N 页”（空格+数字形态误删现场）
-    .replace(/PDF\s*第\s*\d+(?:\s*[-—至到~～]\s*\d+)?\s*页/giu, '相关资料')
-    // 残缺页码引用残片（“PDF 第”后无数字）：fact 抽取复制招标文件封面页码引用时截断，
-    // 直接删除残片保留其前文本；lookahead 允许空格/tab 后跟数字（“PDF 第 3 页”属完整引用，由上一条归一），
-    // 不跨行（\n 后数字的跨行残片仍删除）；数字与“日”间多余空格一并归一（“2026年8月19 日”）
-    .replace(/PDF\s*第(?![ \t]*[0-9０-９])/giu, '')
-    .replace(/(\d)\s+(日)/gu, '$1$2')
-    .replace(/[。；;]$/u, '')
-    .trim();
+  return stripOrphanTrailingBracket(
+    normalizeOcrFactText(value)
+      .replace(/PDF\s*第\s*\d+(?:\s*[-—至到~～]\s*\d+)?\s*页/giu, '相关资料')
+      .replace(/PDF\s*第(?![ \t]*[0-9０-９])/giu, '')
+      .replace(/(\d)\s+(日)/gu, '$1$2')
+      .replace(/[。；;]$/u, '')
+      .trim(),
+  );
 }
 
 export function parseProjectBasicRowsFromMarkdown(content: string) {
