@@ -10,7 +10,7 @@ import type { FactTokenScopeClassifier } from '../factTokenClassifier';
 import type { ProfessionalDepthClassifier } from '../professionalDepthClassifier';
 import type { BlueprintData } from '../integratedBlueprint';
 import type { BillFactLock } from '../billFactLock';
-import { buildParameterUsageAudit } from '../chapterParameterFacts';
+import { buildBoundFactAudit, buildParameterUsageAudit } from '../chapterParameterFacts';
 import { buildKeyFactPlacementAudit } from '../keyFactPlacement';
 import type { DrawingFactLock } from '../drawingFactLock';
 import { validateDraftWithAutoSpec } from '../../document-validation/documentValidationService';
@@ -549,12 +549,18 @@ export async function stageRebuildAndRecompute(session: FinalizeSession): Promis
     const truthAudit = buildAuthoritativeValues({ facts: truthFacts, overrides });
     session.caliberLedger = renderCaliberLedger(truthAudit);
     session.truthValues = truthAudit.resolved;
+    // 4.55.25 P4：参数绑定审计（值必须携带对象；无对象的裸值不作为可改写权威，其正确数量为 0）
+    const bindingAudit = buildBoundFactAudit(session.factsModel?.factIndex?.parameterFacts || []);
     const caliberStage = displayStage({
       type: 'reference',
       roleId: 'caliber-ledger',
       status: 'success',
-      message: `口径账本（真值层）：受管属性 ${truthAudit.resolved.length} 项、噪声剔除 ${truthAudit.noiseRejected.length} 项、值级覆盖 ${overrides.length} 对`,
-      details: [...session.caliberLedger.slice(0, 20), ...(overrides.length > 0 ? [`值级覆盖：${overrides.slice(0, 5).map(item => `${item.superseded}→${item.effective}`).join('、')}`] : [])],
+      message: `口径账本（真值层）：受管属性 ${truthAudit.resolved.length} 项、噪声剔除 ${truthAudit.noiseRejected.length} 项、值级覆盖 ${overrides.length} 对；参数绑定 ${bindingAudit.bound}/${bindingAudit.bound + bindingAudit.unbound}（绑定率 ${Math.round(bindingAudit.bindRate * 100)}%，项目级 ${bindingAudit.projectLevel} 项不计入）`,
+      details: [
+        ...session.caliberLedger.slice(0, 20),
+        ...(overrides.length > 0 ? [`值级覆盖：${overrides.slice(0, 5).map(item => `${item.superseded}→${item.effective}`).join('、')}`] : []),
+        ...(bindingAudit.unbound > 0 ? [`未绑定对象（应清零：有锚点却未抽到＝抽取器缺陷）：${bindingAudit.unboundSamples.join('；')}`] : []),
+      ],
     }, { subtitle: '口径账本' });
     // 4.55.24 落点修正：原双写 progressStages + finalGateRepairStages 两处都不可见——
     // progressStages 合入 executionStages 的时机在更早的 stageValidationPack（本函数在其后执行），

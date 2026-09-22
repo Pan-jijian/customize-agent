@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  assignMissingParameterChapters, buildParameterUsageAudit, classifyParameterUsage,
+  assignMissingParameterChapters, buildBoundFactAudit, buildParameterUsageAudit, classifyParameterUsage,
   missingRelevantParameterTokens, PARAMETER_OBLIGATION_MIN_RATE, PARAMETER_OBLIGATION_MIN_TOTAL,
   parameterObligationUsageIssues, renderChapterParameterLines, selectChapterParameterFacts,
 } from '@/services/document-workflow/chapterParameterFacts';
@@ -294,5 +294,27 @@ describe('parameterObligationUsageIssues（可靠参数义务满足率门禁）'
   it('门槛常量口径（检测端 export 单源）：0.9 / 8', () => {
     expect(PARAMETER_OBLIGATION_MIN_RATE).toBe(0.9);
     expect(PARAMETER_OBLIGATION_MIN_TOTAL).toBe(8);
+  });
+});
+
+describe('4.55.25 P4 绑定审计（值必须携带对象；无对象的裸值不作为可改写权威）', () => {
+  it('绑定率按「有对象 / (有对象+无对象)」计算，项目主体级不计入分母', () => {
+    const audit = buildBoundFactAudit([
+      { key: '厚度', value: '100mm', objectName: '基础碎石垫层' },
+      { key: '管径', value: 'DN400', objectName: '雨水管道' },
+      { key: '精确参数', value: '241.7平方米' },
+      { key: '计划工期', value: '330日历天' },
+    ]);
+    expect(audit.total).toBe(4);
+    expect(audit.bound).toBe(2);
+    expect(audit.projectLevel).toBe(1);
+    expect(audit.unbound).toBe(1);
+    expect(audit.bindRate).toBeCloseTo(2 / 3, 5);
+    expect(audit.unboundSamples[0]).toContain('241.7平方米');
+  });
+
+  it('全部绑定 → 绑定率 1；空池 → 1（不误报）', () => {
+    expect(buildBoundFactAudit([{ key: '厚度', value: '100mm', objectName: '垫层' }]).bindRate).toBe(1);
+    expect(buildBoundFactAudit([]).bindRate).toBe(1);
   });
 });

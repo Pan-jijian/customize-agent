@@ -171,6 +171,50 @@ export function renderChapterParameterLines(
   ];
 }
 
+/**
+ * 绑定审计（4.55.25 P4）：把「值有没有对象」变成**可量化指标**。
+ *
+ * 口径与判据：
+ * - `bound`：带对象锚点（抽取期从原文共现取得）的参数——写作时以「对象｜属性=值」注入，
+ *   写手据此把值写到该对象处；也是唯一可作为"可改写权威"的来源。
+ * - `unbound`：无对象 —— 不作为可改写权威；其**正确数量应为 0**（有锚点却抽不到 = 抽取器缺陷，
+ *   按缺陷清单逐条清零），故本审计输出样例供逐条定位，不做"暂时容忍"的分类。
+ * - `projectLevel`：项目主体级（工期/金额/地点等，对象即项目本身）——按其性质本无工程对象，
+ *   不计入 unbound 分母。
+ */
+const PROJECT_LEVEL_KEY_RE = /^(?:项目名称|项目编号|招标人|建设单位|建设地点|建设规模|计划工期|合同工期|总工期|开工日期|质量标准|质量目标|合同估算价|最高投标限价|招标范围|施工范围|投标人|开标|评标|资金来源|编制依据|安全生产许可证)/u;
+
+export interface BoundFactAudit {
+  total: number;
+  bound: number;
+  projectLevel: number;
+  unbound: number;
+  /** 绑定率（= bound / (bound + unbound)，项目主体级不计入分母） */
+  bindRate: number;
+  unboundSamples: string[];
+}
+
+export function buildBoundFactAudit(parameterFacts: Array<{ key: string; value: string; objectName?: string }>): BoundFactAudit {
+  let bound = 0;
+  let projectLevel = 0;
+  const unboundSamples: string[] = [];
+  for (const fact of parameterFacts) {
+    if (String(fact.objectName || '').trim()) { bound += 1; continue; }
+    if (PROJECT_LEVEL_KEY_RE.test(String(fact.key || '').trim())) { projectLevel += 1; continue; }
+    if (unboundSamples.length < 12) unboundSamples.push(`${String(fact.key).slice(0, 20)}：${String(fact.value).slice(0, 30)}`);
+  }
+  const unbound = parameterFacts.length - bound - projectLevel;
+  const denominator = bound + unbound;
+  return {
+    total: parameterFacts.length,
+    bound,
+    projectLevel,
+    unbound,
+    bindRate: denominator > 0 ? bound / denominator : 1,
+    unboundSamples,
+  };
+}
+
 /** 参数使用判定（字面口径，双端 normalizeEngineeringTextForFactMatch 归一；组合值按段片段兜底） */
 function parameterValueUsedIn(normalizedMarkdown: string, value: string): boolean {
   const normalizedValue = normalizeEngineeringTextForFactMatch(value);
