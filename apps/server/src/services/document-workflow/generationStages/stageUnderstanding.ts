@@ -25,6 +25,8 @@ import { retrievalCoverageRisk } from '../documentEvidenceRetrieval';
 import { buildBidProcedureJudge, evidenceSafetyKey, partitionEvidenceByContentSafety } from '../evidenceContentSafety';
 import { buildFactsModel, extractLocalFactPool } from '../factsModel';
 import { arbitrateFactPool, buildCanonicalFactModel, extractDrawingAnnotationFacts, PROJECT_BASIC_FIELD_SPECS } from '../factGovernance';
+import { applyOverridesToText, collapseOverrideChains, extractLabeledAuthorityValues, extractValueOverrides } from '../valueOverride';
+import { buildAuthoritativeValues } from '../authoritativeValues';
 import { emptyTenderRequirements, extractTenderRequirements, hasTenderRequirements, readCachedTenderRequirements, tenderRequirementsCacheKey, tenderRequirementsSummary, writeCachedTenderRequirements } from '../tenderRequirements';
 import { bidCompositionSummary, extractBidCompositionSpec } from '../bidComposition';
 
@@ -177,6 +179,55 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
   // Planner 任务书与写作上下文只看到裁决后的胜选值；canonical 保持原始输入以保留冲突检测展示
   const arbitratedFacts = arbitrateFactPool(combinedPreliminaryFacts, session.prepare.projectRoot);
   session.understanding.preliminaryFactsModel = await buildFactsModel(arbitratedFacts, session.understanding.earlyFactPool.structuredTables, session.understanding.missingItems, session.prepare.documentSpec, session.prepare.domainProfile);
+  // ═══ 4.55.20 现行口径前置（根治：写作输入只含生效值）═══
+  // 用户口径：「这些数值应该在一开始就定好了，就不会到后面修复的时候去替换」。
+  // 此前口径治理在链尾（补丁）；现在在**写作之前**完成：
+  //   ① 真值层裁决（带标签权威值：最高投标限价/计划工期/开工日期 + 值级覆盖表）→
+  //   ② 覆盖表**就地应用到事实池与证据**（被取代值在写作输入里消失）→
+  //   ③ 模型看不到旧值，无需事后替换；链尾替换降为兜底（LLM 仍可能从别处抄到旧值）。
+  {
+    const truthSources = [
+      ...session.understanding.writerEvidence.map(item => ({ text: String(item.content || ''), source: `${item.filePath || ''} ${item.sectionTitle || ''}` })),
+      ...arbitratedFacts.map(fact => ({ text: String(fact.value ?? ''), source: String(fact.sourceFile || '') })),
+    ];
+    const truthFacts = arbitratedFacts.map(fact => ({ key: fact.key, label: fact.fieldName, value: fact.value, sourceFile: fact.sourceFile }));
+    const truthAudit = buildAuthoritativeValues({
+      facts: truthFacts,
+      overrides: collapseOverrideChains(extractValueOverrides(truthSources)),
+      labeledValues: extractLabeledAuthorityValues(truthSources),
+    });
+    const overrideList = truthAudit.resolved.flatMap(item => (item.superseded || []).map(superseded => ({
+      superseded,
+      effective: item.value,
+      scope: [item.attribute],
+      evidence: item.evidence,
+      kind: 'override' as const,
+    })));
+    if (overrideList.length > 0) {
+      let applied = 0;
+      const rewrite = (value: unknown) => {
+        const result = applyOverridesToText(String(value ?? ''), overrideList);
+        applied += result.applied.length;
+        return result.text;
+      };
+      for (const fact of arbitratedFacts) fact.value = rewrite(fact.value);
+      const model = session.understanding.preliminaryFactsModel;
+      for (const pool of [model.project, model.schedule, model.quality, model.safety, model.resources, model.preciseFacts, model.bills, model.rules, model.specifications, model.drawings]) {
+        for (const fact of pool || []) fact.value = rewrite(fact.value);
+      }
+      for (const item of session.understanding.writerEvidence) item.content = rewrite(item.content);
+      session.planning.earlyTruthAudit = truthAudit;
+      session.planning.earlyOverrideCount = overrideList.length;
+      if (applied > 0) {
+        upsertProgressStage(session.global.progressStages, displayStage({
+          type: 'fact_extraction', roleId: 'effective-value-preposition', status: 'success',
+          message: `现行口径前置：${overrideList.length} 组被取代值（${[...new Set(overrideList.map(item => `${item.superseded}→${item.effective}`))].slice(0, 3).join('、')}）已在写作输入中就地替换 ${applied} 处`,
+          details: [...truthAudit.resolved.filter(item => item.superseded.length > 0).slice(0, 8).map(item => `${item.attribute}：${item.value}（被取代：${item.superseded.join('、')}）`)],
+        }, { subtitle: '现行口径前置' }));
+        session.global.emitProgress();
+      }
+    }
+  }
   session.understanding.agentWorkflow = createAgentWorkflowContext({ template: session.prepare.template, requirement: session.global.input.requirement, projectRoot: session.prepare.projectRoot, facts: arbitratedFacts, projectGraph: session.understanding.scopedIntelligence?.projectGraph, projectGraphSource: session.understanding.scopedIntelligence ? 'project-intelligence' : undefined, materialScope: session.prepare.materialScope });
   for (const stage of agentWorkflowStages(session.understanding.agentWorkflow)) upsertProgressStage(session.global.progressStages, stage);
   if (session.understanding.scopedIntelligence) upsertProgressStage(session.global.progressStages, displayStage({ type: 'file_understanding', roleId: 'project-intelligence-cache', status: 'success', message: `已复用入库后资料包理解资产：${session.understanding.scopedIntelligence.files.length} 份资料`, details: [`项目级缓存时间：${new Date(session.understanding.scopedIntelligence.cache.createdAt).toLocaleString()}`, `资料包范围指纹：${session.understanding.scopedIntelligence.scope.scopeHash.slice(0, 12)}`, `复用预计算事实：${session.understanding.scopedIntelligence.facts.length} 条`, `复用预计算项目图谱：${session.understanding.scopedIntelligence.projectGraph.works.length}工程/${session.understanding.scopedIntelligence.projectGraph.methods.length}工法/${session.understanding.scopedIntelligence.projectGraph.resources.length}资源`, `复用施工组织设计专项图谱：${session.understanding.scopedIntelligence.constructionOrganizationGraph.workPackages.length} 个工作包/${session.understanding.scopedIntelligence.constructionOrganizationGraph.controlMatrix.length} 条控制矩阵`, `图谱来源：${session.understanding.scopedIntelligence.cache.projectGraphMessage}`, `章节意图证据覆盖：${Object.keys(session.understanding.scopedIntelligence.evidenceByChapterId || {}).length}/${session.prepare.template.chapters.length} 章`, `排除正文不适用资料：${session.understanding.scopedIntelligence.files.filter(file => !file.usableForBody).length} 份`] }, { subtitle: '项目理解缓存 / 资料包' }));

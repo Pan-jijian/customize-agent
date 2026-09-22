@@ -211,6 +211,10 @@ export interface GenerationSessionPlanning {
   clarificationOverrides?: ReturnType<typeof extractClarificationOverrides>;
   /** 4.55.19 真值层出口：写作硬约束块与口径账本（切写侧消费） */
   truthConstraint?: string;
+  /** 4.55.20 写作前的真值层裁决结果（现行口径前置：事实池/证据已就地替换） */
+  earlyTruthAudit?: { resolved: Array<{ subject: string; attribute: string; value: string; rule: string; evidence: Array<{ source: string; snippet: string }>; superseded: string[]; candidates: unknown[] }>; noiseRejected: unknown[] };
+  /** 写作前应用的口径覆盖组数（诊断可见） */
+  earlyOverrideCount?: number;
   caliberLedger?: string[];
   tenderWritingRulesText: string;
   chapterScopedProjectContext: (chapter: DocumentTemplateChapter) => string;
