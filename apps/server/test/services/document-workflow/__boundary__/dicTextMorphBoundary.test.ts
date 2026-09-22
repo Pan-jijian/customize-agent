@@ -244,9 +244,14 @@ describe('P5 修复收敛循环：runFixUntilClean + runDeterministicChainUntilC
     expect(result.fixedCount).toBe(4);
   });
   it('P5-3 runFixUntilClean轮次上限保护：超限截断', () => {
-    const fix = () => ({ markdown: '执行执行。', fixedCount: 1 });
+    // 4.55.22：**轮次上限保护不变**（假修复仍循环到 maxRounds，防死循环），
+    // 但 fixedCount 只统计**文本确实发生变化**的轮次——原断言 toBe(2) 锁定的正是"报了 2 处却
+    // 一个字没改"的幽灵计数（交付报告的"修复 N 处"高于实际改写量）。
+    let calls = 0;
+    const fix = () => { calls += 1; return { markdown: '执行执行。', fixedCount: 1 }; };
     const result = runFixUntilClean(fix, '执行执行。', 2);
-    expect(result.fixedCount).toBe(2);
+    expect(calls).toBe(2);
+    expect(result.fixedCount).toBe(0);
     expect(result.markdown).toBe('执行执行。');
   });
   it('P5-4 runFixUntilClean零命中直接返回', () => {
@@ -267,9 +272,12 @@ describe('P5 修复收敛循环：runFixUntilClean + runDeterministicChainUntilC
     expect(result.fixedCount).toBe(0);
   });
   it('P5-7 链循环轮次上限保护', () => {
-    const never = (md: string) => ({ markdown: md, fixedCount: 1 });
+    // 同 P5-3：轮次保护不变，计数只反映真实改写（文本未变 → 不计分）
+    let calls = 0;
+    const never = (md: string) => { calls += 1; return { markdown: md, fixedCount: 1 }; };
     const result = runDeterministicChainUntilConverged([never], 'X', 2);
-    expect(result.fixedCount).toBe(2);
+    expect(calls).toBe(2);
+    expect(result.fixedCount).toBe(0);
   });
   it('P5-8 链内多修复器同一轮累计fixedCount', () => {
     const fixA = (md: string) => (md.includes('A1') ? { markdown: md.replace('A1', 'A'), fixedCount: 1 } : { markdown: md, fixedCount: 0 });

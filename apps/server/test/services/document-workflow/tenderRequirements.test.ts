@@ -1387,6 +1387,80 @@ describe('M14a 判定口径指纹（缓存失效自动防线：口径变更不�
       expect(listText, `判据 ${name} 未入 CACHE_JUDGE_FINGERPRINT_SOURCES（口径变更将不失效缓存）`).toContain(name);
     }
   });
+
+  it('指纹对表内容敏感：词表/规则表内容变更 → 指纹不同（String() 退化为 [object Object] 的回归守护）', () => {
+    const rulesA = [{ form: 'table', formRe: /一览表/u, elementRules: [{ re: /机构/u, element: '项目管理机构' }], fallbackElement: '要求表格' }];
+    const rulesB = [{ form: 'table', formRe: /一览表|汇总表/u, elementRules: [{ re: /机构/u, element: '项目管理机构' }], fallbackElement: '要求表格' }];
+    expect(tenderRequirementsJudgeFingerprint([rulesA])).not.toBe(tenderRequirementsJudgeFingerprint([rulesB]));
+    expect(tenderRequirementsJudgeFingerprint([{ re: /a/u }])).not.toBe(tenderRequirementsJudgeFingerprint([{ re: /b/u }]));
+    expect(tenderRequirementsJudgeFingerprint([['a']])).not.toBe(tenderRequirementsJudgeFingerprint([['b']]));
+  });
+
+  it('判据表守护：入表判据（含本文件内传递调用）引用的模块级词表/规则表亦须入清单（表漏加即红）', () => {
+    const source = fs.readFileSync(SRC, 'utf8');
+    const lines = source.split('\n');
+    const listStart = source.indexOf('const CACHE_JUDGE_FINGERPRINT_SOURCES');
+    // 去注释后取标识符：清单注释里的词（如「D6 池噪声」）不是判据名
+    const listText = source.slice(listStart, source.indexOf('];', listStart)).replace(/\/\/[^\n]*/gu, '');
+    const registered = new Set(
+      [...listText.matchAll(/(?<![.\w$])([a-zA-Z_$][\w$]*)\b/gu)].map(match => match[1])
+        .filter(name => !['const', 'CACHE_JUDGE_FINGERPRINT_SOURCES', 'ReadonlyArray', 'unknown'].includes(name)),
+    );
+    const fnDecls = new Map<string, number>();
+    const constDecls = new Map<string, number>();
+    lines.forEach((line, index) => {
+      const fn = /^(?:export )?(?:async )?function ([a-zA-Z_$][\w$]*)/u.exec(line);
+      if (fn) fnDecls.set(fn[1]!, index);
+      const constant = /^const ([a-zA-Z_$][\w$]*)/u.exec(line);
+      if (constant) constDecls.set(constant[1]!, index);
+    });
+    const fnBody = (name: string): string | undefined => {
+      const start = fnDecls.get(name);
+      if (start === undefined) return undefined;
+      for (let index = start + 1; index < lines.length; index += 1) {
+        if (/^\}/u.test(lines[index]!)) return lines.slice(start, index + 1).join('\n');
+      }
+      return undefined;
+    };
+    // 模块级「表」常量（正则字面量 / 数组 / 对象；类型注解可能跨行，声明后 6 行内找 `=`）
+    const isTableConst = (name: string): boolean => {
+      const start = constDecls.get(name);
+      if (start === undefined) return false;
+      for (let index = start; index < Math.min(lines.length, start + 7); index += 1) {
+        if (/=\s*\[/u.test(lines[index]!) || /=\s*\/.*\/[a-z]*;?\s*$/u.test(lines[index]!) || /=\s*\{/u.test(lines[index]!)) return true;
+      }
+      return false;
+    };
+    const identifiers = (text: string) => [...new Set([...text.matchAll(/(?<![.\w$])([a-zA-Z_$][\w$]*)\b/gu)].map(match => match[1]!))];
+    // 传递闭包：入表判据 → 本文件内被调用的函数 → …，逐层收集其引用的表常量
+    const reachable = new Set<string>();
+    const missingTables = new Map<string, string>();
+    for (const entry of registered) {
+      const queue = [entry];
+      const seen = new Set([entry]);
+      while (queue.length > 0) {
+        const name = queue.shift()!;
+        const body = fnBody(name);
+        if (body === undefined) continue;
+        reachable.add(name);
+        for (const id of identifiers(body)) {
+          if (fnDecls.has(id)) {
+            if (!seen.has(id)) { seen.add(id); queue.push(id); }
+          } else if (registered.has(id)) {
+            continue;
+          } else if (isTableConst(id)) {
+            if (!missingTables.has(id)) missingTables.set(id, entry);
+          }
+        }
+      }
+    }
+    // 提取有效性下限（格式化变更导致解析失效时须显式报错，不得静默放过）
+    expect(reachable.size, '判据函数体解析失效（源格式变更）').toBeGreaterThan(8);
+    const missing = [...missingTables.entries()];
+    for (const [table, via] of missing) {
+      expect(registered.has(table), `词表/规则表 ${table}（经 ${via} 使用）未入 CACHE_JUDGE_FINGERPRINT_SOURCES（编辑该表将不失效缓存）`).toBe(true);
+    }
+  });
 });
 
 describe('collectRequirementAnchors（条款锚点全清单单源）', () => {

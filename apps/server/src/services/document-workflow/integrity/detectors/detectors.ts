@@ -2836,7 +2836,31 @@ export function excavationDepthLockIssues(markdown: string): ValidationIssue[] {
   // 才算锁定；比较式（超过/大于/小于/不大于…）、按图式（按/依据/详见）、倍数式（倍，
   // 数字后窗口内）、偏差句（「标高偏差控制在±5」「基底标高偏差0～-50mm」，真实回归：
   // 质控允许值被误判为深度锁定）全部排除
-  const depthWindows = normalized.matchAll(/(?:深度|标高)[^。；，,]{0,12}-?\d+(?:\.\d+)?[^。；，,]{0,6}/gu);
+  /**
+   * 4.55.22 根修盲区：锁定判定原先在**全文**上找「深度/标高+数值」——任何无关章节的标高句
+   * 都能把它解锁（实测：道路章写「路床顶面标高20.500」，无排除词 → 函数 `return []` →
+   * 「基坑深度未锁定」这条 blocker 永不触发，而危大分级正依赖该深度）。
+   * 现定位到**基坑相关小节**内扫描（标题命中 基坑|开挖|支护|土方）；
+   * 若全文无此类小节标题（内容散落各章），则退回全文扫描——不留新的盲区。
+   */
+  const pitSectionText = (() => {
+    const lines = markdown.split(/\r?\n/u);
+    const kept: string[] = [];
+    let inPitSection = false;
+    for (const line of lines) {
+      const heading = /^(#{2,4})\s+(.+)$/u.exec(line.trim());
+      if (heading) {
+        // H2/H3 视为小节边界，H4 继承所属小节
+        if (heading[1]!.length <= 3) inPitSection = /基坑|开挖|支护|土方/u.test(heading[2]!);
+        if (inPitSection) kept.push(line);
+        continue;
+      }
+      if (inPitSection) kept.push(line);
+    }
+    return kept.join('\n');
+  })();
+  const scopedNormalized = pitSectionText ? pitSectionText.replace(/\s+/gu, '') : normalized;
+  const depthWindows = scopedNormalized.matchAll(/(?:深度|标高)[^。；，,]{0,12}-?\d+(?:\.\d+)?[^。；，,]{0,6}/gu);
   for (const match of depthWindows) {
     const window = match[0];
     // 「以上|以下」形态（「标高以上300mm人工清底」）是相对量非绝对值（真实回归：300mm 清底厚度被误判为深度锁定）；

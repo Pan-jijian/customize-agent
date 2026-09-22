@@ -221,6 +221,40 @@ describe('buildPlannedChapterContent（块字数分层验收 + 结构硬门 + �
     expect(llmMock).toHaveBeenCalledTimes(2);
   });
 
+  it('4.55.22 关键小节绝对深度门槛：首轮 0.94×块目标（比例线内）仍阻断，二轮携深度反馈放行', async () => {
+    // 关键小节块（危大工程专项施工方案审批流程，blockerMinChars.emergency=650）目标 500：绝对门槛
+    // = min(650, max(500, 500)) = 500，与比例线并行取严（欠产线 350 → 500）。首轮 470 字（0.94×，
+    // 旧口径 ∈[0.85,1.15] 达标区直通）现被首轮阻断并携深度缺口反馈定向重写；
+    // 二轮同一产出放行（末轮不设欠产/深度门，交终检 critical-section-depth + content-depth-repair 兜底）
+    const criticalBlock = makeBlock({ title: '危大工程专项施工方案审批流程', targetWords: 500 });
+    llmMock.mockResolvedValue(`### 危大工程专项施工方案审批流程\n\n${[H4A, H4B, H4C, H4D].map((title, index) => `#### ${title}\n\n${bodyLine(100, index)}`).join('\n\n')}`);
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure({ blocks: [criticalBlock] }));
+    expect(llmMock).toHaveBeenCalledTimes(2);
+    const retryPrompt = llmMock.mock.calls[1][1];
+    expect(retryPrompt).toContain('【上一轮关键小节深度不足】');
+    expect(retryPrompt).toContain('绝对深度门槛 500 字');
+    // 末轮放行（不新增终局失败面）：块成稿、章不阻断
+    expect(result?.allSucceeded).toBe(true);
+    expect(result?.markdown).toContain(H4A);
+  });
+
+  it('4.55.22 工作包要素门禁：首轮三要素不全（篇幅达标）→ 阻断携缺陷原文，二轮放行', async () => {
+    // 块标题命中「项目主要施工内容」且 H4 要点 ≥3 → 门禁适用；首轮 524 字（1.05×块目标：篇幅在
+    // [0.85,1.15] 达标区、关键小节深度门槛 500 亦达标）但工作包三要素不全 → 唯一阻断项是要素门禁；
+    // 二轮同一产出放行（末轮放行，交终检 construction-org-major-content + content-depth-repair 兜底）
+    const majorBlock = makeBlock({ title: '项目主要施工内容', targetWords: 500 });
+    llmMock.mockResolvedValue(`### 项目主要施工内容\n\n${[H4A, H4B, H4C, H4D].map((title, index) => `#### ${title}\n\n${bodyLine(115, index)}`).join('\n\n')}`);
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure({ blocks: [majorBlock] }));
+    expect(llmMock).toHaveBeenCalledTimes(2);
+    const retryPrompt = llmMock.mock.calls[1][1];
+    expect(retryPrompt).toContain('【上一轮工作包结构/要素未达门禁】');
+    expect(retryPrompt).toContain('项目主要施工内容 未按施工工作包展开');
+    // 篇幅/深度均达标 → 不混报篇幅反馈（阻断项只有要素门禁）
+    expect(retryPrompt).not.toContain('【上一轮关键小节深度不足】');
+    expect(result?.allSucceeded).toBe(true);
+    expect(result?.markdown).toContain(H4A);
+  });
+
   it('清单外 H4 修复后仍超产（>1.15×）→ 修复通道不放行，二轮重写达标成稿', async () => {
     // ≈974 字（1.95×）且含清单外 H4：标题层修复（删标题留正文）只减 9 字，修复后仍 >1.15×（575）
     // → 不得经修复通道放行（超产侧无豁免轮次）→ 二轮重写；二轮压缩到 540 字成稿

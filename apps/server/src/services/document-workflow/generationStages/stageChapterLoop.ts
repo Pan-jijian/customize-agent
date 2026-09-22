@@ -8,7 +8,7 @@ import type { DocumentDraftChapter, DocumentEvidence, DocumentExecutionStage } f
 import type { GenerationSession } from './generationSession';
 import { displayChapterTitle } from '../outline';
 import { evidenceMatchesFact } from '../factMatching';
-import { documentTextLength } from '../budget';
+import { documentTextLength, resolveChapterBudgetTarget } from '../budget';
 import { sectionContentIntegrityIssues } from '../qualityValidation';
 import { chapterCriteriaText } from '../constructionBidStructure';
 import { buildSemanticSimilarity } from '../semanticSimilarity';
@@ -244,7 +244,15 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       return [];
     });
     rawEvidence.push(...plannedMaterialEvidence);
-    const matchedRoleContexts: Array<{ fact: never }> = [];
+    /**
+     * 角色节点抽取事实 → 章级事实卡（`buildChapterFactCoverageContext.roleFacts`）。
+     *
+     * 4.55.22：此处原为 `Array<{ fact: never }> = []`——元素类型 `never`，即**结构上不可能被填充**
+     * （重构中途弃用留下的类型谎），于是事实卡里「角色节点已抽取事实」那块在每次调用中恒为空。
+     * 现把类型改为真实形状，使该通道可被接线；同时如实记录：**当前无调用方提供数据**，
+     * 若需恢复该能力（把 agentWorkflow 节点抽取的事实并入章级事实卡），在此处接入即可。
+     */
+    const matchedRoleContexts: Array<{ fact: { key: string; value: unknown } }> = [];
     if (session.planning.chapterIntentClassifier.needsBasicFacts(chapter.title)) rawEvidence.push(...session.understanding.safeProjectBasicEvidence.map(item => ({ ...item, chapterId: chapter.id, source: 'pinned-evidence' })));
     // round-20 S5/W7 P6-2：招标文件/投标须知类文件整文件 pinned 注入到概况/总述类章节——
     // 要求来源文件不得被检索召回截断（招标要求未写入正文的根因是要求原文根本没进 prompt）；
@@ -611,7 +619,16 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     if (!chapterTaskResult.task.ready && !resumedContent) throw new Error(`${displayChapterTitle(chapter.title)} 章节任务未就绪：${chapterTaskResult.task.issues.map(issue => issue.message).join('；')}`);
     const factNeedSummary = { total: resolvedFactNeeds.length, satisfied: resolvedFactNeeds.filter(item => item.status === 'satisfied').length, missing: resolvedFactNeeds.filter(item => item.status === 'missing').length, lowConfidence: resolvedFactNeeds.filter(item => item.status === 'low_confidence').length };
     for (const fact of requiredMissingNeeds) session.understanding.missingItems.push(`${chapter.title}：事实需求未确认 ${fact}`);
-    const budgetTarget = session.planning.documentBudget.chapterTargets.get(chapter.id) || 1200;
+    // 章预算取值单源（预算表缺失/为 0 时按权威预算折算兜底并显式上屏，不再静默落硬编码 1200——
+    // 该值会成为本章 roundTarget 与超产审计分母，下游无从分辨真假预算，见 resolveChapterBudgetTarget）
+    const { budgetTarget, fallbackNote: chapterBudgetFallbackNote } = resolveChapterBudgetTarget({
+      chapterTargets: session.planning.documentBudget.chapterTargets,
+      chapterId: chapter.id,
+      chapterTitle: chapter.title,
+      documentTargetChars: session.planning.documentBudget.targetChars,
+      chapterCount: session.planning.effectiveChapters.length,
+    });
+    const chapterBudgetDetails = chapterBudgetFallbackNote ? [chapterBudgetFallbackNote] : [];
     const sectionCount = chapter.sections?.filter(Boolean).length || 0;
     const targetPlan = chapterGenerationTargets({ budgetTarget, sectionCount, title: chapter.title, longformStrict: session.planning.documentBudget.longformStrict });
     const chapterMaxChars = Math.ceil(targetPlan.maxWords * (session.planning.documentBudget.maxChars ? 1.05 : 1));
@@ -661,7 +678,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
         promptId: chapterPromptExecution.primaryPromptId,
         status: 'success',
         message: `${displayChapterTitle(chapter.title)} 已复用已有章节正文：当前 ${documentTextLength(content)} 字，跳过 Writer，直接进入章节收口`,
-        details: [`有效证据：${evidence.length} 条`, `事实需求：${factNeedSummary.satisfied}/${factNeedSummary.total} 已满足，缺失 ${factNeedSummary.missing}，低置信 ${factNeedSummary.lowConfidence}`, '来源：resumeChapters/checkpointChapters'],
+        details: [`有效证据：${evidence.length} 条`, `事实需求：${factNeedSummary.satisfied}/${factNeedSummary.total} 已满足，缺失 ${factNeedSummary.missing}，低置信 ${factNeedSummary.lowConfidence}`, ...chapterBudgetDetails, '来源：resumeChapters/checkpointChapters'],
         progress: { current: chapterOrder + 1, total: session.planning.effectiveChapters.length, label: '复用章节' },
       }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
       session.global.progressStages[chapterProgressIndex] = latestChapterStageForProgress;
@@ -673,7 +690,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
         promptId: chapterPromptExecution.primaryPromptId,
         status: 'running',
         message: `${displayChapterTitle(chapter.title)} 正在规划主题块并准备并发成稿`,
-        details: [...chapterPromptDetails, `有效证据：${evidence.length} 条`, `事实需求：${factNeedSummary.satisfied}/${factNeedSummary.total} 已满足，缺失 ${factNeedSummary.missing}，低置信 ${factNeedSummary.lowConfidence}`, targetPlan.label, `生成上限约 ${chapterMaxChars} 字`, `模板细目：${chapter.sections?.length || 0} 条`, '先由章级 Planner 聚类为主题块并语义合并，再按主题块全并发出稿，避免逐小节碎片化'],
+        details: [...chapterPromptDetails, `有效证据：${evidence.length} 条`, `事实需求：${factNeedSummary.satisfied}/${factNeedSummary.total} 已满足，缺失 ${factNeedSummary.missing}，低置信 ${factNeedSummary.lowConfidence}`, targetPlan.label, `生成上限约 ${chapterMaxChars} 字`, ...chapterBudgetDetails, `模板细目：${chapter.sections?.length || 0} 条`, '先由章级 Planner 聚类为主题块并语义合并，再按主题块全并发出稿，避免逐小节碎片化'],
         progress: { current: chapterOrder + 1, total: session.planning.effectiveChapters.length, label: '主题块并发' },
       }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
       session.global.emitProgress();
@@ -686,7 +703,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
         const retried = await Promise.all(failedBlocks.map(({ block, retryFeedback }) =>
           // 定向反馈携带（initialFeedback）：失败块单块重写 attempt=0 即注入上一轮缺陷原文（缺失要点点名等）——
           // 历史缺陷：无反馈的隔离重写从零生成，极易复现同一漏点（4.44 丰乐镇工期章 2 块全失败于气候要点）
-          buildPlannedChapterContent({ ...buildInput, targetWords: block.targetWords, maxWords: Math.ceil(block.targetWords * 1.1), initialFeedback: retryFeedback }, { blocks: [block], coveredSections: [], fallbackSections: [] })
+          buildPlannedChapterContent({ ...buildInput, targetWords: block.targetWords, initialFeedback: retryFeedback }, { blocks: [block], coveredSections: [], fallbackSections: [] })
             .catch((error: unknown) => {
               // 降级治理：原实现丢弃异常对象 ⇒ 章阻断可见但**失败原因不可定位**（LLM 异常/超时/解析失败无差别）
               session.planning.generationDiagnostics.llm.lastError = `失败块定向重写异常（${chapter.title}）：${error instanceof Error ? error.message : String(error)}`;
@@ -756,7 +773,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
           chapterTaskStage.message = `${chapterTaskResult.task.sections.filter(item => item.ready).length}/${chapterTaskResult.task.sections.length} 条细目任务就绪（已规划为 ${plannedStructure.blocks.length} 个主题块）`;
         }
         session.global.emitProgress(session.global.chapterDrafts);
-        const plannedBuildInput: PlannedChapterContentInput = { template: session.prepare.template, chapter, evidence, missingFacts, promptTexts: plannedPromptTexts, projectContext: session.planning.chapterScopedProjectContext(chapter), skeletonProjectContext: session.planning.projectContext, requirement: session.global.input.requirement, roleContext, targetWords: effectiveTargetWords, maxWords: chapterMaxChars, forbidDrawingImages, bidComposition: session.understanding.bidComposition, factCoverageContext, compactProjectContext: true, scopedProjectContext: true, // G 线 P1-5：蓝图数据**按域下发**——原为「validation.passed ? data : undefined」的全有全无：
+        const plannedBuildInput: PlannedChapterContentInput = { template: session.prepare.template, chapter, evidence, missingFacts, promptTexts: plannedPromptTexts, projectContext: session.planning.chapterScopedProjectContext(chapter), skeletonProjectContext: session.planning.projectContext, requirement: session.global.input.requirement, roleContext, targetWords: effectiveTargetWords, forbidDrawingImages, bidComposition: session.understanding.bidComposition, factCoverageContext, compactProjectContext: true, scopedProjectContext: true, // G 线 P1-5：蓝图数据**按域下发**——原为「validation.passed ? data : undefined」的全有全无：
           // 任一校验未过即整套蓝图都不注入，于是「劳动力不可用」会连带掐断进度/清单/图纸等
           // 完全可用的权威，章级损失被放大成篇级损失。现按 authorityAvailability 逐域过滤，
           // 不可用域清零、其余照常；整体 passed=false 时仍不注入（该校验失败含清单缺失等
@@ -903,7 +920,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       promptId: chapterPromptExecution.primaryPromptId,
       status: chapterStatus,
       message: elapsedMessage(`${displayChapterTitle(chapter.title)} 已由大模型成稿：当前 ${chapterChars} 字；章节预算约 ${targetPlan.budgetTarget} 字，本轮目标约 ${targetPlan.roundTarget} 字${chapterIssues.length ? `；待优化：${chapterIssues.slice(0, 8).join('、')}` : ''}`, chapterStartedAt),
-      details: [`本轮完成率：${chapterOverProducePercent}%`, `结构目标约 ${targetPlan.structureTarget} 字`, ...chapterPromptDetails, `二级小节：${sections.length} 个`, ...(chapterOverProduce ? [`篇幅审计：章超产（${chapterChars} 字 vs 本轮目标 ${targetPlan.roundTarget} 字，终稿篇幅阻断线为目标总额 +20%）`] : []), ...(overProduceAcceptanceNote ? [overProduceAcceptanceNote] : [])],
+      details: [`本轮完成率：${chapterOverProducePercent}%`, `结构目标约 ${targetPlan.structureTarget} 字`, ...chapterPromptDetails, ...chapterBudgetDetails, `二级小节：${sections.length} 个`, ...(chapterOverProduce ? [`篇幅审计：章超产（${chapterChars} 字 vs 本轮目标 ${targetPlan.roundTarget} 字，终稿篇幅阻断线为目标总额 +20%）`] : []), ...(overProduceAcceptanceNote ? [overProduceAcceptanceNote] : [])],
       progress: { current: chapterOrder + 1, total: session.planning.effectiveChapters.length, label: chapterIssues.length ? '章节已生成' : '章节达标' },
     }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
     session.understanding.chapterGenerationStagesByOrder[chapterOrder] = latestChapterStageForProgress;

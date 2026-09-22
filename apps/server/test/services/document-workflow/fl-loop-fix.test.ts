@@ -80,7 +80,8 @@ describe('runDeterministicChainUntilConverged 链级收敛', () => {
     const result = runDeterministicChainUntilConverged([
       (md) => { calls += 1; return { markdown: md, fixedCount: 1 }; },
     ], '正文', 2);
+    // 轮次上限保护不变（仍调用 2 次）；fixedCount 只统计真实改写（4.55.22 幽灵计数根修）
     expect(calls).toBe(2);
-    expect(result.fixedCount).toBe(2);
+    expect(result.fixedCount).toBe(0);
   });
 });

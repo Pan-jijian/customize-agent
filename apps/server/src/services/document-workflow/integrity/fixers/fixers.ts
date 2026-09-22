@@ -222,8 +222,12 @@ export function runFixUntilClean(fix: (markdown: string) => DeterministicFixOutc
   for (let round = 0; round < maxRounds; round += 1) {
     const result = fix(current);
     if (result.fixedCount === 0) break;
+    // 4.55.22 根修「幽灵计数」：**保留**既有轮次上限保护（修复器恒报命中时循环到 maxRounds，
+    // 该保护有用例锁定：「假修复（markdown 不变 fixedCount>0）循环到轮次上限」），
+    // 但只在 markdown **确实变化**时累加计数——否则「报了 N 处却没改一个字」会把 N×maxRounds
+    // 计入进度与 `recordRepairActions`，交付报告的"修复 N 处"高于实际改写量。
+    if (result.markdown !== current) total += result.fixedCount;
     current = result.markdown;
-    total += result.fixedCount;
   }
   return { markdown: current, fixedCount: total };
 }
@@ -237,13 +241,18 @@ export function runDeterministicChainUntilConverged(fixers: Array<(markdown: str
   let total = 0;
   for (let round = 0; round < maxRounds; round += 1) {
     let roundTotal = 0;
+    // **循环判据与计数分离**（4.55.22）：循环是否继续沿用既有口径——本轮**任一修复器报命中**
+    // 即继续（受 maxRounds 上限保护，有用例锁定「修复器恒命中时仍跑满轮次」）；
+    // 而 fixedCount 只统计**文本确实改写**的轮次，避免"报了 N 处却没改一个字"虚增交付报告数字。
+    let reportedAny = false;
     for (const fix of fixers) {
       const result = fix(current);
       if (result.fixedCount === 0) continue;
+      reportedAny = true;
+      if (result.markdown !== current) roundTotal += result.fixedCount;
       current = result.markdown;
-      roundTotal += result.fixedCount;
     }
-    if (roundTotal === 0) break;
+    if (!reportedAny) break;
     total += roundTotal;
   }
   return { markdown: current, fixedCount: total };
@@ -2147,11 +2156,21 @@ export function fixInvertedDateRanges(markdown: string): { markdown: string; fix
   for (const hit of [...hits].reverse()) {
     const source = next.slice(hit.start, hit.end);
     // V5 P6 修复（run1 实测残留 2 条）：旧实现只匹配「至」，「第120日～第3日」（波浪线
-    // 连接符）落修——必须与检测器 INVERTED_DATE_RANGE_RE 同源字符类，防检测到但修不掉的残留
-    const dayMatch = /第\d{1,3}日(?:至|到|～|~|—|－)/u.exec(source);
-    if (!dayMatch) continue;
-    next = next.slice(0, hit.start) + next.slice(hit.start + dayMatch[0].length);
-    details.push(source);
+    // 连接符）落修——必须与检测器 INVERTED_DATE_RANGE_RE 同源字符类，防检测到但修不掉的残留。
+    //
+    // 4.55.22 根修「以删除代替修复」：原实现**删掉连接符与起始日**（「第120日至第3日」→「第3日」），
+    // 把区间压成单点——交付物断言的工期含义被改变，且检测器复检天然通过（矛盾已不存在）。
+    // 现改为**交换端点**：区间仍是区间，语义（起止范围）保留，仅纠正倒置。
+    const rangeMatch = /第(\d{1,3})日(至|到|～|~|—|－)第(\d{1,3})日/u.exec(source);
+    if (!rangeMatch) continue;
+    const startDay = Number(rangeMatch[1]);
+    const endDay = Number(rangeMatch[3]);
+    if (!Number.isFinite(startDay) || !Number.isFinite(endDay) || startDay <= endDay) continue;
+    const connector = rangeMatch[2]!;
+    const fixedRange = `第${endDay}日${connector}第${startDay}日`;
+    const absoluteStart = hit.start + (rangeMatch.index ?? 0);
+    next = next.slice(0, absoluteStart) + fixedRange + next.slice(absoluteStart + rangeMatch[0].length);
+    details.push(`${source} → ${fixedRange}`);
   }
   return { markdown: next, fixedCount: details.length, details };
 }

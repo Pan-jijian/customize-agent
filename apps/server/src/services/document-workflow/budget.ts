@@ -1,5 +1,5 @@
 import type { AutoDocumentSpecPackage } from '../document-core/autoDocumentSpecTypes';
-import type { DocumentExportSettings, DocumentGenerationSettings, DocumentTemplate, DocumentTemplateChapter, ValidationIssue } from './types';
+import type { DocumentExportSettings, DocumentFact, DocumentGenerationSettings, DocumentTemplate, DocumentTemplateChapter, ValidationIssue } from './types';
 
 export function estimateDocumentPages(markdown: string, settings?: DocumentGenerationSettings | DocumentExportSettings) {
   const textLength = documentTextLength(markdown);
@@ -193,6 +193,36 @@ export function reanchorChapterTargetsByFeasibility(input: {
   return { chapterTargets, adjustments, compressed };
 }
 
+/** 章预算取值（写作侧单源解析）：documentBudget.chapterTargets 是唯一权威来源。
+ * 缺失/非正数（预算未覆盖本章 = 上游契约违约）时**不得**静默落硬编码常量——历史缺陷：
+ * `chapterTargets.get(id) || 1200` 把「缺失输入」变成「自信的错误分母」，该值经 chapterGenerationTargets
+ * 变成本轮目标（targetPlan.roundTarget）与章超产审计基准，下游无从分辨真假预算。
+ * 显式兜底口径：优先「全文目标 ÷ 章数」，无全文目标时取「章预算合计 ÷ 章数」，两者皆无则取章最低
+ * 预算锚点 CHAPTER_MIN_BUDGET；返回的 fallbackNote 由调用方上屏（阶段 details）+ console 告警，
+ * 使预算缺口可见而非静默。 */
+export function resolveChapterBudgetTarget(input: {
+  chapterTargets: Map<string, number>;
+  chapterId: string;
+  chapterTitle: string;
+  /** 全文目标字数（documentBudget.targetChars） */
+  documentTargetChars?: number;
+  chapterCount: number;
+}): { budgetTarget: number; fallbackNote?: string } {
+  const raw = input.chapterTargets.get(input.chapterId);
+  if (raw !== undefined && Number.isFinite(raw) && raw > 0) return { budgetTarget: raw };
+  const chapterCount = Math.max(1, Math.floor(input.chapterCount) || 1);
+  const chapterSum = [...input.chapterTargets.values()].reduce((sum, value) => sum + (Number.isFinite(value) && value > 0 ? value : 0), 0);
+  const documentTarget = Number.isFinite(input.documentTargetChars) && input.documentTargetChars! > 0 ? input.documentTargetChars! : 0;
+  const total = documentTarget > 0 ? documentTarget : chapterSum;
+  const budgetTarget = total > 0 ? Math.max(1, Math.round(total / chapterCount)) : CHAPTER_MIN_BUDGET;
+  const basis = total > 0
+    ? `按${documentTarget > 0 ? '全文目标' : '章预算合计'} ${Math.round(total)} 字 ÷ ${chapterCount} 章折算`
+    : `全文目标与章预算合计均不可用，取章最低预算锚点 ${CHAPTER_MIN_BUDGET} 字`;
+  const fallbackNote = `章预算缺失回退：章预算表未覆盖本章（${input.chapterTitle}，原值 ${String(raw)}），${basis} → ${budgetTarget} 字；该值参与本章目标与超产审计，请核查预算生成契约`;
+  console.error(`[budget] ${fallbackNote}`);
+  return { budgetTarget, fallbackNote };
+}
+
 export function buildDocumentBudget(input: { requirement?: string; promptTexts: string; template: DocumentTemplate; chapters: DocumentTemplateChapter[]; spec?: AutoDocumentSpecPackage }): DocumentBudget {
   const settings = input.template.generationSettings || input.template.exportSettings;
   const charsPerPage = charsPerPageForSettings(input.template.exportSettings || input.template.generationSettings);
@@ -327,6 +357,36 @@ export function documentLengthOverflow(budget: DocumentBudget, markdown: string)
  */
 export const EVIDENCE_DENSITY_MIN_RATIO = 0.8;
 export const EVIDENCE_DENSITY_WEIGHTS = { parameter: 100, boqRow: 60, drawingFact: 50, basicFact: 30 } as const;
+
+/** 事实稳定身份（计数去重键）：同一 key+value+来源文件即同一条事实（DocumentFact 无 id，
+ * 字段级 id 不唯一——一条事实可命中多个 spec 字段）。 */
+function densityFactIdentity(fact: DocumentFact): string {
+  return `${fact.key}\u0000${fact.value}\u0000${fact.sourceFile}`;
+}
+
+/** 证据密度体检的事实计数（单次计数，单源）。
+ * 病根：project/schedule/quality/safety/resources 五池与 schemaFacts 均由**同一 facts 数组**过滤而来
+ * （schemaFacts 逐 spec 字段过滤、五池按关键词过滤），一条事实同时落在多个池/多个字段是常态——
+ * 直接对拼接结果求长度会把同一条事实重复计权（基础事实权重 30 字/条），supportableWords 因此虚高，
+ * 前置密度门（supportableWords < target×0.8 即失败）几乎不触发。
+ * 现按稳定身份去重后计数；量化参数（preciseFacts，权重 100，另行计权）按同一身份从基本事实中剔除，
+ * 同一条事实不同时按「参数」与「基本事实」计两次。 */
+export function countEvidenceDensityFacts(input: { pools: DocumentFact[][]; preciseFacts?: DocumentFact[] }): { allFacts: number; basicFacts: number; parameters: number } {
+  const distinct = new Map<string, DocumentFact>();
+  for (const pool of input.pools) {
+    for (const fact of pool) {
+      const identity = densityFactIdentity(fact);
+      if (!distinct.has(identity)) distinct.set(identity, fact);
+    }
+  }
+  const preciseFacts = input.preciseFacts ?? [];
+  const parameterIdentities = new Set(preciseFacts.map(densityFactIdentity));
+  return {
+    allFacts: distinct.size,
+    basicFacts: [...distinct.keys()].filter(identity => !parameterIdentities.has(identity)).length,
+    parameters: preciseFacts.length,
+  };
+}
 
 export interface EvidenceDensityAssessment {
   /** 可支撑字数**下界**估算 */

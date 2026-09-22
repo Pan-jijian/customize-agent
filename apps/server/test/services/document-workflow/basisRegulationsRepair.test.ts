@@ -57,6 +57,8 @@ function makeSession(chapters: Array<{ id: string; title: string; content: strin
     blueprintData: undefined,
     generationDiagnostics: { llm: { calls: 0, failures: 0, maxActive: 0, retries: 0, lastError: '' } },
     finalChapterDrafts: chapters.map(chapter => ({ ...chapter, evidence: [], missingFacts: [], sections: [] })),
+    // 4.55.22：项目资料（无来源规范编号守卫的依据来源）——补列的标准必须能在资料里查到
+    allEvidence: [{ content: '设计说明：给水排水管道施工按《给水排水管道工程施工及验收规范》（GB 50268-2008）执行；地基基础施工按《建筑地基基础工程施工质量验收标准》（GB 50202-2018）执行。', filePath: '结构设计总说明.dwg' }],
     progressStages: [] as StageLike[],
     finalGateRepairStages: [] as StageLike[],
     finalMarkdown: chapters.map(chapter => chapter.content).join('\n\n'),
@@ -155,6 +157,20 @@ describe('basis-regulations-repair 行为矩阵', () => {
     const stage = stageOf(session.progressStages, 'agent-basis-regulations-repair-ch1');
     expect(stage?.status).toBe('failed');
     expect(stage?.message).toContain('已回滚');
+  });
+
+  // 4.55.22 新增守卫：本轮指令要求模型"按本工程分部分项选择现行版本并列全名称与编号"，
+  // 而唯一事实来源只有招标文件引用法规——标准编号全靠模型记忆产出，原 recheck 只看类目覆盖+汉字数，
+  // 编造/废止编号照样落地。现要求新引入的编号必须能在项目资料中查到，否则回滚。
+  it('无来源规范编号回滚：补列的编号在项目资料中查无 → 回滚保留原文', async () => {
+    const session = makeSession([{ id: 'ch1', title: '编制依据', content: DEFECTIVE_CONTENT }]);
+    const fabricated = [
+      ...REPAIRED_CONTENT.split('\n'),
+      '《既有建筑维护与改造通用规范》（GB 55022-2099）',
+    ].join('\n');
+    repairMock.mockResolvedValueOnce(repairResult(fabricated));
+    await stageBasisRegulationsRepair(session);
+    expect(session.finalChapterDrafts[0].content).toBe(DEFECTIVE_CONTENT);
   });
 
   it('章外区段报出：章级检测均通过时显性记录，不猜测改写', async () => {

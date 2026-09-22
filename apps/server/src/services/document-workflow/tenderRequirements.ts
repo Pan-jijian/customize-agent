@@ -918,7 +918,13 @@ const COMMERCIAL_TECHNICAL_RESCUE_RE = /工艺试验|工艺评定|试验段|复�
  * 不再依赖人工递增版本纪律（M10 漏递增实锤）。
  * M26 增补：合同附件来源域判据（isContractAttachmentSectionClause）+ 引用性条款判据
  * （isDocumentReferenceTerm/isDocumentReferenceOnlyClause）+ 商务域两个词表常量
- * （外部 const 词表不影响函数源码序列化，必须直接入表方能触发缓存失效）。 */
+ * （外部 const 词表不影响函数源码序列化，必须直接入表方能触发缓存失效）。
+ * v10 补漏：入表判据**函数体内引用**的词表/规则表同样必须直接入表——函数只序列化自身源码，
+ * 表内容变更不进指纹（本类漏网实证：isTableDeclarationBoilerplate 的
+ * TABLE_DECLARATION_BOILERPLATE_RE、isContractAttachmentSectionClause 的
+ * CONTRACT_ATTACHMENT_SECTION_RE、collectClauseStructureRequirements → detectStructureRequirements
+ * 的 STRUCTURE_FORM_RULES 三张表编辑后缓存不失效）。源序列化同步收紧：对象/表常量不再退化为
+ * '[object Object]'（见 tenderRequirementsFingerprintSourceText）。 */
 const CACHE_JUDGE_FINGERPRINT_SOURCES: ReadonlyArray<unknown> = [
   clauseFragmentLike,
   // 4.55.14 技术标准入闸（池纯度判据）：分类器函数入表，口径变更自动失效缓存
@@ -946,11 +952,26 @@ const CACHE_JUDGE_FINGERPRINT_SOURCES: ReadonlyArray<unknown> = [
   normalizeExclusionReason,
   GLOBAL_COMPLY_RE,
   collectClauseStructureRequirements,
+  // v10：入表判据函数体内引用的外部词表/规则表（函数源码序列化不含外部 const 内容）
+  STRUCTURE_FORM_RULES,
+  TABLE_DECLARATION_BOILERPLATE_RE,
+  CONTRACT_ATTACHMENT_SECTION_RE,
 ];
+
+/** 判据源序列化（单点）：函数取源码文本、正则取 pattern/flags、表/常量对象递归序列化（函数项取
+ * 源码、正则项取字面量）——直接 String() 对对象表恒得 '[object Object]'，词表内容变更不进指纹，
+ * 入表等于没入（v10 前的结构性盲区）。 */
+function tenderRequirementsFingerprintSourceText(source: unknown): string {
+  if (typeof source === 'function' || source instanceof RegExp) return String(source);
+  if (source && typeof source === 'object') {
+    return JSON.stringify(source, (_key, value: unknown) => (typeof value === 'function' || value instanceof RegExp ? String(value) : value)) ?? String(source);
+  }
+  return String(source);
+}
 
 /** 判定口径指纹（导出供测试）：判据源序列化文本的稳定哈希——判据代码任何变更 → 缓存 key 变化 */
 export function tenderRequirementsJudgeFingerprint(sources: ReadonlyArray<unknown> = CACHE_JUDGE_FINGERPRINT_SOURCES): string {
-  return stableHash(sources.map(source => String(source)).join('\n'));
+  return stableHash(sources.map(tenderRequirementsFingerprintSourceText).join('\n'));
 }
 
 function tenderRequirementsCacheRoot(projectRoot?: string) {

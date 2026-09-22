@@ -316,11 +316,23 @@ const GATING_CHECKLIST_KEYS: readonly string[] = ['basic_facts', 'source_traceab
 
 export function buildExportGate(issues: ValidationIssue[], factsModel: DocumentFactsModel, chapters: DocumentDraftChapter[]): ExportGateResult {
   const governedIssues = issues.map(classifyValidationIssue);
-  // 人工兜底项豁免（F4）：封面/页眉/页脚/附图等后期人工完善的内容不作为导出门禁阻断项，
-  // 修复循环同样不消费预算处理该类缺陷；仅在 checklist 中展示供人工跟进
-  const MANUAL_POSTPROCESS_ISSUE_RE = /封面|页眉|页脚|附图|图片引用|CAD图|示意图|插图/u;
-  const hardBlockingIssues = governedIssues.filter(issue => issue.level === 'error' && classifyBlockingIssue(issue) && !MANUAL_POSTPROCESS_ISSUE_RE.test(issue.message));
-  const manualPostprocessIssues = governedIssues.filter(issue => issue.level === 'error' && MANUAL_POSTPROCESS_ISSUE_RE.test(issue.message));
+  /**
+   * 人工兜底项豁免（F4）：封面/页眉/页脚/附图等**后期人工完善**的内容不作为导出门禁阻断项，
+   * 修复循环同样不消费预算处理该类缺陷；仅在 checklist 中展示供人工跟进。
+   *
+   * 4.55.22 根修：原判据是**消息关键词**正则 `/封面|页眉|页脚|附图|图片引用|CAD图|示意图|插图/`
+   * —— 任何 error 的 message 只要**引述**了这些词（如「第 3 章示意图引用无对应图件」）就会被
+   * 静默移出硬阻断，即一条以消息文本为键的放行通道。现改为**锚定前缀白名单**：
+   * 只有下列"内容本身就属于封面类后期完善项"的消息才豁免，引述型消息不再被误放行。
+   */
+  const MANUAL_POSTPROCESS_MESSAGE_PREFIXES: readonly string[] = [
+    '正文缺少提示词要求的封面',
+    '正文残留封面内容',
+  ];
+  const isManualPostprocessIssue = (message: string): boolean =>
+    MANUAL_POSTPROCESS_MESSAGE_PREFIXES.some(prefix => message.startsWith(prefix));
+  const hardBlockingIssues = governedIssues.filter(issue => issue.level === 'error' && classifyBlockingIssue(issue) && !isManualPostprocessIssue(issue.message));
+  const manualPostprocessIssues = governedIssues.filter(issue => issue.level === 'error' && isManualPostprocessIssue(issue.message));
   // V2 批3 门禁升级（宁缺毋假）：category 白名单 → 黑名单式全量阻断——凡通过 isHardExportBlockingIssue
   // 的 error（含 category 直通与消息白名单校准后的残留）一律硬阻断，不再按旧 category 白名单
   // （structure/style/fact_consistency）二次过滤。旧白名单与 hasBody 开关会静默放行

@@ -38,7 +38,7 @@ export type { DocumentLlmTaskKind, ThinkingDecision, ContextLayerKey, DocumentJs
 export { selectDocumentGenerationStrategy, createGenerationDiagnostics, measureGenerationStep, repairableQualityIssue, classifyQualityRepairType, repairTypeInstruction, repairChapterByQuality, sanitizePromptForExecution, promptTextsForResolvedPrompts } from './rolePipeline';
 export type { AnchorSpec, QualityRepairType } from './rolePipeline';
 
-export { buildValidationIssues, buildChapterFactCoverageContext, extractUserRequirementFacts, userRequirementFactsPrompt, capFactCoverageContext, buildLlmChapterContent, sectionTargets, buildSectionBudgetInstruction, tokenizeForRelevance, evidenceForSection, normalizeFactUsageText, buildSectionFactCard, sectionFactUsageIssue, compactSectionProjectContext, compactScopedProjectContext, buildLlmSectionContent, buildPlannedChapterContent } from './chapterGeneration';
+export { buildValidationIssues, buildChapterFactCoverageContext, extractUserRequirementFacts, userRequirementFactsPrompt, capFactCoverageContext, buildLlmChapterContent, sectionTargets, buildSectionBudgetInstruction, tokenizeForRelevance, evidenceForSection, normalizeFactUsageText, buildSectionFactCard, sectionFactUsageIssue, compactSectionProjectContext, compactScopedProjectContext, buildPlannedChapterContent } from './chapterGeneration';
 export type { SectionQuotaItem } from './chapterGeneration';
 export type { PlannedChapterContentInput, PlannedChapterContentResult } from './chapterGeneration';
 

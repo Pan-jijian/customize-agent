@@ -12,6 +12,7 @@
  * 不得猜测改写。
  */
 import { basisRegulationsCoverageIssues } from '../../qualityValidation';
+import { REGULATION_CODE_RE } from '../../basisRegulationsCross';
 import { displayStage, upsertProgressStage } from '../../progress';
 import { repairChapterByQuality, repairPatchGuard } from '../../rolePipeline';
 import { withPatchRollback } from '../../patchRollback';
@@ -52,6 +53,21 @@ export async function stageBasisRegulationsRepair(session: FinalizeSession): Pro
     let chapterRepaired = false;
     let anyRollback = false;
     const roleId = `agent-basis-regulations-repair-${chapter.id}`;
+    /**
+     * 4.55.22 根修「无来源规范编号」：本轮的指令要求模型「按本工程分部分项选择现行版本并列全名称与编号」，
+     * 而唯一传给它的事实来源只有招标文件引用法规——**标准名称与编号全靠模型记忆产出**；
+     * 原 recheck 只看「类目覆盖数 + 汉字未减少」，编造或已废止的编号照样通过。
+     * 现增加第三指标：本轮**新引入**的规范编号必须能在**项目资料**中找到（allEvidence 原文 + 蓝图法规条目），
+     * 否则计为「无来源新增」并回滚该次 patch（与 patchGuard 的'不得编造'同口径）。
+     */
+    const normalizeRegCode = (code: string): string => code.replace(/[^0-9A-Za-z]/gu, '').toUpperCase();
+    const materialText = [
+      ...(session.allEvidence || []).map(item => String(item.content || '')),
+      ...(session.blueprintData?.basisRegulations || []),
+    ].join('\n');
+    const materialCodes = new Set([...materialText.matchAll(REGULATION_CODE_RE)].map(match => normalizeRegCode(match[0])));
+    const codesOf = (text: string): Set<string> => new Set([...text.matchAll(REGULATION_CODE_RE)].map(match => normalizeRegCode(match[0])));
+
     while (rounds < MAX_BASIS_REPAIR_ROUNDS && basisRegulationsCoverageIssues(chapterContent, session.blueprintData).length > 0) {
       rounds += 1;
       // 当前残留的缺失类目（每轮以最新文本重新定位，检测定位=修复定位）
@@ -92,9 +108,14 @@ export async function stageBasisRegulationsRepair(session: FinalizeSession): Pro
           }));
           return repaired.content && repaired.content !== chapterContent ? repaired.content : chapterContent;
         },
-        // 指标 1：缺失类目数（越大越差）；指标 2：负汉字数（汉字数减少=删除式修复，越大越差）
-        recheck: (content) => [basisRegulationsCoverageIssues(content, session.blueprintData).length, -hanCount(content)],
-        shouldRollback: (before, after) => after[0] > before[0] || after[1] > before[1] + Math.max(40, Math.abs(before[1]) * 0.05),
+        // 指标 1：缺失类目数（越大越差）；指标 2：负汉字数（汉字数减少=删除式修复，越大越差）；
+        // 指标 3（4.55.22）：本轮新引入且**项目资料中查无**的规范编号数（编造/废止版本，越大越差）
+        recheck: (content) => {
+          const existing = codesOf(chapterContent);
+          const unsourcedNew = [...codesOf(content)].filter(code => !existing.has(code) && !materialCodes.has(code));
+          return [basisRegulationsCoverageIssues(content, session.blueprintData).length, -hanCount(content), unsourcedNew.length];
+        },
+        shouldRollback: (before, after) => after[0] > before[0] || after[1] > before[1] + Math.max(40, Math.abs(before[1]) * 0.05) || (after[2] ?? 0) > (before[2] ?? 0),
       });
       if (outcome.rolledBack) anyRollback = true;
       if (outcome.rolledBack || outcome.content === chapterContent) break;

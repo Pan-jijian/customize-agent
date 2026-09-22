@@ -4,10 +4,13 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  CHAPTER_MIN_BUDGET,
   allocateChapterTargets,
+  assessEvidenceDensity,
   buildDocumentBudget,
   chapterBudgetWeight,
   charsPerPageForSettings,
+  countEvidenceDensityFacts,
   documentBudgetIssues,
   documentBudgetStatus,
   documentTextLength,
@@ -16,11 +19,12 @@ import {
   pageTargetIssues,
   parseChineseNumber,
   reanchorChapterTargetsByFeasibility,
+  resolveChapterBudgetTarget,
   stripExplicitLengthLines,
   type DocumentBudget,
 } from '@/services/document-workflow/budget';
 import type { AutoDocumentSpecPackage } from '@/services/document-core/autoDocumentSpecTypes';
-import type { DocumentTemplate, DocumentTemplateChapter } from '@/services/document-workflow/types';
+import type { DocumentFact, DocumentTemplate, DocumentTemplateChapter } from '@/services/document-workflow/types';
 
 function makeChapter(overrides: Partial<DocumentTemplateChapter> = {}): DocumentTemplateChapter {
   return { id: 'c1', title: '第一章', purpose: '', queries: [], requiredFacts: [], ...overrides };
@@ -457,5 +461,58 @@ describe('documentBudgetStatus', () => {
   it('按 charsPerPage 计算字数与页数', () => {
     const budget = makeBudget({ charsPerPage: 900 });
     expect(documentBudgetStatus(budget, '字'.repeat(1800))).toEqual({ currentChars: 1800, estimatedPages: 2 });
+  });
+});
+
+describe('resolveChapterBudgetTarget（章预算取值单源，缺失不落硬编码）', () => {
+  it('预算表命中 → 直接取权威值，无回退告警', () => {
+    const resolved = resolveChapterBudgetTarget({ chapterTargets: new Map([['c1', 5200]]), chapterId: 'c1', chapterTitle: '第一章', documentTargetChars: 52000, chapterCount: 10 });
+    expect(resolved).toEqual({ budgetTarget: 5200 });
+  });
+
+  it('0 与缺失同判（非正数不是预算）→ 按全文目标 ÷ 章数折算并给出可见告警', () => {
+    for (const targets of [new Map<string, number>(), new Map([['c1', 0]]), new Map([['other', 3000]])]) {
+      const resolved = resolveChapterBudgetTarget({ chapterTargets: targets, chapterId: 'c1', chapterTitle: '第一章', documentTargetChars: 52000, chapterCount: 10 });
+      expect(resolved.budgetTarget).toBe(5200);
+      expect(resolved.fallbackNote).toContain('章预算缺失回退');
+      expect(resolved.fallbackNote).toContain('第一章');
+    }
+  });
+
+  it('无全文目标 → 按章预算合计 ÷ 章数折算；两者皆无 → 章最低预算锚点（非 1200 硬编码）', () => {
+    const bySum = resolveChapterBudgetTarget({ chapterTargets: new Map([['c1', 0], ['c2', 3000], ['c3', 5000]]), chapterId: 'c1', chapterTitle: '第一章', chapterCount: 4 });
+    expect(bySum.budgetTarget).toBe(2000);
+    const bare = resolveChapterBudgetTarget({ chapterTargets: new Map([['c1', 0]]), chapterId: 'c1', chapterTitle: '第一章', chapterCount: 0 });
+    expect(bare.budgetTarget).toBe(CHAPTER_MIN_BUDGET);
+    expect(bare.fallbackNote).toContain('章最低预算锚点');
+  });
+});
+
+describe('countEvidenceDensityFacts（证据密度计数去重：同一条事实只计一次）', () => {
+  const fact = (key: string, value: string, sourceFile = '招标文件.pdf'): DocumentFact => ({ key, value, sourceFile, roleId: 'project_basic', confidence: 90 });
+  it('五池与 schemaFacts 的同源重复不计权，量化参数从基本事实中按同一身份剔除', () => {
+    const project = [fact('建设规模', '总建筑面积28570.36平方米'), fact('项目名称', '某安置房项目')];
+    const schedule = [fact('建设规模', '总建筑面积28570.36平方米'), fact('计划工期', '540日历天')];
+    const schemaProject = [fact('项目名称', '某安置房项目'), fact('建设规模', '总建筑面积28570.36平方米')];
+    const counts = countEvidenceDensityFacts({ pools: [project, schedule, schemaProject], preciseFacts: [fact('建设规模', '总建筑面积28570.36平方米'), fact('计划工期', '540日历天')] });
+    // 去重后 3 条（建设规模/项目名称/计划工期）；3 条中的 2 条是量化参数 → 基本事实 1 条
+    expect(counts.allFacts).toBe(3);
+    expect(counts.parameters).toBe(2);
+    expect(counts.basicFacts).toBe(1);
+  });
+
+  it('同 key+value 但来源不同视为两条事实（跨文件同值不去重，来源是身份的一部分）', () => {
+    const counts = countEvidenceDensityFacts({ pools: [[fact('计划工期', '540日历天', '招标文件.pdf'), fact('计划工期', '540日历天', '答疑纪要.pdf')]] });
+    expect(counts.allFacts).toBe(2);
+    expect(counts.basicFacts).toBe(2);
+  });
+
+  it('密度体检同输入下更保守：重复计数虚高的支撑字数被压回（去重即下调估算）', () => {
+    const duplicated = [fact('建设规模', '总建筑面积28570.36平方米'), fact('项目名称', '某安置房项目')];
+    const inflated = assessEvidenceDensity({ targetWords: 0, parameters: 0, boqRows: 0, drawingFacts: 0, basicFacts: duplicated.length * 3 });
+    const deduped = countEvidenceDensityFacts({ pools: [duplicated, duplicated, duplicated] });
+    const conservative = assessEvidenceDensity({ targetWords: 0, parameters: 0, boqRows: 0, drawingFacts: 0, basicFacts: deduped.basicFacts });
+    expect(deduped.basicFacts).toBe(2);
+    expect(conservative.supportableWords).toBeLessThan(inflated.supportableWords);
   });
 });

@@ -61,10 +61,13 @@ describe('Z1 runFixUntilClean 节点内闭环修复深挖', () => {
     expect(result.markdown).toBe('XXXAYYY');
     expect(result.fixedCount).toBe(3);
   });
-  it('Z1 假修复（markdown 不变 fixedCount>0）循环到轮次上限', () => {
-    const fake: Fixer = md => ({ markdown: md, fixedCount: 1 });
+  it('Z1 假修复（markdown 不变 fixedCount>0）循环到轮次上限，但计数为 0', () => {
+    // 4.55.22：循环保护不变（仍跑满 maxRounds），fixedCount 不再累计未产生改写的"修复"
+    let calls = 0;
+    const fake: Fixer = md => { calls += 1; return { markdown: md, fixedCount: 1 }; };
     const result = runFixUntilClean(fake, '原文', 3);
-    expect(result).toEqual({ markdown: '原文', fixedCount: 3 });
+    expect(calls).toBe(3);
+    expect(result).toEqual({ markdown: '原文', fixedCount: 0 });
   });
   it('Z1 修复器返回空 fixedCount 但 markdown 改变 → 不采纳该 markdown', () => {
     const mutateButZero: Fixer = () => ({ markdown: '篡改后文本', fixedCount: 0 });

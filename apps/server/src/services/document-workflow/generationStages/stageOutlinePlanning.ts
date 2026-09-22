@@ -8,7 +8,7 @@ import type { DocumentEvidence, DocumentTemplateChapter } from '../types';
 import { displayChapterTitle } from '../outline';
 import { evidenceMatchesFact } from '../factMatching';
 import { selectEvidenceByBudget } from '../evidence';
-import { assessEvidenceDensity, buildDocumentBudget, stripExplicitLengthLines } from '../budget';
+import { assessEvidenceDensity, buildDocumentBudget, countEvidenceDensityFacts, stripExplicitLengthLines } from '../budget';
 import { chapterCriteriaText, prioritizeOverviewSections, validateBidStructureBeforeGeneration } from '../constructionBidStructure';
 import { buildSemanticSimilarity } from '../semanticSimilarity';
 import { filterOffTopicSectionsForChapters } from '../evidenceContentSafety';
@@ -407,13 +407,18 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
   // 前置在这里（而非更早）是因为目标字数由 documentBudget 解出；仍早于任何章节写作，属「生成前」。
   // 数据源与质检同源（preliminaryFactsModel：量化参数 + 结构化表行 + 其余基础事实）；
   // 图纸事实以 CAD 证据切片数为代理——图纸标注已并入事实池，单独计数会与基础事实重复。
+  // 基础事实计数按**稳定身份去重**（countEvidenceDensityFacts）：五池与 schemaFacts 同源于一个 facts
+  // 数组且一条事实可命多池/多字段，重复计数会让 supportableWords 虚高、前置密度门形同不触发。
   const densityModel = session.understanding.preliminaryFactsModel;
-  const densityParameters = densityModel?.preciseFacts?.length ?? 0;
+  const densityCounts = countEvidenceDensityFacts({
+    pools: densityModel
+      ? [densityModel.project, densityModel.schedule, densityModel.quality, densityModel.safety, densityModel.resources, ...Object.values(densityModel.schemaFacts ?? {})]
+      : [],
+    preciseFacts: densityModel?.preciseFacts,
+  });
+  const densityParameters = densityCounts.parameters;
   const densityBoqRows = (densityModel?.tables ?? []).reduce((sum, table) => sum + (table.rows?.length ?? 0), 0);
-  const densityAllFacts = densityModel
-    ? [...densityModel.project, ...densityModel.schedule, ...densityModel.quality, ...densityModel.safety, ...densityModel.resources, ...Object.values(densityModel.schemaFacts ?? {}).flat()].length
-    : 0;
-  const densityBasicFacts = Math.max(0, densityAllFacts - densityParameters);
+  const densityBasicFacts = densityCounts.basicFacts;
   // CAD 证据切片的识别口径与全仓一致：来源路径以图纸扩展名结尾
   const densityDrawingFacts = (session.understanding.writerEvidence ?? []).filter(item => /[.](?:dwg|dxf)$/iu.test(String((item as { filePath?: string }).filePath ?? ''))).length;
   const density = assessEvidenceDensity({

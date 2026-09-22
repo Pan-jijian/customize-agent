@@ -2357,7 +2357,9 @@ describe('collisionNumberedHeadingIssues / fixCollisionNumberedHeadings（防撞
 });
 
 describe('invertedDateRangeIssues / fixInvertedDateRanges（十五版报告时间区间倒挂）', () => {
-  it('「第90日至第3日」倒挂 → error/blocker 并确定性修复为仅保留终点', () => {
+  // 4.55.22 根修「以删除代替修复」：原实现删掉连接符与起始日、把区间压成单点
+  //（交付物断言的工期含义被改变，且检测器复检天然通过）。现改为**交换端点**——区间仍是区间。
+  it('「第90日至第3日」倒挂 → error/blocker 并确定性修复为顺序正确的区间', () => {
     const markdown = '各自然村施工组在开工令下发后第90日至第3日完成本村施工区围挡布设。';
     const issues = invertedDateRangeIssues(markdown);
     expect(issues.length).toBe(1);
@@ -2365,7 +2367,7 @@ describe('invertedDateRangeIssues / fixInvertedDateRanges（十五版报告时�
     expect(issues[0]!.severity).toBe('blocker');
     const r = fixInvertedDateRanges(markdown);
     expect(r.fixedCount).toBe(1);
-    expect(r.markdown).toBe('各自然村施工组在开工令下发后第3日完成本村施工区围挡布设。');
+    expect(r.markdown).toBe('各自然村施工组在开工令下发后第3日至第90日完成本村施工区围挡布设。');
     expect(invertedDateRangeIssues(r.markdown)).toEqual([]);
   });
 
@@ -2379,7 +2381,8 @@ describe('invertedDateRangeIssues / fixInvertedDateRanges（十五版报告时�
     expect(invertedDateRangeIssues(markdown).length).toBe(1);
     const r = fixInvertedDateRanges(markdown);
     expect(r.fixedCount).toBe(1);
-    expect(r.markdown).toBe('阶段性资料移交节点为开工令下发后第3日完成归档。');
+    // 交换端点后区间仍完整（原「仅保留终点」把 120 日整段丢掉）
+    expect(r.markdown).toBe('阶段性资料移交节点为开工令下发后第3日～第120日完成归档。');
     expect(invertedDateRangeIssues(r.markdown)).toEqual([]);
   });
 

@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import type { DocumentDraftChapter, DocumentExecutionStage, DocumentFact, DocumentGenerationDiagnostics, DocumentTemplate } from '../types';
 import { documentTextLength } from '../budget';
 import { templatePromptBindings } from '../templateStore';
-import { criticalSectionBlockerMinChars } from '../chapterPostProcessing';
+import { criticalSectionBlockerMinChars } from '../writingSpec';
 
 export function chapterGenerationTargets(input: { budgetTarget: number; sectionCount: number; title: string; longformStrict: boolean }) {
   const { budgetTarget, sectionCount, title, longformStrict } = input;
@@ -58,24 +58,17 @@ export function chapterCompletionStatus(chars: number, _targetWords: number, iss
 }
 
 /**
- * Final Gate 关键小节深度阻断线：min(规则表 blocker 线, Writer/Repairer/Final Gate 修复验收线)。
- * 阻断线不得超过修复验收线（criticalSectionBlockerMinChars），否则补写达标替换后重算仍不足，同一小节永不自愈。
- * 历史缺陷："主要施工方法"修复验收线 1200 但阻断线 1760（规则表 2200×0.8），补写 1715 字达标替换后仍被判不足，整篇生成失败。
+ * Final Gate 关键小节深度阻断线：**单源**取生成侧深度门槛（= Writer/Repairer/Final Gate 修复验收线，
+ * 阈值来自项目可覆盖的 workflowRules.blockerMinChars，见 writingSpec.criticalSectionBlockerMinChars）。
+ * 阻断线必须等于修复验收线：补写达标替换后重算即过门，同一小节可自愈（历史缺陷："主要施工方法"
+ * 修复验收线 1200 但阻断线 1760（规则表 2200×0.8），补写 1715 字达标替换后仍被判不足，整篇生成失败）。
+ * 历史缺陷二（口径分裂，本函数即根修点）：本处曾自维护一份硬编码规则表（1800/2200/1200/500/600 ×0.8
+ * 或显式 blockerMinChars），与项目可覆盖表两套口径（2200 vs 1800、2200 vs 1200、500 vs 650 等分歧对）——
+ * 运维按项目调高 blockerMinChars 只改了修复验收线，终门禁仍按硬编码小值判定（校准静默失效：改配置无效果）。
+ * 现直接等于修复验收线，硬编码表删除。
  */
 export function criticalSectionBlockerLine(title: string) {
-  const rules: Array<{ title: string; minChars: number; blockerMinChars?: number }> = [
-    { title: '项目特点、重点、难点分析', minChars: 1800 },
-    { title: '项目主要施工内容', minChars: 2200 },
-    { title: '主要分部分项工程施工方案', minChars: 1200, blockerMinChars: 800 },
-    { title: '主要施工方法', minChars: 2200 },
-    { title: '危大工程专项施工方案审批流程', minChars: 500, blockerMinChars: 250 },
-    { title: '原材料进场复试与见证取样', minChars: 600, blockerMinChars: 300 },
-  ];
-  const rule = rules.find(item => item.title === title);
-  if (!rule) return 0;
-  const ruleBlocker = rule.blockerMinChars || Math.floor(rule.minChars * 0.8);
-  const repairAcceptLine = criticalSectionBlockerMinChars(title);
-  return Math.min(ruleBlocker, repairAcceptLine > 0 ? repairAcceptLine : ruleBlocker);
+  return criticalSectionBlockerMinChars(title);
 }
 
 export function partialChapterStatus(chapter: DocumentDraftChapter, _targetWords?: number): 'completed' | 'failed' {

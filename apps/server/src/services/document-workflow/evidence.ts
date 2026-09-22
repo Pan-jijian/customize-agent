@@ -140,6 +140,42 @@ export function sanitizeEvidenceContent(filePath: string, content: string) {
   return cleaned;
 }
 
+/** 图纸参数行分级（单源）：基坑/开挖/坡率等结构安全设计参数最高优先，管底/井底/中心标高等常规标注次之，
+ * 裸负小数/比例最低。窗口提取（extractKeyParameterWindows）与质量门的 drawing 类判据共用本表——
+ * 「可提取的图纸参数」只有一个定义。
+ * 历史缺陷：真实基坑支护图全文命中 1204 处（多为给排水管底标高等常规标注与标题行噪声），
+ * 前部噪声先占满预算，尾部「15.65(基坑底标高)」「坡率 1:1.0」被挤出渲染窗口。 */
+const DRAWING_PARAMETER_LINE_PATTERNS: Array<{ re: RegExp; value: number }> = [
+  { re: /基坑底标高|换填底标高|整平标高|开挖深度|放坡系数|支护形式|坡率/u, value: 20 },
+  { re: /标高/u, value: 10 },
+  { re: /[±＋]\s*0[.,]0{2,}/u, value: 8 },
+  { re: /[±＋-]\s*\d+\.\d{2,}/u, value: 3 },
+];
+
+/** drawing 类证据识别（类别由来源标识判定，不依赖内容是否已被摘要化） */
+function isDrawingClassEvidence(item: DocumentEvidence, content: string): boolean {
+  return item.processingType === 'drawing' || path.extname(item.filePath).toLowerCase() === '.dwg' || /资料类型:\s*cad/iu.test(content);
+}
+
+/** drawing 类证据自身判据：含可提取的图纸参数行（与窗口提取同一张表）。 */
+function hasExtractableDrawingParameters(text: string): boolean {
+  return text.split('\n').some(line => DRAWING_PARAMETER_LINE_PATTERNS.some(({ re }) => re.test(line)));
+}
+
+/** 证据质量门（单点判定，所有入池路径共用）：
+ * ① 散文类证据按 evidenceQualityScore（噪声分/事实密度）；
+ * ② drawing 类（CAD 语义落块）**不适用**散文噪声判据——落块天然由「图纸节点/图层/坐标」结构行构成，
+ *    noiseScore 恒为 1，历史缺陷是把「判据不适用」当成「质量不合格」⇒ CAD 证据整类出池
+ *    （图纸事实/drawingFacts 随之归零，而图纸事实是密度权重 50/条的一手来源），旧实现靠
+ *    「通过不足三条即整池放行」的回退顺带救回；现改按该类**自身**判据（是否含可提取图纸参数）判定；
+ * ③ 附件占位句（无正文可用）按既有口径放行。
+ * 未过门条目一律不入池——不存在整体外溢回退。 */
+function passesEvidenceQualityGate(item: DocumentEvidence, content: string, quality: { shouldUse: boolean }): boolean {
+  if (quality.shouldUse) return true;
+  if (/附件，仅作为内部事实提取依据/u.test(content)) return true;
+  return isDrawingClassEvidence(item, content) && hasExtractableDrawingParameters(content);
+}
+
 /**
  * 超长证据关键参数窗口提取：CAD 图纸/大文件经 expandContext 父块回溯后，单条证据动辄 10 万+ 字符，
  * 关键参数（基坑底标高、坡率、开挖深度等）常位于全文尾部，头部截断会永久丢失参数数据。
@@ -155,20 +191,10 @@ export function extractKeyParameterWindows(content: string, maxChars: number): s
   // 行粒度提取：CAD 标注流以「图纸节点 + └── 标注文本」行为单位，
   // 整行提取可保证「标注文本: 15.65(基坑底标高) | 关联对象: 邻近标注 坡率 1:1.0」中的关联参数不丢
   const lines = text.split('\n');
-  // 行价值分级：基坑/开挖/坡率等结构安全设计参数最高优先，
-  // 管底/井底/中心标高等常规标注次之，裸负小数/比例最低。
-  // 历史缺陷：真实基坑支护图全文命中 1204 处（多为给排水管底标高等常规标注与标题行噪声），
-  // 前部噪声先占满预算，尾部「15.65(基坑底标高)」「坡率 1:1.0」被挤出渲染窗口
-  const rankedLinePatterns: Array<{ re: RegExp; value: number }> = [
-    { re: /基坑底标高|换填底标高|整平标高|开挖深度|放坡系数|支护形式|坡率/u, value: 20 },
-    { re: /标高/u, value: 10 },
-    { re: /[±＋]\s*0[.,]0{2,}/u, value: 8 },
-    { re: /[±＋-]\s*\d+\.\d{2,}/u, value: 3 },
-  ];
   const scoredLines = lines
     .map((line, index) => {
       let value = 0;
-      for (const { re, value: v } of rankedLinePatterns) {
+      for (const { re, value: v } of DRAWING_PARAMETER_LINE_PATTERNS) {
         if (re.test(line)) { value = v; break; }
       }
       return { line, index, value };
@@ -213,9 +239,26 @@ export function uniqueEvidence(items: DocumentEvidence[], limit?: number, diagno
     const quality = evidenceQualityScore(content);
     return { item: { ...item, content, score: item.score * (1 + quality.factDensity) * (1 - quality.noiseScore * 0.45) }, quality };
   });
-  const usable = scored.filter(entry => entry.quality.shouldUse || /附件，仅作为内部事实提取依据/u.test(entry.item.content));
+  // 质量门恒生效（历史缺陷：通过条目少于 Math.min(3, items.length) 时整池放行——被门判为噪声的条目
+  // 全数回流，门形同虚设；「资料质量差」被静默转换为「看起来正常的证据池」）。
+  // 现恒只成池通过条目（判据单点见 passesEvidenceQualityGate：散文类按质量分、drawing 类按可提取图纸
+  // 参数判据）：不足门槛时按实际通过量出池（可能为空，交由上层显性失败），
+  // 短缺经既有诊断通道可见（filteredNoise 计数 + console 告警），不以外溢补救。
+  const usable: Array<(typeof scored)[number]> = [];
+  const rejected: Array<(typeof scored)[number]> = [];
+  const drawingAdmitted: string[] = [];
+  for (const entry of scored) {
+    if (passesEvidenceQualityGate(entry.item, entry.item.content, entry.quality)) {
+      usable.push(entry);
+      if (!entry.quality.shouldUse && isDrawingClassEvidence(entry.item, entry.item.content)) drawingAdmitted.push(entry.item.filePath);
+    } else rejected.push(entry);
+  }
+  if (drawingAdmitted.length) {
+    console.warn(`[evidence] drawing 类证据按图纸参数判据放行（散文噪声判据不适用）：${drawingAdmitted.slice(0, 5).join('、')}${drawingAdmitted.length > 5 ? ` 等 ${drawingAdmitted.length} 条` : ''}`);
+  }
+  const gateFloor = Math.min(3, items.length);
   const resolvedLimit = Number.isFinite(limit) && limit! > 0 ? Math.ceil(limit!) : undefined;
-  const deduped = (usable.length >= Math.min(3, items.length) ? usable : scored)
+  const deduped = usable
     .sort((a, b) => b.item.score - a.item.score)
     .filter(entry => {
       const key = evidenceDedupeKey(entry.item);
@@ -232,6 +275,9 @@ export function uniqueEvidence(items: DocumentEvidence[], limit?: number, diagno
     diagnostics.evidence.filteredNoise += Math.max(0, scored.length - usable.length);
     diagnostics.evidence.avgNoiseScore = scored.length ? Number((totalNoise / scored.length).toFixed(3)) : 0;
     diagnostics.evidence.avgFactDensity = scored.length ? Number((totalDensity / scored.length).toFixed(3)) : 0;
+  }
+  if (usable.length < gateFloor) {
+    console.warn(`[evidence] 质量门通过条目不足（${usable.length}/${gateFloor}，未过门 ${rejected.length} 条，共 ${items.length} 条）：按通过条目成池（不外溢未过门条目），短缺见诊断 filteredNoise`, rejected.slice(0, 3).map(entry => entry.item.filePath));
   }
   return selected.map(entry => entry.item);
 }
