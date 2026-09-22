@@ -424,3 +424,25 @@ F=~/.customize-agent/projects/3c3f04667c69/generatedDocuments/drafts/doc-1790086
 ## 附录 B：本方案与上一版的差异（一句话）
 
 上一版按"现象"列了 8 条、准备**加检测器**；本版按"病灶"重排，主战场改为 **真值层错值（A/B）＋ 修复器口径不同源（D）＋ 上游双写（B2）**，因为实测显示 **检测器早已触发，而 61/63 项在修复轮后依然没改掉**。
+
+---
+
+## 附录 C：4.55.24 实施记录（2026-09-23）
+
+**已发布**：`@customize-agent/server@4.55.24`、`@customize-agent/knowledge@4.15.2`（npm 正式版本，已上架）。
+
+| 组 | 状态 | 落点 |
+|---|---|---|
+| **A** 真值层值-属性错配 | ✅ 已实施 | `authoritativeValues.ts` 新增 `attributeValueShapeMismatch` 形状相容闸（文本型属性不得取裸型号值／多标签拼接属性名拒收／规格型属性不得取长句值），入闸记 `noiseRejected` |
+| **B1** 危大参数错值（安全性） | ✅ 已实施 | `factGovernance.ts` 深度取值改「离标签最近」+ 排除复合单位量（m/s、m²、m³、%）+ 值域 1~50 → 0.5~20 |
+| **B2** CAD 双写伪影 | ✅ 已实施（**需重抽 CAD 才对存量库生效**） | `packages/knowledge` `layoutCadAnnotations` 相邻重复标注折叠 + 新增 `collapseAdjacentRepeatedLines`（判据：相邻 + 完全同文本 + 长度 ≥2，不做删除式治理） |
+| **C** 参数池残片污染 | ✅ 已实施 | `poolNoise.ts` 新增 `duplicated_label` 类别 + `stripDuplicatedLabelEchoes` 单源函数；`materialResidue` 句级清理改为复用同一函数 |
+| **F1** 指向型表述 | ✅ 已实施（判据 + 写作前红线；**定向改写轮未接**） | 新增红线「禁止指向型表述与缺资料搪塞」；新增检测器 `drawing-pointer-phrase`（含裸图集号形态与编制依据豁免），暂 `fixerDisposition: 'manual'` |
+| **F2** 变更叙述残留 | ✅ 已实施 | `materialResidue.ts` 新增 `TENDER_STAGE_CHANGE_RE`（「招标阶段…现澄清变更为…」）与 `VIA_CLARIFICATION_CHANGE_RE`（「经澄清…调整为…」）；B8 铁律补具名句模 |
+| **G** 图件全局不出图（D1） | ✅ 已实施 | `BODY_FIGURE_OUTPUT_ENABLED=false` 全局总闸；新增机构图替代表（与 SVG 共用 `ORG_CHART_HIERARCHY` 单源，零编造） |
+| **H** 导出列表编号 | ✅ 已实施 | `export.ts` 去掉 Word 侧 `numbering`，并清理死代码 `docxNumberingXml` 与 numbering.xml 的 rels/content-types 注册 |
+| **I** 三个诊断阶段落点 | ✅ 已实施 | `caliber-ledger` → `executionStages`；`detector-execution-summary` 移到阶段限幅之后；`tender-format-applied` → `finalStages` |
+| **D** 检测器↔修复器口径不同源 | ⏸ **未实施** | 根因已确认：`emptySectionSweep` 只管「无规划归属」空壳，终检 `structure-integrity` 管「全部」空壳 → 3 处规划空小节卡在两者之间（**需要章级补写通道，属 W6 级功能，非本轮安全范围**）。四类形态判据单源化与注册表加锁（`sameSourceWith`）排期下一版 |
+| **E** 值-对象绑定与权威值落位 | ⏸ **未实施** | 需给 `DocumentFact` 增对象字段 + 改渲染格式 + 把 `specAuthorityMap` 接入参数池 + 新增确定性修复。**渲染格式变更会影响全部章节的写作输入，属高风险改写**；实测 1.5mm 类错值已由 `spec-location-mismatch` 检出（本轮 4 条 blocker），其确定性修复路径排期下一版 |
+
+**验证**：typecheck ✓ / eslint ✓ / 全量 **14,544** 测试通过（342 文件，新增 5 个用例文件/26 条用例）。
