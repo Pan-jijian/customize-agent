@@ -5,7 +5,8 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { missingPlannedSections, promotePlannedSectionHeadings } from '@/services/document-workflow/chapterPostProcessing';
-import { hollowTableCellIssues } from '@/services/document-workflow/qualityValidation';
+import { hollowTableCellIssues, scheduleDurationOverrunIssues } from '@/services/document-workflow/qualityValidation';
+import { resolveEffectiveTotalDays } from '@/services/document-workflow/integratedBlueprint';
 import { cleanInlineFactValue } from '@/services/document-workflow/helpers/projectBasicInfo';
 import { ambiguousEitherOrIssues, scanSpecLocationMismatchHits, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, invertedDateRangeIssues, paragraphTailRepeatIssues, scanParagraphTailRepeats, collisionNumberedHeadingIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixInvertedDateRanges, fixZeroLengthDayRanges, fixParagraphOpeningRepeats, fixParagraphTailRepeats, fixCollisionNumberedHeadings, fixEmbeddedHeadingLines, fixPlaceholderTableCells, fixTruncatedSentenceArtifacts, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
 import { markdownTableQualityIssues } from '@/services/document-workflow/qualityValidation';
@@ -2610,5 +2611,48 @@ describe('4.55.16 孤立尾括号清洗（项目编号「2026AFMGZ50828））」
   it('尾部孤立右括号删除；配平括号保留', () => {
     expect(cleanInlineFactValue('2026AFMGZ50828）')).toBe('2026AFMGZ50828');
     expect(cleanInlineFactValue('巢湖市（居巢经开区）')).toBe('巢湖市（居巢经开区）');
+  });
+});
+
+// ═══ 4.55.17 工期变更后口径（招标 365 / 答疑 330） ═══
+
+describe('resolveEffectiveTotalDays（答疑变更后口径优先）', () => {
+  it('「365日历天，现变更修改为:330日历天」→ 330（变更后生效口径）', () => {
+    expect(resolveEffectiveTotalDays('计划工期365日历天，现变更修改为:330日历天。')).toBe(330);
+  });
+  it('「工期由365日历天调整为330日历天」→ 330', () => {
+    expect(resolveEffectiveTotalDays('本工程工期由365日历天调整为330日历天。')).toBe(330);
+  });
+  it('无变更形态 → 首个工期口径', () => {
+    expect(resolveEffectiveTotalDays('本工程计划工期330日历天，质量标准合格。')).toBe(330);
+  });
+  it('变更标记后无「数字+日历天」不误取（「工期330日历天，如需变更须报批」→ 330）', () => {
+    expect(resolveEffectiveTotalDays('本工程计划工期330日历天，如需变更须报批。')).toBe(330);
+  });
+});
+
+describe('scheduleDurationOverrunIssues(进度计划超声明工期)', () => {
+  it('声明 330、进度排到 348 → 报超出（巢湖实测形态）', () => {
+    const md = [
+      '本工程总工期330日历天，按此倒排各阶段节点。',
+      '| 工序 | 持续天数 | 起止天序 |',
+      '| --- | --- | --- |',
+      '| 施工准备 | 29 | 第1～29天 |',
+      '| 安装与收尾工程 | 28 | 第321～348天 |',
+    ].join('\n');
+    const issues = scheduleDurationOverrunIssues(md);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toContain('330');
+    expect(issues[0]!.message).toContain('348');
+  });
+
+  it('声明 330、进度排到第 330 天（余量内）→ 不报', () => {
+    const md = '本工程总工期330日历天。\n\n| 工序 | 起止天序 |\n| --- | --- |\n| 收尾 | 第302～330天 |';
+    expect(scheduleDurationOverrunIssues(md)).toEqual([]);
+  });
+
+  it('无声明工期或无天序 → 静默（不误伤无进度章文档）', () => {
+    expect(scheduleDurationOverrunIssues('| 工序 | 起止天序 |\n| --- | --- |\n| 收尾 | 第302～348天 |')).toEqual([]);
+    expect(scheduleDurationOverrunIssues('本工程总工期330日历天。')).toEqual([]);
   });
 });

@@ -44,6 +44,11 @@ import { chapterSectionFactUsageIssues } from '../chapterReview';
 import { factCoverageIssues, finalizeChapterContentQuality, finalizeFinalMarkdownStructure, removeDuplicateProjectBasicInfoBlocks, normalizeProjectBasicInfoTable, partialChapterStatus, criticalSectionBlockerLine, projectBasicPlaceholderIssues, validateDraft, vectorStatusLabel } from '../documentGeneratorHelpers';
 import { collectFigurePlaceholderSpecs, ensureFigurePlaceholders, injectTableCaptions, normalizeFigureNumbering, normalizeTableNumbering } from '../constructionOrgTablePlan';
 import { figureSubstituteTableLines } from '../figureSubstituteTables';
+import { buildFigureForName } from '../documentFigures';
+import { generatedRoot } from '../../document-core/generatedDocumentService';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { supersededValueIssues } from '../clarificationOverrides';
 import { assignStructureRequirementsToChapters } from '../tenderRequirements';
 import { constructionOrgProfessionalAuditIssues } from '../constructionOrgAudit';
 // 方案 2.2 密度/结构执行器终检同源复核（写作侧 block-fact-density/block-structure-contract 的 finalize 复核函数）
@@ -380,6 +385,30 @@ function figurePlaceholderSpecs(session: FinalizeSession) {
   });
 }
 
+/**
+ * 图件解析器（4.55.18）：图名 → SVG 图件（写入 generatedAssets/assets/ 供导出引用）。
+ * 暗标（bodyFigureForbidden）一律不出图（回退数据表承载）；写盘失败不阻断（导出侧跳过缺失图）。
+ * 幂等：同名图件内容一致时不重写。
+ */
+function figureImageResolver(session: FinalizeSession) {
+  const cache = new Map<string, { fileName: string; svg: string } | undefined>();
+  return (figureName: string): { fileName: string; svg: string } | undefined => {
+    if (isBodyFigureForbidden(session.bidComposition)) return undefined;
+    const key = String(figureName || '').replace(/\s+/gu, '');
+    if (cache.has(key)) return cache.get(key);
+    const figure = buildFigureForName(session.blueprintData, figureName);
+    if (!figure) { cache.set(key, undefined); return undefined; }
+    try {
+      const dir = path.join(generatedRoot(session.projectRoot), 'assets');
+      fs.mkdirSync(dir, { recursive: true });
+      const target = path.join(dir, figure.fileName);
+      if (!fs.existsSync(target) || fs.readFileSync(target, 'utf8') !== figure.svg) fs.writeFileSync(target, figure.svg, 'utf8');
+    } catch { /* 写盘失败不阻断生成 */ }
+    cache.set(key, figure);
+    return figure;
+  };
+}
+
 /** stageComposeFinal：全文组装 + 标准化管道（P2 拆分，方案 5.2） */
 export function stageComposeFinal(session: FinalizeSession): void {
   // W4 安全目标承诺句兜底：写作要求已注入但模型未遵循时（巢湖实测该章其余要求全落位、唯此项 0 处），
@@ -488,6 +517,7 @@ export async function stageRebuildAndRecompute(session: FinalizeSession): Promis
     // B-T1 图位链（同口径）：规格补位 + 编号归一化，正文禁表跳过
     if (isBodyTableForbidden(session.bidComposition)) return rebuilt;
     return normalizeFigureNumbering(ensureFigurePlaceholders(normalizeTableNumbering(injectTableCaptions(rebuilt)), figureSpecs, {
+      figureImage: figureImageResolver(session),
       substituteTable: name => figureSubstituteTableLines(session.blueprintData, name),
     }).markdown);
   };
@@ -496,6 +526,10 @@ export async function stageRebuildAndRecompute(session: FinalizeSession): Promis
   if (canonicalFacts.size > 0) session.executionStages.push({ type: 'fact_extraction', roleId: 'canonical-facts', status: 'success', message: `已决策可信基础事实 ${canonicalFacts.size} 项`, details: [...canonicalFacts.values()].map(fact => `${fact.label}=${fact.value}（${fact.source}，confidence=${fact.confidence}）`).slice(0, 12) });
 
   // 修复后重算问题组会重新计算，修复基线只保留基础累计问题，避免重复累加
+  // 4.55.17 答疑澄清生效口径兜底检测（招标与答疑不一致时旧值不得作为现行表述）：
+  // 写作硬约束（写作简报注入）未遵循时在此暴露，直进终门禁与修复轮
+  const clarificationIssues = supersededValueIssues(session.finalMarkdown, session.clarificationOverrides || []);
+  if (clarificationIssues.length > 0) session.validationIssues = [...session.validationIssues, ...clarificationIssues];
   session.baseValidationIssues = session.validationIssues;
   session.validationIssues = await buildFullValidationIssues({ documentSpec: session.documentSpec, validationIssues: session.validationIssues, factsModel: session.factsModel, finalChapterDrafts: session.finalChapterDrafts, finalMarkdown: session.finalMarkdown, template: session.template, promptBindings: session.promptBindings, promptDocumentRules: session.promptDocumentRules, projectMaterialSummary: session.projectMaterialSummary, domainProfile: session.domainProfile, structuredFacts: session.structuredFacts, documentBudget: session.documentBudget, scopeConflicts: session.scopeConflicts, evaluationCriteriaItems: session.evaluationCriteriaItems, effectiveChapters: session.effectiveChapters, tenderRequirements: session.tenderRequirements, requirementsSimilarity: session.requirementsSimilarity, factTokenScopeClassifier: session.factTokenScopeClassifier, professionalDepthClassifier: session.professionalDepthClassifier, materialEvidence: session.allEvidence, blueprintData: session.blueprintData, billFactLock: session.billFactLock, drawingFactLock: session.drawingFactLock, bodyTableForbidden: isBodyTableForbidden(session.bidComposition), bodyFigureForbidden: isBodyFigureForbidden(session.bidComposition), identityMarksForbidden: Boolean(session.bidComposition?.identityMarksForbidden), coverForbidden: session.bidComposition?.formatRules.cover === 'forbidden' });
 

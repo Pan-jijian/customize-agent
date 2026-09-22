@@ -321,6 +321,9 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   // 4.55.16 表格空话单元格（巢湖实测：工程量列写「按清单工程量」而正文已有 12792.800m3）：
   // 修复路径为 LLM 按列定向补写真实值（清单/图纸/蓝图同源数据）
   { id: 'hollow-table-cell', scope: 'full-document', category: 'table', fixerDisposition: 'manual', fixerDispositionReason: '按「表×列」聚合报出，交 LLM 按列补真实值（同章正文通常已有同口径数据）' },
+  // 4.55.17 进度计划超声明工期（巢湖实测：声明 330、进度表排到 348）：
+  // 源头已修（resolveEffectiveTotalDays 取答疑变更后口径）；本检测兜底，交 LLM 按生效工期重排天序
+  { id: 'schedule-duration-overrun', scope: 'full-document', category: 'fact_consistency', fixerDisposition: 'manual', fixerDispositionReason: '按生效工期重排进度计划与节点天序（源头解析已取变更后口径，残留为写作期漂移）' },
   { id: 'precise-fact-usage', scope: 'full-document', category: 'fact_consistency' },
   // C3-4 可靠参数义务落位验收（chapterParameterFacts.parameterObligationUsageIssues）：参数池净化后
   // 义务满足率 <90% 即 error（兑现报告出口 parameterUsageAudit / 修复出口 assignMissingParameterChapters

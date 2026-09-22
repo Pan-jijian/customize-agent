@@ -249,10 +249,25 @@ export function deriveSpecAuthoritiesFromBoq(boq: BillOfQuantitiesResult): Recor
  * 封闭工艺类目（垂直运输/模板等）+ 数据口径条目（总工期/劳动力峰值/自然村数量/核心工程量——
  * 写作层参数桶强制引用，正文与蓝图不一致由引用一致性检测器报 error）。 */
 
+/**
+ * 工期生效口径解析（4.55.17 巢湖实测）：招标文件写 365 日历天、答疑澄清「现变更修改为 330 日历天」时，
+ * 生效口径是**变更后**的 330（基本信息表已按 330 填），而旧实现取文本里**首个**工期匹配 → 蓝图
+ * contract.totalDays=365 → 里程碑/劳动力/进度计划表全按 365 编排，与正文（按 330 写）同文档两套工期
+ * （实测：正文「总工期锁定330日历天」，而进度替代表起止天序排到第 348 天）。
+ * 变更形态（「365日历天，现变更修改为:330日历天」「工期由365日历天调整为330日历天」）优先取变更后值；
+ * 无变更形态时回退首个工期口径。变更标记后必须紧跟「数字+日历天」，避免「工期330天，如需变更须报批」
+ * 类句误取。
+ */
+export function resolveEffectiveTotalDays(text: string): number {
+  const changed = /(?:变更为|变更修改为|澄清为|修改为|调整为|更正为|修正为|变更至|调整至)\s*[:：]?\s*(\d{1,4})\s*个?\s*日历天/u.exec(text);
+  if (changed) return Number(changed[1]);
+  const plain = /(?<!节点)(?<!阶段)(?<!分项)(?<!关键)(?:计划工期|合同工期|工期总日历天数|工期控制|工期目标|总工期|工期)[^。；;\n]{0,12}?(\d{1,4})\s*个?\s*日历天/u.exec(text)
+    || /(\d{1,4})\s*个?\s*日历天[^。；;\n]{0,8}?(?:总工期|倒排|分解|完成)/u.exec(text);
+  return plain ? Number(plain[1]) : 0;
+}
+
 export function extractContractFromFacts(basicFacts: string, boq: BillOfQuantitiesResult): { totalDays: number; qualityStandard: string; pricingFile: string; estimatedAmount: number } {
-  const totalDaysMatch = /(?<!节点)(?<!阶段)(?<!分项)(?<!关键)(?:计划工期|合同工期|工期总日历天数|工期控制|工期目标|总工期|工期)[^。；;\n]{0,12}?(\d{1,4})\s*个?\s*日历天/u.exec(basicFacts)
-    || /(\d{1,4})\s*个?\s*日历天[^。；;\n]{0,8}?(?:总工期|倒排|分解|完成)/u.exec(basicFacts);
-  const totalDays = totalDaysMatch ? Number(totalDaysMatch[1]) : 0;
+  const totalDays = resolveEffectiveTotalDays(basicFacts);
   const qualityMatch = /质量(?:标准|要求)[^。；;\n]{0,20}?[：:]\s*([^。；;\n]{1,20})/u.exec(basicFacts) || /合格/u.exec(basicFacts);
   const qualityStandard = qualityMatch ? (qualityMatch[1] || '合格').trim() : '';
   // 造价文号形态通用化：{机构简称}价〔YYYY〕N号（如「合造价」「皖价」「皖建价」）——不绑定单一城市文号前缀

@@ -4,7 +4,7 @@
  * 变量读写经 session 子对象显式化，业务生成语义与原巨型函数逐字一致（行为保持）。
  */
 import type { GenerationSession } from './generationSession';
-import type { DocumentTemplateChapter } from '../types';
+import type { DocumentEvidence, DocumentTemplateChapter } from '../types';
 import { displayChapterTitle } from '../outline';
 import { evidenceMatchesFact } from '../factMatching';
 import { selectEvidenceByBudget } from '../evidence';
@@ -19,6 +19,7 @@ import { buildFactTokenScopeClassifier } from '../factTokenClassifier';
 import { buildChapterIntentClassifier } from '../chapterIntentClassifier';
 import { buildProfessionalDepthClassifier } from '../professionalDepthClassifier';
 import { buildWritingTaskBrief } from '../documentWritingTaskBrief';
+import { extractClarificationOverrides, renderClarificationConstraintBlock } from '../clarificationOverrides';
 import { buildPlannedTablePlans, attachDiagramArtifacts, extractDiagramArtifacts, mergeStructureDiagramArtifacts } from '../constructionOrgTablePlan';
 import { auditPlannedTableScope, type PlannedTableScopeEntry } from '../tableScopeAudit';
 import { isBodyTableForbidden } from '../bidComposition';
@@ -338,7 +339,13 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
   // 专业深度语义分类器（round-14）：章节专业深度/缺项/套话/闭环/依赖的语义判定（根治关键词正则模拟语义打分）；
   // 本地语义模型恒可用，构建失败直接抛出，无不可用降级路径
   session.planning.professionalDepthClassifier = await buildProfessionalDepthClassifier();
-  session.planning.writingTaskBrief = buildWritingTaskBrief({ chapters: session.planning.effectiveChapters, factsModel: session.understanding.preliminaryFactsModel, projectGraph: session.understanding.projectGraph || undefined, requirement: session.global.input.requirement, templateName: session.prepare.template.name });
+  // 4.55.17 答疑澄清生效口径（招标与答疑不一致时以答疑为准）：从证据（文本 + 来源）抽取 override，
+  // 渲染为全文硬约束注入写作简报——实测缺陷：正文一处「总工期为365日历天」、另一处「变更修改为330日历天」、
+  // 进度表按 365 排到第 348 天（三套口径并存）
+  session.planning.clarificationOverrides = extractClarificationOverrides(
+    (session.understanding.allEvidence || []).map((item: DocumentEvidence) => ({ text: String(item.content || ''), source: `${item.filePath || ''} ${item.sectionTitle || ''}` })),
+  );
+  session.planning.writingTaskBrief = buildWritingTaskBrief({ chapters: session.planning.effectiveChapters, factsModel: session.understanding.preliminaryFactsModel, projectGraph: session.understanding.projectGraph || undefined, requirement: session.global.input.requirement, templateName: session.prepare.template.name, clarificationConstraint: renderClarificationConstraintBlock(session.planning.clarificationOverrides || []) });
   // 评分项要求写作规则注入：生成时显性响应招标要求（零响应即评标失分），与零响应检测共用同一份提取模型；
   // 全文级篇幅语句同样消解（规则文本随章级 scoped 上下文直通块写作提示词）
   session.planning.tenderWritingRulesText = dissolveLength('tenderWritingRulesText', tenderRequirementsWritingRules(session.planning.tenderRequirements));

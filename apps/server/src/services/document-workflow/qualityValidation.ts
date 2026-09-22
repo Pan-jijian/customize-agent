@@ -3050,3 +3050,39 @@ export function hollowTableCellIssues(markdown: string): ValidationIssue[] {
   }
   return issues;
 }
+
+/**
+ * 进度计划超总工期检测（4.55.17 巢湖实测）：正文声明的计划工期与进度计划/节点的天序必须同口径。
+ * 实测形态：招标 365 日历天、答疑澄清变更为 330 日历天，基本信息表与正文均写 330，而进度计划表按
+ * 365 编排（起止天序排到第 348 天）——同文档两套工期，评标人一眼可见的重大失分。源头已修
+ * （resolveEffectiveTotalDays 取变更后口径）；本检测为兜底：从正文提取声明工期（「N日历天」多数口径）
+ * 与最大天序（「第X～Y天」「第N天」）比对，超出声明工期即报 blocker。
+ * 阈值：允 2% 或 3 天的收尾余量（工序跨日取整），超出即判失配。
+ */
+export function scheduleDurationOverrunIssues(markdown: string, options: { toleranceDays?: number } = {}): ValidationIssue[] {
+  if (!markdown) return [];
+  const declared = [...markdown.matchAll(/(?:总工期|计划工期|合同工期|工期)[^。；;\n]{0,12}?(\d{2,4})\s*个?\s*日历天/gu)].map(match => Number(match[1])).filter(Number.isFinite);
+  if (declared.length === 0) return [];
+  // 声明工期取众数（正文多处声明同一口径）：众数缺失时取最小值（保守方）
+  const counts = new Map<number, number>();
+  for (const value of declared) counts.set(value, (counts.get(value) || 0) + 1);
+  const effective = [...counts.entries()].sort((left, right) => right[1] - left[1] || left[0] - right[0])[0]![0];
+  if (!Number.isFinite(effective) || effective <= 0) return [];
+  const spans: number[] = [];
+  for (const match of markdown.matchAll(/第\s*(\d{1,4})\s*[～~—–-]\s*(\d{1,4})\s*天/gu)) spans.push(Number(match[2]));
+  for (const match of markdown.matchAll(/(?:第|不迟于第|至第)\s*(\d{3,4})\s*天/gu)) spans.push(Number(match[1]));
+  if (spans.length === 0) return [];
+  const maxSpan = Math.max(...spans);
+  const tolerance = Math.max(options.toleranceDays ?? 3, Math.round(effective * 0.02));
+  if (maxSpan <= effective + tolerance) return [];
+  return [{
+    level: 'error',
+    severity: 'blocker',
+    category: 'fact_consistency',
+    owner: 'llm',
+    repairability: 'llm_repairable',
+    provenance: { detectorId: 'schedule-duration-overrun', fingerprint: stableHash(markdown) },
+    message: `进度计划超出声明工期：正文声明总工期 ${effective} 日历天，而进度计划/节点的天序排到第 ${maxSpan} 天（超出 ${maxSpan - effective} 天）——工期口径必须单一（招标工期经答疑澄清变更时以变更后为准）`,
+    suggestion: `请统一工期口径：以答疑/澄清后的生效工期（${effective} 日历天）为唯一基准，重排进度计划表与各阶段节点的起止天序，使最大天序不超过 ${effective} 天（可留 ${tolerance} 天收尾余量）；正文任何位置的工期表述必须与此一致。`,
+  }];
+}

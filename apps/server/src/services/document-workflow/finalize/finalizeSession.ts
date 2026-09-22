@@ -8,6 +8,7 @@
  * - 修复轮顺序由 FINALIZE_REPAIR_ROUNDS（detectorFixerRegistry）单源声明，顺序快照测试锁定。
  */
 import type { AgentWorkflowContext } from '../agentWorkflow';
+import type { ClarificationOverride } from '../clarificationOverrides';
 import type {
   DocumentAsset,
   DocumentDraftChapter,
@@ -67,6 +68,8 @@ export interface FinalizeGenerationInput {
   effectiveChapters: DocumentTemplateChapter[];
   // ── 模板与证据 ──
   template: DocumentTemplate; allEvidence: DocumentEvidence[];
+  /** 4.55.17 答疑澄清生效口径（生成阶段产出，终检 superseded-value-usage 消费） */
+  clarificationOverrides?: ClarificationOverride[];
   // ── 进度与基础设施 ──
   progressStages: DocumentExecutionStage[];
   input: { requirement?: string; signal?: AbortSignal; onProgress?: (stages: DocumentExecutionStage[], checkpoint?: { chapters?: DocumentDraftChapter[] }) => void };
@@ -185,6 +188,8 @@ export interface FinalizeSession {
   webResearchReport: { enabled: boolean; queries: string[]; evidenceCount: number; filteredCount: number; chapters: string[] };
   retrievalCoverageReports: RetrievalCoverageReport[];
   writingTaskBrief?: WritingTaskBrief;
+  /** 4.55.17 答疑澄清生效口径（招标与答疑不一致时以答疑为准；终检 superseded-value-usage 消费） */
+  clarificationOverrides?: ClarificationOverride[];
   globalConsistencyIssues?: string[];
   agentWorkflow: AgentWorkflowContext;
   factExtractionPromptTexts: string;
@@ -277,6 +282,7 @@ export function createFinalizeSession(input: FinalizeGenerationInput): FinalizeS
     webResearchReport: input.webResearchReport,
     retrievalCoverageReports: input.retrievalCoverageReports,
     writingTaskBrief: input.writingTaskBrief,
+    clarificationOverrides: input.clarificationOverrides,
     globalConsistencyIssues: input.globalConsistencyIssues,
     agentWorkflow: input.agentWorkflow,
     factExtractionPromptTexts: input.factExtractionPromptTexts,

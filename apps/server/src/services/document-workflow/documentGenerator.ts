@@ -127,6 +127,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
 
   return measureGenerationStep(session.planning.generationDiagnostics, 'phase:finalize', () => finalizeGeneration({
     chapterDrafts: session.chapterLoop.chapterDraftsFinal, chapterDraftsByOrder: session.understanding.chapterDraftsByOrder, chapterGenerationStagesByOrder: session.understanding.chapterGenerationStagesByOrder,
+    // 4.55.17 答疑澄清生效口径随会话下传（终检 superseded-value-usage 消费）
+    clarificationOverrides: session.planning.clarificationOverrides,
     chapterGenerationStages: session.understanding.chapterGenerationStages, effectiveChapters: session.planning.effectiveChapters, template: session.prepare.template, allEvidence: session.understanding.allEvidence,
     progressStages: session.global.progressStages,
     documentSpec: session.prepare.documentSpec, projectMaterialProfile: session.prepare.projectMaterialProfile, projectMaterialSummary: session.prepare.projectMaterialSummary,

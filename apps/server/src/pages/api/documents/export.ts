@@ -6,6 +6,10 @@ import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import JSZip from 'jszip';
 import type { NextApiRequest, NextApiResponse } from 'next';
+import type { chromium as PlaywrightChromium } from 'playwright';
+
+/** playwright chromium 启动器类型（4.55.18 SVG 光栅化复用；避免 import() 类型注解被 lint 禁止） */
+type ChromiumLauncher = typeof PlaywrightChromium;
 import { generatedRoot, getGeneratedDocument, updateGeneratedDocument, type ExportReport, type ExportRenderAuditReport, type GeneratedDocumentRecord } from '@/services/document-core/generatedDocumentService';
 import { getProjectKbRoot, getProjectRoot } from '@/services/knowledge/kbService';
 import type { DocumentExportSettings } from '@/services/document-workflow';
@@ -514,6 +518,8 @@ type DocxImageItem = {
 type DocxBuildContext = {
   projectRoot: string;
   images: DocxImageItem[];
+  /** 4.55.18 SVG 图件预光栅化缓存（路径 → PNG；DOCX 不能内联 SVG） */
+  rasterizedSvg?: Map<string, NonSharedBuffer>;
 };
 
 function docxRun(text: string, options: { bold?: boolean; size?: number; fontEastAsia?: string; fontAscii?: string } = {}) {
@@ -570,11 +576,18 @@ function docxImageFromMarkdown(line: string, context: DocxBuildContext) {
   if (!match) return null;
   const localPath = resolveLocalImagePath(match[2].trim(), context.projectRoot);
   if (!localPath) return null;
-  const buffer = fs.readFileSync(localPath);
-  const contentType = imageMime(localPath);
-  if (!contentType || contentType === 'image/svg+xml' || buffer.length > MAX_INLINE_IMAGE_BYTES) return null;
+  let buffer = fs.readFileSync(localPath);
+  let contentType = imageMime(localPath);
+  // 4.55.18 SVG 图件：预光栅化结果优先（旧实现直接跳过 SVG，图位导出后只剩字符）
+  if (contentType === 'image/svg+xml') {
+    const rasterized = context.rasterizedSvg?.get(localPath);
+    if (!rasterized) return null;
+    buffer = rasterized;
+    contentType = 'image/png';
+  }
+  if (!contentType || buffer.length > MAX_INLINE_IMAGE_BYTES) return null;
   const imageNumber = context.images.length + 1;
-  const ext = path.extname(localPath).toLowerCase() || '.png';
+  const ext = contentType === 'image/png' ? '.png' : (path.extname(localPath).toLowerCase() || '.png');
   const size = imageSizePixels(buffer, contentType);
   const maxWidthPx = 620;
   const scale = Math.min(1, maxWidthPx / Math.max(size.width, 1));
@@ -809,8 +822,59 @@ async function ensureDocxPackageParts(zip: JSZip, title: string, settings?: Docu
   zip.file('[Content_Types].xml', contentTypes);
 }
 
+/**
+ * SVG 图件预光栅化（4.55.18）：DOCX 不能内联 SVG（旧实现显式跳过 → 图位导出成字符）。
+ * 用 playwright 以 2× 设备像素比渲染 SVG 后截图为 PNG（矢量→位图，清晰度按 2 倍冗余留足）。
+ * 多候选启动（与 renderPdfBuffer 同源：bundled chromium → 系统 chrome/edge → 常见路径）；
+ * 任一图失败仅跳过该图（不阻断导出）。
+ */
+async function rasterizeSvgImages(markdown: string, projectRoot: string): Promise<Map<string, NonSharedBuffer>> {
+  const result = new Map<string, NonSharedBuffer>();
+  const paths: string[] = [];
+  for (const match of markdown.matchAll(/!\[[^\]]*\]\(([^)]+)\)/gu)) {
+    const localPath = resolveLocalImagePath(match[1]!.trim(), projectRoot);
+    if (localPath && imageMime(localPath) === 'image/svg+xml' && !paths.includes(localPath)) paths.push(localPath);
+  }
+  if (paths.length === 0) return result;
+  let chromium: ChromiumLauncher | undefined;
+  try { ({ chromium } = await import('playwright')); } catch { return result; }
+  if (!chromium) return result;
+  const attempts: Array<Parameters<typeof chromium.launch>[0]> = [
+    { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] },
+    { channel: 'chrome', headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] },
+    ...existingBrowserPaths().map(executablePath => ({ executablePath, headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] })),
+  ];
+  for (const options of attempts) {
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+    try {
+      browser = await chromium.launch(options);
+      const page = await browser.newPage({ locale: 'zh-CN', deviceScaleFactor: 2 });
+      for (const localPath of paths) {
+        try {
+          const svg = fs.readFileSync(localPath, 'utf8');
+          const widthMatch = /width="(\d+(?:\.\d+)?)"/u.exec(svg);
+          const heightMatch = /height="(\d+(?:\.\d+)?)"/u.exec(svg);
+          const width = Math.max(320, Math.min(1400, Math.round(Number(widthMatch?.[1] || 760))));
+          const height = Math.max(120, Math.min(1600, Math.round(Number(heightMatch?.[1] || 400))));
+          await page.setViewportSize({ width, height });
+          await page.setContent(`<html><head><meta charset="utf-8"/></head><body style="margin:0;padding:0;background:#fff">${svg}</body></html>`, { waitUntil: 'load' });
+          const png = await page.screenshot({ type: 'png', clip: { x: 0, y: 0, width, height } });
+          result.set(localPath, Buffer.from(png) as NonSharedBuffer);
+        } catch { /* 单图失败跳过 */ }
+      }
+      await browser.close();
+      return result;
+    } catch {
+      try { await browser?.close(); } catch { /* ignore */ }
+    }
+  }
+  return result;
+}
+
 async function buildDocx(title: string, markdown: string, settings?: DocumentExportSettings, templatePath?: string, projectRoot = process.cwd()) {
   const context: DocxBuildContext = { projectRoot, images: [] };
+  // 4.55.18：SVG 图件预光栅化（DOCX 不能内联 SVG；失败仅跳过该图）
+  context.rasterizedSvg = await rasterizeSvgImages(markdown, projectRoot).catch(() => new Map<string, NonSharedBuffer>());
   const contentXml = markdownToDocxXml(markdown, settings, context);
   if (templatePath && fs.existsSync(templatePath)) {
     const zip = await JSZip.loadAsync(fs.readFileSync(templatePath));

@@ -1258,7 +1258,12 @@ function repairMalformedFigureLines(lines: string[]): { lines: string[]; repaire
  * C2：注入前先做非规范图题行就地修复（拆分/补尾词），修复行进入既有图题扫描——根治
  * 「宽松认『像』不补、严格不认」的补了白补死循环。
  */
-export function ensureFigurePlaceholders(markdown: string, specs: FigurePlaceholderSpec[], options: { substituteTable?: (figureName: string) => string[] | undefined } = {}): { markdown: string; inserted: string[] } {
+export function ensureFigurePlaceholders(markdown: string, specs: FigurePlaceholderSpec[], options: {
+  substituteTable?: (figureName: string) => string[] | undefined;
+  /** 4.55.18 图件（SVG 矢量图）：返回时可出真图——正文插图片引用而非替代表；
+   * 未提供或返回 undefined 时回退替代表/图题承载。暗标（禁图）由调用侧不传本回调实现。 */
+  figureImage?: (figureName: string) => { fileName: string; svg: string } | undefined;
+} = {}): { markdown: string; inserted: string[] } {
   if (specs.length === 0) return { markdown, inserted: [] };
   const repair = repairMalformedFigureLines(markdown.replace(/\r/gu, '').split('\n'));
   const lines = repair.lines;
@@ -1280,18 +1285,23 @@ export function ensureFigurePlaceholders(markdown: string, specs: FigurePlacehol
   // 4.55.12 W5 正文侧承载：图位必须「带内容落地」——图题下无数据表且蓝图有对应数据时，就地补等效数据表
   // （巢湖实测：模型只输出裸图题，图位被判已承载、W5 替代表从未生成；此处按已有图题与新增图题两路补）
   const captionBackfill = new Map<number, string[]>();
-  if (options.substituteTable) {
-    for (const caption of existingCaptionLines) {
-      const table = options.substituteTable(caption.name);
-      if (!table || table.length === 0) continue;
-      // 幂等：图题后 8 行内已有表格行则视为已承载（重放零改动）
-      const hasTable = lines.slice(caption.index + 1, caption.index + 9).some(line => /^\s*\|.+\|\s*$/u.test(line));
-      if (!hasTable) captionBackfill.set(caption.index, table);
+  const captionImage = new Map<number, string>();
+  for (const caption of existingCaptionLines) {
+    // 幂等：图题邻域（前后 8 行）已有图片引用或表格行则视为已承载（重放零改动）
+    const neighborhood = lines.slice(Math.max(0, caption.index - 8), caption.index + 9);
+    const alreadyCarried = neighborhood.some(line => /!\[[^\]]*\]\([^)]*\)/u.test(line) || /^\s*\|.+\|\s*$/u.test(line));
+    if (alreadyCarried) continue;
+    const image = options.figureImage?.(caption.name);
+    if (image) {
+      captionImage.set(caption.index, `![${caption.name}](generatedDocuments/assets/${image.fileName})`);
+      continue;
     }
+    const table = options.substituteTable?.(caption.name);
+    if (table && table.length > 0) captionBackfill.set(caption.index, table);
   }
   // C2：无缺失但原地修复过时同样输出修复结果（修复即收益；纯补位路径原样返回）
   // 4.55.12：图题替代表回填（captionBackfill）同为实质变更，一并进入输出路径
-  if (missing.length === 0 && captionBackfill.size === 0) {
+  if (missing.length === 0 && captionBackfill.size === 0 && captionImage.size === 0) {
     return repair.repaired > 0 ? { markdown: lines.join('\n'), inserted: [] } : { markdown, inserted: [] };
   }
   // 一级标题行索引（章区间=[标题行, 下一个一级标题行)；目录/附表标题不计）
@@ -1323,15 +1333,20 @@ export function ensureFigurePlaceholders(markdown: string, specs: FigurePlacehol
     // C2：注入名归一化（尾词补「图」）——注入行须能被严格判据/编号链/覆盖对账闭环识别
     const injectedName = normalizeFigureSpecName(spec.name);
     bucket.push(`图 ${injectedName}`);
-    // 4.55.12 W5：图位注入即带等效数据表（图题 + 数据行，数据源为一体化蓝图，零编造）
-    const table = options.substituteTable?.(injectedName);
-    if (table && table.length > 0) {
-      const signature = table[0] || '';
-      if (tableSignatureByChapter.get(end) === signature) {
-        bucket.push('', '> 说明：本图工序数据与本章前述进度数据表同源，见该表（不重复列出）。', '');
-      } else {
-        tableSignatureByChapter.set(end, signature);
-        bucket.push('', ...table, '');
+    // 4.55.18 图件优先：有 SVG 图件时插图片引用（导出为真图），否则回退 4.55.12 的等效数据表
+    const image = options.figureImage?.(injectedName);
+    if (image) {
+      bucket.splice(bucket.length - 1, 0, '', `![${injectedName}](generatedDocuments/assets/${image.fileName})`, '');
+    } else {
+      const table = options.substituteTable?.(injectedName);
+      if (table && table.length > 0) {
+        const signature = table[0] || '';
+        if (tableSignatureByChapter.get(end) === signature) {
+          bucket.push('', '> 说明：本图工序数据与本章前述进度数据表同源，见该表（不重复列出）。', '');
+        } else {
+          tableSignatureByChapter.set(end, signature);
+          bucket.push('', ...table, '');
+        }
       }
     }
     insertAt.set(end, bucket);
@@ -1345,7 +1360,13 @@ export function ensureFigurePlaceholders(markdown: string, specs: FigurePlacehol
     const bucket = insertAt.get(index);
     if (bucket) output.push('', ...bucket, '');
     output.push(lines[index]);
-    // 4.55.12：既有裸图题就地补等效数据表（紧随图题行之后，前置空行分隔；尾随空行交给原稿）
+    // 4.55.18：既有裸图题就地补图件（图片在图题行之前——图在上、题在下）或等效数据表（紧随其后）
+    const imageLine = captionImage.get(index);
+    if (imageLine) {
+      output.pop();
+      output.push('', imageLine, lines[index]);
+      continue;
+    }
     const backfill = captionBackfill.get(index);
     if (backfill) output.push('', ...backfill);
   }

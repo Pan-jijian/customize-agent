@@ -54,6 +54,7 @@ import type { planDocument } from '../agentPlanner';
 import type { buildChapterIntentClassifier } from '../chapterIntentClassifier';
 import type { kbIndexHealth } from '../documentGeneratorHelpers';
 import type { buildWritingTaskBrief } from '../documentWritingTaskBrief';
+import type { extractClarificationOverrides } from '../clarificationOverrides';
 import type { buildBidProcedureJudge } from '../evidenceContentSafety';
 import type { buildFactTokenScopeClassifier } from '../factTokenClassifier';
 import type { extractLocalFactPool } from '../factsModel';
@@ -206,6 +207,8 @@ export interface GenerationSessionPlanning {
   chapterIntentClassifier: Awaited<ReturnType<typeof buildChapterIntentClassifier>>;
   professionalDepthClassifier: Awaited<ReturnType<typeof buildProfessionalDepthClassifier>>;
   writingTaskBrief: ReturnType<typeof buildWritingTaskBrief>;
+  /** 4.55.17 答疑澄清生效口径（未变更项目为空数组） */
+  clarificationOverrides?: ReturnType<typeof extractClarificationOverrides>;
   tenderWritingRulesText: string;
   chapterScopedProjectContext: (chapter: DocumentTemplateChapter) => string;
   documentBudget: DocumentBudget;

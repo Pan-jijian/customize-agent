@@ -35,7 +35,7 @@ import type { BlueprintBuildDiagnostics, BlueprintMeta, BuildIntegratedBlueprint
 // ═══════════════════════════════ 公共 API 转发（S6 模块拆分：对外导出与拆分前逐一对应） ═══════════════════════════════
 
 export * from './integratedBlueprint/types';
-export { resolveBillOfQuantities, deriveQuantitiesFromBoq, extractRedLineFacts, extractVillageCount, deriveSpecAuthoritiesFromBoq, extractContractFromFacts, extractBasisRegulations, extractLocationFromFacts, renderBasicFactsForBlueprint } from './integratedBlueprint/parse';
+export { resolveBillOfQuantities, deriveQuantitiesFromBoq, extractRedLineFacts, extractVillageCount, deriveSpecAuthoritiesFromBoq, extractContractFromFacts, resolveEffectiveTotalDays, extractBasisRegulations, extractLocationFromFacts, renderBasicFactsForBlueprint } from './integratedBlueprint/parse';
 export { deriveLaborFromBoq, deriveEquipmentFromBoq, deriveMaterialsPlanFromBoq, deriveMilestonesFromBoq, deriveInspectionBatchesFromBoq, deriveEarthworkBalanceFromBoq, deriveTempUtilitiesFromBoq, deriveConstructionDeployment, deriveKeyDifficulties, deriveTestInstruments, deriveSchedule, deriveTempLand, buildBlueprintData } from './integratedBlueprint/derive';
 export { extractDecisionLockEntries, decisionLockCategoryMeta, matchDecisionCategory, locateDecisionOptionAnchor, decisionMentionNegated, buildBlueprintDecisionLock } from './integratedBlueprint/decisionLock';
 export { buildBlueprintOutline, buildWorkPackageFromBoqSection, fallbackStructureForSections, buildChapterStructureFromBlueprint, estimateChapterMinFeasibleWords } from './integratedBlueprint/outline';

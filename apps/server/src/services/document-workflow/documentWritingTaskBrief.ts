@@ -72,6 +72,8 @@ export function buildWritingTaskBrief(input: {
   projectGraph?: ProjectGraph;
   requirement?: string;
   templateName?: string;
+  /** 4.55.17 答疑澄清生效口径（招标与答疑不一致时以答疑为准；渲染为全文硬约束） */
+  clarificationConstraint?: string;
 }): WritingTaskBrief {
   const projectTypes = inferConstructionOrgProjectTypes({ template: { id: 'runtime', name: input.templateName || '', outputTitle: '', description: '', category: '', chapters: input.chapters }, chapters: input.chapters, requirement: input.requirement });
   const isConstructionOrg = /施工组织设计|施工组织|施组|技术标/u.test(`${input.templateName || ''} ${input.requirement || ''} ${input.chapters.map(chapter => chapter.title).join(' ')}`) || projectTypes.length > 0;
@@ -90,7 +92,8 @@ export function buildWritingTaskBrief(input: {
     'B5 属地创优目标（属地适配项）：招标文件未明确具体奖项时，正文必须提出不低于招标文件要求的属地创优目标（如“争创市级优质工程”“争创市级安全文明标准化工地”，市名须为工程所在地），并在质量与文明施工章节落位',
     'B5 表格数据一致性（实测缺陷：合计行与阶段明细之和不符、班组人数多值并存）：表格类内容（劳动力投入、材料配置、机械设备等）合计行数值必须与上方明细行数据一致、可由各行相加推导；各阶段人数与全项目峰值人数必须显式区分口径并保持一致（如写明“阶段高峰人数按阶段分别统计，合计行仅列全项目峰值口径”）；同一班组人数在配置表与进退场表中必须同值，不得多值并存',
     ...WRITING_INTEGRITY_CONSTRAINTS,
-  ];
+    input.clarificationConstraint || '',
+  ].filter(Boolean);
   const chapters: WritingTaskBriefChapter[] = input.chapters.map(chapter => {
     const rule = chapterFocusRule(chapter.title);
     const graphWorks = (input.projectGraph?.works || [])
