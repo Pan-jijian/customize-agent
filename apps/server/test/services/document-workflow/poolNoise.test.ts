@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { classifyPoolNoiseText, POOL_NOISE_RULE_SOURCES, stripDuplicatedLabelEchoes } from '@/services/document-workflow/poolNoise';
-import { stripClarificationNarrative } from '@/services/document-workflow/materialResidue';
+import { stripClarificationNarrative, stripDrawingPointerPhrases } from '@/services/document-workflow/materialResidue';
 
 describe('classifyPoolNoiseText（D6 池噪声形态判定与防误伤）', () => {
   it('图签：无约束词的印章/证书编号行判 drawing_signature；含约束词的真实条款不误伤（守卫统一）', () => {
@@ -165,5 +165,34 @@ describe('4.55.24 变更过程叙述链尾清理（实测漏网句式）', () =>
     const once = stripClarificationNarrative('招标阶段计划工期为365日历天，现澄清变更为330日历天，各阶段按330日历天控制');
     const twice = stripClarificationNarrative(once.text);
     expect(twice.text).toBe(once.text);
+  });
+});
+
+describe('4.55.25 指向型表述链尾确定性清除（用户实测：技术标不能靠指向搪塞）', () => {
+  it('实测形态「具体做法参见《钢筋混凝土及砖砌排水检查井》20S515/29」→ 整句删除', () => {
+    const result = stripDrawingPointerPhrases('管道基础施工前应复核槽底标高。具体做法参见《钢筋混凝土及砖砌排水检查井》20S515/29。');
+    expect(result.removed).toBeGreaterThan(0);
+    expect(result.text).not.toContain('20S515');
+    expect(result.text).toContain('管道基础施工前应复核槽底标高。');
+  });
+
+  it('句中嵌指向 → 只删该小句，句子其余内容保留', () => {
+    const result = stripDrawingPointerPhrases('管道基础采用C20混凝土浇筑，具体做法参见《钢筋混凝土及砖砌排水检查井》20S515/29，管座与管基同步施工。');
+    expect(result.text).toContain('管道基础采用C20混凝土浇筑');
+    expect(result.text).toContain('管座与管基同步施工');
+    expect(result.text).not.toContain('20S515');
+  });
+
+  it('「按设计图纸控制」「以图纸为准」「详见××大样图」「待补充」一并清除', () => {
+    const result = stripDrawingPointerPhrases('室内外高差按设计图纸控制，散水做法详见图集大样图，垫层厚度待确认，混凝土强度等级C25。');
+    expect(result.text).not.toMatch(/按设计图纸|大样图|待确认/u);
+    expect(result.text).toContain('混凝土强度等级C25');
+  });
+
+  it('写实的做法与规范引用不误伤（编制依据/具体参数）', () => {
+    const ok = '基础下做100厚碎石垫层，100厚C15混凝土垫层；执行《混凝土结构工程施工质量验收规范》GB50204-2015。';
+    const result = stripDrawingPointerPhrases(ok);
+    expect(result.removed).toBe(0);
+    expect(result.text).toBe(ok);
   });
 });

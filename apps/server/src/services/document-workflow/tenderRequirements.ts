@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { isMaterialResidueLine, stripClarificationNarrative, stripSentenceLevelResidue } from './materialResidue';
+import { isMaterialResidueLine, stripClarificationNarrative, stripDrawingPointerPhrases, stripSentenceLevelResidue } from './materialResidue';
 import type {
   DocumentEvidence,
   DocumentGenerationDiagnostics,
@@ -1922,8 +1922,10 @@ export function fixFormalSourceResidue(markdown: string): { markdown: string; fi
   const sentenceLevel = stripSentenceLevelResidue(markdown);
   // 4.55.20 变更过程叙述清理（正文只陈述现行值，不得描述澄清过程）
   const narrative = stripClarificationNarrative(sentenceLevel.text);
-  const baseMarkdown = narrative.text;
-  markdown = baseMarkdown;
+  // 4.55.25：指向型表述（「参见《…》20S515/29」「按设计图纸控制」「待补充」）链尾确定性清除——
+  // 只报不删等于没修（实测交付物仍带病）；指向处应写的具体做法由写作侧按绑定参数写出
+  const pointer = stripDrawingPointerPhrases(narrative.text);
+  markdown = pointer.text;
   const lines = markdown.split(/\r?\n/u);
   const out: string[] = [];
   let fixedCount = 0;
@@ -1939,7 +1941,7 @@ export function fixFormalSourceResidue(markdown: string): { markdown: string; fi
     // 整行删除：前后均空行时吞掉尾随空行，防双空行残留（与 fixTenderMetaLanguage 同形态）
     if (index + 1 < lines.length && !lines[index + 1].trim() && out.length > 0 && !out[out.length - 1].trim()) index += 1;
   }
-  const sentenceLevelCount = sentenceLevel.removed + narrative.removed;
+  const sentenceLevelCount = sentenceLevel.removed + narrative.removed + pointer.removed;
   return {
     markdown: out.join('\n'),
     fixedCount: fixedCount + sentenceLevelCount,

@@ -120,3 +120,62 @@ export function stripClarificationNarrative(text: string): { text: string; remov
   result = result.replace(VIA_CLARIFICATION_CHANGE_RE, () => { removed += 1; return ''; });
   return { text: result.replace(/[，,；;]\s*(?=[。；])/gu, ''), removed };
 }
+
+/**
+ * 指向型表述确定性清除（4.55.25 用户实测）。
+ *
+ * **用户口径**：这是技术标，不是写着玩的——「具体做法参见《钢筋混凝土及砖砌排水检查井》20S515/29」
+ * 这类**指向替代**在交付物里**不能出现**：评标人拿不到做法，等同没写。
+ * 4.55.24 只加了写作前红线与检测器（报 blocker），但**模型无视红线时正文照旧带病交付**——
+ * 只报不删等于没修。本函数是链尾确定性兜底（与材料残片/澄清叙述同链、同单源判据）。
+ *
+ * **处置（小句级，不误伤句子其余内容）**：按标点切成小句，**只删指向型小句**；
+ * 若整句删空则连句读一起收敛。指向处应写的具体做法由写作侧按绑定参数写出——
+ * 缺失的内容由「内容深度/事实密度」类检测器在正确的位置报告，而不是靠留一句指向搪塞。
+ */
+const POINTER_CLAUSE_PATTERNS: RegExp[] = [
+  // 图集/标准图引用替代做法：「参见《…》20S515/29」「详见图集 12J201」
+  /(?:具体)?(?:做法|详见|参见|见|按|依据|参照)[^，,、；;\n]{0,12}?《[^》]{2,40}》[^，,、；;\n]{0,12}/u,
+  // 裸图集号引用：「按皖2015S209/93~相关专业图纸」
+  /(?:参见|详见|参照|按|依照)[^，,、；;\n]{0,10}?(?:[皖烷京沪苏浙粤鲁豫鄂湘川渝陕冀晋蒙辽吉黑闽赣桂黔滇甘青宁新藏]\s?\d{4}|\d{2})\s?[A-Z]{1,2}\s?\d{2,4}(?:[/／]\d{1,3})?[^，,、；;\n]{0,10}/u,
+  // 大样图/详图指向
+  /(?:详见|参见|见)[^，,、；;\n]{0,16}?(?:大样图|详图|节点图|工艺图|做法表)/u,
+  // 按设计图纸/按图纸/以图纸为准
+  /按(?:设计)?(?:施工)?图纸(?:控制|计量|要求|施工|确定|执行|进行|处理|设置|选用|计算|调整)?/u,
+  /以(?:设计)?图纸为准/u,
+  // 缺资料搪塞
+  /(?:资料|图纸|清单|设计文件)(?:中)?未(?:提供|明确|给出|注明)[^，,、；;\n]{0,12}(?:参数|数据|做法|要求|规格)?/u,
+  /(?:具体(?:参数|做法|数值))?待(?:补充|确认|核实|明确)/u,
+];
+
+export function stripDrawingPointerPhrases(text: string): { text: string; removed: number } {
+  if (!text) return { text, removed: 0 };
+  let removed = 0;
+  const keptSentences: string[] = [];
+  for (const sentence of String(text).split(/(?<=[。；])/u)) {
+    if (!sentence.trim()) { keptSentences.push(sentence); continue; }
+    // 保留分隔符切分（小句级裁剪：只删指向型小句，句子其余内容原样保留）
+    const pieces = sentence.split(/([，,、；;])/u);
+    const kept: string[] = [];
+    for (let index = 0; index < pieces.length; index += 2) {
+      const clause = pieces[index] ?? '';
+      const isPointer = POINTER_CLAUSE_PATTERNS.some(pattern => pattern.test(clause));
+      if (isPointer) { removed += 1; continue; }
+      kept.push(clause);
+      const delimiter = pieces[index + 1];
+      if (delimiter && index + 2 < pieces.length) kept.push(delimiter);
+    }
+    // 只剥**小句级分隔符**（逗号/顿号）；句末分号属句子边界，不得剥（否则「…；下一句」会被并成一句）
+    const rebuilt = kept.join('').replace(/^[，,、]+/u, '').replace(/[，,、]+$/u, '');
+    // 整句被删空（句内只剩指向）→ 连句读一起收敛
+    if (!rebuilt.replace(/[。；;\s]/gu, '')) { removed += 1; continue; }
+    // 不补句读：表格行/标题行/列表行本就不以句读结尾，补「。」会破坏 Markdown 结构
+    //（句子的原有句读在拼接中已保留：句边界字符不是小句分隔符）
+    keptSentences.push(rebuilt);
+  }
+  const result = keptSentences.join('')
+    .replace(/[，,、；;]{2,}/gu, '，')
+    .replace(/[，,、；;]\s*(?=[。；])/gu, '')
+    .replace(/\n{3,}/gu, '\n\n');
+  return { text: result, removed };
+}
