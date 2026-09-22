@@ -1178,11 +1178,16 @@ export async function enforcePlannedSectionCompleteness(input: {
   // 补写目标 = 检查器会报「缺少规划小节」的小节，不多不少；
   // 丰乐镇第 2 轮实测扩展：规划小节只有标题或表格无正文（planned empty，如扬尘治理六个百分百/环境污染物管控指标
   // 只有表格无正文）同样进补写目标——写作侧留表格、修复链无人补正文段落，终检报「小节只有标题或表格无正文」-8 分/条
-  const gaps = collectSectionContentGaps('', chapterDraftsFinal).filter(gap => gap.reason === 'missing_planned_section' || (gap.reason === 'empty' && gap.planned));
+  // 4.55.22 根修盲区：`too_short`（正文 1–179 字且非表正文稀薄）原先**三个消费点全都不收**
+  //（本轮的 missing/empty 过滤、sectionContentIntegrityIssues 的 empty/missing 过滤、
+  //  generatedDocumentService 的 empty 过滤）——即「标题下只有一两句」的小节在整个流程里不可见、
+  //  不可修。它正是本补写轮该处理的形态（内容不足 → 扩写），故纳入补写目标。
+  const gaps = collectSectionContentGaps('', chapterDraftsFinal).filter(gap =>
+    gap.reason === 'missing_planned_section' || (gap.reason === 'empty' && gap.planned) || (gap.reason === 'too_short' && gap.planned));
   const targets = chapterDraftsFinal.flatMap(chapter => {
     const chapterGaps = gaps.filter(gap => gap.chapterTitle === chapter.title);
     if (chapterGaps.length === 0) return [];
-    const sectionTitles = chapterGaps.map(gap => ({ title: gap.sectionTitle, emptyOnly: gap.reason === 'empty' }));
+    const sectionTitles = chapterGaps.map(gap => ({ title: gap.sectionTitle, emptyOnly: gap.reason === 'empty', tooShort: gap.reason === 'too_short' }));
     // 章末标题行作为补写锚点（章末追加模式：锚点仅作存在性校验，补写小节落章末——锚点行后
     // 仍有其正文时在位插入会把标题行切成空壳触发回滚，r28j B8 实测 s28i 第五章）
     const lastHeadingLine = chapter.content.split('\n').map(line => line.trim()).filter(line => /^#{2,4}\s/u.test(line)).pop();

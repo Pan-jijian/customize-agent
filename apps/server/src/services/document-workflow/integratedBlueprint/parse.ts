@@ -411,3 +411,49 @@ export function extractProjectName(basicFacts: string, templateName?: string): s
   if (yearMatch) return stripIndexPrefix(yearMatch[1].trim());
   return templateName || '';
 }
+
+
+/**
+ * 清单项目特征描述的**带标签字段**通用抽取（4.55.22）。
+ *
+ * ## 为什么必须通用
+ *
+ * 蓝图原先只抽 `name/spec/quantity`，其余**带标签字段一律丢弃**——
+ * 于是「额定功率/生产能力/国别产地/制造年份/用于施工部位/已使用台时数」这类
+ * 招标文件与清单**本来就给了**的字段，到交付附表时只能留空（历史上被硬编码成「—」，
+ * 再由检测端豁免，形成「生成端如实留空 vs 检测端阻断」的口径冲突）。
+ *
+ * 各项目/各工程类型的附表字段集完全不同，**按字段名逐个补是补不完的**；
+ * 正解是抽取时**把源里有的标签字段原样保留**，下游按需取用。
+ * 抽取为纯文本句式（`N．<标签>：<值>`，含全/半角句点与冒号、OCR 复写形态），
+ * 标签长度 2–12 汉字，值取到下一个标签或句末为止。
+ *
+ * @returns 标签 → 值（同一描述内重复标签保留**最后一次**，与"后修订生效"同口径）
+ */
+export function extractLabeledAttributes(description: string): Record<string, string> {
+  const text = String(description || '').replace(/\r/gu, '');
+  const attributes: Record<string, string> = {};
+  if (!text) return attributes;
+  // 标签形态：行首/序数前缀/标点后的 2–12 汉字 + 冒号（`1．名称：` `3．搭设高度：` `名称:` 均可）
+  // 标签字符集含「、」（实测标签「钢材品种、规格」——「、」在**标签内**是并列符，
+  // 在**值内**才是子项分隔；故「、」不入前导分隔符集，否则标签被从中间劈开，
+  // 前一字段的值会吃掉半个标签名，「钢材品种、规格」只剩「规格」）
+  const tagRe = /(?:^|[\s，,；;。]|[0-9]{1,2}\s*[.．、]\s*)([\u4e00-\u9fa5、]{2,14})\s*[：:]/gu;
+  // 边界必须取**下一个匹配的整体起点**（含其「2．」序号前缀）——取标签本身起点会把
+  // 下一个字段的序号前缀留在本字段值里（实测：「砖外墙 2．」「Q355B 3．」）
+  const hits = [...text.matchAll(tagRe)].map(match => ({
+    label: match[1]!.trim(),
+    valueStart: (match.index ?? 0) + match[0].length,
+    matchStart: match.index ?? 0,
+  }));
+  for (let index = 0; index < hits.length; index += 1) {
+    const hit = hits[index]!;
+    const valueEnd = index + 1 < hits.length ? hits[index + 1]!.matchStart : text.length;
+    if (valueEnd <= hit.valueStart) continue;
+    const value = text.slice(hit.valueStart, valueEnd).replace(/[\s，,；;。]+$/gu, '').trim();
+    if (!value) continue;
+    // 值取短语级：超长说明截到分句边界（字段值不是整段做法说明）
+    attributes[hit.label] = value.length > 60 ? value.slice(0, 60) : value;
+  }
+  return attributes;
+}

@@ -9,7 +9,7 @@ import type { DocumentEvidence, DocumentFact } from '../types';
 import { buildBlueprintDecisionLock } from './decisionLock';
 import { buildAuthoritativeValues } from '../authoritativeValues';
 import { collapseOverrideChains, extractLabeledAuthorityValues, extractValueOverrides } from '../valueOverride';
-import { deriveQuantitiesFromBoq, deriveSpecAuthoritiesFromBoq, extractBasisRegulations, extractContractFromFacts, extractLocationFromFacts, extractRedLineFacts, extractVillageCount } from './parse';
+import { deriveQuantitiesFromBoq, deriveSpecAuthoritiesFromBoq, extractBasisRegulations, extractContractFromFacts, extractLabeledAttributes, extractLocationFromFacts, extractRedLineFacts, extractVillageCount } from './parse';
 import { BLUEPRINT_AMOUNT_RULE } from './types';
 import type { BlueprintBuildDiagnostics, BlueprintData, BlueprintDeployment, BlueprintDifficulty, BlueprintEarthworkBalance, BlueprintEquipmentItem, BlueprintInspectionBatch, BlueprintInstrumentItem, BlueprintLabor, BlueprintMaterialPlanItem, BlueprintMilestone, BlueprintScheduleItem, BlueprintTempLandItem, BlueprintTempUtilities } from './types';
 
@@ -154,7 +154,18 @@ export function deriveEquipmentFromBoq(boq: BillOfQuantitiesResult, strategy: Bl
     const totalQty = hits.reduce((sum, entry) => sum + entry.quantity, 0);
     const min = Math.max(1, Math.min(4, Math.ceil(Math.log10(Math.max(10, totalQty)) - 1)));
     const max = Math.max(min, Math.min(8, min + 2));
-    result.push({ name: mapping.name, spec: mapping.spec, min, max, basis: `${mapping.basis}；相关条目工程量合计约 ${Math.round(totalQty)}${hits[0]?.unit || ''}` });
+    // 4.55.22：把命中条目的**带标签字段原样并入**（额定功率/生产能力/国别产地/制造年份/
+    // 用于施工部位/已使用台时数…）——原先只取 name/spec/数量，源里明明有的字段全被丢弃，
+    // 到附表只能留空（历史上硬编码「—」再由检测端豁免，形成生成端/检测端口径冲突）。
+    // 同名字段后出现者覆盖（与"后修订生效"同口径）。
+    const attributes: Record<string, string> = {};
+    for (const entry of hits) Object.assign(attributes, extractLabeledAttributes(entry.description || ''));
+    // 型号规格兜底：策略表未给 spec 时取源描述的规格字段，避免该列无源而被整列裁掉
+    if (!mapping.spec) {
+      const specFromSource = Object.entries(attributes).find(([label]) => /规格|型号/.test(label))?.[1];
+      if (specFromSource) attributes['型号规格'] = specFromSource;
+    }
+    result.push({ name: mapping.name, spec: mapping.spec || attributes['型号规格'], min, max, basis: `${mapping.basis}；相关条目工程量合计约 ${Math.round(totalQty)}${hits[0]?.unit || ''}`, ...(Object.keys(attributes).length > 0 ? { attributes } : {}) });
   }
   return result;
 }

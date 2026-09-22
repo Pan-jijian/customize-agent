@@ -1195,7 +1195,10 @@ export function collectSectionContentGaps(markdown: string, chapters: Array<Pick
 
 export function sectionContentIntegrityIssues(markdown: string, chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content' | 'sections'>>): ValidationIssue[] {
   return collectSectionContentGaps(markdown, chapters)
-    .filter(gap => gap.reason === 'empty' || gap.reason === 'missing_planned_section')
+    // 4.55.22：`too_short` 一并浮出（原为**死值**——生产者有、三个消费点全都过滤掉）。
+    // 保持既有定级意图：classifyBlockingIssue 对「规划小节正文过短」是**非阻断**（不拦导出），
+    // 但必须进问题流——否则"内容不足"在报告与修复链里彻底不可见，即盲区。
+    .filter(gap => gap.reason === 'empty' || gap.reason === 'missing_planned_section' || gap.reason === 'too_short')
     .map(gap => ({
       level: 'error' as const,
       // 结构完整性检查器产出显式标注 structure：评分层按 category 白名单归属编制规范性，
@@ -3075,7 +3078,11 @@ export function hollowTableCellIssues(markdown: string): ValidationIssue[] {
  */
 export function scheduleDurationOverrunIssues(markdown: string, options: { toleranceDays?: number } = {}): ValidationIssue[] {
   if (!markdown) return [];
-  const declared = [...markdown.matchAll(/(?:总工期|计划工期|合同工期|工期)[^。；;\n]{0,12}?(\d{2,4})\s*个?\s*日历天/gu)].map(match => Number(match[1])).filter(Number.isFinite);
+  // 4.55.22 根修盲区：原判据只认「N 日历天」。正文写「总工期330天」「计划工期 330 日」时
+  // `declared` 为空 → 函数直接 `return []`（**无输入被读成"无问题"**），本门禁整体失效——
+  // 而「两套工期」正是本函数存在的理由（巢湖实测）。单位族改为 日历天|天|日，
+  // 且单位必须**紧随数值**（防「工期紧，30天完成」类无关句被误当声明工期）。
+  const declared = [...markdown.matchAll(/(?:总工期|计划工期|合同工期|工期)[^。；;\n]{0,12}?(\d{2,4})\s*个?\s*(?:日历天|天|日)/gu)].map(match => Number(match[1])).filter(Number.isFinite);
   if (declared.length === 0) return [];
   // 声明工期取众数（正文多处声明同一口径）：众数缺失时取最小值（保守方）
   const counts = new Map<number, number>();
@@ -3084,7 +3091,8 @@ export function scheduleDurationOverrunIssues(markdown: string, options: { toler
   if (!Number.isFinite(effective) || effective <= 0) return [];
   const spans: number[] = [];
   for (const match of markdown.matchAll(/第\s*(\d{1,4})\s*[～~—–-]\s*(\d{1,4})\s*天/gu)) spans.push(Number(match[2]));
-  for (const match of markdown.matchAll(/(?:第|不迟于第|至第)\s*(\d{3,4})\s*天/gu)) spans.push(Number(match[1]));
+  // 天序侧同样放宽：原需 3–4 位数字，「第45天」这类两位天序漏检（进度计划表按周排时常见）
+  for (const match of markdown.matchAll(/(?:第|不迟于第|至第)\s*(\d{2,4})\s*天/gu)) spans.push(Number(match[1]));
   if (spans.length === 0) return [];
   const maxSpan = Math.max(...spans);
   const tolerance = Math.max(options.toleranceDays ?? 3, Math.round(effective * 0.02));

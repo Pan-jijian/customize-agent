@@ -67,6 +67,14 @@ export interface BlueprintEquipmentItem {
   min?: number;
   max?: number;
   basis: string;
+  /**
+   * 源资料（清单项目特征描述/招标附表）里**该设备自带的标签字段**，原样保留（4.55.22）。
+   *
+   * 为什么开放键：各家招标的机械附表字段集不同（额定功率/生产能力/国别产地/制造年份/
+   * 用于施工部位/已使用台时数…），**按字段名逐个补是补不完的**。抽取时保留、渲染时按需取用，
+   * 才是通用解——附表列有源数据就填、没有才不出列（composeAppendices.pruneEmptyColumns）。
+   */
+  attributes?: Record<string, string>;
 }
 
 export interface BlueprintMaterialPlanItem {

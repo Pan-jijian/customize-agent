@@ -115,12 +115,30 @@ function pruneEmptyColumns<T>(header: string[], rows: T[][]): { header: string[]
 function renderEquipmentAppendix(data?: BlueprintData): string[] | '' {
   const items = data?.resources?.equipment || [];
   if (items.length === 0) return appendixGapSkeleton(EQUIPMENT_HEADER, '施工设备配置');
+  // 4.55.22：投产信息列（国别产地/制造年份/额定功率/生产能力/用于施工部位）**有源就填**——
+  // 从蓝图该项保留的源标签字段（extractLabeledAttributes）按表头名取值；无源则该列整列不出
+  //（pruneEmptyColumns）。按字段名硬编码留空再靠检测端豁免，是「生成端与检测端口径打架」的老路。
+  const pick = (item: { attributes?: Record<string, string> }, headerLabel: string): string => {
+    const attributes = item.attributes;
+    if (!attributes) return '';
+    // 表头可能带单位后缀（「额定功率（kW）」），源标签通常不带——按去括号后的词干匹配
+    const stem = headerLabel.replace(/[（(].*$/u, '').trim();
+    for (const [label, value] of Object.entries(attributes)) {
+      if (!value) continue;
+      if (label === stem || label.includes(stem) || stem.includes(label)) return value;
+    }
+    return '';
+  };
   const rows = items.map((item, index) => [
     String(index + 1),
     item.name,
-    item.spec || '',
+    item.spec || pick(item, '型号规格'),
     quantityText(item),
-    '', '', '', '', '',
+    pick(item, '国别产地'),
+    pick(item, '制造年份'),
+    pick(item, '额定功率'),
+    pick(item, '生产能力'),
+    pick(item, '用于施工部位'),
     item.basis || '',
   ]);
   const pruned = pruneEmptyColumns(EQUIPMENT_HEADER, rows);

@@ -193,136 +193,7 @@ export function capFactCoverageContext(text: string): string {
 }
 
 /** 两步生成第一步产出的事实大纲 */
-interface ChapterFactOutline {
-  sections: Array<{ title?: string; facts?: string[]; quantifiedFacts?: string[]; missingFacts?: string[] }>;
-}
-
-/** 两步生成（事实大纲 → 写作）第一步（P2 归类替代提炼）：绑定材料先经确定性事实行提取（extractKeyFactLines），
- * LLM 只做「事实行编号 → 小节」的归类决策，不做内容提炼——事实行文本全程不走 LLM，
- * 从源头消除转述失真（抄错数值/合并规格/幻觉事实）。JSON 解析失败反馈后重试一次；
- * 仍失败返回 undefined 由调用方退化为单步生成（非模板兜底）。 */
-async function buildChapterFactOutline(input: { template: DocumentTemplate; chapter: DocumentTemplate['chapters'][number]; sections: string[]; requiredFacts: string[]; missingFacts: string[]; promptTexts: string; factLines: string[]; signal?: AbortSignal; diagnostics?: DocumentGenerationDiagnostics }): Promise<ChapterFactOutline | undefined> {
-  const sectionLines = input.sections.length
-    ? input.sections.map((section, index) => `${index + 1}. ${section}`).join('\n')
-    : '（本章无预设小节，请按材料自然归纳 2-5 个主题作为大纲小节）';
-  const factIndexLines = input.factLines.map((fact, index) => `F${index + 1}｜${fact}`).join('\n');
-  const system = [
-    docSystemPrefix('你是文档事实分配专家。绑定材料已由系统提取出事实行清单（每条均为材料原文、逐字保留）。你的任务是把每条事实分配到最合适的小节，供 Writer 逐条落位。'),
-    '只做分配，不改写事实：factIds 必须引用事实行编号，正文写作使用事实行原文；不得转述、合并、拆分或编造事实。',
-    'missingFacts 放该小节需要但事实行清单中确实没有的事实（供 Writer 用公共专业知识补做法与要求；补做法时不得引入任何具体数值、规格、型号、品牌、参数，此类内容一律不得出现在 missingFacts 或补做表述中）。',
-    '只返回 JSON，不要返回 markdown。',
-  ].filter(Boolean).join('\n\n');
-  const prompt = [
-    // A5a 前缀缓存：可变提示词从 system 移入 user（system 恒定化，跨调用共享 prefix cache）
-    input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
-    `文档模板：${input.template.name}`,
-    // F6 前缀收敛：块路径下「章节标题/预设小节/事实行清单」均为块级变化值（每块一次大纲规划），
-    // 章级恒定段（章节目的/事实要求/缺失事实/JSON 指令）前置——同章各块大纲调用共享前缀延续至
-    // 「章节标题」处才分叉（历史顺序下章节标题紧随模板名，恒定段全在分叉点后不可共享）
-    `章节目的：${input.chapter.purpose}`,
-    input.requiredFacts.length ? `模板要求覆盖的事实：${input.requiredFacts.join('、')}` : '',
-    input.missingFacts.length ? `当前检索未充分命中的事实（如材料中确实没有，写入对应小节的 missingFacts）：${input.missingFacts.join('、')}` : '',
-    '返回 JSON：{"sections":[{"title":"小节名","factIds":["F1","F3"],"missingFacts":["该小节需要但清单缺失的事实"]}]}；factIds 必须是上方清单中的编号，不得编造编号；每条事实只分配给一个小节，不得跨小节重复分配；每条事实都必须分配出去，不得遗漏。',
-    // ── 块级变化段起点（同章各块以下内容互不相同；保持其在 prompt 尾部，共享前缀到此为止恒定）──
-    `章节标题：${input.chapter.title}`,
-    `预设小节：\n${sectionLines}`,
-    `事实行清单（编号｜事实原文）：\n${factIndexLines}`,
-  ].filter(Boolean).join('\n\n');
-  // F6 分层统计：与上方 prompt 组装同源表达式（l0 system 恒定段 / l1 任务级恒定指令 /
-  // l2 章级共享段 / l3 块级变化段），供「可缓存前缀 vs 不可缓存变化段」占比验收
-  const contextLayers = {
-    l0: system.length,
-    l1: contextLayerChars([
-      input.promptTexts ? `配置写作主控提示词：\n${input.promptTexts}` : '',
-    ]),
-    l2: contextLayerChars([
-      `文档模板：${input.template.name}`,
-      `章节目的：${input.chapter.purpose}`,
-      input.requiredFacts.length ? `模板要求覆盖的事实：${input.requiredFacts.join('、')}` : '',
-      input.missingFacts.length ? `当前检索未充分命中的事实（如材料中确实没有，写入对应小节的 missingFacts）：${input.missingFacts.join('、')}` : '',
-      '返回 JSON：{"sections":[{"title":"小节名","factIds":["F1","F3"],"missingFacts":["该小节需要但清单缺失的事实"]}]}；factIds 必须是上方清单中的编号，不得编造编号；每条事实只分配给一个小节，不得跨小节重复分配；每条事实都必须分配出去，不得遗漏。',
-    ]),
-    l3: contextLayerChars([
-      `章节标题：${input.chapter.title}`,
-      `预设小节：\n${sectionLines}`,
-      `事实行清单（编号｜事实原文）：\n${factIndexLines}`,
-    ]),
-  };
-  const factMap = new Map(input.factLines.map((fact, index) => [`F${index + 1}`, fact]));
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const raw = await callDocumentLlmJson<{ sections: Array<{ title?: string; factIds?: string[]; missingFacts?: string[] }> }>(system, prompt, { maxTokens: 1600, temperature: 0, signal: input.signal, diagnostics: input.diagnostics, contextLayers, prefixKey: `outline:${input.chapter.id}` });
-    if (raw && Array.isArray(raw.sections) && raw.sections.length > 0) {
-      // 编号校验：非法编号剔除并观测（LLM 编造编号防御），合法编号映射回事实原文——
-      // 下游 renderChapterFactOutline 结构不变，补充检索/重渲染链路零改动
-      const invalidIds = new Set<string>();
-      const sections = raw.sections.map(section => {
-        const facts = (section.factIds || []).filter(id => {
-          const valid = factMap.has(id);
-          if (!valid) invalidIds.add(id);
-          return valid;
-        }).map(id => factMap.get(id)!);
-        return { title: section.title, facts, missingFacts: section.missingFacts || [] };
-      });
-      if (invalidIds.size > 0 && input.diagnostics) input.diagnostics.llm.lastInfo = `大纲编号校验：剔除非法编号 ${[...invalidIds].join('、')}`;
-      return { sections };
-    }
-  }
-  return undefined;
-}
-
-/** P1 大纲-证据数值对账：大纲 fact 条目的数值 token 未在注入证据/完整证据池中命中时剔除——
- * 「不构成编造」的背书只覆盖对账通过的部分；纯叙述 fact（无数值）不做数值对账（避免正则误杀）。 */
-function reconcileOutlineFacts(outline: ChapterFactOutline, evidenceText: string, poolText: string, diagnostics?: DocumentGenerationDiagnostics): ChapterFactOutline {
-  let removed = 0;
-  const keepFact = (fact: string): boolean => {
-    const tokens = extractNumericTokens(fact);
-    if (tokens.length === 0) return true;
-    return tokens.every(token => evidenceText.includes(token) || poolText.includes(token));
-  };
-  const sections = outline.sections.map(section => {
-    const facts = (section.facts || []).filter(fact => {
-      const keep = keepFact(fact);
-      if (!keep) removed += 1;
-      return keep;
-    });
-    return { ...section, facts };
-  });
-  if (removed > 0 && diagnostics) diagnostics.llm.lastInfo = `大纲事实对账：剔除 ${removed} 条未在绑定材料中命中的事实（疑似编造）`;
-  return { sections };
-}
-
-function renderChapterFactOutline(outline: ChapterFactOutline, stillMissingFacts: Set<string>) {
-  const blocks = outline.sections.map(section => {
-    const facts = [...new Set([...(section.facts || []), ...(section.quantifiedFacts || [])])].filter(Boolean);
-    // 仅保留「补充检索后仍缺失」的事实标注缺失（已被覆盖的已在证据池提示中转为落位指令）
-    const missing = (section.missingFacts || []).filter(fact => fact && stillMissingFacts.has(fact));
-    return [
-      `### ${section.title || '正文'}`,
-      facts.length ? `必须写入的事实（数值必须原样）：\n${facts.map(fact => `- ${fact}`).join('\n')}` : '',
-      missing.length ? `材料缺失（禁止编造具体值；可用公共专业知识补做法与要求，补做法不得引入任何数值/规格/型号/参数）：${missing.join('、')}` : '',
-    ].filter(Boolean).join('\n');
-  });
-  return [
-    '【事实大纲——由事实规划阶段生成，写作时必须逐条落位】',
-    '大纲事实为绑定材料事实行原文（已通过确定性数值对账），落位不构成编造；数值、单位、标准编号必须与大纲完全一致。',
-    ...blocks,
-  ].join('\n\n');
-}
-
-/** 判断大纲中标记缺失的事实是否被定向补充检索覆盖（保守策略：至少两个有效 token 或一段 6+ 字连续片段命中才认为覆盖，
- * 避免误判导致 Writer 编造数值） */
-function factCoveredByEvidence(fact: string, evidence: DocumentEvidence[]): boolean {
-  const haystack = evidence.map(item => `${item.sectionTitle || ''}\n${item.content}`).join('\n');
-  const tokens = fact.split(/[\s、，,。；;：:（）()【】[\]《》]/u).map(token => token.trim()).filter(token => token.length >= 4);
-  if (tokens.length === 0) return false;
-  const hitTokens = tokens.filter(token => haystack.includes(token)).length;
-  if (hitTokens >= 2) return true;
-  const chunks = [...new Set(fact.match(/.{6,}/gu) || [])];
-  return chunks.some(chunk => haystack.includes(chunk));
-}
-
-/** 使用 LLM 生成单章内容，基于证据包、提示词角色和用户需求 */
-export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; sectionQuotas?: SectionQuotaItem[]; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; twoStep?: boolean; supplementEvidenceProvider?: (missingFacts: string[]) => Promise<DocumentEvidence[]>; diagnostics?: DocumentGenerationDiagnostics; evidenceFloorChars?: number; evidenceCeilingChars?: number; compactProjectContext?: boolean; scopedProjectContext?: boolean; sharedFactLayerText?: string; evidenceRankBoost?: (item: DocumentEvidence) => number; onlyRankBoosted?: boolean; chapterLevelContext?: string; blueprintDataText?: string; blueprintSliceText?: string; /** 4.55.22：蓝图锁定数值（渲染后的值，非 path）——首轮提示词即须注入，不能只在重试反馈里给 */ blueprintMustCiteHint?: string; skipT2Catalog?: boolean; /** 标书编制规格（阶段 1 判定）：暗标正文禁表/禁图/身份禁语写作口径注入 */ bidComposition?: BidCompositionSpec } = {}) {
+export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; sectionQuotas?: SectionQuotaItem[]; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; diagnostics?: DocumentGenerationDiagnostics; evidenceFloorChars?: number; evidenceCeilingChars?: number; compactProjectContext?: boolean; scopedProjectContext?: boolean; sharedFactLayerText?: string; evidenceRankBoost?: (item: DocumentEvidence) => number; onlyRankBoosted?: boolean; chapterLevelContext?: string; blueprintDataText?: string; blueprintSliceText?: string; /** 4.55.22：蓝图锁定数值（渲染后的值，非 path）——首轮提示词即须注入，不能只在重试反馈里给 */ blueprintMustCiteHint?: string; skipT2Catalog?: boolean; /** 标书编制规格（阶段 1 判定）：暗标正文禁表/禁图/身份禁语写作口径注入 */ bidComposition?: BidCompositionSpec } = {}) {
   const bundle = buildEvidenceBundle(chapter, evidence);
   // 证据注入预算与 generationBudget 的证据区间（7k-26k 档）对齐：未显式传入时保持旧默认，
   // 由 documentGenerator 主路径统一传入按章节目标字计算的 floor/ceiling
@@ -339,67 +210,7 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     onlyRankBoosted: options.onlyRankBoosted,
     diagnostics: options.diagnostics,
   };
-  let evidenceText = evidenceBundlePrompt(bundle, { maxChars: evidencePromptBudgetForTarget(options.targetWords || options.minWords, options.evidenceFloorChars, options.evidenceCeilingChars), ...evidencePromptOptions });
-  // 两步生成（事实大纲 → 写作）：第一步先让 LLM 基于绑定材料规划可写事实清单，
-  // 第二步按大纲逐条落位写作，根治「要求具体但证据碎片化导致空话灌水」的不稳定。
-  // （原 DOCUMENT_TWO_STEP_GENERATION 回退已固化删除：两步法恒开，options.twoStep 仍可关闭；大纲阶段失败退化为单步生成非模板兜底）
-  const twoStepEnabled = options.twoStep !== false && evidence.length >= 3 && evidenceText.length > 0;
-  let outlineBlock = '';
-  let outline: ChapterFactOutline | undefined;
-  let stillMissingFacts = new Set<string>();
-  // P0-3 两步瘦身：跟踪当前证据池（P4 定向补充检索会扩充），大纲成功后第二步按降档预算重建证据
-  let outlineEvidence = evidence;
-  if (twoStepEnabled) {
-    // 4.17.6 大纲证据独立构建（P2 归类替代提炼）：事实大纲输入从证据全文改为确定性事实行清单
-    // （extractKeyFactLines 提取——数值参数行/项目基础事实行/规范编号行），LLM 只做编号→小节归类，
-    // 事实行文本不走 LLM。目录对大纲无消费价值且是逐调用不可缓存变化段——独立小预算（outlineEvidenceChars，
-    // DOCUMENT_TUNING_PROFILE 可调，默认 2500 字符）跳过目录，把 outline L3 从 ~16K 压到 ~3K（前缀缓存命中率 90% 目标参数之一）
-    const outlineEvidenceCharsValue = tuningProfile().outlineEvidenceChars || 2500;
-    const outlineEvidenceChars = Number.isFinite(outlineEvidenceCharsValue) && outlineEvidenceCharsValue > 0 ? Math.floor(outlineEvidenceCharsValue) : 2500;
-    const outlineFactPoolText = [...new Set(outlineEvidence.flatMap(item => extractKeyFactLines(item.content).split('\n').filter(Boolean)))].join('\n');
-    const outlineFactLines = outlineFactPoolText.length > outlineEvidenceChars ? outlineFactPoolText.slice(0, outlineEvidenceChars).split('\n').filter(Boolean) : outlineFactPoolText.split('\n').filter(Boolean);
-    outline = await buildChapterFactOutline({ template, chapter, sections: chapter.sections?.filter(Boolean) || [], requiredFacts: chapter.requiredFacts, missingFacts, promptTexts, factLines: outlineFactLines, signal: options.signal, diagnostics: options.diagnostics });
-    if (outline) {
-      // P1 大纲-证据数值对账：fact 数值 token 未在注入证据/完整证据池命中即剔除（背只覆盖对账通过部分）
-      outline = reconcileOutlineFacts(outline, outlineFactPoolText, outlineEvidence.map(item => item.content).join('\n'), options.diagnostics);
-      // P4 硬回路：大纲报告的材料缺失事实 → 定向补充检索 → 命中材料并入证据池后重渲染大纲
-      const allOutlinedMissing = [...new Set(outline.sections.flatMap(section => (section.missingFacts || []).filter(Boolean)))];
-      const outlinedMissingFacts = allOutlinedMissing;
-      if (outlinedMissingFacts.length > 0 && options.supplementEvidenceProvider) {
-        const supplements = await options.supplementEvidenceProvider(outlinedMissingFacts).catch((error: unknown) => {
-          // 降级治理：失败 ≠ 无补充（原 `.catch(() => [])` 让调用异常表现为「大纲缺失事实无补充资料」）
-          if (options.diagnostics) options.diagnostics.llm.lastError = `大纲缺失事实补充检索失败：${error instanceof Error ? error.message : String(error)}`;
-          console.error('[gen] 大纲缺失事实补充检索失败', error);
-          return [];
-        });
-        const fresh = supplements.filter(item => !evidence.some(existing => existing.filePath === item.filePath && (existing.sectionTitle || '') === (item.sectionTitle || '')));
-        if (fresh.length > 0) {
-          const mergedEvidence = [...evidence, ...fresh];
-          outlineEvidence = mergedEvidence;
-          evidenceText = evidenceBundlePrompt(buildEvidenceBundle(chapter, mergedEvidence), { maxChars: evidencePromptBudgetForTarget(options.targetWords || options.minWords, options.evidenceFloorChars, options.evidenceCeilingChars), ...evidencePromptOptions });
-          // 覆盖判断基于合并后证据池：原证据已覆盖的事实不算缺失，避免误标
-          stillMissingFacts = new Set(allOutlinedMissing.filter(fact => !factCoveredByEvidence(fact, mergedEvidence)));
-          if (stillMissingFacts.size < allOutlinedMissing.length) {
-            evidenceText = `${evidenceText}\n\n【定向补充检索】以下大纲缺失事实已找到对应材料并追加在上方，请一并落位：${allOutlinedMissing.filter(fact => !stillMissingFacts.has(fact)).join('、')}`;
-          }
-        } else {
-          stillMissingFacts = new Set(allOutlinedMissing);
-        }
-      } else {
-        stillMissingFacts = new Set(allOutlinedMissing);
-      }
-      outlineBlock = renderChapterFactOutline(outline, stillMissingFacts);
-      // P0-3 两步瘦身：事实大纲已产出可写事实清单（facts + quantifiedFacts），第二步写作只需
-      // 大纲事实对应的细节原文；证据预算降为基准的 60%——T0 关键参数层全量保留（零丢失原则），
-      // T1 高相关片段缩量，T2 目录索引保留全貌与追溯。两步路径第二步输入与第一步相当，
-      // 降档后两步总输入收敛到单步路径水平；（原 DOCUMENT_TWO_STEP_SLIM 回退已固化删除：0.6× 瘦身恒开）
-      {
-        const slimBudget = Math.floor(evidencePromptBudgetForTarget(options.targetWords || options.minWords, options.evidenceFloorChars, options.evidenceCeilingChars) * 0.6);
-        const supplementNote = evidenceText.split('\n\n【定向补充检索】')[1];
-        evidenceText = evidenceBundlePrompt(buildEvidenceBundle(chapter, outlineEvidence), { maxChars: slimBudget, ...evidencePromptOptions }) + (supplementNote ? `\n\n【定向补充检索】${supplementNote}` : '');
-      }
-    }
-  }
+  const evidenceText = evidenceBundlePrompt(bundle, { maxChars: evidencePromptBudgetForTarget(options.targetWords || options.minWords, options.evidenceFloorChars, options.evidenceCeilingChars), ...evidencePromptOptions });
   const userFactBlock = userRequirementFactsPrompt(requirement);
   // 即使 evidenceText 和 roleContext 为空，也让 LLM 基于 projectContext 和 promptTexts 尝试生成
   // 4.55.14 小节清单下发硬化（巢湖实测）：旧措辞「请完整包含并展开以下小节」+ 编号清单形态，
@@ -472,7 +283,6 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     // 均为章级构建一次、同章各块值完全相同——历史缺陷置于块级变化段（L3）使同章各块
     // 共享前缀在此处即分叉，L2 占比被压短；上移后同章各块共享前缀显著变长，prefix cache 命中率回升
     options.chapterLevelContext || '',
-    outlineBlock,
     '请生成可直接导出的 Markdown 章节，要求：',
     '- 内容必须遵循用户提示词、模板章节、提示词角色、项目资料包和自动识别的资料类型；不得编造材料未提供的项目专属事实；任何带数值、工程量、规格、型号、品牌、参数的表述必须逐字来自绑定材料、蓝图参数桶或清单事实锁，材料中没有对应值时不得猜测填充、不得以行业惯例或公共知识为由虚构数值；公共知识豁免仅限法律法规名称、标准规范名称与编号（不带本项目数值）以及通用工艺做法表述，可依据现行有效版本直接引用。',
     '- 将材料要点自然融入正文；不要输出系统证据清单、中间分析过程或后台流程话术。',
@@ -531,9 +341,8 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
       // F1/F2：章级恒定段计入 L2（同章各块值相同 → 可缓存前缀组成部分）
       options.factCoverageContext || '',
       missingFacts.length ? `需要特别补足的信息：${missingFacts.join('、')}` : '',
-      // F9：章级角色上下文与章级事实大纲计入 L2（同章各块值相同 → 可缓存前缀组成部分）
+      // F9：章级角色上下文计入 L2（同章各块值相同 → 可缓存前缀组成部分）
       options.chapterLevelContext || '',
-      outlineBlock,
     ]),
     l3: contextLayerChars([
       `章节标题：${chapter.title}`,
@@ -1601,7 +1410,6 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           blueprintDataText: blockBlueprintDataText,
           blueprintSliceText: blockBlueprintSliceText,
           blueprintMustCiteHint: input.blueprintMustCiteHint,
-          twoStep: false,
           signal: input.signal,
           diagnostics: input.diagnostics,
         });

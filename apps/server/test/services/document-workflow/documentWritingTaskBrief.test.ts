@@ -261,3 +261,37 @@ describe('写作前定死块（4.55.22 断链修复护栏）', () => {
     expect(buildWriteTimeFixedBlocks({ truthConstraint: '   ' })).toEqual([]);
   });
 });
+
+/**
+ * 盲区回归（4.55.22）：`too_short` 缺口原先**生产者有、三个消费点全都不收**
+ *（缺节/空节两处过滤 + 导出服务只取 empty），即「标题下只有一两句」的小节
+ * 在整个流程里不可见、不可修。它正是补写轮该处理的形态。
+ */
+describe('小节内容缺口：too_short 必须可达（不再是无消费方的死值）', () => {
+  const chapters = [{
+    title: '第一章 主要施工方法',
+    content: [
+      '## 第一章 主要施工方法',
+      '',
+      '### 1.1 资源配置计划',
+      '钢筋工十五人、木工二十人，分阶段进退场。',
+    ].join('\n'),
+    sections: ['资源配置计划'],
+  }];
+
+  it('正文过短（<180 字）→ sectionContentIntegrityIssues 报出（进问题流）', async () => {
+    const { sectionContentIntegrityIssues } = await import('@/services/document-workflow/qualityValidation');
+    const issues = sectionContentIntegrityIssues('', chapters as never);
+    expect(issues.some(issue => issue.message.includes('正文过短'))).toBe(true);
+  });
+
+  it('正文充分（≥180 字）→ 不报（不是无差别告警）', async () => {
+    const { sectionContentIntegrityIssues } = await import('@/services/document-workflow/qualityValidation');
+    const long = {
+      title: '第一章 主要施工方法',
+      content: `## 第一章 主要施工方法\n\n### 1.1 资源配置计划\n${'按施工进度分阶段配置劳动力，各工种进退场由施工员按周计划核定，进场前完成三级安全教育与技能核验。'.repeat(4)}`,
+      sections: ['资源配置计划'],
+    };
+    expect(sectionContentIntegrityIssues('', [long] as never)).toEqual([]);
+  });
+});

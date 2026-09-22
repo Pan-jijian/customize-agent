@@ -8,6 +8,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { HAZARD_THRESHOLDS, billOfQuantitiesCorpus, extractHazardBindings, extractHazardParameters, normalizeParameterValue, renderHazardBindingBlock } from '@/services/document-workflow/hazardBinding';
+import { extractLabeledAttributes } from '@/services/document-workflow/integratedBlueprint/parse';
 
 const 清单 = '巢湖项目/4-工程量清单各项分类表/1#厂房土建工程.xls';
 
@@ -177,5 +178,36 @@ describe('阈值表（单源）与注入渲染', () => {
     const deep = findings([{ content: '挖一般土方 3．挖土深度：5.2m', filePath: 清单 }]).get('基坑工程');
     expect(deep?.conclusion).toBe('属超过一定规模的危大');
     expect(deep?.clause).toBe('3.1.1');
+  });
+});
+
+/**
+ * 源标签字段保留（4.55.22 用户口径：「蓝图为什么没把该有的数据留下」）。
+ * 各项目/各工程类型的附表字段集不同，按字段名逐个补是补不完的——
+ * 正解是抽取时把源里有的标签字段原样保留，下游按需取用。
+ */
+describe('清单项目特征描述的标签字段抽取', () => {
+  it('逐字段切分（含「、」标签与序号前缀）', () => {
+    expect(extractLabeledAttributes('1．柱类型：钢柱 2．钢材品种、规格：Q355B 3．单根柱质量：5t以内 4．安装高度：24.00m以内'))
+      .toEqual({ 柱类型: '钢柱', '钢材品种、规格': 'Q355B', 单根柱质量: '5t以内', 安装高度: '24.00m以内' });
+  });
+
+  it('值不含下一字段的序号前缀（边界取下一个匹配整体起点）', () => {
+    const attributes = extractLabeledAttributes('1．构件类型：砖外墙 2．搭设方式：双排,密目网(全封闭) 围护 3．搭设高度：18.05m以内');
+    expect(attributes['构件类型']).toBe('砖外墙');
+    expect(attributes['搭设方式']).toBe('双排,密目网(全封闭) 围护');
+    expect(attributes['搭设高度']).toBe('18.05m以内');
+  });
+
+  it('机械设备类描述：抽出额定功率/生产能力等投产信息字段', () => {
+    const attributes = extractLabeledAttributes('1．名称：蛙式打夯机 2．规格型号：HW-20 3．额定功率：1.5kW 4．生产能力：60m²/台班 5．国别产地：国产');
+    expect(attributes['额定功率']).toBe('1.5kW');
+    expect(attributes['生产能力']).toBe('60m²/台班');
+    expect(attributes['国别产地']).toBe('国产');
+  });
+
+  it('空描述与非标签文本不产出字段', () => {
+    expect(extractLabeledAttributes('')).toEqual({});
+    expect(extractLabeledAttributes('本工程为标准化厂房项目，位于巢湖市。')).toEqual({});
   });
 });
