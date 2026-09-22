@@ -12,10 +12,36 @@
  * 无对应蓝图数据（如「项目管理机构图」无岗位数据）→ 返回 undefined，不造数据：
  * 该图类由写作侧「岗位责任矩阵」硬性要求承载，残留缺口交检测器报告。
  */
-import { ORG_CHART_HIERARCHY } from './documentFigures';
 import type { BlueprintData } from './integratedBlueprint';
 
+/**
+ * 项目管理机构层级（单源）：机构替代表用（原在 documentFigures.ts，4.55.25 图件整体删除后迁入）。
+ * 岗位名称取自行业通用职能，零人员实名数据。
+ */
+export const ORG_CHART_HIERARCHY = {
+  top: '项目经理',
+  second: ['技术负责人', '质量负责人', '安全负责人', '施工负责人', '材料负责人', '资料负责人'],
+  third: ['土建施工班组', '钢结构安装班组', '安装专业班组', '装饰装修班组', '试验与检测组'],
+} as const;
+
 const DASH = '—';
+
+/** 各图类替代表的表头（单源：表构造与「图类要求是否已以表落实」的覆盖率判定共用） */
+export const FIGURE_TABLE_HEADERS = {
+  schedule: ['工序', '持续天数', '起止天序', '线路性质', '依据'],
+  tempLand: ['设施', '面积（平方米）', '位置', '使用时长', '说明'],
+  orgChart: ['层级', '岗位／班组', '直接上级'],
+} as const satisfies Record<string, readonly string[]>;
+
+/** 图名 → 该图类替代表的表头行（无匹配图类时 undefined；不依赖蓝图数据，供覆盖率判定使用） */
+export function figureTableHeaderRow(figureName: string): string | undefined {
+  const name = String(figureName || '').replace(/\s+/gu, '');
+  if (!name) return undefined;
+  if (/项目管理机构|机构图|组织架构/.test(name)) return `| ${[...FIGURE_TABLE_HEADERS.orgChart].join(' | ')} |`;
+  if (/横道图|网络图|进度计划|总进度/.test(name)) return `| ${[...FIGURE_TABLE_HEADERS.schedule].join(' | ')} |`;
+  if (/总平面|平面布置/.test(name)) return `| ${[...FIGURE_TABLE_HEADERS.tempLand].join(' | ')} |`;
+  return undefined;
+}
 
 function tableLines(header: string[], rows: string[][]): string[] {
   const head = `| ${header.join(' | ')} |`;
@@ -34,7 +60,7 @@ function scheduleTableLines(data: BlueprintData): string[] | undefined {
     item.critical ? '关键线路' : '非关键线路',
     item.basis || DASH,
   ]);
-  return tableLines(['工序', '持续天数', '起止天序', '线路性质', '依据'], rows);
+  return tableLines([...FIGURE_TABLE_HEADERS.schedule], rows);
 }
 
 /** 总平面布置图：设施/面积/位置/使用时长/说明 */
@@ -48,7 +74,7 @@ function tempLandTableLines(data: BlueprintData): string[] | undefined {
     item.duration || DASH,
     item.note || DASH,
   ]);
-  return tableLines(['设施', '面积（平方米）', '位置', '使用时长', '说明'], rows);
+  return tableLines([...FIGURE_TABLE_HEADERS.tempLand], rows);
 }
 
 /**
@@ -63,7 +89,7 @@ function orgChartTableLines(): string[] {
     ...ORG_CHART_HIERARCHY.second.map(title => ['第二层', title, ORG_CHART_HIERARCHY.top]),
     ...ORG_CHART_HIERARCHY.third.map(title => ['第三层', title, '各专业负责人']),
   ];
-  return tableLines(['层级', '岗位／班组', '直接上级'], rows);
+  return tableLines([...FIGURE_TABLE_HEADERS.orgChart], rows);
 }
 
 /** 图名 → 替代表行（无匹配图类或无蓝图数据时返回 undefined，调用方保持原形态） */

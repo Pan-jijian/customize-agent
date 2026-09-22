@@ -36,7 +36,9 @@ export interface BillFactLock {
 }
 
 /** 规格 token：功率/长度/强度/管径/钢筋等级/直径/尺寸等，用于规格-数量拆分对提取 */
-const SPEC_TOKEN_RE = /(?:\d+(?:\.\d+)?\s*(?:W|kW|kV|V|A|Hz|mm|cm|m|km|kg|g|t|K|MPa|kN|℃|%|L|mL|s|h|min)\b|C\d{2,}|HRB\d+|HPB\d+|DN\s*\d+|Φ\s*\d+(?:\.\d+)?|φ\s*\d+(?:\.\d+)?|\d+(?:\.\d+)?\s*[×x*]\s*\d+(?:\.\d+)?)/giu;
+// 4.55.24 边界守卫：`C\d{2,}` 会在桩型号「PHC400-AB95」里抠出 C400（非法强度等级，进而在
+// 下游变成"清单权威"改写正文）——字母/数字紧邻即不算独立规格 token。
+const SPEC_TOKEN_RE = /(?:\d+(?:\.\d+)?\s*(?:W|kW|kV|V|A|Hz|mm|cm|m|km|kg|g|t|K|MPa|kN|℃|%|L|mL|s|h|min)\b|(?<![A-Za-z0-9])C\d{2,}(?!\d)|HRB\d+|HPB\d+|DN\s*\d+|Φ\s*\d+(?:\.\d+)?|φ\s*\d+(?:\.\d+)?|\d+(?:\.\d+)?\s*[×x*]\s*\d+(?:\.\d+)?)/giu;
 
 /** 从条目特征描述中提取规格 token（去重、保持原样） */
 export function extractSpecTokens(text: string): string[] {

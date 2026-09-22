@@ -6,7 +6,7 @@ import { displayChapterTitle, formalChapterTitle, isTenderClauseFragmentTitle, n
 import { composeEnhancedCoverMarkdown } from './composeAppendices';
 import { buildSemanticGate } from './semanticGate';
 import { THREE_SOURCE_WRITE_RULES } from './writingSpec';
-import { extractMarkdownTableCandidates, injectTableCaptions, matchMissingTablePlans, normalizeFigureNumbering, normalizeTableNumbering } from './constructionOrgTablePlan';
+import { extractMarkdownTableCandidates, injectTableCaptions, matchMissingTablePlans, normalizeTableNumbering } from './constructionOrgTablePlan';
 
 /**
  * 暗标禁图剥离（标书编制规格 bodyFigurePolicy=forbidden / forbidDrawingImages=true）：正文一律纯文字，
@@ -1935,7 +1935,7 @@ export function finalizeDocumentMarkdown<T extends Pick<DocumentDraftChapter, 't
   // r25 B1：注入后接编号唯一化（拆题注粘连 + 章内重排消解重复编号 + 引用同步）——
   // 重建插入的表（如基本信息表）与首轮已编表撞号时的机制级收口，全部为编号/结构判据
   // B-T1 图题链：与表题同范式（幂等，无图题零改动）——图题编号随重建链重跑归一化，保证导出产物与终检同口径
-  const captionedMarkdown = options.bodyTableForbidden ? finalizedMarkdown : normalizeFigureNumbering(normalizeTableNumbering(injectTableCaptions(finalizedMarkdown)));
+  const captionedMarkdown = options.bodyTableForbidden ? finalizedMarkdown : normalizeTableNumbering(injectTableCaptions(finalizedMarkdown));
   return { markdown: captionedMarkdown, chapters: finalizedChapters };
 }
 

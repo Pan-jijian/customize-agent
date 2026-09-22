@@ -414,17 +414,6 @@ export function isBodyFigureForbidden(spec: BidCompositionSpec | undefined) {
   return spec?.bodyFigurePolicy === 'forbidden';
 }
 
-/**
- * 图件输出总闸（4.55.24 用户口径 D1）：**全局默认不出图**（含明标项目）。
- *
- * 用户口径：「现在我觉得还是不要图了，都要表格数据形式展示就行了」。
- * 关闭后图位一律由等效数据表承载（`figureSubstituteTableLines`），不再注入 SVG 图件引用；
- * 暗标原本就禁图（`isBodyFigureForbidden`），口径不变、测试不变。
- * 另：无图件模式下「同图只出一次」的文件级去重（emittedFigureFiles）自然失效，
- * 改由表格签名去重（tableSignatureByChapter）承担同源只出一张表。
- * 恢复出图只需把本常量改为 true（单点开关，勿在他处再写分支）。
- */
-export const BODY_FIGURE_OUTPUT_ENABLED = false;
 
 /**
  * 写作约束文本（招标编制口径注入写作/修复提示词）。

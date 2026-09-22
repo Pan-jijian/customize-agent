@@ -1760,6 +1760,42 @@ const SPEC_LAYER_RE = /找平层|抹灰层|防水层|保温层|结合层|垫层|
 // 层名后“采用 1:3 水泥砂浆厚 20mm”是标准规格句式，数值仍属当前层
 const SPEC_ACTION_RE = /铺设|施工|浇筑|粘贴|铺贴|涂抹|完成|进行|待|设置|铺装|挂网|喷涂|灌注/u;
 
+/**
+ * 非厚度语义闸（4.55.24 实测根治）：窗口内出现这些语义时，其中的 `数值+mm` **不是层厚度**。
+ *
+ * **实测根因**（巢湖 真实自测，用户实测提问复现）：源资料原文
+ * `塘渣层计算弯沉值为3.41mm,压实标准见垫层压实度要求。`——`3.41mm` 是**弯沉值**，
+ * 而层名「垫层」出现在同句。原判据按「层名后 90 字内首个 mm 数值」取值，且 CAD 文字层双写
+ * （见 4.55.24 knowledge 侧修复）让「塘渣层计算弯沉值为3.41mm」在「垫层」之后再次出现 →
+ * 归属成立。于是「资料中垫层唯一厚度 = 3.41mm」→ 定点修复器把**正文里所有垫层厚度
+ * （含图纸原件正确的 100mm）全局改写成 3.41mm**，再由下一环节改写为 1.5mm
+ *（上一版交付物 `垫层厚度 1.5mm` 的真正来源，非模型移植）。
+ *
+ * 位置：层名与数值之间（direction='first'）或数值之后（direction='last'）的 gap。
+ * 误伤方向安全：判为"非厚度"只会**少改**（不登记目标 → 不替换正文），不会改错。
+ */
+const NON_THICKNESS_SEMANTIC_RE = /(?:弯沉|压实|回弹模量|强度|模量|偏差|误差|抗渗|抗冻|标高|覆土|净空|坡度|坡率|直径|管径|宽度|长度|高度|间距|面\s*积|体积|荷载|含水率|孔隙率|比例|图号|编号|桩号|坐标)/u;
+
+/** 句读截断：厚度归属不得跨句取值（原窗口为「下一个层名或 +90 字」，会把下一句的数值算进来） */
+function sameSentenceAfter(text: string): string {
+  const cut = text.search(/[。；\n]/u);
+  return cut >= 0 ? text.slice(0, cut) : text;
+}
+
+function sameSentenceBefore(text: string): string {
+  const parts = text.split(/[。；\n]/u);
+  return parts[parts.length - 1] ?? text;
+}
+
+/** 层配比物理合理域（4.55.24）：分母 >100 不是砂浆/混凝土配比。
+ * 实测污染源：CAD 双写使比例尺 `1:100` 变为 `1:1001:100`，抽取到配比 `1:1001` 并把正文
+ * 砂浆配比 `1:2` 全局改写为 `1:1001`。 */
+const SPEC_RATIO_MAX_DENOMINATOR = 100;
+
+/** 厚度定点替换的量级上限（4.55.24）：比值 >5 视为"不是同一对象的口径"，不做机器改写。
+ * 实测：正文防水层 250mm/30mm/100mm 因「资料里防水层唯一厚度 3mm」被批量改成 3mm（最大 83 倍）。 */
+const SPEC_THICKNESS_REPLACE_MAX_RATIO = 5;
+
 // 阶段五语义升级：动作词语义扩围——词面未命中但语义属“施工过程/工序动作”的 gap 由语义 gate 承接，
 // 检测与确定性修复共用同一归属规则（collectLayerNumbers），语义扩围同口径生效。
 const SPEC_ACTION_SEMANTIC_PROTOTYPES = [
@@ -1798,6 +1834,8 @@ async function collectLayerNumbers(text: string, actionGate?: (texts: string[]) 
       if (isUsed(absStart, absEnd)) continue;
       const gap = direction === 'first' ? window.slice(0, m.index ?? 0) : window.slice((m.index ?? 0) + m[0].length);
       if (SPEC_ACTION_RE.test(gap)) continue;
+      // 4.55.24 非厚度语义闸：弯沉值/压实度/强度/偏差… 不是层厚度（实测：垫层←塘渣层弯沉值 3.41mm）
+      if (kind === 'thickness' && NON_THICKNESS_SEMANTIC_RE.test(gap)) continue;
       // 层厚度物理合理边界：构造层（找平/面层/防水/保温/结合/垫层等）厚度物理区间 (0,1000)mm。
       // 窗口内首个 mm 数值可能是平整度偏差/瓷砖规格等非厚度语义（4.19.5 真实回归：
       // 「面层…2000mm」被误当厚度权威，确定性修复把正文 20mm/9mm 批量替换为 2000mm，
@@ -1805,6 +1843,12 @@ async function collectLayerNumbers(text: string, actionGate?: (texts: string[]) 
       if (kind === 'thickness') {
         const rawValue = Number(m[1] ?? '');
         if (!Number.isFinite(rawValue) || rawValue <= 0 || rawValue >= 1000) continue;
+      }
+      // 4.55.24 配比合理域：分母 >100 不是砂浆/混凝土配比（实测：CAD 双写把比例尺 1:100 变成
+      // 1:1001:100 → 抽到配比 1:1001 → 正文砂浆配比 1:2 被全局改写成 1:1001）
+      if (kind === 'ratio') {
+        const denominator = Number(m[1]?.split(':')[1] ?? '');
+        if (!Number.isFinite(denominator) || denominator <= 0 || denominator > SPEC_RATIO_MAX_DENOMINATOR) continue;
       }
       if (actionGate && gap.trim()) uncertainGaps.push({ key: `${layer}|${absStart}|${absEnd}`, gap });
       usedRanges.push([absStart, absEnd]);
@@ -1824,13 +1868,17 @@ async function collectLayerNumbers(text: string, actionGate?: (texts: string[]) 
     const layerEnd = layerStart + layer.length;
     const nextLayerStart = matches[i + 1]?.index;
     const afterEnd = nextLayerStart === undefined ? Math.min(text.length, layerEnd + 90) : nextLayerStart;
-    const after = text.slice(layerEnd, afterEnd);
+    // 4.55.24 句读截断：厚度/配比归属**不得跨句**（原窗口取到「下一个层名或 +90 字」，
+    // 会把下一句的数值算进来——实测「…见垫层压实度要求。塘渣层计算弯沉值为3.41mm」）
+    const after = sameSentenceAfter(text.slice(layerEnd, afterEnd));
     const prevLayerEnd = i > 0 ? (matches[i - 1].index ?? 0) + matches[i - 1][0].length : Math.max(0, layerStart - 40);
-    const before = text.slice(prevLayerEnd, layerStart);
+    const before = sameSentenceBefore(text.slice(prevLayerEnd, layerStart));
+    // before 是「到层名为止的末句」，故其绝对偏移 = layerStart - before.length
+    const beforeOffset = layerStart - before.length;
     claim(after, layerEnd, /(\d+:\d+(?:\.\d+)?)/gu, 'first', layer, 'ratio');
-    claim(before, prevLayerEnd, /(\d+:\d+(?:\.\d+)?)/gu, 'last', layer, 'ratio');
+    claim(before, beforeOffset, /(\d+:\d+(?:\.\d+)?)/gu, 'last', layer, 'ratio');
     claim(after, layerEnd, /(\d+(?:\.\d+)?)\s*mm/gu, 'first', layer, 'thickness');
-    claim(before, prevLayerEnd, /(\d+(?:\.\d+)?)\s*mm/gu, 'last', layer, 'thickness');
+    claim(before, beforeOffset, /(\d+(?:\.\d+)?)\s*mm/gu, 'last', layer, 'thickness');
   }
   // 语义复核：gap 语义属施工动作的归属撤销（该数值属其他层/施工过程，当前层不得占用）
   if (actionGate && uncertainGaps.length > 0) {
@@ -1956,7 +2004,6 @@ async function deterministicFixTargets(factsModel: DocumentFactsModel, scopeConf
 /** 单章定点修复：span 基于原始 text 收集，替换从后往前执行避免偏移 */
 async function fixChapterDeterministic(text: string, targets: Awaited<ReturnType<typeof deterministicFixTargets>>): Promise<{ content: string; fixedCount: number; details: string[] }> {
   const replacements: Array<{ start: number; end: number; replacement: string; detail: string }> = [];
-  // 结构层规格：collectLayerNumbers 与检测共用归属规则，定位到的错误数值必为检测所报冲突，直接替换为资料口径
   for (const claim of await collectLayerNumbers(text, targets.actionGate)) {
     const target = targets.specTargets.get(claim.layer);
     if (!target) continue;
@@ -1966,7 +2013,12 @@ async function fixChapterDeterministic(text: string, targets: Awaited<ReturnType
     }
     if (claim.kind === 'thickness' && Number.isFinite(target.thickness)) {
       const thickness = Number(claim.raw.match(/(\d+(?:\.\d+)?)/u)?.[1]);
-      if (Number.isFinite(thickness) && thickness !== (target.thickness as number)) replacements.push({ start: claim.span[0], end: claim.span[1], replacement: claim.raw.replace(/(\d+(?:\.\d+)?)/u, String(target.thickness)), detail: `${claim.layer}厚度 ${thickness}mm→${target.thickness}mm` });
+      // 4.55.24 量级守卫：仅同量级（比值 ≤5）的差异属"同一量口径不统一"，才做定点替换。
+      // 跨量级差异说明两者**不是同一个对象的口径**（实测：正文防水层 250mm/30mm/100mm 被
+      // 「资料里防水层唯一厚度 3mm」改写成 3mm，最大 83 倍——机器改写在此必错），
+      // 交检测器（processSpecConflictIssues 同层判据）报出后由 LLM/人工裁决。
+      const magnitudeRatio = thickness > 0 && Number.isFinite(thickness) ? Math.max(thickness, target.thickness as number) / Math.min(thickness, target.thickness as number) : Number.POSITIVE_INFINITY;
+      if (Number.isFinite(thickness) && thickness !== (target.thickness as number) && magnitudeRatio <= SPEC_THICKNESS_REPLACE_MAX_RATIO) replacements.push({ start: claim.span[0], end: claim.span[1], replacement: claim.raw.replace(/(\d+(?:\.\d+)?)/u, String(target.thickness)), detail: `${claim.layer}厚度 ${thickness}mm→${target.thickness}mm` });
     }
   }
   // 建设规模/估算价：与检测同源模式带 span 重新匹配，败选数值替换为期望口径（单位保留原样）。

@@ -1,5 +1,5 @@
 import { buildTenderBidScores, buildTenderBidTemplatingReport, MANDATORY_MODULE_QUERIES } from './tenderBidScoring';
-import { collectFigurePlaceholderSpecs, figureCoverage, tablePlanExecutionGaps } from './constructionOrgTablePlan';
+import { collectFigurePlaceholderSpecs, figureTableCoverage, tablePlanExecutionGaps } from './constructionOrgTablePlan';
 import { drawingFactPlacement, type DrawingFactLock } from './drawingFactLock';
 import { bodyCompositionTableIssues, tableCaptionCoverage } from './markdownComposer';
 import { scanBillExplicitDispositions } from './billFactLock';
@@ -229,11 +229,11 @@ function structurePart(input: {
     const executed = Math.max(0, plannedTotal - missing);
     parts.push({ weight: STRUCTURE_PART_WEIGHTS.execution, value: (executed / plannedTotal) * 100, detail: `表执行 ${executed}/${plannedTotal}` });
   }
-  // B-T1 图位覆盖（图类要求 ↔ 正文规范图题；无图类要求时不可用降级不参与）
+  // B-T1 图类要求落实（4.55.25 零图口径：图类要求一律以**数据表**落实，覆盖率按替代表头行判定）
   const figureSpecs = collectFigurePlaceholderSpecs({ chapters: effectiveChapters });
   if (figureSpecs.length > 0) {
-    const figure = figureCoverage(figureSpecs, markdown);
-    parts.push({ weight: STRUCTURE_PART_WEIGHTS.figure, value: (figure.covered / figure.total) * 100, detail: `图位 ${figure.covered}/${figure.total}` });
+    const figure = figureTableCoverage(figureSpecs, markdown);
+    parts.push({ weight: STRUCTURE_PART_WEIGHTS.figure, value: (figure.covered / figure.total) * 100, detail: `图类数据表 ${figure.covered}/${figure.total}` });
   }
   const caption = tableCaptionCoverage(markdown, bidComposition?.bodyTablePolicy === 'forbidden');
   if (caption.total > 0) {

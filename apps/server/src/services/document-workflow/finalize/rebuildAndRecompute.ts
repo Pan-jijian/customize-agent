@@ -18,7 +18,7 @@ import { validateProjectContamination } from '../../document-validation/document
 import { validateFactConsistency } from '../../document-validation/factConsistencyService';
 import { chapterReadinessIssues, evaluateChapterReadiness } from '../../document-validation/chapterReadinessService';
 import { cleanFormalSourcePhrases, composeDocumentMarkdown, finalizeDocumentMarkdown, normalizeTertiaryHeadings, plannedStructureIssues, sanitizeFormalMarkdown } from '../markdownComposer';
-import { BODY_FIGURE_OUTPUT_ENABLED, isBodyFigureForbidden, isBodyTableForbidden, type BidCompositionSpec } from '../bidComposition';
+import { isBodyFigureForbidden, isBodyTableForbidden, type BidCompositionSpec } from '../bidComposition';
 import { appendTenderAppendixSections } from '../composeAppendices';
 import { documentBudgetIssues, documentTextLength, pageTargetIssues } from '../budget';
 import { applySpecGateRules, buildExportGate, headingUncoveredEngineeringItems } from '../qualityValidation';
@@ -43,9 +43,8 @@ import { displayStage, upsertProgressStage } from '../progress';
 import { buildValidationIssues } from '../chapterGeneration';
 import { chapterSectionFactUsageIssues } from '../chapterReview';
 import { factCoverageIssues, finalizeChapterContentQuality, finalizeFinalMarkdownStructure, removeDuplicateProjectBasicInfoBlocks, normalizeProjectBasicInfoTable, partialChapterStatus, criticalSectionBlockerLine, projectBasicPlaceholderIssues, validateDraft, vectorStatusLabel } from '../documentGeneratorHelpers';
-import { collectFigurePlaceholderSpecs, ensureFigurePlaceholders, injectTableCaptions, normalizeFigureNumbering, normalizeTableNumbering } from '../constructionOrgTablePlan';
+import { collectFigurePlaceholderSpecs, ensureFigureAsTables, injectTableCaptions, normalizeTableNumbering } from '../constructionOrgTablePlan';
 import { figureSubstituteTableLines } from '../figureSubstituteTables';
-import { buildFigureForName } from '../documentFigures';
 import { generatedRoot } from '../../document-core/generatedDocumentService';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -416,30 +415,6 @@ function figurePlaceholderSpecs(session: FinalizeSession) {
   });
 }
 
-/**
- * 图件解析器（4.55.18）：图名 → SVG 图件（写入 generatedAssets/assets/ 供导出引用）。
- * 4.55.24：**全局默认不出图**（BODY_FIGURE_OUTPUT_ENABLED=false，含明标）——图位由等效数据表承载；
- * 暗标（bodyFigureForbidden）口径不变。写盘失败不阻断（导出侧跳过缺失图）。幂等：同名图件内容一致时不重写。
- */
-function figureImageResolver(session: FinalizeSession) {
-  const cache = new Map<string, { fileName: string; svg: string } | undefined>();
-  return (figureName: string): { fileName: string; svg: string } | undefined => {
-    if (!BODY_FIGURE_OUTPUT_ENABLED || isBodyFigureForbidden(session.bidComposition)) return undefined;
-    const key = String(figureName || '').replace(/\s+/gu, '');
-    if (cache.has(key)) return cache.get(key);
-    const figure = buildFigureForName(session.blueprintData, figureName);
-    if (!figure) { cache.set(key, undefined); return undefined; }
-    try {
-      const dir = path.join(generatedRoot(session.projectRoot), 'assets');
-      fs.mkdirSync(dir, { recursive: true });
-      const target = path.join(dir, figure.fileName);
-      if (!fs.existsSync(target) || fs.readFileSync(target, 'utf8') !== figure.svg) fs.writeFileSync(target, figure.svg, 'utf8');
-    } catch { /* 写盘失败不阻断生成 */ }
-    cache.set(key, figure);
-    return figure;
-  };
-}
-
 /** stageComposeFinal：全文组装 + 标准化管道（P2 拆分，方案 5.2） */
 export function stageComposeFinal(session: FinalizeSession): void {
   // W4 安全目标承诺句兜底：写作要求已注入但模型未遵循时（巢湖实测该章其余要求全落位、唯此项 0 处），
@@ -494,16 +469,11 @@ export function stageComposeFinal(session: FinalizeSession): void {
   // r25 B1：注入后接编号唯一化（拆粘连 + 重复编号章内重排 + 引用同步）——与 composeFinal 同口径
   // B-T1 图位链（与题注链同为链尾确定性注入）：图类要求规格补位（幂等）→ 图题编号归一化（章序-图序连续 + 引用同步）
   if (!bodyTableForbidden) {
+    // 4.55.25 零图口径：图类要求一律以**数据表**落实（图题/图号/图件均已取消，无图号归一化步骤）
     session.finalMarkdown = normalizeTableNumbering(injectTableCaptions(session.finalMarkdown));
-    session.finalMarkdown = normalizeFigureNumbering(ensureFigurePlaceholders(session.finalMarkdown, figurePlaceholderSpecs(session), {
-      // 4.55.22 修复：本路径原**只传 substituteTable 不传 figureImage**，而"图位是否已承载"的判据
-      // 是回调相关的（constructionOrgTablePlan.ts：有图件时只有**图片引用**才算承载）。
-      // 后果：首次组装时图位被补成数据替代表，真图只在这条重建闭包再次运行时才补上——
-      // 若本轮未触发任何修复轮，交付物里就只有替代表、没有任何 SVG 图件
-      //（用户实测：6 个图题只有 4 张图）。两条路径回调口径统一（与 :523 重建链同源）。
-      figureImage: figureImageResolver(session),
+    session.finalMarkdown = ensureFigureAsTables(session.finalMarkdown, figurePlaceholderSpecs(session), {
       substituteTable: name => figureSubstituteTableLines(session.blueprintData, name),
-    }).markdown);
+    }).markdown;
   }
   // 文末附表区：全部标准化管道完成后追加（不再经 normalize 管道，避免附表 H2 被当章标题处理）；
   // 数据源为一体化蓝图（appendixPlan 逐项绑定），无附表清单时不追加
@@ -553,10 +523,9 @@ export async function stageRebuildAndRecompute(session: FinalizeSession): Promis
     // 该表重新无题注直坠终检；注入器幂等可重放，正文禁表跳过
     // B-T1 图位链（同口径）：规格补位 + 编号归一化，正文禁表跳过
     if (isBodyTableForbidden(session.bidComposition)) return rebuilt;
-    return normalizeFigureNumbering(ensureFigurePlaceholders(normalizeTableNumbering(injectTableCaptions(rebuilt)), figureSpecs, {
-      figureImage: figureImageResolver(session),
+    return ensureFigureAsTables(normalizeTableNumbering(injectTableCaptions(rebuilt)), figureSpecs, {
       substituteTable: name => figureSubstituteTableLines(session.blueprintData, name),
-    }).markdown);
+    }).markdown;
   };
 
   const canonicalFacts = buildCanonicalFacts({ facts: session.structuredFacts, markdown: session.finalMarkdown });

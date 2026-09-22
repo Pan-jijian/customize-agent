@@ -337,6 +337,36 @@ describe('collectLayerNumbers 层厚度物理边界（4.19.5 真实回归：面�
     expect(fixed.markdown).toContain('20mm');
   });
 
+  // ── 4.55.24 用户实测复现：源资料「塘渣层计算弯沉值为3.41mm,压实标准见垫层压实度要求。」──
+  // 弯沉值被当成"垫层厚度"，定点修复器把正文里 9 个不同的垫层厚度（含图纸原件正确的 100mm）
+  // 全部改写成 3.41mm，再由下一环节改写为 1.5mm（上一版交付物 `垫层厚度 1.5mm` 的真正来源）。
+  it('弯沉值不被当作层厚度权威（资料「垫层…弯沉值为3.41mm」+ 正文「垫层厚度100mm」→ 不改写）', async () => {
+    const issues = await processSpecConflictIssues('基础下做100厚碎石垫层，垫层厚度100mm。', specFactsModel('塘渣层计算弯沉值为3.41mm,压实标准见垫层压实度要求。'), embedDocuments);
+    expect(issues).toHaveLength(0);
+    const fixed = await applyDeterministicConsistencyFixesToMarkdown('基础下做100厚碎石垫层，垫层厚度100mm。', specFactsModel('塘渣层计算弯沉值为3.41mm,压实标准见垫层压实度要求。'), undefined, embedDocuments);
+    expect(fixed.fixedCount).toBe(0);
+    expect(fixed.markdown).toContain('100mm');
+    expect(fixed.markdown).not.toContain('3.41mm');
+  });
+
+  it('跨句数值不参与层厚度归属（层名后的数值属下一句时不成权威）', async () => {
+    const fixed = await applyDeterministicConsistencyFixesToMarkdown('垫层厚度100mm。', specFactsModel('压实标准见垫层要求。相邻层计算弯沉值为9.9mm'), undefined, embedDocuments);
+    expect(fixed.fixedCount).toBe(0);
+    expect(fixed.markdown).toContain('100mm');
+  });
+
+  it('量级守卫：跨量级（防水层 250mm vs 资料 3mm）不做机器改写', async () => {
+    const fixed = await applyDeterministicConsistencyFixesToMarkdown('防水层厚度250mm，热熔满粘。', specFactsModel('防水层厚3mm'), undefined, embedDocuments);
+    expect(fixed.fixedCount).toBe(0);
+    expect(fixed.markdown).toContain('250mm');
+  });
+
+  it('配比合理域：比例尺双写产物 1:1001 不成配比权威（正文 1:2 不被改写）', async () => {
+    const fixed = await applyDeterministicConsistencyFixesToMarkdown('垫层采用1:2水泥砂浆找平。', specFactsModel('垫层做法 1:1001:100 水泥砂浆'), undefined, embedDocuments);
+    expect(fixed.fixedCount).toBe(0);
+    expect(fixed.markdown).toContain('1:2');
+  });
+
   it('正常厚度（找平层 20mm vs 正文 15mm）仍报冲突并确定性替换', async () => {
     const issues = await processSpecConflictIssues('找平层厚度15mm，随浇随抹。', specFactsModel('找平层厚20mm'), embedDocuments);
     expect(issues.length).toBe(1);

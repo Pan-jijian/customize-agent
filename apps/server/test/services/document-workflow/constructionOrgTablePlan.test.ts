@@ -3,10 +3,10 @@
  * R20 C3 追加：题注注入器单测（幂等重跑/三形态/章号推进/附表区不注入）；
  * R20 C1 追加：图类呈现元件单测（提取/语义归属/指令渲染）；
  * r26d 追加：终稿无题表题名回填单测（草稿表头键反查/歧义不回填/幂等）。
- * B-T1 追加：图位/图题机制单测（编号归一化/引用同步/补位注入/规格汇集/覆盖对账/无内部话术）。
+ * 4.55.25 追加：零图口径单测（图类要求一律以数据表落实、残留图题被移除、零图守卫、覆盖率按替代表头判定）。
  */
 import { describe, expect, it } from 'vitest';
-import { attachDiagramArtifacts, collectFigurePlaceholderSpecs, completeTitlelessTableTitles, diagramRequirementsPrompt, ensureFigurePlaceholders, extractDiagramArtifacts, extractFigureCaptions, extractMarkdownTableCandidates, figureCoverage, injectTableCaptions, mergeStructureDiagramArtifacts, normalizeFigureNumbering, normalizeFigureSpecName, normalizeTableNumbering, recoverTitlelessTableTitlesFromDrafts, splitGluedTableCaptions, tablePlanExecutionGaps } from '@/services/document-workflow/constructionOrgTablePlan';
+import { attachDiagramArtifacts, collectFigurePlaceholderSpecs, completeTitlelessTableTitles, diagramRequirementsPrompt, ensureFigureAsTables, extractDiagramArtifacts, extractMarkdownTableCandidates, figureTableCoverage, injectTableCaptions, mergeStructureDiagramArtifacts, normalizeFigureSpecName, normalizeTableNumbering, recoverTitlelessTableTitlesFromDrafts, splitGluedTableCaptions, tablePlanExecutionGaps } from '@/services/document-workflow/constructionOrgTablePlan';
 import { scanTableNumberingDefects } from '@/services/document-workflow/structureIntegrityRules';
 import { figureSubstituteTableLines } from '@/services/document-workflow/figureSubstituteTables';
 import { figureSubstituteTableIssues } from '@/services/document-workflow/documentIntegrityChecks';
@@ -620,233 +620,7 @@ describe('r26d 终稿无题表题名回填（recoverTitlelessTableTitlesFromDraf
 
 // ═══ B-T1 图位/图题机制 ═══
 
-describe('B-T1 图题编号归一化（normalizeFigureNumbering）', () => {
-  it('Writer 乱编号 → 按章序-章内序重排，引用同步；幂等', () => {
-    const md = [
-      '## 第1章 编制说明',
-      '正文段落。',
-      '图 9-9 项目管理机构图',
-      '上述机构如图 9-9 所示运行。',
-      '## 第2章 施工进度计划',
-      '图 1-1 施工进度横道图',
-      '具体节点见图 1-1。',
-    ].join('\n');
-    const result = normalizeFigureNumbering(md);
-    expect(result).toContain('图1-1 项目管理机构图');
-    expect(result).toContain('图2-1 施工进度横道图');
-    expect(result).toContain('上述机构如图1-1所示运行。');
-    expect(result).toContain('具体节点见图2-1。');
-    expect(normalizeFigureNumbering(result)).toBe(result);
-  });
-
-  it('无编号图题补编号；引用句/叙述句不被误判为图题', () => {
-    const md = [
-      '## 第1章 工程概况',
-      '图 管理组织机构图',
-      '如图 1-1 所示的层级关系。',
-      '图 1-2 所示为岗位设置情况。',
-    ].join('\n');
-    const result = normalizeFigureNumbering(md);
-    expect(result).toContain('图1-1 管理组织机构图');
-    // 引用句/叙述句（含句读或不以图类尾词落定）保持原样
-    expect(result).toContain('如图 1-1 所示的层级关系。');
-    expect(result).toContain('图 1-2 所示为岗位设置情况。');
-  });
-
-  it('同章多图章内序号连续递增；附表区不参与', () => {
-    const md = [
-      '## 第1章 施工组织总体安排',
-      '图 项目管理机构图',
-      '正文。',
-      '图 岗位责任分工图',
-      '## 附表一 项目管理机构图',
-      '图 1-1 附表内图题',
-    ].join('\n');
-    const result = normalizeFigureNumbering(md);
-    expect(result).toContain('图1-1 项目管理机构图');
-    expect(result).toContain('图1-2 岗位责任分工图');
-    expect(result).toContain('图 1-1 附表内图题');
-  });
-
-  it('无图题零改动恒等；extractFigureCaptions 实体提取', () => {
-    const plain = ['## 第1章 工程概况', '正文内容。'].join('\n');
-    expect(normalizeFigureNumbering(plain)).toBe(plain);
-    const entities = extractFigureCaptions(['## 第1章 工程概况', '图 项目管理机构图', '正文。', '图1-2 岗位责任分工图'].join('\n'));
-    expect(entities.map(entity => `${entity.chapterNo}|${entity.oldKey}|${entity.name}`)).toEqual(['1||项目管理机构图', '1|1-2|岗位责任分工图']);
-  });
-});
-
-describe('B-T1 图位补位（ensureFigurePlaceholders）与规格汇集', () => {
-  it('缺失规格注入目标章末尾；已有图题（核心词匹配）不重复注入；幂等且可接归一化落地编号', () => {
-    const md = [
-      '## 第1章 工程概况',
-      '正文。',
-      '## 第2章 施工进度计划',
-      '图2-1 横道图',
-      '正文段落。',
-      '## 第3章 施工总平面布置',
-      '正文。',
-    ].join('\n');
-    const specs = [
-      { chapterTitle: '施工进度计划', name: '施工进度横道图' },
-      { chapterTitle: '施工总平面布置', name: '施工总平面布置图' },
-    ];
-    const result = ensureFigurePlaceholders(md, specs);
-    expect(result.inserted).toEqual(['施工总平面布置：「施工总平面布置图」']);
-    const lines = result.markdown.split('\n');
-    const figureLine = lines.indexOf('图 施工总平面布置图');
-    expect(figureLine).toBeGreaterThan(lines.findIndex(line => line.includes('第3章')));
-    expect(ensureFigurePlaceholders(result.markdown, specs)).toEqual({ markdown: result.markdown, inserted: [] });
-    expect(normalizeFigureNumbering(result.markdown)).toContain('图3-1 施工总平面布置图');
-  });
-
-  it('规格为空恒等；无匹配章标题时注入文末保底', () => {
-    const md = ['## 第1章 工程概况', '正文。'].join('\n');
-    expect(ensureFigurePlaceholders(md, [])).toEqual({ markdown: md, inserted: [] });
-    const result = ensureFigurePlaceholders(md, [{ chapterTitle: '不存在的章节', name: '施工进度网络图' }]);
-    expect(result.inserted).toEqual(['不存在的章节：「施工进度网络图」']);
-    expect(result.markdown).toContain('图 施工进度网络图');
-  });
-
-  it('collectFigurePlaceholderSpecs：结构要求（图/框图形态）+ 章级图类指令合并去重；表类形态不收', () => {
-    const specs = collectFigurePlaceholderSpecs({
-      structureItems: [
-        { chapterTitle: '施工组织总体安排', form: 'org_chart', element: '项目管理机构图' },
-        { chapterTitle: '施工组织总体安排', form: 'table', element: '部门设置一览表' },
-        { chapterTitle: '施工进度计划', form: 'diagram', element: '施工进度网络图' },
-      ],
-      chapters: [{ title: '施工进度计划', diagramRequirements: ['「网络图」以文字框图呈现（节点与衔接关系）。（招标要求原文：「以网络图表示进度计划。」）'] }],
-    });
-    expect(specs).toEqual([
-      { chapterTitle: '施工组织总体安排', name: '项目管理机构图' },
-      { chapterTitle: '施工进度计划', name: '施工进度网络图' },
-    ]);
-  });
-
-  it('figureCoverage：图类要求 ↔ 正文规范图题对照（核心词匹配）；无图类要求不参与', () => {
-    const md = ['## 第1章 施工组织总体安排', '图1-1 项目管理机构图', '## 第2章 施工进度计划'].join('\n');
-    const specs = [
-      { chapterTitle: '施工组织总体安排', name: '项目管理机构图' },
-      { chapterTitle: '施工进度计划', name: '施工进度横道图' },
-    ];
-    expect(figureCoverage(specs, md)).toEqual({ total: 2, covered: 1, missing: [{ chapterTitle: '施工进度计划', name: '施工进度横道图' }] });
-    expect(figureCoverage([], md)).toEqual({ total: 0, covered: 0, missing: [] });
-  });
-
-  it('E2E：ensure → normalize 成对使用后图类要求一一落地、编号全局连续、重跑全链幂等', () => {
-    const md = [
-      '## 第1章 编制说明与工程概况',
-      '图 项目管理机构框图',
-      '## 第2章 施工进度计划及保证措施',
-      '## 第3章 施工总平面布置',
-    ].join('\n');
-    const specs = [
-      { chapterTitle: '编制说明与工程概况', name: '项目管理机构图' },
-      { chapterTitle: '施工进度计划及保证措施', name: '施工进度网络图' },
-      { chapterTitle: '施工总平面布置', name: '施工总平面布置图' },
-    ];
-    const once = normalizeFigureNumbering(ensureFigurePlaceholders(md, specs).markdown);
-    expect(once).toContain('图1-1 项目管理机构框图');
-    expect(once).toContain('图2-1 施工进度网络图');
-    expect(once).toContain('图3-1 施工总平面布置图');
-    expect(figureCoverage(specs, once)).toEqual({ total: 3, covered: 3, missing: [] });
-    const twice = normalizeFigureNumbering(ensureFigurePlaceholders(once, specs).markdown);
-    expect(twice).toBe(once);
-  });
-
-  it('无内部话术：图类呈现指令与图题链产物不出现「系统不生成/编制人绘制/绘制后附」', () => {
-    const chapter = { id: 'c-figure', title: '施工进度计划', purpose: '', diagramRequirements: ['「横道图」以表格式时间轴呈现（阶段与节点、起止时间）。'] } as DocumentTemplateChapter;
-    const prompt = diagramRequirementsPrompt(chapter);
-    expect(prompt).toContain('规范图题行');
-    expect(prompt).toContain('图 X-X 图名');
-    expect(prompt).not.toContain('系统不生成');
-    expect(prompt).not.toContain('编制人');
-    expect(prompt).not.toContain('绘制后附');
-    const md = ['## 第1章 施工进度计划', '图 施工进度横道图'].join('\n');
-    const produced = normalizeFigureNumbering(ensureFigurePlaceholders(md, [{ chapterTitle: '施工进度计划', name: '施工进度横道图' }]).markdown);
-    expect(produced).not.toMatch(/编制人|系统不生成|绘制后附/u);
-  });
-
-  it('mergeStructureDiagramArtifacts：结构要求图/框图形态并入并按图名核心词去重；表类不收', () => {
-    const base = [{ name: '横道图', instruction: '以表格式时间轴呈现', source: '以横道图表示进度。' }];
-    const merged = mergeStructureDiagramArtifacts(base, [
-      { form: 'diagram', element: '施工进度横道图', sourceText: '横道图。' },
-      { form: 'org_chart', element: '项目管理机构图', sourceText: '组织机构以框图方式表示。' },
-      { form: 'table', element: '部门设置一览表', sourceText: '附表列明部门。' },
-    ]);
-    expect(merged.map(item => item.name)).toEqual(['横道图', '项目管理机构图']);
-    expect(merged[1].instruction).toContain('文字框图');
-    expect(mergeStructureDiagramArtifacts([], [])).toEqual([]);
-  });
-
-  it('C2 normalizeFigureSpecName：工程图类构成词尾补「图」；已带图尾/非构成词尾原样（防正文引用句误修）', () => {
-    expect(normalizeFigureSpecName('施工进度计划')).toBe('施工进度计划图');
-    expect(normalizeFigureSpecName('项目管理机构')).toBe('项目管理机构图');
-    expect(normalizeFigureSpecName('总平面布置')).toBe('总平面布置图');
-    expect(normalizeFigureSpecName('施工进度网络图')).toBe('施工进度网络图');
-    expect(normalizeFigureSpecName('组织机构图')).toBe('组织机构图');
-    // 非图类构成词尾原样（宁缺不假：「中所示内容」类正文引用句不得被改成图题）
-    expect(normalizeFigureSpecName('中所示内容')).toBe('中所示内容');
-    expect(normalizeFigureSpecName('施工部署')).toBe('施工部署');
-  });
-
-  it('C2 规格汇集归一化：无尾词图类名补「图」，注入/覆盖对账口径闭环', () => {
-    const specs = collectFigurePlaceholderSpecs({
-      structureItems: [
-        { chapterTitle: '施工进度计划', form: 'diagram', element: '施工进度计划' },
-        { chapterTitle: '施工组织总体安排', form: 'org_chart', element: '项目管理机构' },
-      ],
-    });
-    expect(specs).toEqual([
-      { chapterTitle: '施工进度计划', name: '施工进度计划图' },
-      { chapterTitle: '施工组织总体安排', name: '项目管理机构图' },
-    ]);
-    const md = ['## 第1章 施工进度计划', '## 第2章 施工组织总体安排'].join('\n');
-    const result = ensureFigurePlaceholders(md, specs);
-    // 注入行与规格同口径（严格判据可达），归一化后覆盖对账 2/2
-    expect(result.markdown).toContain('图 施工进度计划图');
-    const numbered = normalizeFigureNumbering(result.markdown);
-    expect(figureCoverage(specs, numbered)).toEqual({ total: 2, covered: 2, missing: [] });
-  });
-
-  it('C2 就地修复：尾词补全/句读粘连拆分/编号缺尾词补全；修复行纳入既有图题不重复注入；幂等', () => {
-    const md = [
-      '## 第1章 施工进度计划',
-      '图 施工进度计划',
-      '## 第2章 进度网络图',
-      '图4-3 网络图相关内容纳入施工组织设计与作业流程管理，资料员每日更新记录、测量员每周复核数据。',
-      '正文段落。',
-      '## 第3章 项目管理机构',
-      '图 9-1 项目管理机构',
-    ].join('\n');
-    const specs = [
-      { chapterTitle: '施工进度计划', name: '施工进度计划图' },
-      { chapterTitle: '进度网络图', name: '网络图' },
-      { chapterTitle: '项目管理机构', name: '项目管理机构图' },
-    ];
-    const result = ensureFigurePlaceholders(md, specs);
-    // ①裸图题缺尾词 → 补全
-    expect(result.markdown).toContain('图 施工进度计划图');
-    // ②句读粘连 → 图题行保留 + 残余句独立成行
-    expect(result.markdown).toContain('图4-3 网络图');
-    expect(result.markdown).toContain('\n相关内容纳入施工组织设计与作业流程管理，资料员每日更新记录、测量员每周复核数据。');
-    // ③带编号缺尾词 → 补全
-    expect(result.markdown).toContain('图9-1 项目管理机构图');
-    // 修复后三项全部计入既有图题，零注入
-    expect(result.inserted).toEqual([]);
-    const numbered = normalizeFigureNumbering(result.markdown);
-    expect(numbered).toContain('图1-1 施工进度计划图');
-    expect(figureCoverage(specs, numbered)).toEqual({ total: 3, covered: 3, missing: [] });
-    // 幂等：重跑零变化
-    const again = ensureFigurePlaceholders(numbered, specs);
-    expect(again.markdown).toBe(numbered);
-    expect(again.inserted).toEqual([]);
-  });
-});
-
-// ═══ 4.55.12 W5 正文侧承载：图位带数据落地（巢湖实测：裸图题无表） ═══
-
-describe('4.55.12 图类替代表（图位必须带内容承载）', () => {
+describe('4.55.25 零图口径：图类要求一律以数据表落实（图题/图号/图件均已取消）', () => {
   const bp = {
     schedule: [
       { seq: 1, label: '施工准备', duration: 10, startDay: 1, endDay: 10, critical: false, basis: '里程碑推导' },
@@ -855,107 +629,64 @@ describe('4.55.12 图类替代表（图位必须带内容承载）', () => {
     tempLand: [{ purpose: '钢筋加工区', area: 800, location: '场地东侧', duration: '全过程', note: '硬化处理', basis: '推导' }],
   } as unknown as BlueprintData;
   const callback = { substituteTable: (name: string) => figureSubstituteTableLines(bp, name) };
-  const specs = [{ chapterTitle: '第一章 主要施工方法与技术措施', name: '施工进度计划横道图' }];
 
-  it('既有裸图题（模型只输出图题）→ 就地补等效数据表（蓝图直出，零编造）', () => {
+  it('既有图题行被移除，原位放等效数据表（正文不再出现图题/图号）', () => {
     const src = ['## 第一章 主要施工方法与技术措施', '', '图1-2 施工进度计划横道图', '', '正文内容。'].join('\n');
-    const result = ensureFigurePlaceholders(src, specs, callback).markdown;
+    const result = ensureFigureAsTables(src, [{ chapterTitle: '第一章 主要施工方法与技术措施', name: '施工进度计划横道图' }], callback).markdown;
+    expect(result).not.toMatch(/图\s*1-2/u);
     expect(result).toContain('| 工序 | 持续天数 | 起止天序 | 线路性质 | 依据 |');
     expect(result).toContain('| 基础与主体施工 | 120 | 第11～130天 | 关键线路 | 里程碑推导 |');
-    // 图题原位保留（只补内容，不改形态声明）
-    expect(result).toContain('图1-2 施工进度计划横道图');
-    expect(result.indexOf('图1-2')).toBeLessThan(result.indexOf('| 工序 |'));
   });
 
-  it('完全缺失图位 → 注入图题 + 数据表（不再是裸图题）', () => {
+  it('完全缺失图类要求 → 章末放数据表（不注入任何图题）', () => {
     const src = ['## 第一章 主要施工方法与技术措施', '', '正文内容。'].join('\n');
-    const result = ensureFigurePlaceholders(src, specs, callback).markdown;
-    expect(result).toContain('图 施工进度计划横道图');
-    expect(result).toContain('| 工序 |');
+    const result = ensureFigureAsTables(src, [{ chapterTitle: '第一章 主要施工方法与技术措施', name: '施工进度计划横道图' }], callback).markdown;
+    expect(result).toContain('| 工序 | 持续天数 | 起止天序 | 线路性质 | 依据 |');
+    expect(result).not.toMatch(/^图\s/u);
   });
 
-  it('幂等：图片已插入后重放不再补（表格不构成"图已承载"——4.55.20 口径收紧）', () => {
-    const src = ['## 第一章 主要施工方法与技术措施', '', '图1-2 施工进度计划横道图', '', '正文内容。'].join('\n');
-    const once = ensureFigurePlaceholders(src, specs, callback).markdown;
-    expect(ensureFigurePlaceholders(once, specs, callback).markdown).toBe(once);
+  it('无对应数据 → 不产生任何行（不保留裸图题，宁缺毋假）', () => {
+    const src = ['## 第一章 主要施工方法与技术措施', '', '图1-4 智慧工地子系统运行管理框图', '', '正文内容。'].join('\n');
+    const result = ensureFigureAsTables(src, [{ chapterTitle: '第一章 主要施工方法与技术措施', name: '智慧工地子系统运行管理框图' }], callback).markdown;
+    expect(result).not.toContain('图1-4');
+    expect(result).not.toContain('智慧工地子系统运行管理框图');
+    expect(result).toContain('正文内容。');
   });
 
-  it('4.55.24 机构图不再是裸图题：就地补「层级／岗位班组／直接上级」表（同一层级数据源，零编造）', () => {
-    const src = ['## 第一章 主要施工方法与技术措施', '', '图1-5 项目管理机构图', '', '正文内容。'].join('\n');
-    const result = ensureFigurePlaceholders(src, [{ chapterTitle: '第一章 主要施工方法与技术措施', name: '项目管理机构图' }], callback).markdown;
-    expect(result).toContain('| 层级 | 岗位／班组 | 直接上级 |');
-    expect(result).toContain('| 第一层 | 项目经理 | 公司管理层 |');
-    expect(result).toContain('| 第二层 | 技术负责人 | 项目经理 |');
-    expect(result).toContain('| 第三层 | 土建施工班组 | 各专业负责人 |');
-    // 图题原位保留
-    expect(result).toContain('图1-5 项目管理机构图');
+  it('不在规格内的残留图题同样被删除（零图：任何图题都不留）', () => {
+    const src = ['## 第一章 主要施工方法与技术措施', '', '图2-9 某个残留图题', '', '正文内容。'].join('\n');
+    const result = ensureFigureAsTables(src, [], callback).markdown;
+    expect(result).not.toContain('图2-9');
+    expect(result).toContain('正文内容。');
   });
 
-  it('未匹配图类的替代表为 undefined（调用方保持原形态，不造数据）', () => {
-    expect(figureSubstituteTableLines(bp, '智慧工地子系统运行管理框图')).toBeUndefined();
+  it('幂等：重放结果不变（同章同源只出一张表）', () => {
+    const src = ['## 第一章 主要施工方法与技术措施', '', '图1-2 施工进度计划横道图', '', '图1-3 施工总进度计划图', '', '正文内容。'].join('\n');
+    const once = ensureFigureAsTables(src, [{ chapterTitle: '第一章 主要施工方法与技术措施', name: '施工进度计划横道图' }], callback).markdown;
+    const twice = ensureFigureAsTables(once, [{ chapterTitle: '第一章 主要施工方法与技术措施', name: '施工进度计划横道图' }], callback).markdown;
+    expect(twice).toBe(once);
+    expect(once.split('| 工序 | 持续天数 |').length - 1).toBe(1);
   });
 
-  it('未传替代表回调时保持原行为（纯图题注入，向后兼容）', () => {
-    const src = ['## 第一章 主要施工方法与技术措施', '', '正文内容。'].join('\n');
-    const result = ensureFigurePlaceholders(src, specs).markdown;
-    expect(result).toContain('图 施工进度计划横道图');
-    expect(result).not.toContain('| 工序 |');
-  });
-});
-
-/**
- * 4.55.20 图件优先（出真图）与全文同图去重。
- * 巢湖实测缺陷①：「图 1-1 施工进度计划横道图」是裸图题——邻域里的进度数据表让它被判「已承载」，
- * 有图件也不出图；缺陷②：第 1 章「图1-5 项目管理机构图」与第 2 章「图2-1 项目管理机构图」
- * 插入的是同一张图（同文件名），正文重复出现同一张机构图。
- */
-describe('4.55.20 图件优先与全文同图去重', () => {
-  const imageOptions = {
-    figureImage: (name: string) => ({ fileName: `${name}.svg`, svg: '<svg></svg>' }),
-    substituteTable: () => ['| 工序 | 持续天数 |', '| --- | --- |', '| 施工准备 | 10 |'],
-  };
-  const scheduleSpecs = [{ chapterTitle: '第一章 主要施工方法与技术措施', name: '施工进度计划横道图' }];
-
-  it('裸图题（邻域只有表格）→ 仍补图片引用（表格不算"图已承载"）', () => {
-    const src = ['## 第一章 主要施工方法与技术措施', '', '图1-1 施工进度计划横道图', '', '| 工序 | 持续天数 |', '| --- | --- |', '| 施工准备 | 10 |'].join('\n');
-    const result = ensureFigurePlaceholders(src, scheduleSpecs, imageOptions).markdown;
-    expect(result).toContain('![施工进度计划横道图](generatedDocuments/assets/施工进度计划横道图.svg)');
-    expect(result).toContain('图1-1 施工进度计划横道图');
+  it('figureTableCoverage：图类要求以替代表头行判定落实', () => {
+    const specs = [{ chapterTitle: '第一章', name: '施工进度计划横道图' }];
+    const withTable = ['| 工序 | 持续天数 | 起止天序 | 线路性质 | 依据 |', '| --- | --- | --- | --- | --- |'].join('\n');
+    expect(figureTableCoverage(specs, withTable).covered).toBe(1);
+    expect(figureTableCoverage(specs, '正文无表。').covered).toBe(0);
+    expect(figureTableCoverage([], withTable).total).toBe(0);
   });
 
-  it('全文同一张图件只出一次图，后续同图图题改为指向说明', () => {
-    const src = [
-      '## 第一章 主要施工方法与技术措施', '',
-      '图1-5 项目管理机构图', '',
-      '## 第二章 施工总体部署', '',
-      '图2-1 项目管理机构图', '',
-    ].join('\n');
-    const specs = [
-      { chapterTitle: '第一章 主要施工方法与技术措施', name: '项目管理机构图' },
-      { chapterTitle: '第二章 施工总体部署', name: '项目管理机构图' },
-    ];
-    const result = ensureFigurePlaceholders(src, specs, imageOptions).markdown;
-    const imageLines = result.split('\n').filter(line => /!\[[^\]]*\]\([^)]*\)/u.test(line));
-    expect(imageLines).toHaveLength(1);
-    expect(result).toContain('本图与前述同名图件一致，见前图');
-  });
-});
-
-describe('4.55.12 图类承载检测（裸图题不再判成立）', () => {
-  const specs = [{ chapterTitle: '第一章 主要施工方法与技术措施', name: '施工进度计划横道图' }];
-
-  it('裸图题（图题下无内容）→ 判无承载', () => {
-    const md = ['## 第一章', '', '图1-2 施工进度计划横道图', '', '下一条目内容。'].join('\n');
-    expect(figureSubstituteTableIssues(md, specs)).toHaveLength(1);
+  it('零图守卫：图题/图号与图片引用判 blocker（正文只出表）', () => {
+    const withCaption = ['## 第一章', '', '图1-5 施工总平面布置图', '', '正文。'].join('\n');
+    const captionIssues = figureSubstituteTableIssues(withCaption, []);
+    expect(captionIssues.some(issue => issue.severity === 'blocker' && issue.message.includes('零图口径违规'))).toBe(true);
+    const withImage = ['## 第一章', '', '![施工进度计划横道图](generatedDocuments/assets/fig-x.svg)', '', '正文。'].join('\n');
+    expect(figureSubstituteTableIssues(withImage, []).some(issue => issue.severity === 'blocker')).toBe(true);
+    expect(figureSubstituteTableIssues('## 第一章\n\n图纸设计说明如下：基础采用独立基础。', [])).toEqual([]);
   });
 
-  it('图题下有数据表 → 判已承载', () => {
-    const md = ['## 第一章', '', '图1-2 施工进度计划横道图', '', '| 工序 | 持续天数 |', '| --- | --- |', '| 施工准备 | 10 |'].join('\n');
-    expect(figureSubstituteTableIssues(md, specs)).toEqual([]);
-  });
-
-  it('图题下有文字框图（≥8 汉字正文行）→ 判已承载（正文禁表口径下的合法形态）', () => {
-    const md = ['## 第一章', '', '图1-2 施工进度计划横道图', '', '施工准备（第1～10天）→基础与主体施工（第11～130天）→装饰装修。'].join('\n');
-    expect(figureSubstituteTableIssues(md, specs)).toEqual([]);
+  it('图类要求未以数据表落实 → warning（该项要求落空）', () => {
+    const issues = figureSubstituteTableIssues('## 第一章\n\n正文。', [{ chapterTitle: '第一章', name: '施工进度计划横道图' }]);
+    expect(issues.some(issue => issue.message.includes('未以数据表落实'))).toBe(true);
   });
 });

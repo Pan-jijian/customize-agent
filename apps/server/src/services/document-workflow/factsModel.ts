@@ -138,12 +138,40 @@ export function extractBillItemFacts(tables: StructuredTableFact[]): DocumentFac
 /** 规格维度标签词表：特征描述「1.混凝土种类:商品混凝土 2.混凝土强度等级:C30」分句后的标签
  *  命中即作为 specAuthorityMap 维度键 */
 const SPEC_DIMENSION_LABELS = ['混凝土强度等级', '砂浆强度等级', '抗渗等级', '钢筋牌号', '钢筋级别', '砖规格', '砌块强度等级', '混凝土种类', '砂浆种类', '垫层材料种类', '找平层厚度', '保护层厚度', '防水层厚度', '卷材厚度', '镀锌层厚度', '保温层厚度', '垫层厚度', '找坡层厚度', '防水等级', '抗裂等级', '耐火等级', '强度等级'];
-const SPEC_TOKEN_RE = /C\d{2,3}|M\d+(?:\.\d+)?|P\d{1,2}|HRB\d{3,4}|HPB\d{3}|Q\d{3}|MU\d+|A\d+(?:\.\d+)?|B\d+(?:\.\d+)?|\d+(?:\.\d+)?\s*mm/u;
+// 4.55.24 边界守卫：`C\d{2,3}` 原样会在**桩型号 `PHC400-AB95`** 里匹配出 `C400`，
+// 于是「预制钢筋混凝土管桩」的清单权威规格被读成 C400，定点修复器再把正文里**正确的 C80
+// 全局改写为 C400**（实测：`规格错位“预制钢筋混凝土管桩” C80→C400`）。字母/数字紧邻即不算独立规格 token。
+const SPEC_TOKEN_RE = /(?<![A-Za-z0-9])C\d{2,3}(?!\d)|M\d+(?:\.\d+)?|P\d{1,2}|HRB\d{3,4}|HPB\d{3}|Q\d{3}|MU\d+|A\d+(?:\.\d+)?|B\d+(?:\.\d+)?|\d+(?:\.\d+)?\s*mm/u;
+
+/** 混凝土强度等级合法值域（4.55.24 值域闸）：C15~C80。
+ * 超域值（如桩型号里抠出的 C400、C1000）不是强度等级——权威映射直接拒收，
+ * 定点修复器便无从"按错误权威改写正确正文"。 */
+const CONCRETE_GRADE_MIN = 15;
+const CONCRETE_GRADE_MAX = 80;
+
+/** 混凝土强度等级 token 合法性（导出供检测/修复侧同源使用，避免两处各写一套值域） */
+export function isLegalConcreteGradeToken(token: string): boolean {
+  const match = /^C(\d{2,3})$/u.exec(String(token || '').trim());
+  if (!match) return true;
+  const grade = Number(match[1]);
+  return Number.isFinite(grade) && grade >= CONCRETE_GRADE_MIN && grade <= CONCRETE_GRADE_MAX;
+}
+
+/** 规格 token 值域/形态合法性（4.55.24）：不合法返回 undefined（该 token 不作为规格权威） */
+function isLegalSpecToken(token: string): boolean {
+  const concreteGrade = /^C(\d{2,3})$/u.exec(token);
+  if (concreteGrade) {
+    const grade = Number(concreteGrade[1]);
+    return Number.isFinite(grade) && grade >= CONCRETE_GRADE_MIN && grade <= CONCRETE_GRADE_MAX;
+  }
+  return true;
+}
 
 /** 规格 token → 维度名（buildSpecAuthorityMap 归维口径统一）：标签缺失时按 token 类型归维，
  *  禁止一律归「混凝土强度等级」——F14 检测按维度首 placement 推导 pattern 时跨类型误比对
  *  （「有梁板权威 120mm 与正文 C30 不一致」实为板厚与强度等级两类规格，本无矛盾） */
 function specTokenDimension(token: string): string {
+  if (!isLegalSpecToken(token)) return '';
   return /^C\d{2,3}$/.test(token) ? '混凝土强度等级'
     : /^M\d/.test(token) ? '砂浆强度等级'
     : /^P\d/.test(token) ? '抗渗等级'

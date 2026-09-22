@@ -1,4 +1,12 @@
 import type { DocumentTemplateChapter, PlannedTablePlan } from './types';
+import { figureTableHeaderRow } from './figureSubstituteTables';
+
+/** 图位规格（章 + 图类名）：由 collectFigurePlaceholderSpecs 汇集；
+ * 4.55.25 零图口径下它表示「该章应以数据表落实的图类要求」 */
+export interface FigurePlaceholderSpec {
+  chapterTitle: string;
+  name: string;
+}
 import type { PlannedTableRequest } from './promptRuleExtraction';
 
 function normalizeText(text: string) {
@@ -1121,64 +1129,6 @@ export function extractFigureCaptions(markdown: string): FigureCaptionEntity[] {
   return entities;
 }
 
-/**
- * B-T1 图题编号归一化：正文区（附表区前）全部规范图题按「图{章号}-{章内序号} 图名」重排——
- * 章号=所在章（第X章解析与题注链同口径），章内序号=按图题出现顺序连续编号（验收判据「图位编号全局连续」）；
- * 无编号图题（补位链产物）补编号；旧编号→新编号唯一映射时同步全文引用（数量词形态跳过、歧义不建映射，
- * 宁缺不假，与 normalizeTableNumbering 同范式）；附表区零改动；幂等（重放时旧=新，全静默）。
- */
-export function normalizeFigureNumbering(markdown: string): string {
-  const lines = markdown.replace(/\r/gu, '').split('\n');
-  const bodyEnd = figureBodyEndIndex(lines);
-  const chapterByLine = scanFigureChapterNumbers(lines, bodyEnd);
-  interface FigureEntity { index: number; chapterNo: number; oldKey: string; name: string; newKey: string }
-  const entities: FigureEntity[] = [];
-  const seqByChapter = new Map<number, number>();
-  for (let index = 0; index < bodyEnd; index += 1) {
-    const chapterNo = chapterByLine[index];
-    if (chapterNo < 1) continue;
-    const probe = probeFigureCaptionLine(lines[index] || '');
-    if (!probe) continue;
-    const seq = (seqByChapter.get(chapterNo) || 0) + 1;
-    seqByChapter.set(chapterNo, seq);
-    entities.push({ index, chapterNo, oldKey: probe.oldKey, name: probe.name, newKey: `${chapterNo}-${seq}` });
-  }
-  if (entities.length === 0) return markdown;
-  const oldKeyCount = new Map<string, number>();
-  for (const entity of entities) if (entity.oldKey) oldKeyCount.set(entity.oldKey, (oldKeyCount.get(entity.oldKey) || 0) + 1);
-  const rewriteByIndex = new Map<number, string>();
-  const referenceMap = new Map<string, string>();
-  for (const entity of entities) {
-    if (entity.oldKey === entity.newKey) continue;
-    rewriteByIndex.set(entity.index, `图${entity.newKey} ${entity.name}`);
-    if (entity.oldKey && oldKeyCount.get(entity.oldKey) === 1) referenceMap.set(entity.oldKey, entity.newKey);
-  }
-  if (rewriteByIndex.size === 0 && referenceMap.size === 0) return markdown;
-  const output: string[] = [];
-  for (let index = 0; index < lines.length; index += 1) {
-    const rewrite = rewriteByIndex.get(index);
-    if (rewrite) {
-      output.push(rewrite);
-      continue;
-    }
-    if (index >= bodyEnd || referenceMap.size === 0) {
-      output.push(lines[index]);
-      continue;
-    }
-    output.push((lines[index] || '').replace(/图\s*(\d+(?:[-—–－]\d+)?)\s*(?![份个张条页行列项次台套人天年月日])/gu, (full, raw: string) => {
-      const mapped = referenceMap.get(normalizeCaptionKey(raw));
-      return mapped ? `图${mapped}` : full;
-    }));
-  }
-  return output.join('\n');
-}
-
-/** 图位规格（章标题{归一化口径匹配} + 图名{要素名}） */
-export interface FigurePlaceholderSpec {
-  chapterTitle: string;
-  name: string;
-}
-
 /** C2 现地修复：非规范「图 …」行（缺图类尾词/句读粘连）就地修复（正文区限定）。
  * ①粘连前缀拆分：「图4-3 网络图相关内容纳入…」→「图4-3 网络图」+ 残余句另起行
  *   （取最短「图类尾词落定」前缀，前缀须过严格判据）；
@@ -1240,147 +1190,92 @@ function repairMalformedFigureLines(lines: string[]): { lines: string[]; repaire
  * C2：注入前先做非规范图题行就地修复（拆分/补尾词），修复行进入既有图题扫描——根治
  * 「宽松认『像』不补、严格不认」的补了白补死循环。
  */
-export function ensureFigurePlaceholders(markdown: string, specs: FigurePlaceholderSpec[], options: {
+/**
+ * 图类要求 → 数据表（4.55.25 零图口径）。
+ *
+ * **用户口径**：正文**只出表**——不再出现任何图题、图号、图件、图片；原文里"要求出图"的条目
+ * 一律按**数据表**落实。因此本函数：
+ * · 正文既有图题行 → **删除**（含不在规格清单里的残留图题），就地在原位放等效数据表；
+ * · 缺失的图类要求 → 在目标章末尾放等效数据表；**无对应数据则什么都不放**（不保留裸图题，宁缺毋假）；
+ * · 不产生图号、不注入图片引用、不做图号归一（`normalizeFigureNumbering` 已删除）。
+ * 幂等：同章同数据源（表头签名）只出一张表；重放结果不变。
+ */
+export function ensureFigureAsTables(markdown: string, specs: FigurePlaceholderSpec[], options: {
   substituteTable?: (figureName: string) => string[] | undefined;
-  /** 4.55.18 图件（SVG 矢量图）：返回时可出真图——正文插图片引用而非替代表；
-   * 未提供或返回 undefined 时回退替代表/图题承载。暗标（禁图）由调用侧不传本回调实现。 */
-  figureImage?: (figureName: string) => { fileName: string; svg: string } | undefined;
 } = {}): { markdown: string; inserted: string[] } {
-  if (specs.length === 0) return { markdown, inserted: [] };
-  const repair = repairMalformedFigureLines(markdown.replace(/\r/gu, '').split('\n'));
-  const lines = repair.lines;
+  const lines = markdown.replace(/\r/gu, '').split('\n');
+  // 图题行判定：严格判据（裸图题「图 图名」）或**编号图题**「图N-M 图名」——零图口径下两类都应删除
+  const numberedFigureLine = /^图\s*\d+(?:[-—–－]\d+)?\s+\S/u;
+  const isFigureCaptionLine = (line: string): boolean => Boolean(probeFigureCaptionLine(line)) || numberedFigureLine.test(line.trim());
   const bodyEnd = figureBodyEndIndex(lines);
-  // 已有图题（宽松扫描：编号/无编号形态均可）——防重复注入
-  const existingNames: string[] = [];
-  const existingCaptionLines: Array<{ index: number; name: string }> = [];
+  const inserted: string[] = [];
+  // 同章同源去重：签名（表头行）→ 章键，保证同一份数据只出一张表
+  const tableSignatureByChapter = new Set<string>();
+  const emitTable = (chapterKey: string, table: string[] | undefined): string[] | undefined => {
+    if (!table || table.length === 0) return undefined;
+    const signature = `${chapterKey}|${table[0] || ''}`;
+    if (tableSignatureByChapter.has(signature)) return undefined;
+    tableSignatureByChapter.add(signature);
+    return table;
+  };
+  // ① 既有图题行：删除图题，原位放等效数据表（同章同源只出一次）
+  const captionTables = new Map<number, string[]>();
+  const matchedSpecNames = new Set<string>();
   for (let index = 0; index < bodyEnd; index += 1) {
     const row = (lines[index] || '').trim();
-    const numbered = FIGURE_CAPTION_NUMBERED_RE.exec(row);
-    const bare = numbered ? null : FIGURE_CAPTION_BARE_RE.exec(row);
-    const name = (numbered ? numbered[2] : bare ? bare[1] : '').trim();
-    if (name && figureCaptionNameLike(name)) {
-      existingNames.push(name);
-      existingCaptionLines.push({ index, name });
-    }
+    if (!isFigureCaptionLine(row)) continue;
+    const probe = probeFigureCaptionLine(row);
+    const captionName = probe?.name || row.replace(numberedFigureLine, '').trim() || row;
+    const name = probe?.name || '';
+    const spec = name ? specs.find(item => figureNamesMatch(name, normalizeFigureSpecName(item.name))) : undefined;
+    if (spec) matchedSpecNames.add(spec.name);
+    const table = emitTable(normalizeText(figureChapterOf(lines, index)), options.substituteTable?.(name || captionName));
+    if (table) captionTables.set(index, table);
+    inserted.push(`移除图题「${captionName.slice(0, 24)}」${table ? '改为等效数据表' : '（无对应数据，仅移除）'}`);
   }
-  const missing = specs.filter(spec => !existingNames.some(name => figureNamesMatch(name, normalizeFigureSpecName(spec.name))));
-  // 4.55.12 W5 正文侧承载：图位必须「带内容落地」——图题下无数据表且蓝图有对应数据时，就地补等效数据表
-  // （巢湖实测：模型只输出裸图题，图位被判已承载、W5 替代表从未生成；此处按已有图题与新增图题两路补）
-  const captionBackfill = new Map<number, string[]>();
-  const captionImage = new Map<number, string>();
-  // 4.55.20 全文同图去重：同一张图件（同文件名）只出一次图；后续同图图题改为指向说明
-  //（实测缺陷：第 1 章「图1-5 项目管理机构图」与第 2 章「图2-1 项目管理机构图」重复插入同一张图）
-  const emittedFigureFiles = new Set<string>();
-  // 4.55.19 同章同源替代表去重（两条路径共用同一签名表）：实测缺陷——回填路径未去重，
-  // 「横道图」「网络图」两个既有图题各补一张**完全相同**的进度表（相邻两表重复；
-  // 模型自己写的表 + 补的表也会撞车）
-  const tableSignatureByChapter = new Map<string, string>();
-  for (const caption of existingCaptionLines) {
-    // 幂等：承载判定**随可用载体而定**——有图件可用时，只有**图片引用**才算承载（表格是数据形态，
-    // 不能替代「图」；实测缺陷：邻域里的进度数据表让「图 1-1 横道图」被判已承载 → 裸图题无图）；
-    // 无图件可用时（暗标/无蓝图数据），替代表即承载 ✓ 两条路径各自幂等
-    const neighborhood = lines.slice(Math.max(0, caption.index - 8), caption.index + 9);
-    const hasImage = neighborhood.some(line => /!\[[^\]]*\]\([^)]*\)/u.test(line));
-    const hasTable = neighborhood.some(line => /^\s*\|.+\|\s*$/u.test(line));
-    const figureAvailable = options.figureImage?.(caption.name) !== undefined;
-    const alreadyCarried = figureAvailable ? hasImage : (hasImage || hasTable);
-    if (alreadyCarried) continue;
-    const image = options.figureImage?.(caption.name);
-    if (image) {
-      if (emittedFigureFiles.has(image.fileName)) {
-        captionImage.set(caption.index, `> 说明：本图与前述同名图件一致，见前图（不重复列出）。`);
-        continue;
-      }
-      emittedFigureFiles.add(image.fileName);
-      captionImage.set(caption.index, `![${caption.name}](generatedDocuments/assets/${image.fileName})`);
-      continue;
-    }
-    const table = options.substituteTable?.(caption.name);
-    if (table && table.length > 0) {
-      const signature = table[0] || '';
-      const chapterKey = `${figureChapterOf(lines, caption.index)}|${signature}`;
-      if (tableSignatureByChapter.has(chapterKey)) continue;   // 同章同源已出表 → 不重复补
-      tableSignatureByChapter.set(chapterKey, signature);
-      captionBackfill.set(caption.index, table);
-    }
-  }
-  // C2：无缺失但原地修复过时同样输出修复结果（修复即收益；纯补位路径原样返回）
-  // 4.55.12：图题替代表回填（captionBackfill）同为实质变更，一并进入输出路径
-  if (missing.length === 0 && captionBackfill.size === 0 && captionImage.size === 0) {
-    return repair.repaired > 0 ? { markdown: lines.join('\n'), inserted: [] } : { markdown, inserted: [] };
-  }
-  // 一级标题行索引（章区间=[标题行, 下一个一级标题行)；目录/附表标题不计）
-  const headingIndexes: number[] = [];
-  for (let index = 0; index < bodyEnd; index += 1) {
-    const heading = /^##\s+(.+?)\s*$/u.exec(lines[index]);
-    if (heading && !/^(目录|附表)/u.test(heading[1])) headingIndexes.push(index);
-  }
-  const locateChapterEnd = (chapterTitle: string): number => {
+  // ② 缺失的图类要求：在目标章末尾放等效数据表（无数据则不放）
+  const missing = specs.filter(spec => !matchedSpecNames.has(spec.name));
+  const chapterEndIndexOf = (chapterTitle: string): number => {
     const target = normalizeText(chapterTitle);
+    const headingIndexes: number[] = [];
+    for (let index = 0; index < bodyEnd; index += 1) {
+      const heading = /^##\s+(.+?)\s*$/u.exec(lines[index] || '');
+      if (heading && !/^(目录|附表)/u.test(heading[1]!)) headingIndexes.push(index);
+    }
     if (!target) return bodyEnd;
     for (let order = 0; order < headingIndexes.length; order += 1) {
-      const headingText = (lines[headingIndexes[order]] || '').replace(/^##\s+/u, '');
-      const normalized = normalizeText(headingText);
+      const normalized = normalizeText((lines[headingIndexes[order]!] || '').replace(/^##\s+/u, ''));
       if (normalized.includes(target) || target.includes(normalized)) {
-        return order + 1 < headingIndexes.length ? headingIndexes[order + 1] : bodyEnd;
+        return order + 1 < headingIndexes.length ? headingIndexes[order + 1]! : bodyEnd;
       }
     }
     return bodyEnd;
   };
   const insertAt = new Map<number, string[]>();
-  const inserted: string[] = [];
-  // 4.55.16 替代表去重（巢湖实测：横道图/总进度计划图/网络图三个图位共用同一份 schedule 数据，
-  // 注入三张完全相同的表）：同章内同一数据源（表头签名相同）只出一次表，后续图位改为指向该表
   for (const spec of missing) {
-    const end = locateChapterEnd(spec.chapterTitle);
+    const end = chapterEndIndexOf(spec.chapterTitle);
+    const table = options.substituteTable?.(normalizeFigureSpecName(spec.name));
+    if (!table || table.length === 0) continue;   // 无数据 → 不产生任何行（不保留裸图题）
+    // 幂等守卫：正文已含该替代表（表头行相同）→ 不再重复出表（重放/多入口共用同一判据）
+    if (markdown.includes(table[0] || '')) continue;
+    if (!emitTable(normalizeText(spec.chapterTitle), table)) continue;
     const bucket = insertAt.get(end) || [];
-    // C2：注入名归一化（尾词补「图」）——注入行须能被严格判据/编号链/覆盖对账闭环识别
-    const injectedName = normalizeFigureSpecName(spec.name);
-    bucket.push(`图 ${injectedName}`);
-    // 4.55.18 图件优先：有 SVG 图件时插图片引用（导出为真图），否则回退 4.55.12 的等效数据表
-    const image = options.figureImage?.(injectedName);
-    if (image) {
-      bucket.splice(bucket.length - 1, 0, '', `![${injectedName}](generatedDocuments/assets/${image.fileName})`, '');
-    } else {
-      const table = options.substituteTable?.(injectedName);
-      if (table && table.length > 0) {
-        const signature = table[0] || '';
-        const chapterKey = `${end}|${signature}`;
-        if (tableSignatureByChapter.has(chapterKey)) {
-          bucket.push('', '> 说明：本图工序数据与本章前述进度数据表同源，见该表（不重复列出）。', '');
-        } else {
-          tableSignatureByChapter.set(chapterKey, signature);
-          bucket.push('', ...table, '');
-        }
-      }
-    }
+    bucket.push('', ...table, '');
     insertAt.set(end, bucket);
-    inserted.push(`${spec.chapterTitle}：「${injectedName}」`);
+    inserted.push(`${spec.chapterTitle}：图类要求「${spec.name}」以数据表落实`);
   }
-  if (captionBackfill.size > 0) {
-    for (const [captionIndex, table] of captionBackfill) inserted.push(`补替代表于图题行 ${captionIndex + 1}（${table.length} 行）`);
-  }
+  if (inserted.length === 0) return { markdown, inserted: [] };
   const output: string[] = [];
   for (let index = 0; index < lines.length; index += 1) {
+    const table = captionTables.get(index);
+    if (table) { output.push('', ...table, ''); continue; }   // 图题行整行被替换
+    if (isFigureCaptionLine(lines[index] || '')) continue;  // 残留图题（含不在规格内的）：直接删除（零图）
     const bucket = insertAt.get(index);
-    if (bucket) output.push('', ...bucket, '');
-    output.push(lines[index]);
-    // 4.55.18：既有裸图题就地补图件（图片在图题行之前——图在上、题在下）或等效数据表（紧随其后）
-    const imageLine = captionImage.get(index);
-    if (imageLine) {
-      output.pop();
-      output.push('', imageLine, lines[index]);
-      continue;
-    }
-    const backfill = captionBackfill.get(index);
-    if (backfill) output.push('', ...backfill);
+    if (bucket) output.push(...bucket);
+    output.push(lines[index]!);
   }
-  // bodyEnd=文末（无附表区）时注入点在数组外：循环结束后补处理
   const trailing = insertAt.get(lines.length);
-  if (trailing) {
-    while (output.length > 0 && !(output[output.length - 1] || '').trim()) output.pop();
-    output.push('', ...trailing);
-  }
+  if (trailing) output.push(...trailing);
   return { markdown: output.join('\n'), inserted };
 }
 
@@ -1439,13 +1334,14 @@ export function collectFigurePlaceholderSpecs(input: {
 
 /** 图位覆盖对账（B-T1 验收：招标明文每项图类要求 → 正文规范图位一一对照；图名核心词匹配）。
  * C2：规格图名先归一化（尾词补「图」）——与注入链/严格判据同口径，防「补了不被认」虚缺 */
-export function figureCoverage(specs: FigurePlaceholderSpec[], markdown: string): { total: number; covered: number; missing: FigurePlaceholderSpec[] } {
+export function figureTableCoverage(specs: FigurePlaceholderSpec[], markdown: string): { total: number; covered: number; missing: FigurePlaceholderSpec[] } {
   if (specs.length === 0) return { total: 0, covered: 0, missing: [] };
-  const captionNames = extractFigureCaptions(markdown).map(entity => entity.name);
   const missing: FigurePlaceholderSpec[] = [];
   let covered = 0;
   for (const spec of specs) {
-    if (captionNames.some(name => figureNamesMatch(name, normalizeFigureSpecName(spec.name)))) covered += 1;
+    // 4.55.25 零图口径：图类要求以**数据表**落实——覆盖率按该图类替代表的表头行是否出现在正文判定
+    const header = figureTableHeaderRow(normalizeFigureSpecName(spec.name));
+    if (header && markdown.includes(header)) covered += 1;
     else missing.push(spec);
   }
   return { total: specs.length, covered, missing };

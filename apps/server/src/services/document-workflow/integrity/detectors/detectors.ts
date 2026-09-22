@@ -10,6 +10,7 @@ import { buildSemanticGate } from '../../semanticGate';
 import { isQualificationSectionTitle } from '../../evidenceContentSafety';
 import { LABOR_STAGE_LIMIT_WORDS, PEAK_LABOR_RE, PILE_SUPPORT_LITERAL_RE, TRADE_WORKER_WORD_RE, cnNumberToArabic, collectLaborTableBlocks, excavationDepthFromFacts, extractGreeningMaintenanceAuthority, extractStreetLightAuthority, flexNamePattern, laborPeakStageOf, quantityUnitVariants } from '../authorities/authorities';
 import { matchDecisionCategory } from '../../integratedBlueprint';
+import { isLegalConcreteGradeToken } from '../../factsModel';
 import { buildCitationSentenceContext, defaultCitationAdjudicator } from '../../semanticAdjudication';
 import type { CitationAdjudicationCandidate, CitationAdjudicator } from '../../semanticAdjudication';
 import type { SupportSystemAuthorityKind } from '../authorities/authorities';
@@ -2383,7 +2384,10 @@ export function crossSectionNumericConflictIssues(markdown: string): ValidationI
 /** 规格 token 类型推断：从权威规格值推导正则，只校验同类型规格（避免「垫层…HRB400 钢筋」误比对混凝土标号） */
 
 function specTokenPattern(spec: string): RegExp | null {
-  if (/^C\d{2,3}$/.test(spec)) return /C\d{2,3}/u;
+  // 4.55.24 边界守卫（与 factsModel.SPEC_TOKEN_RE 同源）：`C\d{2,3}` 会在桩型号
+  // 「PHC400-AB95」里匹配出 C400——权威侧与正文侧都必须拒绝"字母紧邻的伪规格 token"，
+  // 否则正确的 C80 会被当成与 C400 错位而被改写。
+  if (/^C\d{2,3}$/.test(spec)) return /(?<![A-Za-z0-9])C\d{2,3}(?!\d)/u;
   if (/^M\d/.test(spec)) return /M\d+(?:\.\d+)?/u;
   // V5 P6 误报收口（run1 实测）：「AP42」「IP55」中的 P42/P55 是型号/防护等级代号子串，
   // 非独立 P 规格 token——左边界排除拉丁字母前缀，只匹配独立 P 规格（「配电箱P65」仍命中）
@@ -2484,7 +2488,10 @@ export function scanSpecLocationMismatchHits(markdown: string, specAuthorityMap?
           const loose = new RegExp(`^(?:${pattern.source})`, 'u').exec(item.spec);
           return loose ? loose[0] : null;
         })
-        .filter((token): token is string => token !== null));
+        .filter((token): token is string => token !== null)
+        // 4.55.24 值域闸：权威侧同样只认合法强度等级（实测「预制钢筋混凝土管桩」权威曾被读成
+        // 桩型号里的 C400，进而把正文正确的 C80 改写成 C400）
+        .filter(token => isLegalConcreteGradeToken(token)));
       const locationRe = new RegExp(`${escapeRegexLiteral(location)}[^。；;\n|]{0,40}?(${pattern.source})`, 'gu');
       for (const match of markdown.matchAll(locationRe)) {
         const found = match[1] || '';
@@ -2554,6 +2561,9 @@ export function scanSpecLocationMismatchHits(markdown: string, specAuthorityMap?
         if (collisionSpecs.has(found)) continue;
       }
       if (authoritySpecs.has(found)) continue;
+      // 4.55.24 值域闸（与 factsModel 同源）：正文侧 token 也须是合法强度等级——
+      // 正文写「PHC400-AB95」时若被抠出 C400，不得当成"错位规格"去比对/改写
+      if (!isLegalConcreteGradeToken(found)) continue;
       // 4.27.0 A2：权威规格唯一（同 pattern 类型）时可确定性裁决口径 → 附替换 span
       // 4.55.12 扩：权威多义时按「正文同限定词自洽」消歧（见 resolveQualifiedSpecTarget）
       const uniqueAuthority = authoritySpecs.size === 1 ? [...authoritySpecs][0] : undefined;
@@ -4775,27 +4785,30 @@ export function figureSubstituteTableIssues(
   markdown: string,
   figureSpecs: Array<{ chapterTitle: string; name: string }>,
 ): ValidationIssue[] {
-  if (figureSpecs.length === 0) return [];
   const issues: ValidationIssue[] = [];
   const lines = markdown.split('\n');
+  // ① 零图守卫（4.55.25 用户口径）：正文**只出表**——不得出现图题、图号、图片引用。
+  // 判据取窄形态，防误伤以「图」开头的正文词（如「图纸设计说明」）：
+  //   · 编号图题「图1-1 施工进度计划横道图」/「图 1-1 …」
+  //   · 裸图题整行「图 项目管理机构图」
+  const numberedCaption = /^图\s*\d+(?:[-—–－]\d+)?\s+\S+$/u;
+  const bareCaption = /^图\s+[^\s，。；：]{2,36}$/u;
+  const captionHits = lines.map((line, index) => ({ text: line.trim(), index }))
+    .filter(item => numberedCaption.test(item.text) || bareCaption.test(item.text));
+  const imageHits = lines.map((line, index) => ({ text: line.trim(), index }))
+    .filter(item => /!\[[^\]]*\]\([^)]*\)/u.test(item.text) || /<img\b/iu.test(item.text));
+  if (captionHits.length > 0 || imageHits.length > 0) {
+    issues.push({
+      level: 'error',
+      severity: 'blocker',
+      category: 'format',
+      provenance: { detectorId: 'figure-substitute-table', fingerprint: stableHash(markdown) },
+      message: `正文零图口径违规：图题/图号 ${captionHits.length} 处、图片引用 ${imageHits.length} 处`,
+      suggestion: `正文只出表：删除全部图题、图号与图片引用，图类要求一律改写为等效数据表（进度类→工序表、机构类→岗位层级表、平面类→临时设施用地表）并加表题。示例：${(captionHits[0]?.text || imageHits[0]?.text || '').slice(0, 40)}`,
+    });
+  }
+  // ② 图类要求须以**数据表**落实（该章无对应数据表即该项要求落空）
   for (const spec of figureSpecs) {
-    // ① 该图名已有规范图题**且图题下有内容承载**（数据表/文字框图/正文段）→ 图位成立，无需替代。
-    // 4.55.12 巢湖实测归因：原判据只问「图名是否在全文出现」，而链尾注入器会无条件补裸图题行
-    // （形态声明），注入即判成立 → W5 的替代表检查永不执行，正文出现五条裸图题（图1-1…图1-5）
-    // 其下无任何内容，"图位 4/4/题注 10/10"却计满分。现要求图题行后 10 行内出现表格行或
-    // ≥8 个汉字的正文行（文字框图形态），否则不构成承载。
-    const figureNameCore = spec.name.replace(/图$/u, '');
-    if (figureNameCore) {
-      const captionRe = new RegExp(`^图\\s*(?:\\d+(?:[-—–－]\\d+)?\\s+)?${figureNameCore.slice(0, 12).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'u');
-      const captionIndex = lines.findIndex(line => captionRe.test(line.trim()));
-      if (captionIndex >= 0) {
-        const following = lines.slice(captionIndex + 1, captionIndex + 11).map(line => line.trim()).filter(Boolean);
-        const hasTable = following.some(line => /^\|.+\|$/u.test(line));
-        const hasCarrier = following.some(line => !/^\|/u.test(line) && !/^图\s/u.test(line) && line.replace(/[^一-龥]/gu, '').length >= 8);
-        if (hasTable || hasCarrier) continue;
-      }
-    }
-    // ② 无图题（或图题下无内容）→ 须有等效数据表（按图名主题词映射到表主题）
     const mapping = FIGURE_SUBSTITUTE_TABLE_PATTERNS.find(item => item.figure.test(spec.name));
     const tablePattern = mapping?.table ?? /./u;
     const hasSubstitute = lines.some(line => {
@@ -4808,8 +4821,8 @@ export function figureSubstituteTableIssues(
       level: 'warning',
       severity: 'warning',
       category: 'structure',
-      message: `图类要求无承载：「${spec.name}」（${spec.chapterTitle}）既无正文图题、也无等效数据表${mapping ? `（应至少提供${mapping.label}）` : ''}`,
-      suggestion: '该图无法呈现时，须以等效数据表承载同一信息（如进度图→进度计划表、平面布置图→临时设施用地表、机构图→岗位职责表），并加规范题注；两者皆无即该项要求落空。',
+      message: `图类要求未以数据表落实：「${spec.name}」（${spec.chapterTitle}）${mapping ? `（应至少提供${mapping.label}）` : ''}`,
+      suggestion: '图类要求一律以等效数据表承载同一信息（进度图→进度计划表、平面布置图→临时设施用地表、机构图→岗位层级表）；无对应数据则该项要求落空，须补齐数据而非留空。',
     });
   }
   return issues;

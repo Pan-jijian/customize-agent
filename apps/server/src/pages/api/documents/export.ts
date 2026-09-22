@@ -823,53 +823,9 @@ async function ensureDocxPackageParts(zip: JSZip, title: string, settings?: Docu
  * 多候选启动（与 renderPdfBuffer 同源：bundled chromium → 系统 chrome/edge → 常见路径）；
  * 任一图失败仅跳过该图（不阻断导出）。
  */
-async function rasterizeSvgImages(markdown: string, projectRoot: string): Promise<Map<string, NonSharedBuffer>> {
-  const result = new Map<string, NonSharedBuffer>();
-  const paths: string[] = [];
-  for (const match of markdown.matchAll(/!\[[^\]]*\]\(([^)]+)\)/gu)) {
-    const localPath = resolveLocalImagePath(match[1]!.trim(), projectRoot);
-    if (localPath && imageMime(localPath) === 'image/svg+xml' && !paths.includes(localPath)) paths.push(localPath);
-  }
-  if (paths.length === 0) return result;
-  let chromium: ChromiumLauncher | undefined;
-  try { ({ chromium } = await import('playwright')); } catch { return result; }
-  if (!chromium) return result;
-  const attempts: Array<Parameters<typeof chromium.launch>[0]> = [
-    { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] },
-    { channel: 'chrome', headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] },
-    ...existingBrowserPaths().map(executablePath => ({ executablePath, headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] })),
-  ];
-  for (const options of attempts) {
-    let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
-    try {
-      browser = await chromium.launch(options);
-      const page = await browser.newPage({ locale: 'zh-CN', deviceScaleFactor: 2 });
-      for (const localPath of paths) {
-        try {
-          const svg = fs.readFileSync(localPath, 'utf8');
-          const widthMatch = /width="(\d+(?:\.\d+)?)"/u.exec(svg);
-          const heightMatch = /height="(\d+(?:\.\d+)?)"/u.exec(svg);
-          const width = Math.max(320, Math.min(1400, Math.round(Number(widthMatch?.[1] || 760))));
-          const height = Math.max(120, Math.min(1600, Math.round(Number(heightMatch?.[1] || 400))));
-          await page.setViewportSize({ width, height });
-          await page.setContent(`<html><head><meta charset="utf-8"/></head><body style="margin:0;padding:0;background:#fff">${svg}</body></html>`, { waitUntil: 'load' });
-          const png = await page.screenshot({ type: 'png', clip: { x: 0, y: 0, width, height } });
-          result.set(localPath, Buffer.from(png) as NonSharedBuffer);
-        } catch { /* 单图失败跳过 */ }
-      }
-      await browser.close();
-      return result;
-    } catch {
-      try { await browser?.close(); } catch { /* ignore */ }
-    }
-  }
-  return result;
-}
-
 async function buildDocx(title: string, markdown: string, settings?: DocumentExportSettings, templatePath?: string, projectRoot = process.cwd()) {
   const context: DocxBuildContext = { projectRoot, images: [] };
   // 4.55.18：SVG 图件预光栅化（DOCX 不能内联 SVG；失败仅跳过该图）
-  context.rasterizedSvg = await rasterizeSvgImages(markdown, projectRoot).catch(() => new Map<string, NonSharedBuffer>());
   const contentXml = markdownToDocxXml(markdown, settings, context);
   if (templatePath && fs.existsSync(templatePath)) {
     const zip = await JSZip.loadAsync(fs.readFileSync(templatePath));
