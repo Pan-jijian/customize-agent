@@ -100,8 +100,6 @@ function processParameterScore(chapters: DocumentDraftChapter[]): { score: numbe
  * 表格完整度 91 而非 100）。评分必须与写时标准同源，否则「按规范写」反而扣分。
  */
 export function countIncompleteTableCells(tableLines: string[]): number {
-  const headerCells = (tableLines[0] || '').split('|').slice(1, -1).map(cell => stripTableCellInvisibleChars(cell.trim()));
-  const isSpecColumn = (columnIndex: number) => /规格|型号/u.test(headerCells[columnIndex] || '');
   const isTotalRow = (row: string) => /^[\s|]*\|?\s*(?:合计|小计|总计|累计)/u.test(row);
   const bodyRows = tableLines.slice(1).filter(row => row.replace(/\|/gu, '').replace(/[\s\-:]/gu, '').length > 0);
   return bodyRows.reduce((total, row) => {
@@ -110,7 +108,6 @@ export function countIncompleteTableCells(tableLines: string[]): number {
     return total + cells.filter((cell, columnIndex) => {
       if (cell !== '' && cell !== '-' && cell !== '—' && cell !== '/') return false;
       if (totalRow && cell === '—') return false;
-      if (cell === '—' && isSpecColumn(columnIndex)) return false;
       return true;
     }).length;
   }, 0);

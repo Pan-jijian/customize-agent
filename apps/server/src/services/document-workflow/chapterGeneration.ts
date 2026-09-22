@@ -322,7 +322,7 @@ function factCoveredByEvidence(fact: string, evidence: DocumentEvidence[]): bool
 }
 
 /** 使用 LLM 生成单章内容，基于证据包、提示词角色和用户需求 */
-export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; sectionQuotas?: SectionQuotaItem[]; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; twoStep?: boolean; supplementEvidenceProvider?: (missingFacts: string[]) => Promise<DocumentEvidence[]>; diagnostics?: DocumentGenerationDiagnostics; evidenceFloorChars?: number; evidenceCeilingChars?: number; compactProjectContext?: boolean; scopedProjectContext?: boolean; sharedFactLayerText?: string; evidenceRankBoost?: (item: DocumentEvidence) => number; onlyRankBoosted?: boolean; chapterLevelContext?: string; blueprintDataText?: string; blueprintSliceText?: string; skipT2Catalog?: boolean; /** 标书编制规格（阶段 1 判定）：暗标正文禁表/禁图/身份禁语写作口径注入 */ bidComposition?: BidCompositionSpec } = {}) {
+export async function buildLlmChapterContent(template: DocumentTemplate, chapter: DocumentTemplate['chapters'][number], evidence: DocumentEvidence[], missingFacts: string[], promptTexts: string, projectContext: string, requirement?: string, roleContext = '', options: { forbidDrawingImages?: boolean; minWords?: number; targetWords?: number; sectionQuotas?: SectionQuotaItem[]; maxTokens?: number; factCoverageContext?: string; signal?: AbortSignal; userWriterRules?: string; twoStep?: boolean; supplementEvidenceProvider?: (missingFacts: string[]) => Promise<DocumentEvidence[]>; diagnostics?: DocumentGenerationDiagnostics; evidenceFloorChars?: number; evidenceCeilingChars?: number; compactProjectContext?: boolean; scopedProjectContext?: boolean; sharedFactLayerText?: string; evidenceRankBoost?: (item: DocumentEvidence) => number; onlyRankBoosted?: boolean; chapterLevelContext?: string; blueprintDataText?: string; blueprintSliceText?: string; /** 4.55.22：蓝图锁定数值（渲染后的值，非 path）——首轮提示词即须注入，不能只在重试反馈里给 */ blueprintMustCiteHint?: string; skipT2Catalog?: boolean; /** 标书编制规格（阶段 1 判定）：暗标正文禁表/禁图/身份禁语写作口径注入 */ bidComposition?: BidCompositionSpec } = {}) {
   const bundle = buildEvidenceBundle(chapter, evidence);
   // 证据注入预算与 generationBudget 的证据区间（7k-26k 档）对齐：未显式传入时保持旧默认，
   // 由 documentGenerator 主路径统一传入按章节目标字计算的 floor/ceiling
@@ -495,6 +495,12 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     // 块变化段（各块互不相同、本就不可缓存），不影响上文共享前缀；行文案与全量渲染同一来源
     options.blueprintDataText || '',
     options.blueprintSliceText || '',
+    // 4.55.22 修复：蓝图锁定数值（「劳动力峰值 85 人」这类**渲染后的值**）此前只在
+    // `buildBlockDefectFeedback`（attempt>0 的重试反馈）里注入 → 多数块首轮即过，
+    // **首轮提示词从未拿到必须引用的权威数值**，只能省略或从旧证据里取数；
+    // 而写后对齐 `alignChapterContentToBlueprint` 只替换数字本身、无法凭空补出缺失的数。
+    // 现与 blueprintDataText/Slice 同段注入首轮（后者只给 path，本行给出值）。
+    options.blueprintMustCiteHint ? `【本章蓝图锁定数值（正文必须逐条原样出现且与给定值完全一致）】${options.blueprintMustCiteHint}` : '',
     roleContext ? roleContext : '',
     '',
     evidenceText ? '绑定材料：' : '',
@@ -1594,6 +1600,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           // s1-slim 块级聚焦：参数桶与蓝图片段均为块级筛选文本（块变化段注入，见上方构建）
           blueprintDataText: blockBlueprintDataText,
           blueprintSliceText: blockBlueprintSliceText,
+          blueprintMustCiteHint: input.blueprintMustCiteHint,
           twoStep: false,
           signal: input.signal,
           diagnostics: input.diagnostics,

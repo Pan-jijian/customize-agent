@@ -22,13 +22,20 @@ export function extractTableBlockByAnchor(content: string, anchor: string): stri
 }
 
 /**
- * 表格结构缺陷确定性归一（只做不引入新错误、不伪造内容的确定性操作；V2 批1-4 零兜底写入：
- * 合计行填空「—」与零星空单元格确定性删行等伪造/丢失内容的兜底已删除，占位符交检测器阻断 +
- * LLM 定向修复；r18 丰乐镇 B3 归因：空单元格残留直坠交付门禁，改为按列就近非空值确定性填充）：
+ * 表格结构缺陷确定性归一：**只做结构性操作，不伪造内容**。
+ *
+ * 4.55.22 删除两条**编造类**规则（历史注释把它们包装成"零兜底写入"，实际是伪造后过检测）：
+ * - 规则 3「约82kW → 82kW」：断言资料从未给出的确定值，动机是"数值确定化后不再阻断"；
+ * - 规则 4「空单元格按列就近非空值填充」：把首行的责任岗位/检查频次复制到整列每一行，
+ *   造假程度高于留空。
+ * 现口径：占位符与空单元格一律由交付门禁阻断（含规格型号列，用户红线"每格必须有内容且有值"），
+ * 由 LLM 定向修复轮按证据逐格修复——确定性链不得代笔。
+ *
+ * 保留的规则（纯结构，不新增语义）：
  * 1. 表名占首格（表头首格以“表”结尾且数据行末列全空）→ 表头删首格、数据行删末格，列对齐归一；
- * 2. 数据行全空列 → 删除整列（含表头）；3. “约82kW”类模糊前缀归一（数值确定化）；
- * 4. 数据行空单元格 → 同列最近非空值填充（合计行除外）；5. 删到只剩表头/分隔线时整个表格块删除。
- * 无缺陷表格原样返回。修复动作计数（删除/填充）返回供进度留痕。
+ * 2. 数据行全空列 → 删除整列（含表头）；
+ * 5. 删到只剩表头/分隔线时整个表格块删除。
+ * 无缺陷表格原样返回。修复动作计数返回供进度留痕。
  */
 export function repairTableBlockLines(rawLines: string[]): { lines: string[]; removed: number } {
   const rows = rawLines.map(line => line.trim().replace(/^\|/u, '').replace(/\|$/u, '').split(/(?<!\\)\|/u).map(cell => stripTableCellInvisibleChars(cell.trim())));
@@ -59,41 +66,14 @@ export function repairTableBlockLines(rawLines: string[]): { lines: string[]; re
       removed += 1;
     }
   }
-  // 3. “约82kW”模糊前缀归一（约N 占位表述在交付口径属占位符，数值确定化后不再阻断）
-  for (let rowIndex = dividerIndex + 1; rowIndex < rows.length; rowIndex += 1) {
-    const row = rows[rowIndex];
-    for (let col = 0; col < row.length; col += 1) {
-      if (!/^约\d/u.test(row[col] || '')) continue;
-      row[col] = (row[col] || '').replace(/^约/u, '');
-      changed = true;
-    }
-  }
-  // 4. 数据行空单元格按列就近非空值填充（r18 丰乐镇 B3 归因）：危险作业管控清单表 5 列中第 5 列
-  // 仅首行有值、其余行为空——正式交付不得出现空单元格（qualityValidation 空单元格检测无豁免），
-  // 交付前确定性补齐：向上取同列最近非空值，找不到再向下；缺列行（数组短于列宽）不补，
-  // 全空列由规则 2 删除；合计/小计/总计/累计行不填充（汇总行空格属结构性空位，填充会伪造汇总值）
-  if (rows.length > dividerIndex + 1) {
-    const total = width();
-    let filledCount = 0;
-    for (let col = 0; col < total; col += 1) {
-      for (let rowIndex = dividerIndex + 1; rowIndex < rows.length; rowIndex += 1) {
-        const row = rows[rowIndex];
-        if (col >= row.length || (row[col] || '') !== '') continue;
-        if (/^(?:合计|小计|总计|累计)/u.test(row[0] || '')) continue;
-        let filled = '';
-        for (let up = rowIndex - 1; up >= dividerIndex + 1; up -= 1) {
-          if (col < rows[up].length && (rows[up][col] || '') !== '') { filled = rows[up][col]; break; }
-        }
-        if (!filled) {
-          for (let down = rowIndex + 1; down < rows.length; down += 1) {
-            if (col < rows[down].length && (rows[down][col] || '') !== '') { filled = rows[down][col]; break; }
-          }
-        }
-        if (filled) { row[col] = filled; filledCount += 1; }
-      }
-    }
-    if (filledCount > 0) { changed = true; removed += 1; }
-  }
+  // 3.（4.55.22 已删除）“约82kW”模糊前缀归一——**这是编造精度**：把「约 82kW」改写成「82kW」
+  // 等于断言一个资料从未给出的确定值，动机注释也写着「数值确定化后不再阻断」，即改数据以过检测。
+  // 「约 N」类表述应由检测器阻断 + LLM 定向修复按证据改写，不得由确定性链伪造精度。
+  // 4.（4.55.22 已删除）空单元格「按列就近非空值填充」——**这是编造内容**，且比空单元格更危险：
+  // 原注释自述的实测形态是「危险作业管控清单表 5 列中第 5 列仅首行有值、其余行为空」，
+  // 于是首行的责任岗位/检查频次被**复制到每一行**——正式标书里同一张管控表逐项宣称同一责任人
+  // 与同一频次，评标人无法分辨，比留空更失真。空单元格现由交付门禁阻断 + LLM 定向修复
+  // （tableRepair 轮按「数据优先取自本章正文与证据摘要」逐格修复），不由确定性链伪造。
   // 5. 删到只剩表头/分隔线时整个表格块删除
   if (rows.length <= dividerIndex + 1) {
     rows.splice(0, rows.length);

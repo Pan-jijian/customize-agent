@@ -2149,30 +2149,31 @@ describe('表格单元格不可见字符归一（十度实测缺陷：全角空�
     const issues = markdownTableQualityIssues(table);
     expect(issues.some(issue => issue.message.includes('空单元格'))).toBe(true);
   });
-  it('修复层：全角空格零星空单元格数据行不再删除，按列就近非空值填充（r18 丰乐镇 B3 归因）', () => {
-    const { lines, removed } = repairTableBlockLines([
+  // 4.55.22 用户红线「不得编造」：删除「空单元格按列就近非空值填充」——
+  // 它把首行的 责任岗位/检查频次 复制到整列每一行，在正式标书里等于逐项声称同一责任人与同一频次，
+  // 比留空更失真。空单元格现由交付门禁阻断 + LLM 定向修复按证据逐格修复。
+  it('修复层：空单元格不再被同列值填充（禁止编造；留空交门禁+LLM 修复）', () => {
+    const { lines } = repairTableBlockLines([
       '| 工序名称 | 检查内容 | 责任岗位 |',
       '| --- | --- | --- |',
       '| 土方开挖 | 标高检查 | \u3000 |',
       '| 回填夯实 | 压实度检测 | 试验员 |',
     ]);
-    expect(removed).toBe(1);
+    // 不删行、不复制（不出现「试验员」被填到土方开挖行）
     expect(lines.join('\n')).toContain('土方开挖');
     expect(lines.join('\n')).toContain('回填夯实');
-    // r18 丰乐镇 B3 归因：空单元格直坠交付门禁（qualityValidation 无豁免）——向上无值时
-    // 向下取同列最近非空值确定性补齐，不删行、不留空格
-    expect(lines.join('\n')).toContain('| 土方开挖 | 标高检查 | 试验员 |');
+    expect(lines.join('\n')).not.toContain('| 土方开挖 | 标高检查 | 试验员 |');
   });
 
-  it('修复层：危险作业清单表空单元格向上取同列最近非空值（r18 B3 实况复刻）', () => {
-    const { lines, removed } = repairTableBlockLines([
+  it('修复层：危险作业清单表空单元格不被上行值填充（r18 B3 形态，改为不编造）', () => {
+    const { lines } = repairTableBlockLines([
       '| 危险作业类型 | 主要风险 | 管控责任岗位 | 管控频次 |',
       '| --- | --- | --- | --- |',
       '| 机械作业 | 机械倾覆伤害 | 安全员 | 每日巡查 |',
       '| 高处作业 | 坠落伤害 | \u3000 | \u200b |',
     ]);
-    expect(removed).toBe(1);
-    expect(lines.join('\n')).toContain('| 高处作业 | 坠落伤害 | 安全员 | 每日巡查 |');
+    // 高处作业行的 责任岗位/频次 不得被机械作业行的值顶替
+    expect(lines.join('\n')).not.toContain('| 高处作业 | 坠落伤害 | 安全员 | 每日巡查 |');
   });
   it('修复层：合计行全角空格单元格不再填「—」（V2 批1-4 零兜底写入：不伪造占位符）', () => {
     const { lines } = repairTableBlockLines([

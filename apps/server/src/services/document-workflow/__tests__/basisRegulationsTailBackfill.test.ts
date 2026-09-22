@@ -38,12 +38,16 @@ describe('backfillUsedNotDeclared（链尾确定性回补）', () => {
     expect(before.usedNotDeclared.length).toBeGreaterThan(0);
     const result = backfillUsedNotDeclared(session);
     expect(result.inserted).toBeGreaterThan(0);
-    // 契约：本函数只改章节草稿，finalMarkdown 由调用方重建（documentPipeline 里随后 rebuildFinalMarkdown）
-    session.finalMarkdown = (session.finalChapterDrafts as Array<{ content: string }>).map(chapter => chapter.content).join('\n\n');
+    // 4.55.22 契约变更：本函数改为 **markdown-only**——返回补写后的 markdown 由调用方写回，
+    // **不再改章节草稿**。原因见其函数注释：原先改草稿迫使调用侧 rebuildFinalMarkdown() 从草稿
+    // 重拼全文，会把其前九个 markdown-only 链尾轮（含现行口径落地/要求响应补写）整批回退。
+    expect(result.markdown).toBeTruthy();
+    session.finalMarkdown = result.markdown!;
     const after = auditBasisRegulationsCross(session.finalMarkdown);
     expect(after.usedNotDeclared).toHaveLength(0);
-    // 正文引用原样保留（只补编制依据条目）
-    expect(session.finalChapterDrafts[1]!.content).toContain('《钢筋机械连接技术规程》（JGJ 107）');
+    // 正文引用原样保留（只补编制依据条目），且**章草稿未被改动**
+    expect(session.finalMarkdown).toContain('《钢筋机械连接技术规程》（JGJ 107）');
+    expect(session.finalChapterDrafts[1]!.content).not.toContain('编制依据');
   });
 
   it('缺口为零 → 不改动任何章节（幂等）', () => {
@@ -63,7 +67,10 @@ describe('backfillUsedNotDeclared（链尾确定性回补）', () => {
 
   it('多次调用结果稳定（第二次无新增）', () => {
     const session = sessionOf(BASIS_CHAPTER, '## 第二章 主要施工方法\n\n按《钢筋机械连接技术规程》（JGJ 107）执行。');
-    expect(backfillUsedNotDeclared(session).inserted).toBeGreaterThan(0);
+    const first = backfillUsedNotDeclared(session);
+    expect(first.inserted).toBeGreaterThan(0);
+    // 调用方写回后再次调用：已声明 → 零新增（幂等）
+    session.finalMarkdown = first.markdown!;
     expect(backfillUsedNotDeclared(session).inserted).toBe(0);
   });
 });

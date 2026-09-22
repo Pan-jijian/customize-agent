@@ -571,17 +571,31 @@ export async function stageBasisRegulationsCrossRepair(session: FinalizeSession)
  * **调用契约**：本函数只写 `session.finalChapterDrafts[i].content`，**不更新** `session.finalMarkdown`——
  * 调用方须在 inserted > 0 时自行 `rebuildFinalMarkdown()` 并重算校验组（终门禁所检=交付所存）。
  */
-export function backfillUsedNotDeclared(session: FinalizeSession): { inserted: number; labels: string[] } {
+/**
+ * 链尾编制依据回补（确定性，零 LLM）。
+ *
+ * **4.55.22 改为 markdown-only（关键修复）**：原实现把补写结果写回 `session.finalChapterDrafts`，
+ * 迫使调用侧执行 `session.rebuildFinalMarkdown()`——那是全流程**最后一次**从章草稿重拼全文的动作，
+ * 会把它之前的**九个 markdown-only 链尾轮整批回退**：现行口径落地（被取代值→生效值替换）、
+ * 招标要求响应链尾补写、句模宣告剥离、句级复读坍塌、标点终局收口、交付结构收口…
+ * 而该分支**不产阶段事件**，被回退各轮的 success 记录仍留在交付报告里——
+ * 「报告说改了、产物里没有」，且导出的标书可能再次出现旧的合同工期（365 日历天）。
+ *
+ * 该缺陷此前以「每发现一个 draft-mutating 轮就在其后重放一批链尾轮」的方式反复打补丁
+ *（r14 citation 回退、r23「一级建造师」5 条补写零踪迹、M24c 961.42 回归…）。改为 markdown-only 后，
+ * 链尾各轮的产物不再被任何后续重建抹掉，补丁链可终止。
+ *
+ * `extractBasisRegulationSection` / `insertUsedEntries` 均为纯文本函数（不依赖 session），
+ * 对整篇 markdown 与对单章 content 行为一致。
+ */
+export function backfillUsedNotDeclared(session: FinalizeSession): { inserted: number; labels: string[]; markdown?: string } {
   const audit = auditBasisRegulationsCross(session.finalMarkdown);
   if (audit.usedNotDeclared.length === 0) return { inserted: 0, labels: [] };
-  const basisChapterIndex = session.finalChapterDrafts.findIndex(chapter => basisRegulationSectionRanges(chapter.content).length > 0);
-  if (basisChapterIndex < 0) return { inserted: 0, labels: [] };
-  const chapter = session.finalChapterDrafts[basisChapterIndex]!;
-  const sectionText = extractBasisRegulationSection(chapter.content);
+  const sectionText = extractBasisRegulationSection(session.finalMarkdown);
+  if (!sectionText) return { inserted: 0, labels: [] };
   const missing = audit.usedNotDeclared.filter(gap => !gapDeclaredInSection(sectionText, gap));
   if (missing.length === 0) return { inserted: 0, labels: [] };
-  const inserted = insertUsedEntries(chapter.content, missing.map(gap => buildInsertionEntry(gap, session.finalMarkdown)));
-  if (!inserted) return { inserted: 0, labels: [] };
-  session.finalChapterDrafts[basisChapterIndex] = { ...chapter, content: inserted };
-  return { inserted: missing.length, labels: missing.map(renderGapLabel) };
+  const updated = insertUsedEntries(session.finalMarkdown, missing.map(gap => buildInsertionEntry(gap, session.finalMarkdown)));
+  if (!updated) return { inserted: 0, labels: [] };
+  return { inserted: missing.length, labels: missing.map(renderGapLabel), markdown: updated };
 }

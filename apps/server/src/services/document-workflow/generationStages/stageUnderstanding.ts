@@ -51,7 +51,17 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
   const indexHealthHasActionableWarning = session.understanding.indexHealth.pendingJobs > 0 || session.understanding.indexHealth.usableChunkCount === 0;
   // 召回覆盖风险必须写回 session（章节循环与覆盖报告在阶段 4 消费）：P1 六阶段拆分搬迁时
   // 此处仅保留局部变量导致 stageChapterLoop 读 undefined.highRisk 抛错、全部章节生成失败（4.22.0 事故）
-  session.understanding.rolePoolRisk = retrievalCoverageRisk({ totalChunks: Math.min(session.understanding.indexHealth.usableChunkCount, session.prepare.materialFilePaths.length * 20), loadedChunks: Math.min(session.understanding.indexHealth.usableChunkCount, session.prepare.materialFilePaths.length * 20), vectorReady: session.understanding.indexHealth.vectorStatus ? session.understanding.indexHealth.vectorStatus.status === 'ready' : undefined });
+  // 4.55.22 修复（结构性哑火）：`totalChunks` 与 `loadedChunks` 原为**同一个表达式**
+  // → `omittedChunks ≡ 0`、`loadedRatio ≡ 1` → `lazyLoadRisk`（totalChunks≥1000 且 ratio<0.35）
+  // **恒为 false**：整个"切片未完全预加载 → 启用深召回"的安全通道从未触发过，
+  // 且进度页显示的 omittedChunks/loadedRatio 是编造值。
+  // 语义还原：total = 索引实际可用切片数；loaded = 生成期按「每份资料 20 片」预算预加载的片数。
+  // 二者只有在索引远大于预加载预算时才会分离——那正是该告警要捕捉的场景。
+  session.understanding.rolePoolRisk = retrievalCoverageRisk({
+    totalChunks: session.understanding.indexHealth.usableChunkCount,
+    loadedChunks: Math.min(session.understanding.indexHealth.usableChunkCount, session.prepare.materialFilePaths.length * 20),
+    vectorReady: session.understanding.indexHealth.vectorStatus ? session.understanding.indexHealth.vectorStatus.status === 'ready' : undefined,
+  });
   upsertProgressStage(session.global.progressStages, displayStage({
     type: 'knowledge_retrieval',
     roleId: 'knowledge-index',
@@ -208,6 +218,11 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
       evidence: item.evidence,
       kind: 'override' as const,
     })));
+    // 4.55.22：审计结果**无条件**写入 session——它是写作侧口径硬约束块与口径账本的**唯一来源**
+    //（stageOutlinePlanning 原先自行用「5 个事实池 + 未过滤 allEvidence」重算一份更窄的审计，
+    //  导致写手被告知的生效值与实际替换进输入的值可能不一致）。见 stageOutlinePlanning 的取用处。
+    session.planning.earlyTruthAudit = truthAudit;
+    session.planning.earlyOverrideCount = overrideList.length;
     if (overrideList.length > 0) {
       let applied = 0;
       const rewrite = (value: unknown) => {
@@ -221,9 +236,8 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
         for (const fact of pool || []) fact.value = rewrite(fact.value);
       }
       for (const item of session.understanding.writerEvidence) item.content = rewrite(item.content);
-      session.planning.earlyTruthAudit = truthAudit;
-      session.planning.earlyOverrideCount = overrideList.length;
-      // 供检索出口（searchWithCache）逐条施加：章节写作与蓝图推导的二次检索同口径
+      // 供**所有证据回流通道**逐条施加（检索出口 / 深召回 / 资料抽样 / 定向补充）：
+      // 章节写作与蓝图推导的二次检索同口径——单一施加点见 stageChapterLoop 的 assembleScopedEvidence
       session.planning.earlyOverrideList = overrideList;
       if (applied > 0) {
         upsertProgressStage(session.global.progressStages, displayStage({

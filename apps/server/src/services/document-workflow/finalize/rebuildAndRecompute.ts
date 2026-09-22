@@ -469,6 +469,12 @@ export function stageComposeFinal(session: FinalizeSession): void {
   if (!bodyTableForbidden) {
     session.finalMarkdown = normalizeTableNumbering(injectTableCaptions(session.finalMarkdown));
     session.finalMarkdown = normalizeFigureNumbering(ensureFigurePlaceholders(session.finalMarkdown, figurePlaceholderSpecs(session), {
+      // 4.55.22 修复：本路径原**只传 substituteTable 不传 figureImage**，而"图位是否已承载"的判据
+      // 是回调相关的（constructionOrgTablePlan.ts：有图件时只有**图片引用**才算承载）。
+      // 后果：首次组装时图位被补成数据替代表，真图只在这条重建闭包再次运行时才补上——
+      // 若本轮未触发任何修复轮，交付物里就只有替代表、没有任何 SVG 图件
+      //（用户实测：6 个图题只有 4 张图）。两条路径回调口径统一（与 :523 重建链同源）。
+      figureImage: figureImageResolver(session),
       substituteTable: name => figureSubstituteTableLines(session.blueprintData, name),
     }).markdown);
   }

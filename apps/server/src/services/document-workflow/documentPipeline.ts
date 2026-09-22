@@ -1,6 +1,7 @@
 import type { DocumentDraftChapter, DocumentExecutionStage, GeneratedDocumentDraft } from './types';
 import { selectEvidenceByBudget } from './evidence';
 import { documentTextLength } from './budget';
+import { displayStage, upsertProgressStage } from './progress';
 import { buildDocumentProfileReport } from './documentProfiles';
 import { buildSuspensionChecklist } from './suspensionChecklist';
 import { DOCUMENT_WORKFLOW_VERSION } from './documentWorkflowVersion';
@@ -232,10 +233,22 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // 而终检报 13 处「引用未声明」，即轮次之后新增的引用无人收口。
   {
     const basisBackfill = backfillUsedNotDeclared(session);
-    if (basisBackfill.inserted > 0) {
-      session.finalMarkdown = session.rebuildFinalMarkdown();
+    // 4.55.22：**不再** rebuildFinalMarkdown（见 backfillUsedNotDeclared 的注释）——
+    // 那是全流程最后一次从章草稿重拼全文，会静默回退其前的九个 markdown-only 链尾轮
+    //（现行口径落地/要求响应补写/句级复读坍塌/标点收口…），而本分支原先不产阶段事件，
+    // 交付记录仍声称那些修复生效。现改为直接写回 markdown（markdown-only），并**补产阶段事件**。
+    if (basisBackfill.inserted > 0 && basisBackfill.markdown) {
+      session.finalMarkdown = basisBackfill.markdown;
       await session.recomputeFinalValidationBundle();
-      session.generationDiagnostics.llm.lastInfo = `链尾编制依据回补：${basisBackfill.inserted} 条引用未声明的标准补入编制依据小节（${basisBackfill.labels.slice(0, 6).join('、')}）`;
+      const message = `链尾编制依据回补：${basisBackfill.inserted} 条引用未声明的标准补入编制依据小节（${basisBackfill.labels.slice(0, 6).join('、')}）`;
+      session.generationDiagnostics.llm.lastInfo = message;
+      upsertProgressStage(session.finalGateRepairStages, displayStage({
+        type: 'reference',
+        roleId: 'basis-regulations-tail-backfill',
+        status: 'success',
+        message,
+        details: basisBackfill.labels.slice(0, 12),
+      }, { subtitle: '链尾编制依据回补' }));
     }
   }
   await stageFinalGate(session);

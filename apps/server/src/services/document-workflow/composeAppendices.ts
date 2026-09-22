@@ -140,11 +140,13 @@ function renderLaborAppendix(data?: BlueprintData): string[] | '' {
   }
   const parts: string[] = [];
   if (composition.length > 0) {
-    parts.push('**（一）劳动力工种配置**', '', ...renderTable(['工种', '人数', '备注'], composition.map(item => [item.trade, String(item.count), item.basis || DASH])));
+    const comp = pruneEmptyColumns(['工种', '人数', '备注'], composition.map(item => [item.trade, String(item.count), item.basis || '']));
+    parts.push('**（一）劳动力工种配置**', '', ...renderTable(comp.header, comp.rows));
   }
   if (byPhase.length > 0) {
     if (parts.length > 0) parts.push('');
-    parts.push('**（二）分阶段劳动力投入计划**', '', ...renderTable(['施工阶段', '人数', '备注'], byPhase.map(item => [item.phase, quantityText(item), item.basis || DASH])));
+    const phase = pruneEmptyColumns(['施工阶段', '人数', '备注'], byPhase.map(item => [item.phase, quantityText(item), item.basis || '']));
+    parts.push('**（二）分阶段劳动力投入计划**', '', ...renderTable(phase.header, phase.rows));
   }
   return parts;
 }
@@ -178,9 +180,10 @@ function renderScheduleAppendix(data?: BlueprintData): string[] {
     String(item.duration),
     `第${item.startDay}～${item.endDay}天`,
     item.critical ? '关键线路' : '非关键线路',
-    item.basis || DASH,
+    item.basis || '',
   ]);
-  return [note, '', ...renderTable(SCHEDULE_HEADER, rows)];
+  const pruned = pruneEmptyColumns(SCHEDULE_HEADER, rows);
+  return [note, '', ...renderTable(pruned.header, pruned.rows)];
 }
 
 /** C2 附表五：施工总平面设施数据表（图类附表表格化：图件说明 + 设施数据表，图件按表绘制） */
@@ -190,11 +193,12 @@ function renderSiteFacilityAppendix(data?: BlueprintData): string[] {
   if (items.length === 0) return [note];
   const rows = items.map(item => [
     item.purpose,
-    typeof item.area === 'number' ? String(item.area) : DASH,
-    item.location || DASH,
-    item.note || DASH,
+    typeof item.area === 'number' ? String(item.area) : '',
+    item.location || '',
+    item.note || '',
   ]);
-  return [note, '', ...renderTable(SITE_FACILITY_HEADER, rows)];
+  const pruned = pruneEmptyColumns(SITE_FACILITY_HEADER, rows);
+  return [note, '', ...renderTable(pruned.header, pruned.rows)];
 }
 
 /** C2 附表六：临时用地表（蓝图 tempLand 直出；表头按招标原文格式，需用时间列取设施时长口径） */
@@ -203,11 +207,12 @@ function renderTempLandAppendix(data?: BlueprintData): string[] | '' {
   if (items.length === 0) return appendixGapSkeleton(TEMP_LAND_HEADER, '临时用地规划');
   const rows = items.map(item => [
     item.purpose,
-    typeof item.area === 'number' ? String(item.area) : DASH,
-    item.location || DASH,
-    item.duration || DASH,
+    typeof item.area === 'number' ? String(item.area) : '',
+    item.location || '',
+    item.duration || '',
   ]);
-  return renderTable(TEMP_LAND_HEADER, rows);
+  const pruned = pruneEmptyColumns(TEMP_LAND_HEADER, rows);
+  return renderTable(pruned.header, pruned.rows);
 }
 
 /** 图类附表（进度网络图/总平面图）：图件说明（投标人视角，零内部流程话术） */

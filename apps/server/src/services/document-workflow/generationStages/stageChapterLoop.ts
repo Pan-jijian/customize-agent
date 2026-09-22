@@ -26,6 +26,7 @@ import { renderClarificationConstraintBlock } from '../clarificationOverrides';
 import { chapterTaskPromptForPlannedStructure, planChapterTask } from '../agentPlanner';
 import { throttleAgentWorkflowNodes } from '../agentWorkflow';
 import { governEvidenceValues, renderScopeOverrideAnchors } from '../factGovernance';
+import { applyOverridesToRetrieved } from '../valueOverride';
 import { alignSectionHeadingsToPlan, runWithAdaptiveConcurrency, stableHash, throwIfAborted } from '../utils';
 import { displayStage, elapsedMessage, upsertProgressStage } from '../progress';
 import { measureGenerationStep } from '../rolePipeline';
@@ -281,7 +282,18 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     if (!resumedContent && session.prepare.webAccessConfig.enabled && session.prepare.webAccessConfig.allowProjectFacts) {
       const webResult = await retrieveWebEvidence({ config: session.prepare.webAccessConfig, chapterId: chapter.id, chapterTitle: chapter.title, sectionTitles: chapter.sections || [], runtimeRules: session.prepare.runtimePromptRules, localFacts: [...session.understanding.preliminaryFactsModel.project, ...session.understanding.preliminaryFactsModel.schedule, ...session.understanding.preliminaryFactsModel.quality, ...session.understanding.preliminaryFactsModel.safety, ...session.understanding.preliminaryFactsModel.resources, ...session.understanding.preliminaryFactsModel.preciseFacts], signal: session.global.input.signal });
       session.understanding.webResearchReport.queries.push(...webResult.queries);
-      session.understanding.webResearchReport.filteredCount += webResult.filtered + webResult.evidence.length;
+      // 4.55.22 修复：原实现把 `webResult.evidence.length`（**命中的公开资料条数**）计入 `filteredCount`
+      // ——即把"取到的资料"统计成"被过滤掉的噪声"；且 `evidence` 本体**从未进入写作证据链**
+      // （`webResult` 在此仅被取 queries/filtered/evidence.length/failedQueries）。
+      // 后果：开了联网增强的每一章都白付查询改写 LLM + 检索延迟，交付报告却写「使用公开资料 0 条」
+      //（`webResearchReport.evidenceCount` 全仓无任何赋值），通用规范/政策/工艺补充一条都到不了写手。
+      session.understanding.webResearchReport.filteredCount += webResult.filtered;
+      session.understanding.webResearchReport.evidenceCount += webResult.evidence.length;
+      if (webResult.evidence.length > 0) {
+        session.understanding.webResearchReport.chapters.push(chapter.title);
+        // 公开资料仅作通用规范/政策/工艺补充，**不作项目事实来源**——与报告文案同口径
+        scopedEvidence.push(...webResult.evidence.map(item => ({ ...item, chapterId: chapter.id })));
+      }
       // 降级治理：联网检索**失败**与「被噪声过滤」分列——原实现（webResearchService）把请求异常
       // 计入 filtered，网络全挂会被读成「过滤掉了 N 条低质结果」。此处把失败计数同样上报。
       if (webResult.failedQueries > 0) {
@@ -291,8 +303,22 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     }
     const sampledEvidence = resumedContent ? [] : sampleProjectMaterialEvidence({ project: session.understanding.project, chapter, plan, profile: session.prepare.projectMaterialProfile, scopedFilePaths, highRisk: rolePoolRisk.highRisk });
     if (sampledEvidence.length > 0) scopedEvidence.push(...sampledEvidence);
-    // 写作链证据安全过滤：投标/评标纪律、评标办法、商务报价类证据（含搜索召回/深召回路径）不进写手与事实需求链
-    if (session.understanding.excludedEvidenceKeys.size > 0) scopedEvidence = scopedEvidence.filter(item => !session.understanding.excludedEvidenceKeys.has(evidenceSafetyKey(item)));
+    /**
+     * 证据组装**唯一出口**（4.55.22）：现行口径覆盖 + 写作链内容安全过滤在此一并收口。
+     *
+     * 为什么必须在这里而不是各自的生产端：现行口径覆盖此前只加在 `searchWithCache` 出口，
+     * 而**深召回**（`documentEvidenceRetrieval` 直连 `manager.search`）与**资料抽样**
+     * （`sampleProjectMaterialEvidence` 直读切片）都绕过该函数——旧值（365 / 旧限价 / 旧开工日期）
+     * 会经这两条通道重新进入写手输入，正是「终稿 4 处现行 365 日历天」的复发路径。
+     * 覆盖表替换是幂等的（生效值不含被取代 token），与 searchWithCache 出口重复施加无副作用。
+     */
+    const assembleScopedEvidence = (items: DocumentEvidence[]): DocumentEvidence[] => {
+      applyOverridesToRetrieved(items, session.planning.earlyOverrideList);
+      return session.understanding.excludedEvidenceKeys.size > 0
+        ? items.filter(item => !session.understanding.excludedEvidenceKeys.has(evidenceSafetyKey(item)))
+        : items;
+    };
+    scopedEvidence = assembleScopedEvidence(scopedEvidence);
     // P1 语义排序：章节证据按“章查询 ↔ 证据文本”本地 bge-small 余弦排序（语义主键，证据全量保留、无预算截断）。
     // 4.12.16 候选池词面粗筛：全量 ~1.5 万条本地嵌入是检索段 CPU 瓶颈（实测 20+ 分钟），
     // 先按词面/重要性分数取 topN 候选（默认 3000），仅候选池嵌入，未入池条目语义分为 0 退回 baseScore 口径
@@ -470,8 +496,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
         // 深召回增量合并：deepEvidence 由检索层 filters 双锁约束，直接合并；
         // 不再对合并集先做一次 optimizeChapterEvidence 全量重排——下方 evidence 会统一重排一次
         //（历史冗余：同一输入同一参数连续重排两遍，optimizeChapterEvidence 为纯函数，中间结果随即被覆盖）
-        scopedEvidence = [...scopedEvidence, ...deepEvidence];
-        if (session.understanding.excludedEvidenceKeys.size > 0) scopedEvidence = scopedEvidence.filter(item => !session.understanding.excludedEvidenceKeys.has(evidenceSafetyKey(item)));
+        scopedEvidence = assembleScopedEvidence([...scopedEvidence, ...deepEvidence]);
         evidence = optimizeChapterEvidence(chapter, scopedEvidence, { preservePinned: true }, session.planning.generationDiagnostics);
         evidence = governEvidenceValues(evidence, session.understanding.canonicalFacts.scopeConflicts);
         missingFacts = chapter.requiredFacts.filter((fact: string) => !evidence.some(item => evidenceMatchesFact(item, fact)));
@@ -502,8 +527,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       channelDiag.retrievedEvidenceInjected = (channelDiag.retrievedEvidenceInjected ?? 0) + mergedSupplementalEvidence.length;
       if (mergedSupplementalEvidence.length > 0) {
         // 补充证据由检索层 filters 双锁约束，直接合并后统一重排一次（同深召回路径，省一次全量重排）
-        scopedEvidence = [...scopedEvidence, ...mergedSupplementalEvidence];
-        if (session.understanding.excludedEvidenceKeys.size > 0) scopedEvidence = scopedEvidence.filter(item => !session.understanding.excludedEvidenceKeys.has(evidenceSafetyKey(item)));
+        scopedEvidence = assembleScopedEvidence([...scopedEvidence, ...mergedSupplementalEvidence]);
         evidence = optimizeChapterEvidence(chapter, scopedEvidence, { preservePinned: true }, session.planning.generationDiagnostics);
         evidence = governEvidenceValues(evidence, session.understanding.canonicalFacts.scopeConflicts);
         missingFacts = chapter.requiredFacts.filter((fact: string) => !evidence.some(item => evidenceMatchesFact(item, fact)));

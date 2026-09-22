@@ -3104,10 +3104,17 @@ export function scheduleDurationOverrunIssues(markdown: string, options: { toler
 /**
  * 单位族（形态驱动）：被取代值的**同族残留**检测用——正文写「365天」时，
  * 精确串「365日历天」比对不到，但同族单位（日历天/天）暴露它仍是工期口径。
+ *
+ * **每个族内必须长单位在前**（`endsWith` 与正则择一都取首个命中）：`mm` 在 `m` 前，
+ * 否则「150mm」会被切成数值 150 + 单位 m，残留判据随之失真。
+ * 覆盖面从「工期/金额」两族扩到「长度/重量」——原先 `5.85m→1.75m` 这类被取代值
+ * 根本生成不出残留模式（`supersededResidueRe` 返回 undefined），等于不检查。
  */
 const UNIT_FAMILIES: string[][] = [
   ['日历天', '天'],
   ['万元', '亿元', '元'],
+  ['mm', 'cm', '米', 'm'],
+  ['吨', 'kg', 'kN', 't'],
 ];
 
 /** 被取代值的同族残留模式（数值边界 + 同族单位；用于「全文不应再有 365」类硬要求） */
@@ -3152,11 +3159,15 @@ export function caliberConsistencyIssues(markdown: string, ledger: Array<{ attri
       .filter((entry): entry is { superseded: string; re: RegExp } => Boolean(entry.re));
     // 变更过程陈述豁免（与链尾确定性替换同口径）：「原为365日历天，经答疑澄清变更为330日历天」
     // 里出现旧值是**合法的**，不判残留——否则每次如实说明变更过程都会被判 blocker。
+    // **豁免必须收敛到"明确把该值当旧值引用"**：原实现含裸「由」这个极常见字，
+    // 「工期由发包人确定，总工期365日历天」会把旧值 365 豁免掉——正是本检测要拦的形态。
+    // 现与 `applyOverridesToText` 的豁免同口径：`由` 必须与「变更/调整」共现才算变更叙述。
     const hasResidue = (re: RegExp) => {
       for (const match of normalized.matchAll(new RegExp(re.source, 'gu'))) {
         const offset = match.index ?? 0;
-        const context = normalized.slice(Math.max(0, offset - 12), offset + match[0].length + 12);
-        if (/变更|澄清|调整为|修改为|更正|原为|原值|此前|由/u.test(context)) continue;
+        const context = normalized.slice(Math.max(0, offset - 16), offset + match[0].length + 16);
+        if (/原(?:为|值|内容|计划|合同|招标)|此前|变更过程/u.test(context)) continue;
+        if (/由[^，。；]{0,12}(?:变更|调整)/u.test(context)) continue;
         return true;
       }
       return false;

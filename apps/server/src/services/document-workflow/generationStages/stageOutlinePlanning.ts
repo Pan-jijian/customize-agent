@@ -348,26 +348,37 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
     (session.understanding.allEvidence || []).map((item: DocumentEvidence) => ({ text: String(item.content || ''), source: `${item.filePath || ''} ${item.sectionTitle || ''}` })),
   );
   // 4.55.19 切写侧：写作约束由**真值层**出口（覆盖全部发生变更的属性，不限工期/开工日期）
+  //
+  // 4.55.22 单源修复：本处原先**自行重算**一份审计，且输入比阶段 1 更窄——
+  // 事实池只取 preciseFacts/project/schedule/quality/safety（漏 resources/bills/rules/
+  // specifications/drawings 五个池），证据源用**未过滤**的 allEvidence（含已被内容安全
+  // 从写作链断开的商务/纪律证据）。而阶段 1 应用覆盖表的依据是 `arbitratedFacts`（全池）+
+  // `writerEvidence`（已过滤）。两份审计因此可以算出**不同的生效值**——
+  // 写手被告知的口径与实际替换进其输入的值不一致（"两个单一真值源"）。
+  // 现直接消费阶段 1 的无条件产物 `earlyTruthAudit`；仅在缺失时（如复跑路径）回退重算。
   {
-    const truthFacts = [
-      ...(session.understanding.preliminaryFactsModel?.preciseFacts || []),
-      ...(session.understanding.preliminaryFactsModel?.project || []),
-      ...(session.understanding.preliminaryFactsModel?.schedule || []),
-      ...(session.understanding.preliminaryFactsModel?.quality || []),
-      ...(session.understanding.preliminaryFactsModel?.safety || []),
-    ].map((fact: { key?: string; fieldName?: string; value?: unknown; sourceFile?: string }) => ({ key: fact.key, label: fact.fieldName, value: fact.value, sourceFile: fact.sourceFile }));
-    const truthSources = [
-      ...(session.understanding.allEvidence || []).map((item: DocumentEvidence) => ({ text: String(item.content || ''), source: `${item.filePath || ''} ${item.sectionTitle || ''}` })),
-      ...truthFacts.map((fact: { value?: unknown; sourceFile?: string }) => ({ text: String(fact.value ?? ''), source: String(fact.sourceFile || '') })),
-    ];
-    const truthAudit = buildAuthoritativeValues({
-      facts: truthFacts,
-      overrides: collapseOverrideChains(extractValueOverrides(truthSources)),
-      // 带口径标签的权威值（答疑「最高投标限价现调整为:172460314.52元」→ 写作前即定死生效金额）
-      labeledValues: extractLabeledAuthorityValues(truthSources),
-    });
-    session.planning.caliberLedger = renderCaliberLedger(truthAudit);
-    session.planning.truthConstraint = renderTruthConstraintBlock(truthAudit);
+    const truthAudit = session.planning.earlyTruthAudit ?? (() => {
+      const truthFacts = [
+        ...(session.understanding.preliminaryFactsModel?.preciseFacts || []),
+        ...(session.understanding.preliminaryFactsModel?.project || []),
+        ...(session.understanding.preliminaryFactsModel?.schedule || []),
+        ...(session.understanding.preliminaryFactsModel?.quality || []),
+        ...(session.understanding.preliminaryFactsModel?.safety || []),
+      ].map((fact: { key?: string; fieldName?: string; value?: unknown; sourceFile?: string }) => ({ key: fact.key, label: fact.fieldName, value: fact.value, sourceFile: fact.sourceFile }));
+      const truthSources = [
+        ...(session.understanding.allEvidence || []).map((item: DocumentEvidence) => ({ text: String(item.content || ''), source: `${item.filePath || ''} ${item.sectionTitle || ''}` })),
+        ...truthFacts.map((fact: { value?: unknown; sourceFile?: string }) => ({ text: String(fact.value ?? ''), source: String(fact.sourceFile || '') })),
+      ];
+      return buildAuthoritativeValues({
+        facts: truthFacts,
+        overrides: collapseOverrideChains(extractValueOverrides(truthSources)),
+        // 带口径标签的权威值（答疑「最高投标限价现调整为:157166591.34元」→ 写作前即定死生效金额；
+        // 1 号答疑的 172460314.52 元已被 5 号取代，不得作为示例值）
+        labeledValues: extractLabeledAuthorityValues(truthSources),
+      });
+    })();
+    session.planning.caliberLedger = renderCaliberLedger(truthAudit as Parameters<typeof renderCaliberLedger>[0]);
+    session.planning.truthConstraint = renderTruthConstraintBlock(truthAudit as Parameters<typeof renderTruthConstraintBlock>[0]);
   }
   session.planning.writingTaskBrief = buildWritingTaskBrief({ chapters: session.planning.effectiveChapters, factsModel: session.understanding.preliminaryFactsModel, projectGraph: session.understanding.projectGraph || undefined, requirement: session.global.input.requirement, templateName: session.prepare.template.name, clarificationConstraint: [session.planning.truthConstraint, renderClarificationConstraintBlock(session.planning.clarificationOverrides || [])].filter(Boolean).join('\n\n') });
   // 评分项要求写作规则注入：生成时显性响应招标要求（零响应即评标失分），与零响应检测共用同一份提取模型；

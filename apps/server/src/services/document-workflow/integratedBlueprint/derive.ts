@@ -436,7 +436,9 @@ export function buildBlueprintData(input: {
   const truthAudit = buildAuthoritativeValues({
     facts: (input.facts || []).map(fact => ({ key: fact.key, label: fact.fieldName, value: fact.value, sourceFile: fact.sourceFile })),
     overrides: collapseOverrideChains(extractValueOverrides(truthSources)),
-    // 带口径标签的权威值（答疑「最高投标限价现调整为:172460314.52元」→ 合同金额生效值）
+    // 带口径标签的权威值（答疑「最高投标限价现调整为:157166591.34元」→ 合同金额生效值）。
+    // 注意示例值必须是**现行**那条：1 号答疑的 172460314.52 元已被 5 号答疑取代，
+    // 注释里拿作废值当"生效值"示例，读者会以为 1.72 亿是现行口径。
     labeledValues: extractLabeledAuthorityValues(truthSources),
   });
   const truth = new Map(truthAudit.resolved.map(item => [item.attribute, item.value]));
