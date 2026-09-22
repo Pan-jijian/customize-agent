@@ -153,26 +153,45 @@ export function renderBillFactLockText(lock: BillFactLock, chapterTitle: string,
     .sort((a, b) => b.score - a.score || a.entry.seq - b.entry.seq);
   const lines: string[] = [];
   let total = 0;
-  // 上限治理：逐条渲染直到字符预算耗尽。**预算之外（含条数上限之外）的条目全部进入下方
-  // 「另需覆盖」列名**——原实现只把「超出 maxEntries」的送 overflow，而「撑爆 maxChars 被 break
-  // 掉」的条目既没渲染也没列名，在写作提示词里彻底消失（比 maxEntries 那条更隐蔽）。
+  // 4.55.28 根治（用户实测归因）：**权威不得静默丢失**。
+  // 原实现按词面相关性排序后，超出条数上限（120）或字符预算（6000~9000）的条目直接 break——
+  // 注释承诺「预算之外的条目全部进入『另需覆盖』列名」，但函数体内**根本没有该列表**，
+  // 于是 1,387 条清单里绝大部分**从未出现在任何章的写作提示词中**。
+  // 实测后果：清单明确写着「截（凿）桩头｜混凝土强度等级：C80」，写手手里没有这条权威，
+  // 只能按上下文里的其它 C 值推断 → 写成 C40，最后要等**修复轮**去改（检测侧拿的是全量清单，
+  // 于是"检测能发现、写作却写错"——两侧口径不对称）。
   let renderedCount = 0;
-  for (const { entry } of scored) {
-    if (renderedCount >= maxEntries) break;
-    const specText = entry.specQuantityPairs.length > 0 ? ` [${entry.specQuantityPairs.map(pair => `${pair.spec} ${pair.quantity}`).join('；')}]` : '';
-    const line = `${entry.seq}. ${entry.name}${entry.description ? `（${entry.description}）` : ''}：${entry.quantity}${entry.unit}${entry.section ? `｜${entry.section}` : ''}${specText}`;
-    if (total + line.length + 1 > maxChars) break;
+  const overflow: typeof scored = [];
+  for (const item of scored) {
+    if (renderedCount >= maxEntries) { overflow.push(item); continue; }
+    const specText = item.entry.specQuantityPairs.length > 0 ? ` [${item.entry.specQuantityPairs.map(pair => `${pair.spec} ${pair.quantity}`).join('；')}]` : '';
+    const line = `${item.entry.seq}. ${item.entry.name}${item.entry.description ? `（${item.entry.description}）` : ''}：${item.entry.quantity}${item.entry.unit}${item.entry.section ? `｜${item.entry.section}` : ''}${specText}`;
+    if (total + line.length + 1 > maxChars) { overflow.push(item); continue; }
     lines.push(line);
     total += line.length + 1;
     renderedCount += 1;
   }
-  if (lines.length === 0) return '';
-  return [
+  if (lines.length === 0 && overflow.length === 0) return '';
+  const parts: string[] = [
     '【工程量清单事实锁——确定性权威数据（逐项照抄，不得改动或重新分配）】',
     `清单来源：${lock.sourceFile.split('/').pop()}（${lock.totalEntries} 条目，本节锁定 ${lines.length} 条）`,
     '清单给出规格-数量拆分的必须逐项照抄原值（如 100W 109套、120W 9套），不得自行拆分或重新分配；清单只给总量的不得自行拆分；同一规格-数量拆分在全文各章必须一致。',
     ...lines,
-  ].join('\n');
+  ];
+  if (overflow.length > 0) {
+    // ① 列名不漏：超预算条目至少以名称送达（写手据此知道"本章还有这些对象"，不得凭空编造其规格）
+    const names = overflow.map(item => item.entry.name).filter(Boolean);
+    parts.push(`另需覆盖（本章其余清单条目，共 ${names.length} 项；未列规格者须照本章已给规格或标"按清单"，**不得自行编造规格**）：${names.slice(0, 200).join('、')}`);
+    // ② **规格-数量对必须送达**：规格是可自证的硬权威（写错即硬伤），故单独成块全量随行，
+    //    不随正文描述一起被预算截断（最小载荷：`条目名 spec quantity`）
+    const specPairs = overflow
+      .filter(item => item.entry.specQuantityPairs.length > 0)
+      .map(item => `${item.entry.name} ${item.entry.specQuantityPairs.map(pair => `${pair.spec} ${pair.quantity}`).join('；')}`);
+    if (specPairs.length > 0) {
+      parts.push(`【本章规格-数量权威（逐项照抄，不得改写/拆分/挪用；跨对象借用即错）】${specPairs.slice(0, 300).join('｜')}`);
+    }
+  }
+  return parts.join('\n');
 }
 
 // ═══════ C-T5 清单落位口径（豁免登记 / 责任章映射 / 显性说明）═══════
@@ -426,9 +445,16 @@ export function renderBillChapterTaskLines(
   });
   if (owned.length === 0) return [];
   const lines = ['【本章责任清单行（行级任务：下列清单条目按责任章分配到本章，必须在正文对应专业小节逐项写入条目名称与工程量，不得遗漏）】'];
+  // 4.55.28 根治（用户实测归因：C40 为什么等修复才改）：**规格-数量对必须显式送达**。
+  // 原实现只渲染「名称（特征前 60 字）：数量单位」——规格只能靠被截断的特征描述"碰运气"，
+  // 换个条目或换个特征写法就丢失；唯一稳定携带规格对的清单锁又按相关性+预算截断。
+  // 三条通道没有一条保证规格对完整送达 → 写手只能按上下文里别的同类值推断（承台 C40 等）
+  // → 写成错值，最后要等修复轮用全量清单去改（检测侧全量 vs 写作侧截断，口径不对称）。
+  // 现在：**逐条渲染一律附 `[规格 数量]`**，且该段**不参与条数截断**（规格是最小权威载荷）。
   for (const { entry, assignment } of owned.slice(0, maxEntries)) {
     const sectionHint = assignment.section ? `｜建议写入小节「${assignment.section}」` : '';
-    lines.push(`- ${entry.name}${entry.description ? `（${entry.description.slice(0, 60)}）` : ''}：${entry.quantity}${entry.unit}${sectionHint}`);
+    const specText = entry.specQuantityPairs.length > 0 ? ` [${entry.specQuantityPairs.map(pair => `${pair.spec} ${pair.quantity}`).join('；')}]` : '';
+    lines.push(`- ${entry.name}${entry.description ? `（${entry.description.slice(0, 60)}）` : ''}：${entry.quantity}${entry.unit}${specText}${sectionHint}`);
   }
   const overflow = owned.slice(maxEntries);
   if (overflow.length > 0) {
@@ -436,6 +462,14 @@ export function renderBillChapterTaskLines(
     // 注意条数上限之外与字符预算之外是两回事：本函数的详细渲染按 `maxEntries` 条数截断，
     // 被截下的条目全部在此列名——义务不丢，只是详略不同。
     lines.push(`- 另需覆盖（仅列名，共${overflow.length}条）：${overflow.map(item => item.entry.name).join('、')}`);
+  }
+  // **本章规格-数量权威块**（全量、不截断）：把本章责任条目的规格对单独成块随行——
+  // 规格是可自证的硬权威（写错即硬伤），不随描述/条数预算一起被截掉
+  const specPairs = owned
+    .filter(item => item.entry.specQuantityPairs.length > 0)
+    .map(item => `${item.entry.name} ${item.entry.specQuantityPairs.map(pair => `${pair.spec} ${pair.quantity}`).join('；')}`);
+  if (specPairs.length > 0) {
+    lines.push(`【本章对象规格-数量权威（逐项照抄所属对象；**跨对象借用即错**，如桩头取桩身 C80 而非承台 C40；多对象多值并列合规）】${specPairs.join('｜')}`);
   }
   return lines;
 }

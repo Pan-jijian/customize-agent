@@ -4,7 +4,7 @@
  * 全部为 L2 确定性纯函数，无 LLM 与语义通道。
  */
 import { describe, expect, it } from 'vitest';
-import { assignBillRowChapter, buildBillResponsibilityMap, classifyBillPlacementExemption, renderBillChapterTaskLines, scanBillExplicitDispositions, stripBillDescriptionBoilerplate } from '@/services/document-workflow/billFactLock';
+import { assignBillRowChapter, buildBillResponsibilityMap, classifyBillPlacementExemption, renderBillChapterTaskLines, renderBillFactLockText, scanBillExplicitDispositions, stripBillDescriptionBoilerplate } from '@/services/document-workflow/billFactLock';
 import type { BillFactLock, BillFactLockEntry } from '@/services/document-workflow/billFactLock';
 
 const entry = (over: Partial<BillFactLockEntry>): BillFactLockEntry => ({
@@ -261,5 +261,47 @@ describe('buildBillResponsibilityMap / renderBillChapterTaskLines（写作注入
   it('空锁/空章不产生责任映射', () => {
     expect(buildBillResponsibilityMap(undefined, chapters).size).toBe(0);
     expect(buildBillResponsibilityMap(lock, []).size).toBe(0);
+  });
+});
+
+describe('4.55.28 规格-数量权威必须送达写手（用户实测：C40 为什么等修复才改）', () => {
+  const chapters = [{ title: '第一章 主要施工方法与技术措施', sections: ['基础工程', '桩基工程'] }];
+  const pileHead = entry({
+    seq: 18,
+    name: '截（凿）桩头',
+    description: '1．桩类型：钢筋砼管桩 2．混凝土强度等级：C80 3．有无钢筋：有钢筋 4．其它：含试桩、送桩',
+    quantity: 5152,
+    unit: '根',
+    section: '桩基工程',
+    specQuantityPairs: [{ spec: 'C80', quantity: '5152根' }],
+  });
+
+  it('责任清单行显式携带规格-数量对（不再靠特征描述截断碰运气）', () => {
+    const lock = lockOf([pileHead]);
+    const lines = renderBillChapterTaskLines(lock, buildBillResponsibilityMap(lock, chapters), chapters[0]!.title);
+    expect(lines.some(line => line.includes('截（凿）桩头') && line.includes('[C80 5152根]'))).toBe(true);
+  });
+
+  it('超预算条目不再静默消失：清单锁给出列名 + 全量规格-数量权威块', () => {
+    const many = Array.from({ length: 80 }, (_, index) => entry({
+      seq: index + 1,
+      name: `条目${index + 1}`,
+      description: '混凝土强度等级：C30',
+      quantity: 10 + index,
+      unit: 'm3',
+      section: '基础工程',
+      specQuantityPairs: [{ spec: 'C30', quantity: `${10 + index}m3` }],
+    }));
+    const text = renderBillFactLockText(lockOf(many), chapters[0]!.title, { sections: ['基础工程'], maxEntries: 5, maxChars: 200 });
+    expect(text).toContain('另需覆盖');
+    expect(text).toContain('本章规格-数量权威');
+    // 被截断的条目规格对仍在（如 条目80 C30 89m3）
+    expect(text).toContain('条目80 C30 89m3');
+  });
+
+  it('本章责任行的规格权威块要求"跨对象借用即错"（防桩头取承台 C40）', () => {
+    const lock = lockOf([pileHead]);
+    const lines = renderBillChapterTaskLines(lock, buildBillResponsibilityMap(lock, chapters), chapters[0]!.title);
+    expect(lines.join('\n')).toContain('跨对象借用即错');
   });
 });
