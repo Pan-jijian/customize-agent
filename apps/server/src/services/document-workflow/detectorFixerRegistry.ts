@@ -342,6 +342,11 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   { id: 'emergency-section-depth', scope: 'full-document', category: 'structure' },
   { id: 'boq-row-trace', scope: 'full-document', category: 'evidence_coverage', fixerDisposition: 'exempt', fixerDispositionReason: '只产 warning，既不断阻断也不进人工清单（清单由 blockingIssues 构建）；同轴真缺口另有 blocker 通道 boq-placement' },
   { id: 'drawing-reference', scope: 'full-document', category: 'evidence_coverage' },
+  // 4.55.24 指向型表述（「按设计图纸控制」「参见《…》20S515/29」「资料未提供」类搪塞，实测终稿 58+ 处）：
+  // 与 drawing-reference 不同轴（后者测引用率，本条测"以指向替代具体做法"）。修复动作是"用具体做法
+  // 替换指向"，须定位蓝图/清单权威值，属语义改写而非字面替换——在接入 content-depth-repair 定向改写轮
+  // 之前先显性进人工清单（不再隐形），故暂声明 manual。
+  { id: 'drawing-pointer-phrase', scope: 'full-document', category: 'evidence_coverage', fixerDisposition: 'manual', fixerDispositionReason: '指向型表述的修复是用具体做法替换指向（须定位蓝图/清单权威值，属语义改写而非字面替换）；4.55.24 先建立判据与写作前红线并显性进人工清单，定向改写轮排期 4.55.25' },
   { id: 'web-evidence-leakage', scope: 'full-document', category: 'scope', fixerDisposition: 'exempt', fixerDispositionReason: 'warning 级度量信号不阻断、不进人工清单，且全仓不存在该词族的删除/改写函数' },
   { id: 'formal-placeholder', scope: 'full-document', category: 'format', deterministicSafe: true },
   { id: 'prompt-example-leak', scope: 'full-document', category: 'format', fixerDisposition: 'manual', fixerDispositionReason: '「疑似样例」删除必误伤（样例块可能撞合法正文），无实现且无消费轮' },

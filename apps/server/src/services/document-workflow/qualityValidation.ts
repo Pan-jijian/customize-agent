@@ -2825,6 +2825,81 @@ export function drawingReferenceIssues(markdown: string, drawingFactLock?: Drawi
   }];
 }
 
+/**
+ * 指向型表述判定（4.55.24 用户口径 D2：「不存在资料没给参数的情形」）。
+ *
+ * **实测依据**（巢湖 4.55.23 终稿）：`按设计图纸` 58 处、`参见《…》20S515/29` 4 处、
+ * `详见……大样图` 3 处、OCR 错字变体 `烷2015S209` 1 处。评标人拿不到具体做法，等同没写。
+ *
+ * **与 drawing-reference 的分工**（两者不同轴，不可互替）：`drawing-reference` 测「图纸事实引用率」
+ * （引用得够不够），本条测「以指向替代具体做法」（用指向搪塞）——故本条独立成判据。
+ *
+ * 判据形态：
+ * - 指向型短语：按设计图纸＋控制/计量/要求…、按图纸…、以图纸为准/详见图纸、详见××大样图/详图；
+ * - 图集/标准图引用替代做法：`参见《…》<图集号>` 或裸图集号（20S515、12J201、皖2015S209 等），
+ *   **编制依据语境除外**（依据/规范/编制依据句中的规范罗列是正当引用）；
+ * - 缺资料搪塞：资料/图纸未提供…参数、待补充/待确认/待核实。
+ */
+const DRAWING_POINTER_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
+  { pattern: /按设计图纸(?:控制|计量|要求|施工|确定|执行|进行|处理|设置|选用|计算|调整)/gu, label: '按设计图纸…' },
+  { pattern: /按(?:施工)?图纸(?:控制|计量|要求|施工|确定|执行)/gu, label: '按图纸…' },
+  { pattern: /以(?:设计)?图纸为准|详见(?:施工)?图纸/gu, label: '以图纸为准/详见图纸' },
+  { pattern: /详见[^。；\n]{0,16}(?:大样图|详图|节点图|工艺图|做法表)/gu, label: '详见××大样图' },
+  { pattern: /(?:资料|图纸|清单|设计文件)(?:中)?未(?:提供|明确|给出|注明)[^。；\n]{0,12}(?:参数|数据|做法|要求|规格)?/gu, label: '缺资料搪塞' },
+  { pattern: /(?:具体(?:参数|做法|数值))?待(?:补充|确认|核实|明确)/gu, label: '待补充/待确认' },
+];
+/** 图集/标准图编号形态（含地方图集前缀字与 OCR 错字变体「烷」） */
+const ATLAS_CODE_IN_SENTENCE_RE = /(?:参见《[^》]{2,40}》\s*)?(?:[皖烷京沪苏浙粤鲁豫鄂湘川渝陕冀晋蒙辽吉黑闽赣桂黔滇甘青宁新藏]\s?\d{4}|\d{2})\s?[A-Z]{1,2}\s?\d{2,4}(?:[/／]\d{1,3})?/u;
+/** 编制依据语境（正当规范罗列，不判指向型） */
+const BASIS_SENTENCE_RE = /依据|编制|规范标准|标准规范|执行本|遵照/u;
+
+export function drawingPointerPhraseIssues(markdown: string): ValidationIssue[] {
+  const text = String(markdown || '');
+  if (!text) return [];
+  const hits: Array<{ label: string; sample: string }> = [];
+  for (const { pattern, label } of DRAWING_POINTER_PATTERNS) {
+    for (const match of text.matchAll(pattern)) {
+      const sentence = enclosingSentence(text, match.index ?? 0);
+      if (label === '缺资料搪塞' && BASIS_SENTENCE_RE.test(sentence)) continue;
+      hits.push({ label, sample: sentence.slice(0, 60) });
+    }
+  }
+  // 图集引用替代做法：仅当句内出现图集号且**不是**编制依据语境（依据句中的规范罗列正当）
+  for (const match of text.matchAll(/参见《[^》]{2,40}》[^。；\n]{0,20}/gu)) {
+    const sentence = enclosingSentence(text, match.index ?? 0);
+    if (BASIS_SENTENCE_RE.test(sentence)) continue;
+    if (!ATLAS_CODE_IN_SENTENCE_RE.test(match[0])) continue;
+    hits.push({ label: '参见《…》图集替代做法', sample: match[0].replace(/\s+/gu, ' ').slice(0, 60) });
+  }
+  // 裸图集号指向（实测「雨水口按皖2015S209/93~相关专业图纸」）：图集号必须与指向动词同句，
+  // 且非编制依据语境——编制依据里的规范/图集罗列是正当引用，不判。
+  for (const match of text.matchAll(/(?:参见|详见|参照|见|按|依照)[^。；\n]{0,10}?((?:[皖烷京沪苏浙粤鲁豫鄂湘川渝陕冀晋蒙辽吉黑闽赣桂黔滇甘青宁新藏]\s?\d{4}|\d{2})\s?[A-Z]{1,2}\s?\d{2,4}(?:[/／]\d{1,3})?)/gu)) {
+    const sentence = enclosingSentence(text, match.index ?? 0);
+    if (BASIS_SENTENCE_RE.test(sentence)) continue;
+    hits.push({ label: '图集号指向替代做法', sample: match[0].replace(/\s+/gu, ' ').slice(0, 60) });
+  }
+  if (hits.length === 0) return [];
+  const byLabel = new Map<string, number>();
+  for (const hit of hits) byLabel.set(hit.label, (byLabel.get(hit.label) || 0) + 1);
+  return [{
+    level: 'error',
+    severity: 'blocker',
+    owner: 'llm',
+    repairability: 'llm_repairable',
+    provenance: { detectorId: 'drawing-pointer-phrase', fingerprint: stableHash(markdown) },
+    message: `指向型表述替代具体做法：${hits.length} 处（${[...byLabel.entries()].map(([label, count]) => `${label} ${count} 处`).join('、')}）`,
+    suggestion: `请把每处指向改写为本项目已确认的具体做法与参数实值（取蓝图／工程量清单／图纸标注／规范的确定值）；缺该条目权威值时按同专业已确认的等效做法＋已有资料写实，不得指向图纸/图集、不得写「未提供」类搪塞。示例：${hits.slice(0, 4).map(hit => hit.sample).join(' / ')}`,
+  }];
+}
+
+/** 取命中位置所在的句子（以句读切分，用于语境豁免判定） */
+function enclosingSentence(text: string, index: number): string {
+  const start = Math.max(0, text.lastIndexOf('。', index) + 1, text.lastIndexOf('；', index) + 1, text.lastIndexOf('\n', index) + 1);
+  const ends = [text.indexOf('。', index), text.indexOf('；', index), text.indexOf('\n', index)].filter(cursor => cursor >= 0);
+  const end = ends.length > 0 ? Math.min(...ends) : text.length;
+  return text.slice(start, end);
+}
+
 export function formalPlaceholderIssues(markdown: string): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   if (/【本小节生成未达标，需重新生成】/u.test(markdown)) issues.push({ level: 'error', message: '生成未完成：存在未达标小节，需要重新生成或补写后才能导出', suggestion: '请重新生成未达标小节，禁止将占位内容作为正式正文。' });

@@ -65,15 +65,23 @@ export function layoutCadAnnotations(annotations: CadAnnotation[]): string[] {
     else rows.push([item]);
   }
 
-  // 行内按 x 排序 + 大间距加空格拼接
+  // 行内按 x 排序 + 大间距加空格拼接。相邻同文本折叠（4.55.24）：
+  // DXF 中同一标注常存在两条实体（TEXT/MTEXT/ATTRIB 叠放，DWG→DXF 转换产物），
+  // 实测形态 `JL2JL2`、`1:100` 双写为 `1:1001:100`。
   const joinRow = (row: CadAnnotation[]): string => {
     const byX = [...row].sort((a, b) => a.x! - b.x!);
     let output = '';
     let prevX: number | undefined;
+    let prevText: string | undefined;
     for (const item of byX) {
+      const text = item.text.trim();
+      if (!text) continue;
+      // 长度 ≥2 才折叠：单字符实体是 mergeSingleCharRuns 的输入，不在此处理
+      if (text.length >= 2 && prevText === text) continue;
       if (prevX !== undefined && item.x! - prevX > wordGap) output += ' ';
       output += item.text;
       prevX = item.x!;
+      prevText = text;
     }
     return output.trim();
   };
@@ -98,9 +106,36 @@ export function layoutCadAnnotations(annotations: CadAnnotation[]): string[] {
   // 注意：paragraphs 的每个元素是**多行字符串**（段落内已 join('\n')），故须逐段内按行合并，
   // 只对顶层数组做合并会漏掉段落内部的碎片（这正是本修复第一版的缺陷）。
   return [
-    ...paragraphs.map(paragraph => mergeSingleCharRuns(paragraph.split('\n')).join('\n')),
+    ...paragraphs.map(paragraph => mergeSingleCharRuns(collapseAdjacentRepeatedLines(paragraph.split('\n'))).join('\n')),
     ...mergeSingleCharRuns(unpositioned.map(item => item.text)),
   ];
+}
+
+/**
+ * 相邻重复行折叠（4.55.24 图纸文字层双写治理）。
+ *
+ * **实测依据**（巢湖 KB 8,395 块，其中 dwg/dxf 1,169 块；抽样 400 块统计）：重复行占比
+ * ≥50% 的 96 块、20~50% 的 49 块（约 36%）—— DXF 中同一标注实体成对出现，坐标重建后
+ * 整行双写：`e.换填地基承载力特征值不小于65KPa。e.换填地基承载力特征值不小于65KPa。`。
+ * 后果不止噪声翻倍：比例尺 `1:100` 变成 `1:1001:100`（该库 14 块命中），并直接污染
+ * 下游事实抽取与参数池（实测参数池出现「条款号条款号条款名称条款名称编列内容编列内容」）。
+ *
+ * **为什么是折叠而非删除**：折叠后信息仍在（出现一次），不违反本仓「不做删除式治理」口径；
+ * 判据收窄到**相邻且完全同文本且长度 ≥2**，故图纸里合法的重复标注（编号/尺寸值）不会误伤；
+ * 单字符（长度 <2）不入判据，避免破坏 mergeSingleCharRuns 的逐字符重建。
+ */
+export function collapseAdjacentRepeatedLines(lines: string[]): string[] {
+  const output: string[] = [];
+  let lastNonBlank: string | undefined;
+  for (const line of lines) {
+    const text = line.trim();
+    if (!text) { output.push(line); lastNonBlank = undefined; continue; }
+    // 空行视作分隔：被空行隔开的同文本行不折叠（保守，防误删合法重复标注）
+    if (text.length >= 2 && lastNonBlank === text) continue;
+    output.push(line);
+    lastNonBlank = text;
+  }
+  return output;
 }
 
 /**

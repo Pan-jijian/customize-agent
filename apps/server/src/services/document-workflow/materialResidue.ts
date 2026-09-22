@@ -12,6 +12,8 @@
  * 那正是图纸真实事实（基坑底标高）的载体。故改按**无标点长串**判定：图纸/正文的正常行都有标点与
  * 字段分隔（最长无标点串 ≤ 约 20 字符），OCR 表格串则是数百字符的连续密集串。
  */
+import { stripDuplicatedLabelEchoes } from './poolNoise';
+
 /** 无标点长串长度门槛（正常行最长无标点串实测 ≤20；OCR 表格串 40+） */
 const RESIDUE_RUN_MIN_LENGTH = 25;
 /** 长串内数字+符号占比门槛 */
@@ -77,11 +79,11 @@ export function stripSentenceLevelResidue(text: string): { text: string; removed
     removed += 1;
     return '';
   });
-  // 表头字段复写（条款号条款号…）：单处复写即判残片（正常行文不会连续复写字段名）
-  result = result.replace(/(?:条款号条款号|条款名称条款名称|编列内容编列内容)/gu, () => {
-    removed += 1;
-    return '';
-  });
+  // 表头字段复写（条款号条款号…）：单处复写即判残片（正常行文不会连续复写字段名）。
+  // 4.55.24 判据单源：与池噪声闸（classifyPoolNoiseText 的 duplicated_label）共用同一形态判定
+  const duplicated = stripDuplicatedLabelEchoes(result);
+  result = duplicated.text;
+  removed += duplicated.removed;
   // 清理空壳标点（「：。」「，。」等）
   result = result.replace(/[：:，,；;]\s*(?=[。；;])/gu, '');
   return { text: result, removed };
@@ -96,6 +98,13 @@ export function stripSentenceLevelResidue(text: string): { text: string; removed
  */
 const CLARIFICATION_NARRATIVE_RE = /[^。；\n]{0,30}(?:澄清|答疑|补遗)(?:文件)?[^。；\n]{0,10}(?:明确|载明|规定|说明)[^。；\n]{0,60}/gu;
 const ORIGINAL_TO_NOW_RE = /[^。；\n]{0,20}原[^。；\n]{0,24}?(?:现|变更为|调整为|修改为)[^。；\n]{0,24}/gu;
+// 4.55.24 实测漏网形态（巢湖终稿 1 处）：「招标阶段计划工期为365日历天，现澄清变更为330日历天」——
+// 上面两条都不命中：CLARIFICATION_NARRATIVE_RE 要求「澄清+明确/载明/规定/说明」，
+// ORIGINAL_TO_NOW_RE 要求出现「原」。而该句有「澄清」「变更为」无「原/明确」，故整句留在正文。
+// 判据收窄到「带招标/原* 前缀的变更叙述小句」：删该小句、保留同句现行值（幂等）。
+const TENDER_STAGE_CHANGE_RE = /[^。；\n，,]{0,20}(?:招标|原招标|原合同|原计划)[^。；\n]{0,20}?(?:现|已|均|将)?(?:澄清|变更|调整|修改|更正)为[^。；\n，,]{0,24}[，,]?/gu;
+// 「经/根据 澄清（文件）…调整为…」形态（同上口径，无「招标」前缀亦为变更过程叙述）
+const VIA_CLARIFICATION_CHANGE_RE = /(?:经|根据)[^。；\n，,]{0,8}(?:澄清|答疑|补遗)(?:文件)?[^。；\n]{0,16}?(?:调整为|变更为|修改为|更正为)[^。；\n，,]{0,24}[，,]?/gu;
 
 export function stripClarificationNarrative(text: string): { text: string; removed: number } {
   if (!text) return { text, removed: 0 };
@@ -107,5 +116,7 @@ export function stripClarificationNarrative(text: string): { text: string; remov
     removed += 1;
     return '';
   });
+  result = result.replace(TENDER_STAGE_CHANGE_RE, () => { removed += 1; return ''; });
+  result = result.replace(VIA_CLARIFICATION_CHANGE_RE, () => { removed += 1; return ''; });
   return { text: result.replace(/[，,；;]\s*(?=[。；])/gu, ''), removed };
 }

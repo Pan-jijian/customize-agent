@@ -459,6 +459,46 @@ function isolateMaterialPackages(byAttribute: Map<string, TruthCandidate[]>, noi
 }
 
 /** 构建真值层（读侧：只产出裁决结果与审计，不改写作） */
+/**
+ * 值-标签形态相容闸（4.55.24）。
+ *
+ * **实测根因**（巢湖 4.55.23 终稿 63 项阻断中约 25 项的直接来源）：真值层把一个"标签"和一个
+ * 毫无形态关系的"值"配成对，再经 R 链裁决成生效值，产出**语义上不可能落位**的口径：
+ *   「材料投入计划」= DN1000 ｜「机械设备计划」= DN1000
+ *   「检测仪器计划」= 接地系统测试（1#厂房安装工程）｜「技术参数精确参数」= 71807.64 平方米
+ * 写手写不出「材料投入计划 = DN1000」，caliber-consistency 就永久报「正文未按该口径落位」——
+ * 这 25 项**改写作、改修复轮都消不掉**，只能在真值层入闸消掉。
+ *
+ * 判据（窄而确定，不预设字段白名单）：
+ * ① **文本型属性**（计划/方案/措施/制度/职责/体系/程序/规划/组织/安排/要求/标准… 结尾）不得取
+ *    **裸型号值**（`DN1000`/`C30`/`HRB400` 这类无中文、无单位汉字的纯标识 token）；
+ * ② **多标签拼接属性名**（≥8 字且含 ≥2 个通用尾词，如「技术参数精确参数」）本身即缺陷信号 → 拒收；
+ * ③ **规格型属性**（规格/型号/等级/管径/厚度…）不得取长句值（>30 字且含句读）。
+ */
+const TEXTUAL_ATTRIBUTE_RE = /(?:计划|方案|措施|制度|职责|体系|程序|规划|组织|安排|要求|标准|办法|流程|台账|记录)$/u;
+const BARE_MODEL_TOKEN_RE = /^[A-Za-z]{1,6}\s?[-/]?\s?\d{1,6}(?:\.\d+)?$/u;
+const SPEC_ATTRIBUTE_RE = /(?:规格|型号|等级|管径|直径|厚度|强度等级|牌号|标号|尺寸)$/u;
+const GENERIC_FIELD_TAIL_WORDS = ['参数', '要求', '标准', '数据', '指标', '信息'];
+
+/** 返回不相容原因（相容返回 undefined） */
+export function attributeValueShapeMismatch(attribute: string, value: string): string | undefined {
+  const attr = String(attribute || '').trim();
+  const val = String(value || '').trim();
+  if (!attr || !val) return undefined;
+  if (TEXTUAL_ATTRIBUTE_RE.test(attr) && BARE_MODEL_TOKEN_RE.test(val)) {
+    return `值-标签形态不相容：文本型属性「${attr}」取了裸型号值「${val}」`;
+  }
+  // 计**出现次数**而非"命中的词种数"：「技术参数精确参数」里「参数」出现两次才是拼接信号
+  const tailHits = GENERIC_FIELD_TAIL_WORDS.reduce((total, word) => total + (attr.split(word).length - 1), 0);
+  if (attr.length >= 8 && tailHits >= 2) {
+    return `值-标签形态不相容：属性名「${attr}」为多标签拼接，不作为口径属性`;
+  }
+  if (SPEC_ATTRIBUTE_RE.test(attr) && val.length > 30 && /[，。；,;]/u.test(val)) {
+    return `值-标签形态不相容：规格型属性「${attr}」取了长句值`;
+  }
+  return undefined;
+}
+
 export function buildAuthoritativeValues(input: {
   facts: Array<{ key?: string; label?: string; value?: unknown; sourceFile?: string; source?: string }>;
   overrides?: ValueOverride[];
@@ -519,6 +559,12 @@ export function buildAuthoritativeValues(input: {
       const stripped = stripTrailingOcrGarbage(cleaned.value).slice(0, 80);
       if (!/省|市|区|县|路|街|交口/u.test(stripped) || rejectValueNoise(stripped)) return;
       pushCandidate(attribute, stripped);
+      return;
+    }
+    // 4.55.24 值-标签形态相容闸：不相容的值对不入真值层（记 noiseRejected 可审计）
+    const shapeMismatch = attributeValueShapeMismatch(attribute, normalizedValue);
+    if (shapeMismatch) {
+      noiseRejected.push({ attribute, value: normalizedValue.slice(0, 60), source, reason: shapeMismatch });
       return;
     }
     pushCandidate(attribute, normalizedValue);

@@ -263,7 +263,9 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // 招标强制的字体/字号/行距/装订线/页数上限**从未落到导出物**上（暗标格式分项直接失分）。
   const exportSettingsMerged = applyFormatRulesToExportSettings(session.template.exportSettings, session.bidComposition?.formatRules);
   if (exportSettingsMerged.applied.length > 0) {
-    upsertProgressStage(session.executionStages, displayStage({
+    // 4.55.24 落点修正：finalStages 已在 stageFinalGate（finalGate.ts:42 = executionStages 快照 + 修复轮双写）
+    // 组装完毕，本行返回/落库用的是 session.finalStages → 原推 executionStages 永远进不去交付记录。
+    upsertProgressStage(session.finalStages, displayStage({
       type: 'reference',
       roleId: 'tender-format-applied',
       status: 'success',

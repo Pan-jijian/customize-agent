@@ -18,7 +18,7 @@ import { validateProjectContamination } from '../../document-validation/document
 import { validateFactConsistency } from '../../document-validation/factConsistencyService';
 import { chapterReadinessIssues, evaluateChapterReadiness } from '../../document-validation/chapterReadinessService';
 import { cleanFormalSourcePhrases, composeDocumentMarkdown, finalizeDocumentMarkdown, normalizeTertiaryHeadings, plannedStructureIssues, sanitizeFormalMarkdown } from '../markdownComposer';
-import { isBodyFigureForbidden, isBodyTableForbidden, type BidCompositionSpec } from '../bidComposition';
+import { BODY_FIGURE_OUTPUT_ENABLED, isBodyFigureForbidden, isBodyTableForbidden, type BidCompositionSpec } from '../bidComposition';
 import { appendTenderAppendixSections } from '../composeAppendices';
 import { documentBudgetIssues, documentTextLength, pageTargetIssues } from '../budget';
 import { applySpecGateRules, buildExportGate, headingUncoveredEngineeringItems } from '../qualityValidation';
@@ -367,11 +367,23 @@ export async function stageValidationPack(session: FinalizeSession): Promise<voi
   }));
   session.validationIssues = collectValidationIssueGroups(session.validationIssues, factUsageWarnings.flat());
 
+  session.assets = [];
+  // chapterGenerationStages 是各章成稿的最终版 stage（success/failed），progressStages 里还残留同 identity 的
+  // running 版（主题块并发成稿中间态）；直接数组拼接会让同名 stage 成对出现，running 态永久残留在前端节点图
+  //（十四度实测：3 章 chapter_generation 同时出现 running 与 success 两份）
+  const mergedProgressStages = [...session.progressStages];
+  for (const stage of session.chapterGenerationStages) upsertProgressStage(mergedProgressStages, stage);
+  session.executionStages = throttleExecutionStages(mergedProgressStages);
+  upsertProgressStage(session.executionStages, displayStage({ type: 'reference', roleId: 'knowledge-usage-report', status: 'success', message: `资料使用报告：证据 ${session.allEvidence.length} 条，来源文件 ${session.sources.length} 份，结构化事实 ${session.structuredFacts.length} 条`, details: [`证据类型：${[...evidenceSourceCounts.entries()].map(([name, count]) => `${name} ${count}`).join('，') || '无'}`, `索引健康：可用切片 ${session.indexHealth.usableChunkCount} 条，待索引 ${session.indexHealth.pendingJobs} 个，向量${vectorStatusLabel(session.indexHealth.vectorStatus?.status)}`] }, { subtitle: '资料使用报告' }));
+  upsertProgressStage(session.executionStages, displayStage({ type: 'reference', roleId: 'web-research-report', status: session.webResearchReport.enabled ? 'success' : 'skipped', message: session.webResearchReport.enabled ? `联网增强：检索章节 ${new Set(session.webResearchReport.chapters).size} 个，查询 ${session.webResearchReport.queries.length} 个，使用公开资料 ${session.webResearchReport.evidenceCount} 条` : '联网增强未开启', details: session.webResearchReport.enabled ? [`检索主题：${[...new Set(session.webResearchReport.queries)].join('；') || '无'}`, `过滤结果：${session.webResearchReport.filteredCount} 条`, '公开资料仅用于通用规范、政策、工艺和措施补充，不作为项目事实来源'] : ['可在模型配置中开启联网增强'] }, { subtitle: '联网增强报告' }));
+
   // 4.55.22 根修盲区：**交付前检测器执行情况**显性上屏。
   // 原状：`detSafe` 把检测器异常降级为一条非阻断 warning（设计使然，不炸整篇），
   // 但没有任何聚合视图——导出照报 passed，而 N 个检测维度其实从未执行，
   // 缺陷从「被检出」变成「没人查」。此节点把 已执行/降级未执行/声明未执行 三组公开，
   // 并写明降级=该维度本次未查（不阻断导出，但不再是隐形的）。
+  // 4.55.24 落点修正：本节点原在 `session.executionStages = throttleExecutionStages(...)` **之前**推入，
+  // 会被该整体赋值覆盖 → 交付记录里永远查不到（实测：121 阶段中无此节点）。故移到限幅之后推入。
   {
     const summary = detectorExecutionSummary('standard-final');
     const degradedText = summary.degraded.length > 0 ? summary.degraded.join('、') : '无';
@@ -391,16 +403,6 @@ export async function stageValidationPack(session: FinalizeSession): Promise<voi
     session.emitProgress?.();
   }
 
-  session.assets = [];
-  // chapterGenerationStages 是各章成稿的最终版 stage（success/failed），progressStages 里还残留同 identity 的
-  // running 版（主题块并发成稿中间态）；直接数组拼接会让同名 stage 成对出现，running 态永久残留在前端节点图
-  //（十四度实测：3 章 chapter_generation 同时出现 running 与 success 两份）
-  const mergedProgressStages = [...session.progressStages];
-  for (const stage of session.chapterGenerationStages) upsertProgressStage(mergedProgressStages, stage);
-  session.executionStages = throttleExecutionStages(mergedProgressStages);
-  upsertProgressStage(session.executionStages, displayStage({ type: 'reference', roleId: 'knowledge-usage-report', status: 'success', message: `资料使用报告：证据 ${session.allEvidence.length} 条，来源文件 ${session.sources.length} 份，结构化事实 ${session.structuredFacts.length} 条`, details: [`证据类型：${[...evidenceSourceCounts.entries()].map(([name, count]) => `${name} ${count}`).join('，') || '无'}`, `索引健康：可用切片 ${session.indexHealth.usableChunkCount} 条，待索引 ${session.indexHealth.pendingJobs} 个，向量${vectorStatusLabel(session.indexHealth.vectorStatus?.status)}`] }, { subtitle: '资料使用报告' }));
-  upsertProgressStage(session.executionStages, displayStage({ type: 'reference', roleId: 'web-research-report', status: session.webResearchReport.enabled ? 'success' : 'skipped', message: session.webResearchReport.enabled ? `联网增强：检索章节 ${new Set(session.webResearchReport.chapters).size} 个，查询 ${session.webResearchReport.queries.length} 个，使用公开资料 ${session.webResearchReport.evidenceCount} 条` : '联网增强未开启', details: session.webResearchReport.enabled ? [`检索主题：${[...new Set(session.webResearchReport.queries)].join('；') || '无'}`, `过滤结果：${session.webResearchReport.filteredCount} 条`, '公开资料仅用于通用规范、政策、工艺和措施补充，不作为项目事实来源'] : ['可在模型配置中开启联网增强'] }, { subtitle: '联网增强报告' }));
-
 }
 
 /** B-T1 图位规格快照（终稿注入数据源）：结构/呈现要求现场路由（与蓝图分配同函数同口径，低置信不挂章）+
@@ -416,13 +418,13 @@ function figurePlaceholderSpecs(session: FinalizeSession) {
 
 /**
  * 图件解析器（4.55.18）：图名 → SVG 图件（写入 generatedAssets/assets/ 供导出引用）。
- * 暗标（bodyFigureForbidden）一律不出图（回退数据表承载）；写盘失败不阻断（导出侧跳过缺失图）。
- * 幂等：同名图件内容一致时不重写。
+ * 4.55.24：**全局默认不出图**（BODY_FIGURE_OUTPUT_ENABLED=false，含明标）——图位由等效数据表承载；
+ * 暗标（bodyFigureForbidden）口径不变。写盘失败不阻断（导出侧跳过缺失图）。幂等：同名图件内容一致时不重写。
  */
 function figureImageResolver(session: FinalizeSession) {
   const cache = new Map<string, { fileName: string; svg: string } | undefined>();
   return (figureName: string): { fileName: string; svg: string } | undefined => {
-    if (isBodyFigureForbidden(session.bidComposition)) return undefined;
+    if (!BODY_FIGURE_OUTPUT_ENABLED || isBodyFigureForbidden(session.bidComposition)) return undefined;
     const key = String(figureName || '').replace(/\s+/gu, '');
     if (cache.has(key)) return cache.get(key);
     const figure = buildFigureForName(session.blueprintData, figureName);
@@ -585,9 +587,13 @@ export async function stageRebuildAndRecompute(session: FinalizeSession): Promis
       message: `口径账本（真值层）：受管属性 ${truthAudit.resolved.length} 项、噪声剔除 ${truthAudit.noiseRejected.length} 项、值级覆盖 ${overrides.length} 对`,
       details: [...session.caliberLedger.slice(0, 20), ...(overrides.length > 0 ? [`值级覆盖：${overrides.slice(0, 5).map(item => `${item.superseded}→${item.effective}`).join('、')}`] : [])],
     }, { subtitle: '口径账本' });
-    // 双写（4.36.2 口径）：finalStages=executionStages(快照)+finalGateRepairStages，只写 progressStages 会丢
+    // 4.55.24 落点修正：原双写 progressStages + finalGateRepairStages 两处都不可见——
+    // progressStages 合入 executionStages 的时机在更早的 stageValidationPack（本函数在其后执行），
+    // 而 finalGateRepairStages 在本函数末尾被清空（`session.finalGateRepairStages = []`），
+    // 实测交付记录 121 阶段中查无 caliber-ledger。改推 executionStages（限幅已过，修复轮之前，
+    // finalGate 组装 finalStages 时会带上）。
+    upsertProgressStage(session.executionStages, caliberStage);
     upsertProgressStage(session.progressStages, caliberStage);
-    upsertProgressStage(session.finalGateRepairStages, caliberStage);
   }
   // 4.55.17 答疑澄清生效口径兜底检测（招标与答疑不一致时旧值不得作为现行表述）：
   // 写作硬约束（写作简报注入）未遵循时在此暴露，直进终门禁与修复轮

@@ -32,7 +32,9 @@ export type PoolNoiseCategory =
   /** 超长罗列值（规范清单/表行粘连：超长 + 无句读 + 含拉丁串，不可逐字锚定） */
   | 'listing_smear'
   /** 孤立日期值（图签/表单日期栏提取物：独立年份「2024年」/独立月份「12月」，无事件绑定不可落位） */
-  | 'date_fragment';
+  | 'date_fragment'
+  /** 字段名复写（CAD 文字层双写产物：条款号条款号/条款名称条款名称；正常行文不连续复写同一词） */
+  | 'duplicated_label';
 
 /** 目录页行：行首编号（一、/1./1.2 等）且以 4+ 半角点或 3+ 省略号结尾，允许尾部页码（真实 PDF 目录
  * 形态「十九、施工组织设计……211」——点串在标题与页码之间，行尾是页码而非点串，C3-9 归零验证实机
@@ -113,6 +115,32 @@ function countDrawingSignatureHits(text: string): number {
   return (text.match(DRAWING_SIGNATURE_SCAN_RE) || []).length;
 }
 
+/** 字段名复写（4.55.24 图纸文字层双写治理）：同一 2~6 字词**紧邻**复写，正常行文不会出现。
+ * 判据要求连写总长 ≥4（故「年年」「一一」类双字叠词天然不命中）；白名单为汉语固有四字重叠词。 */
+const DUPLICATED_LABEL_RE = /([一-龥]{2,6})\1/gu;
+const DUPLICATED_LABEL_WHITELIST_RE = /^(?:世世代代|子子孙孙|日日夜夜|风风雨雨|时时刻刻|分分秒秒|形形色色|林林总总|家家户户|前前后后)$/u;
+
+/** 字段名复写扫描（单源：池噪声闸 + 正文句级残片清理共用同一判据） */
+export function duplicatedLabelHits(text: string): string[] {
+  const hits: string[] = [];
+  for (const match of String(text || '').matchAll(new RegExp(DUPLICATED_LABEL_RE.source, 'gu'))) {
+    if (DUPLICATED_LABEL_WHITELIST_RE.test(match[0])) continue;
+    hits.push(match[0]);
+  }
+  return hits;
+}
+
+/** 字段名复写剔除（单源：正文句级残片清理复用池噪声闸的同一形态判定与白名单） */
+export function stripDuplicatedLabelEchoes(text: string): { text: string; removed: number } {
+  let removed = 0;
+  const result = String(text || '').replace(new RegExp(DUPLICATED_LABEL_RE.source, 'gu'), (match: string) => {
+    if (DUPLICATED_LABEL_WHITELIST_RE.test(match)) return match;
+    removed += 1;
+    return '';
+  });
+  return { text: result, removed };
+}
+
 /**
  * 池噪声判定（要求池/参数池同源单源）：命中返回分类标签，未命中返回 undefined。
  * 判据顺序：坐标（最强形态）→ 表格残片 → 图签（命中特征且无约束词）→
@@ -144,6 +172,8 @@ export function classifyPoolNoiseText(text: string): PoolNoiseCategory | undefin
   if (OCR_ZERO_SMEAR_RE.test(normalized)) return 'numeric_smear';
   if (INDEX_LABEL_RE.test(normalized)) return 'numeric_smear';
   // 表单占位（模板字段标记）/ 日期时间粘连 / 孤立日期值
+  // 字段名复写（CAD 双写产物，实测参数池「条款号条款号条款名称条款名称编列内容编列内容」污染义务集）
+  if (duplicatedLabelHits(normalized).length > 0) return 'duplicated_label';
   if (FORM_PLACEHOLDER_RE.test(normalized)) return 'table_fragment';
   if (DATETIME_SMEAR_RE.test(normalized)) return 'table_fragment';
   if (DATE_FRAGMENT_RE.test(normalized)) return 'date_fragment';

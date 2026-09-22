@@ -122,6 +122,16 @@ export function buildScheduleNetworkSvg(schedule: BlueprintData['schedule']): st
   return parts.join('\n');
 }
 
+/**
+ * 项目管理机构层级（单源）：机构图 SVG 与「机构图替代表」共用同一岗位数据，
+ * 岗位名称取自行业通用职能，零人员实名数据。
+ */
+export const ORG_CHART_HIERARCHY = {
+  top: '项目经理',
+  second: ['技术负责人', '质量负责人', '安全负责人', '施工负责人', '材料负责人', '资料负责人'],
+  third: ['土建施工班组', '钢结构安装班组', '安装专业班组', '装饰装修班组', '试验与检测组'],
+} as const;
+
 /** 项目管理机构图：标准岗位层级（岗位名称取自行业通用职能，零人员实名数据） */
 export function buildOrgChartSvg(): string {
   const width = 760;
@@ -139,9 +149,9 @@ export function buildOrgChartSvg(): string {
   // 第一层：项目经理
   const topW = 150;
   const topX = width / 2 - topW / 2;
-  parts.push(box(topX, 44, topW, 40, '项目经理', levelColors[0]!));
+  parts.push(box(topX, 44, topW, 40, ORG_CHART_HIERARCHY.top, levelColors[0]!));
   // 第二层：技术/质量/安全/施工/材料/资料
-  const second = ['技术负责人', '质量负责人', '安全负责人', '施工负责人', '材料负责人', '资料负责人'];
+  const second = [...ORG_CHART_HIERARCHY.second];
   const secondW = 104;
   const gap = (width - 40 - second.length * secondW) / (second.length - 1);
   const secondY = 140;
@@ -151,7 +161,7 @@ export function buildOrgChartSvg(): string {
     parts.push(box(x, secondY, secondW, 38, title, levelColors[1]!));
   });
   // 第三层：作业班组
-  const third = ['土建施工班组', '钢结构安装班组', '安装专业班组', '装饰装修班组', '试验与检测组'];
+  const third = [...ORG_CHART_HIERARCHY.third];
   const thirdW = 128;
   const thirdGap = (width - 40 - third.length * thirdW) / (third.length - 1);
   const thirdY = 248;

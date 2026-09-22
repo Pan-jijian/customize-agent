@@ -4,7 +4,7 @@
  * 这些形态是实测踩过的坑，作为回归守卫固化。
  */
 import { describe, expect, it } from 'vitest';
-import { buildAuthoritativeValues, cleanValueForm, extractValueAndShape, normalizeAttributeName, rejectValueNoise, stripTrailingOcrGarbage, sourcePriority } from '@/services/document-workflow/authoritativeValues';
+import { attributeValueShapeMismatch, buildAuthoritativeValues, cleanValueForm, extractValueAndShape, normalizeAttributeName, rejectValueNoise, stripTrailingOcrGarbage, sourcePriority } from '@/services/document-workflow/authoritativeValues';
 import { applyOverridesToRetrieved, applyOverridesToText, collapseOverrideChains, extractLabeledAuthorityValues, extractValueOverrides } from '@/services/document-workflow/valueOverride';
 
 const 答疑 = '巢湖项目/答疑文件/7招标答疑文件（电子签章版）.pdf';
@@ -447,5 +447,50 @@ describe('覆盖表文本应用（写作输入就地替换）', () => {
     expect(applyOverridesToRetrieved(chunks, undefined)).toBe(0);
     expect(applyOverridesToRetrieved(chunks, [])).toBe(0);
     expect(chunks[0]!.content).toBe('计划工期365日历天');
+  });
+});
+
+/**
+ * 4.55.24 值-标签形态相容闸。
+ * 实测样本逐字取自巢湖 4.55.23 终稿的 63 项阻断（其中约 25 项为真值层值-属性错配，
+ * 写手永远无法"落位"，只能在真值层入闸消掉）。
+ */
+describe('4.55.24 值-标签形态相容闸', () => {
+  it('文本型属性不得取裸型号值（实测「材料投入计划=DN1000」「机械设备计划=DN1000」）', () => {
+    expect(attributeValueShapeMismatch('材料投入计划', 'DN1000')).toContain('文本型属性');
+    expect(attributeValueShapeMismatch('机械设备计划', 'DN1000')).toContain('文本型属性');
+    expect(attributeValueShapeMismatch('劳动力投入计划', 'C30')).toContain('文本型属性');
+  });
+
+  it('多标签拼接属性名拒收（实测「技术参数精确参数」）', () => {
+    expect(attributeValueShapeMismatch('技术参数精确参数', '71807.64 平方米')).toContain('多标签拼接');
+  });
+
+  it('规格型属性不得取长句值', () => {
+    expect(attributeValueShapeMismatch('混凝土强度等级', '本工程混凝土强度等级按设计图纸分区配置，各部位取值见下表，施工时按规定留置试块')).toContain('长句值');
+  });
+
+  it('正常值对不误伤', () => {
+    expect(attributeValueShapeMismatch('计划工期', '330日历天')).toBeUndefined();
+    expect(attributeValueShapeMismatch('项目名称', '巢湖市光电新能源产业园项目东区标准化厂房二标段')).toBeUndefined();
+    expect(attributeValueShapeMismatch('建设地点', '巢湖市居巢经开区义成路与南外环路交口北侧')).toBeUndefined();
+    expect(attributeValueShapeMismatch('材料投入计划', '混凝土、钢筋、模板按施工进度分批进场，主材提前15天报验')).toBeUndefined();
+    expect(attributeValueShapeMismatch('混凝土强度等级', 'C30')).toBeUndefined();
+    expect(attributeValueShapeMismatch('暂列金额', '7000000.00元')).toBeUndefined();
+  });
+
+  it('buildAuthoritativeValues 端到端：错配值对不进生效值、记入 noiseRejected', () => {
+    const audit = buildAuthoritativeValues({
+      facts: [
+        { key: '材料投入计划', value: 'DN1000', sourceFile: '巢湖项目/清单.xls' },
+        { key: '技术参数精确参数', value: '71807.64 平方米', sourceFile: '巢湖项目/清单.xls' },
+        { key: '计划工期', value: '330日历天', sourceFile: '巢湖项目/招标文件.pdf' },
+      ],
+    });
+    const attributes = audit.resolved.map(item => item.attribute);
+    expect(attributes).toContain('计划工期');
+    expect(attributes).not.toContain('材料投入计划');
+    expect(attributes).not.toContain('技术参数精确参数');
+    expect(audit.noiseRejected.some(item => String(item.reason).includes('值-标签形态不相容'))).toBe(true);
   });
 });

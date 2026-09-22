@@ -880,10 +880,19 @@ describe('4.55.12 图类替代表（图位必须带内容承载）', () => {
     expect(ensureFigurePlaceholders(once, specs, callback).markdown).toBe(once);
   });
 
-  it('无对应蓝图数据的图类不造数据（机构图保持图题，无表）', () => {
+  it('4.55.24 机构图不再是裸图题：就地补「层级／岗位班组／直接上级」表（同一层级数据源，零编造）', () => {
     const src = ['## 第一章 主要施工方法与技术措施', '', '图1-5 项目管理机构图', '', '正文内容。'].join('\n');
     const result = ensureFigurePlaceholders(src, [{ chapterTitle: '第一章 主要施工方法与技术措施', name: '项目管理机构图' }], callback).markdown;
-    expect(result).toBe(src);
+    expect(result).toContain('| 层级 | 岗位／班组 | 直接上级 |');
+    expect(result).toContain('| 第一层 | 项目经理 | 公司管理层 |');
+    expect(result).toContain('| 第二层 | 技术负责人 | 项目经理 |');
+    expect(result).toContain('| 第三层 | 土建施工班组 | 各专业负责人 |');
+    // 图题原位保留
+    expect(result).toContain('图1-5 项目管理机构图');
+  });
+
+  it('未匹配图类的替代表为 undefined（调用方保持原形态，不造数据）', () => {
+    expect(figureSubstituteTableLines(bp, '智慧工地子系统运行管理框图')).toBeUndefined();
   });
 
   it('未传替代表回调时保持原行为（纯图题注入，向后兼容）', () => {

@@ -7,7 +7,8 @@
  * 判定为 L2 确定性纯函数：无 LLM 无 IO。
  */
 import { describe, expect, it } from 'vitest';
-import { classifyPoolNoiseText, POOL_NOISE_RULE_SOURCES } from '@/services/document-workflow/poolNoise';
+import { classifyPoolNoiseText, POOL_NOISE_RULE_SOURCES, stripDuplicatedLabelEchoes } from '@/services/document-workflow/poolNoise';
+import { stripClarificationNarrative } from '@/services/document-workflow/materialResidue';
 
 describe('classifyPoolNoiseText（D6 池噪声形态判定与防误伤）', () => {
   it('图签：无约束词的印章/证书编号行判 drawing_signature；含约束词的真实条款不误伤（守卫统一）', () => {
@@ -111,5 +112,58 @@ describe('4.55.12 参数池噪声扩围（巢湖实测缺失项形态）', () =>
   it('叙述型长值不误伤（截断散文类判据因「建设地点位于…」误伤风险已放弃，见注释）', () => {
     expect(classifyPoolNoiseText('建设地点位于巢湖市居巢经开区义成路与南外环路交口北侧')).toBeUndefined();
     expect(classifyPoolNoiseText('巢湖市光电新能源产业园项目东区标准化厂房二标段位于巢湖市居巢')).toBeUndefined();
+  });
+});
+
+describe('4.55.24 字段名复写（CAD 双写产物）判定与单源清理', () => {
+  it('实测形态「条款号条款号条款名称条款名称编列内容编列内容…」→ duplicated_label', () => {
+    expect(classifyPoolNoiseText('现澄清为如下：条款号条款号条款名称条款名称编列内容编列内容')).toBe('duplicated_label');
+  });
+
+  it('通用复写形态（规格数量规格数量）→ duplicated_label', () => {
+    expect(classifyPoolNoiseText('规格数量规格数量')).toBe('duplicated_label');
+  });
+
+  it('固有四字重叠词与双字叠词不误伤', () => {
+    expect(classifyPoolNoiseText('时时刻刻')).toBeUndefined();
+    expect(classifyPoolNoiseText('一一对应各分项')).toBeUndefined();
+    expect(classifyPoolNoiseText('分部分项工程')).toBeUndefined();
+    expect(classifyPoolNoiseText('各项措施应落实到位')).toBeUndefined();
+  });
+
+  it('stripDuplicatedLabelEchoes 与池噪声闸同判据（单源）', () => {
+    const single = stripDuplicatedLabelEchoes('规格数量规格数量');
+    expect(single.removed).toBe(1);
+    expect(single.text).toBe('');
+    const preserved = stripDuplicatedLabelEchoes('时时刻刻注意安全');
+    expect(preserved.removed).toBe(0);
+    expect(preserved.text).toBe('时时刻刻注意安全');
+  });
+});
+
+describe('4.55.24 变更过程叙述链尾清理（实测漏网句式）', () => {
+  it('「招标阶段计划工期为365日历天，现澄清变更为330日历天」→ 删除变更叙述小句、保留现行值句', () => {
+    const result = stripClarificationNarrative('本工程位于巢湖市居巢经开区义成路与南外环路交口北侧，招标阶段计划工期为365日历天，现澄清变更为330日历天，各阶段进度安排均按330日历天倒排控制');
+    expect(result.removed).toBeGreaterThan(0);
+    expect(result.text).not.toContain('365');
+    expect(result.text).toContain('330日历天倒排控制');
+    expect(result.text).toContain('巢湖市居巢经开区义成路');
+  });
+
+  it('「经澄清…调整为…」形态同样清理', () => {
+    const result = stripClarificationNarrative('合同估算价经澄清文件调整为157166591.34元');
+    expect(result.removed).toBeGreaterThan(0);
+  });
+
+  it('正常行文不误伤（「招标文件规定质量标准为合格」无变更语义）', () => {
+    const result = stripClarificationNarrative('招标文件规定质量标准为合格，工期为330日历天');
+    expect(result.removed).toBe(0);
+    expect(result.text).toContain('330日历天');
+  });
+
+  it('幂等：重复清理结果不变', () => {
+    const once = stripClarificationNarrative('招标阶段计划工期为365日历天，现澄清变更为330日历天，各阶段按330日历天控制');
+    const twice = stripClarificationNarrative(once.text);
+    expect(twice.text).toBe(once.text);
   });
 });

@@ -261,8 +261,10 @@ const DRAWING_ANNOTATION_DEPTH_COMPARISON_RE = /(?:超过|大于|小于|不[大�
 /**
  * 从图纸类证据中提取基坑深度标注与支护形式词为事实。
  * 形态约束（防 CAD 噪声数字误采）：
- * - 深度：标注词行（坡底线/坑底标高…）本行数值；无数值时回看上一行纯数值行（CAD 标注「-5.150\n坡底线」分两行）；
- *   排除「坑底H-1500」形态（集水井大样的 H 标注，非标高语义），绝对值限 1~50m。
+ * - 深度：标注词行（坡底线/坑底标高…）中**离标签最近**的数值（4.55.24 由「本行最大值」改为最近值，
+ *   实测 `0.5m/s ，基坑深度 -1.7 米` 曾取到流速 1.75m/s）；排除复合单位量（m/s、m²、m³、%…）；
+ *   无数值时回看上一行纯数值行（CAD 标注「-5.150\n坡底线」分两行）；
+ *   排除「坑底H-1500」形态（集水井大样的 H 标注，非标高语义），绝对值限 0.5~20m。
  * - 支护形式：命中词行采样（钢管土钉/钢花管土钉 → 土钉墙；锚杆/锚索/放坡/喷锚/支护桩同理），
  *   同词多行去重；未命中不产出（宁缺毋滥）。
  */
@@ -284,17 +286,32 @@ export function extractDrawingAnnotationFacts(evidence: Array<Pick<DocumentEvide
       // 「坡比 1:0.75」误采比值）；本行无范围值且上一行为纯数值行时回看上一行
       //（CAD 标注「-5.150\n坡底线」分两行形态）；比较式条文行（危大目录阈值/相对量）不采
       if (DRAWING_ANNOTATION_DEPTH_LABEL_RE.test(line) && !/坑底H/u.test(line) && !DRAWING_ANNOTATION_DEPTH_COMPARISON_RE.test(line)) {
-        const inRange = (numberValue: number) => Number.isFinite(numberValue) && numberValue >= 1 && numberValue < 50;
+        // 4.55.24 值域收紧：1~50 → 0.5~20（实测污染值「搭设高度24m」被排除；深基坑实参域足够）
+        const inRange = (numberValue: number) => Number.isFinite(numberValue) && numberValue >= 0.5 && numberValue <= 20;
+        // 4.55.24 取值改为「离标签最近」+ 排除复合单位量。
+        // 实测根因（巢湖源资料原文 `0.5m/s ，基坑深度 -1.7 米（余同）`）：原实现取「本行绝对值最大者」
+        // 把流速 `1.75m/s` 当成基坑深度 → canonical 生效值 1.75m（真值 1.7m），并进一步污染危大分级。
+        const labelAt = line.search(DRAWING_ANNOTATION_DEPTH_LABEL_RE);
+        const labelEnd = labelAt < 0 ? 0 : labelAt + (line.match(DRAWING_ANNOTATION_DEPTH_LABEL_RE)?.[0].length ?? 0);
         const lineValues = [...line.matchAll(/-?(\d+(?:\.\d{1,3})?)/gu)]
           .filter(match => {
             const matchIndex = match.index ?? 0;
             const prev = line[matchIndex - 1];
+            const after = line.slice(matchIndex + match[0].length);
             const next = line[matchIndex + match[0].length];
+            // 复合单位量（流速/面积/体积/比率/温度）不是深度标注值
+            if (/^\s*(?:\/|每|m\s*\/\s*s|m2|m²|m3|m³|kg|t|%|℃)/iu.test(after)) return false;
             return prev !== ':' && next !== ':' && next !== '#';
           })
-          .map(match => Math.abs(Number(match[1])))
-          .filter(inRange);
-        let value = lineValues.length > 0 ? Math.max(...lineValues) : Number.NaN;
+          .map(match => {
+            const matchIndex = match.index ?? 0;
+            const distance = matchIndex >= labelEnd ? matchIndex - labelEnd : labelEnd - (matchIndex + match[0].length);
+            return { value: Math.abs(Number(match[1])), distance };
+          })
+          .filter(item => inRange(item.value));
+        // 同距取较大值（防编号 1 之类压过实参），不同距取最近者（防同行无关量串入）
+        lineValues.sort((a, b) => (a.distance - b.distance) || (b.value - a.value));
+        let value = lineValues.length > 0 ? lineValues[0]!.value : Number.NaN;
         let fromPrevLine = false;
         if (!Number.isFinite(value) && index > 0 && /^-?[\d.,]+\s*$/u.test(lines[index - 1].trim())) {
           const prevValue = Math.abs(Number(lines[index - 1].trim().replace(/,/gu, '')));

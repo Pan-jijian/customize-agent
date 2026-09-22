@@ -595,4 +595,37 @@ describe('extractDrawingAnnotationFacts 图纸标注事实补抽（C 模块）',
     expect(depth?.value).toContain('5.15m');
     expect(depth?.value).not.toContain('16m');
   });
+
+  // ── 4.55.24：值必须离标签最近，且不得是复合单位量 ──
+  // 实测根因（巢湖源资料原文）：「0.5m/s ，基坑深度 -1.7 米（余同）」——原实现取「本行绝对值最大者」
+  // 把流速 1.75m/s 当成基坑深度（canonical 生效值 1.75m，真值 1.7m），并进一步污染危大分级。
+  it('4.55.24 实测形态「1.75m/s ，基坑深度 -1.7 米」→ 取 1.7m，不取流速 1.75m', () => {
+    const facts = extractDrawingAnnotationFacts([
+      { content: '1.75m/s ，基坑深度 -1.7 米（余同）', filePath: '基坑支护设计图.dwg', processingType: 'drawing' },
+    ]);
+    const depth = facts.find(fact => fact.fieldId === 'excavation_depth');
+    expect(depth?.value.startsWith('1.7m')).toBe(true);
+    expect(depth?.value.startsWith('1.75m')).toBe(false);
+  });
+
+  it('4.55.24 危大目录条文「搭设高度24m及以上的落地式钢管脚手架」→ 不采为基坑深度', () => {
+    const facts = extractDrawingAnnotationFacts([
+      { content: '2.4.1 搭设高度24m及以上的落地式钢管脚手架工程(包括采光井、电梯井脚手架)。', filePath: '结构设计总说明.dwg', processingType: 'drawing' },
+    ]);
+    expect(facts.find(fact => fact.fieldId === 'excavation_depth')).toBeUndefined();
+  });
+
+  it('4.55.24 值域上限 20m：25m 实参不采（防脚手架/超危大错值）', () => {
+    const facts = extractDrawingAnnotationFacts([
+      { content: '基坑深度 25 米', filePath: '基坑支护设计图.dwg', processingType: 'drawing' },
+    ]);
+    expect(facts.find(fact => fact.fieldId === 'excavation_depth')).toBeUndefined();
+  });
+
+  it('4.55.24 复合单位量（面积/体积/比率）不误采为深度', () => {
+    const facts = extractDrawingAnnotationFacts([
+      { content: '基坑深度 3.5m² 处加固\n坡底线 8.5%', filePath: '基坑支护设计图.dwg', processingType: 'drawing' },
+    ]);
+    expect(facts.find(fact => fact.fieldId === 'excavation_depth')).toBeUndefined();
+  });
 });

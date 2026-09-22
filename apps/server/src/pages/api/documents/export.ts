@@ -502,7 +502,6 @@ type DocxParagraphOptions = {
   keepNext?: boolean;
   styleId?: string;
   outlineLevel?: number;
-  numbering?: { numId: number; level: number };
 };
 
 type DocxImageItem = {
@@ -542,7 +541,6 @@ function docxParagraph(text: string, options: DocxParagraphOptions = {}) {
   ].filter(Boolean).join(' ');
   const pPr = [
     options.styleId ? `<w:pStyle w:val="${escapeXml(options.styleId)}"/>` : '',
-    options.numbering ? `<w:numPr><w:ilvl w:val="${options.numbering.level}"/><w:numId w:val="${options.numbering.numId}"/></w:numPr>` : '',
     options.keepNext ? '<w:keepNext/>' : '',
     `<w:spacing w:line="${options.line ?? 440}" w:lineRule="exact" w:before="${options.spacingBefore ?? 0}" w:after="${options.spacingAfter ?? 120}"/>`,
     indent ? `<w:ind ${indent}/>` : '',
@@ -708,7 +706,11 @@ function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings, 
     if (!inToc && orderedList) {
       const indentLeft = orderedList.level === 0 ? 720 : orderedList.level === 1 ? 1080 : 1440;
       const hanging = orderedList.level === 0 ? 360 : orderedList.level === 1 ? 420 : 480;
-      blocks.push(docxParagraph(`${orderedList.marker} ${orderedList.text}`, { styleId: 'ListParagraph', numbering: { numId: 1, level: orderedList.level }, size: bodySize, line: style.lineTwips, fontEastAsia: style.fontBody, fontAscii: style.fontBodyAscii, indentLeft, hanging, spacingAfter: 60 }));
+      // 4.55.24：不再传 Word 侧 numbering。原实现每条有序列表都用 `numId: 1`
+      //（numbering.xml 全文仅一个 numId，hybridMultilevel），而字面 marker（`1.`/`1.1.`）同时也写进了
+      // 段文本 → Word 侧全文共享一个编号序列，导出显示成「续号. 1. 文本」（用户实测）。
+      // 字面编号已足够且可控，故去掉自动编号，仅保留缩进/悬挂以维持层级观感。
+      blocks.push(docxParagraph(`${orderedList.marker} ${orderedList.text}`, { styleId: 'ListParagraph', size: bodySize, line: style.lineTwips, fontEastAsia: style.fontBody, fontAscii: style.fontBodyAscii, indentLeft, hanging, spacingAfter: 60 }));
       index += 1;
       continue;
     }
@@ -745,10 +747,6 @@ function docxStylesXml(settings?: DocumentExportSettings) {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts ${fontAttrs}/><w:sz w:val="${style.bodyHalfPoints}"/><w:szCs w:val="${style.bodyHalfPoints}"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="120"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts ${fontAttrs}/><w:sz w:val="${style.bodyHalfPoints}"/><w:szCs w:val="${style.bodyHalfPoints}"/></w:rPr><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="120"/></w:pPr></w:style>${headingStyle('Heading1', 'heading 1', Math.max(style.h1HalfPoints, 24), 0, 260, 180, 'center')}${headingStyle('Heading2', 'heading 2', Math.max(style.h2HalfPoints, 24), 1, 180, 100)}${headingStyle('Heading3', 'heading 3', Math.max(style.h3HalfPoints, 22), 2, 120, 80)}<w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:uiPriority w:val="34"/><w:qFormat/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:style></w:styles>`;
 }
 
-function docxNumberingXml() {
-  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="1"><w:multiLevelType w:val="hybridMultilevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl><w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="1080" w:hanging="420"/></w:pPr></w:lvl><w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2.%3"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="1440" w:hanging="480"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num></w:numbering>';
-}
-
 function docxSettingsXml() {
   return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:updateFields w:val="true"/><w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat></w:settings>';
 }
@@ -769,7 +767,6 @@ function docxAppPropertiesXml() {
 
 async function ensureDocxPackageParts(zip: JSZip, title: string, settings?: DocumentExportSettings, images: DocxImageItem[] = []) {
   zip.folder('word')?.file('styles.xml', docxStylesXml(settings));
-  zip.folder('word')?.file('numbering.xml', docxNumberingXml());
   zip.folder('word')?.file('settings.xml', docxSettingsXml());
   zip.folder('word')?.file('fontTable.xml', docxFontTableXml(settings));
   zip.folder('docProps')?.file('core.xml', docxCorePropertiesXml(title));
@@ -782,7 +779,6 @@ async function ensureDocxPackageParts(zip: JSZip, title: string, settings?: Docu
   let rels = relsFile ? await relsFile.async('string') : '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
   const documentRelationships = [
     ['rStyle', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles', 'styles.xml'],
-    ['rNumbering', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering', 'numbering.xml'],
     ['rSettings', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings', 'settings.xml'],
     ['rFontTable', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable', 'fontTable.xml'],
   ];
@@ -810,7 +806,6 @@ async function ensureDocxPackageParts(zip: JSZip, title: string, settings?: Docu
   }
   const overrides = [
     ['/word/styles.xml', 'application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml'],
-    ['/word/numbering.xml', 'application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml'],
     ['/word/settings.xml', 'application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml'],
     ['/word/fontTable.xml', 'application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml'],
     ['/docProps/core.xml', 'application/vnd.openxmlformats-package.core-properties+xml'],

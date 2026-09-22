@@ -150,7 +150,9 @@ describe('buildWritingTaskBrief', () => {
     expect(brief.documentType).toBe('施工组织设计');
     // 基础 7 条（含五要素链与规范术语显性落位 2 条 R12 新增）+ 写作红线 5 条（V2 批1-5 四条 + 批2-1 工期时序与分批口径，与结构/表格/口径检测口径同源）+ 招标硬性要求 + 规模事实卡 + 可信基础事实卡 = 17 条
     // 4.55.20：新增 B8 现行口径铁律（禁止旧值/禁止变更过程叙述）与 B7 蓝图权威值写作要求
-    expect(brief.globalWritingFocus).toHaveLength(21);
+    // 4.55.24：新增「禁止指向型表述与缺资料搪塞」红线（实测终稿 58 处「按设计图纸」）
+    expect(brief.globalWritingFocus).toHaveLength(22);
+    expect(brief.globalWritingFocus.some(item => item.includes('禁止指向型表述与缺资料搪塞'))).toBe(true);
     expect(brief.globalWritingFocus[0]).toContain('模板化空话');
     expect(brief.globalWritingFocus[2]).toContain('五要素链');
     expect(brief.globalWritingFocus[3]).toContain('规范术语显性落位');
@@ -164,13 +166,15 @@ describe('buildWritingTaskBrief', () => {
     expect(brief.globalWritingFocus[13]).toContain('禁止自伤式假设与短板表述');
     expect(brief.globalWritingFocus[14]).toContain('禁止两可表述');
     expect(brief.globalWritingFocus[15]).toContain('工期时序与分批口径红线');
+    // 4.55.24 新增写作前红线：禁止指向型表述与缺资料搪塞（用户口径 D2）
+    expect(brief.globalWritingFocus[16]).toContain('禁止指向型表述与缺资料搪塞');
     // 尾部顺序（4.55.20）：B8 现行口径铁律 → 招标硬性要求 → 规模事实卡 → 可信基础事实 → B7 蓝图权威值
-    expect(brief.globalWritingFocus[16]).toContain('B8 现行口径铁律');
-    expect(brief.globalWritingFocus[17]).toContain('招标硬性要求必须逐项明确响应');
-    expect(brief.globalWritingFocus[18]).toContain('项目规模事实卡');
-    expect(brief.globalWritingFocus[18]).toContain('建设规模=总建筑面积 28570.36㎡');
-    expect(brief.globalWritingFocus[19]).toContain('项目可信基础事实');
-    expect(brief.globalWritingFocus[20]).toContain('B7 蓝图权威值');
+    expect(brief.globalWritingFocus[17]).toContain('B8 现行口径铁律');
+    expect(brief.globalWritingFocus[18]).toContain('招标硬性要求必须逐项明确响应');
+    expect(brief.globalWritingFocus[19]).toContain('项目规模事实卡');
+    expect(brief.globalWritingFocus[19]).toContain('建设规模=总建筑面积 28570.36㎡');
+    expect(brief.globalWritingFocus[20]).toContain('项目可信基础事实');
+    expect(brief.globalWritingFocus[21]).toContain('B7 蓝图权威值');
   });
 
   it('规模事实卡只收录规模口径事实（前 8 条），非规模事实不进卡', () => {
@@ -198,7 +202,7 @@ describe('buildWritingTaskBrief', () => {
       templateName: '某项目施工组织设计',
     });
     expect(brief.documentType).toBe('施工组织设计');
-    expect(brief.globalWritingFocus).toHaveLength(19); // 基础 7 条 + 红线 5 条 + 招标硬性 + B8 现行口径铁律 + B7 蓝图权威值（4.55.20）
+    expect(brief.globalWritingFocus).toHaveLength(20); // 基础 7 条 + 红线 6 条（4.55.24 增指向型禁令）+ 招标硬性 + B8 现行口径铁律 + B7 蓝图权威值（4.55.20）
     const chapter = brief.chapters[0];
     expect(chapter.drawingTargets).toEqual([]);
     expect(chapter.gaps).toEqual([]);

@@ -12,6 +12,7 @@
  * 无对应蓝图数据（如「项目管理机构图」无岗位数据）→ 返回 undefined，不造数据：
  * 该图类由写作侧「岗位责任矩阵」硬性要求承载，残留缺口交检测器报告。
  */
+import { ORG_CHART_HIERARCHY } from './documentFigures';
 import type { BlueprintData } from './integratedBlueprint';
 
 const DASH = '—';
@@ -50,10 +51,28 @@ function tempLandTableLines(data: BlueprintData): string[] | undefined {
   return tableLines(['设施', '面积（平方米）', '位置', '使用时长', '说明'], rows);
 }
 
+/**
+ * 项目管理机构图替代表（4.55.24）：
+ * 机构图原本恒返回 undefined（原注释：无岗位数据、不造数据），但正文只留裸图题即「图位无承载」，
+ * 与「图类一律数据化」口径冲突。现改用机构图的**同一份层级数据**（ORG_CHART_HIERARCHY 单源）
+ * 输出「层级／岗位班组／直接上级」表——只陈述层级归属，不编造职责与人数。
+ */
+function orgChartTableLines(): string[] {
+  const rows: string[][] = [
+    ['第一层', ORG_CHART_HIERARCHY.top, '公司管理层'],
+    ...ORG_CHART_HIERARCHY.second.map(title => ['第二层', title, ORG_CHART_HIERARCHY.top]),
+    ...ORG_CHART_HIERARCHY.third.map(title => ['第三层', title, '各专业负责人']),
+  ];
+  return tableLines(['层级', '岗位／班组', '直接上级'], rows);
+}
+
 /** 图名 → 替代表行（无匹配图类或无蓝图数据时返回 undefined，调用方保持原形态） */
 export function figureSubstituteTableLines(blueprintData: BlueprintData | undefined, figureName: string): string[] | undefined {
+  const name = String(figureName || '').replace(/\s+/gu, '');
+  if (!name) return undefined;
+  // 机构图为纯层级数据（不依赖蓝图），故在蓝图判空之前处理
+  if (/项目管理机构|机构图|组织架构/.test(name)) return orgChartTableLines();
   if (!blueprintData) return undefined;
-  const name = figureName.replace(/\s+/gu, '');
   if (/横道图|网络图|进度计划|总进度/.test(name)) return scheduleTableLines(blueprintData);
   if (/总平面|平面布置/.test(name)) return tempLandTableLines(blueprintData);
   return undefined;
