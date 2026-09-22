@@ -328,6 +328,10 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   { id: 'caliber-consistency', scope: 'full-document', category: 'fact_consistency', fixerDisposition: 'manual', fixerDispositionReason: '写作硬约束（真值层）未遵循时在此暴露；交 LLM 按现行口径统一正文表述' },
   // 4.55.19 危大工程参数—判定绑定（写本项目实参 + 阈值对照 + 结论）
   { id: 'hazard-parameter-binding', scope: 'full-document', category: 'fact_consistency', fixerDisposition: 'manual', fixerDispositionReason: '交 LLM 在危大判定处补本项目实际参数并给出阈值对照结论' },
+  // 4.55.20 蓝图权威值落位（劳动力峰值/机械台数：正文须写具体数值，不得只写控制原则）
+  { id: 'blueprint-value-placement', scope: 'full-document', category: 'professional_chain', fixerDisposition: 'manual', fixerDispositionReason: '交 LLM 按蓝图权威值补写资源配置具体数值（不得自行推算）' },
+  // 4.55.20 悬空连接词截断（半截句）：交 LLM 补全成分或删悬空连接词
+  { id: 'dangling-conjunction', scope: 'full-document', category: 'structure', fixerDisposition: 'manual', fixerDispositionReason: '语义截断需补宾语成分，交 LLM 定向补全（标点类残片另有 fixTruncatedSentenceArtifacts）' },
   { id: 'precise-fact-usage', scope: 'full-document', category: 'fact_consistency' },
   // C3-4 可靠参数义务落位验收（chapterParameterFacts.parameterObligationUsageIssues）：参数池净化后
   // 义务满足率 <90% 即 error（兑现报告出口 parameterUsageAudit / 修复出口 assignMissingParameterChapters

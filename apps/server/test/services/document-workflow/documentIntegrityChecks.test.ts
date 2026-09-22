@@ -5,7 +5,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { missingPlannedSections, promotePlannedSectionHeadings } from '@/services/document-workflow/chapterPostProcessing';
-import { hazardParameterBindingIssues, hollowTableCellIssues, scheduleDurationOverrunIssues } from '@/services/document-workflow/qualityValidation';
+import { blueprintValuePlacementIssues, danglingConjunctionIssues, hazardParameterBindingIssues, hollowTableCellIssues, scheduleDurationOverrunIssues } from '@/services/document-workflow/qualityValidation';
 import { resolveEffectiveTotalDays } from '@/services/document-workflow/integratedBlueprint';
 import { cleanInlineFactValue } from '@/services/document-workflow/helpers/projectBasicInfo';
 import { ambiguousEitherOrIssues, scanSpecLocationMismatchHits, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, invertedDateRangeIssues, paragraphTailRepeatIssues, scanParagraphTailRepeats, collisionNumberedHeadingIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixInvertedDateRanges, fixZeroLengthDayRanges, fixParagraphOpeningRepeats, fixParagraphTailRepeats, fixCollisionNumberedHeadings, fixEmbeddedHeadingLines, fixPlaceholderTableCells, fixTruncatedSentenceArtifacts, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
@@ -2680,5 +2680,40 @@ describe('hazardParameterBindingIssues（危大须写本项目实参 + 阈值对
 
   it('真值层无工程测量值 → 静默（不误伤无参数项目）', () => {
     expect(hazardParameterBindingIssues('开挖深度超过3m的沟槽土方开挖工程。', [{ attribute: '合同金额', value: '100万元' }])).toEqual([]);
+  });
+});
+
+// ═══ 4.55.20 新发现缺陷（终稿复核）：蓝图权威值未落位 / 悬空连接词截断 ═══
+
+describe('blueprintValuePlacementIssues（蓝图裁决值必须写具体数字）', () => {
+  const blueprint = { resources: { labor: { peakValue: 168 }, equipment: [{ name: '挖掘机', count: 5 }] } };
+
+  it('正文只写「按…控制」而无峰值人数 → 报未落位', () => {
+    const md = '劳动力峰值按总进度计划控制，各阶段投入与总工期严格对应。';
+    const issues = blueprintValuePlacementIssues(md, blueprint);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toContain('劳动力峰值 168 人');
+    expect(issues[0]!.message).toContain('挖掘机 5 台');
+  });
+
+  it('写出具体数值 → 不报', () => {
+    const md = '本工程劳动力峰值 168 人，配置挖掘机 5 台。';
+    expect(blueprintValuePlacementIssues(md, blueprint)).toEqual([]);
+  });
+
+  it('无蓝图数据 → 静默（不误伤）', () => {
+    expect(blueprintValuePlacementIssues('劳动力峰值按总进度计划控制。', undefined)).toEqual([]);
+  });
+});
+
+describe('danglingConjunctionIssues（悬空连接词截断）', () => {
+  it('「…探明既有管线的平面位置和。」→ 报截断', () => {
+    const issues = danglingConjunctionIssues('施工前由施工员组织管线探测，采用物探与人工开挖探沟相结合的方式，探明既有管线的平面位置和。穿越道路段采用分段开挖。');
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toContain('悬空连接词');
+  });
+
+  it('完整句子不误伤（连接词在句中）', () => {
+    expect(danglingConjunctionIssues('探明既有管线的平面位置和埋深，并形成探测记录。')).toEqual([]);
   });
 });

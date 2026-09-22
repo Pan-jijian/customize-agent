@@ -624,6 +624,24 @@ function findAggregateSpecInfo(authority: ReconciliationAuthority, specKey: stri
   return undefined;
 }
 
+/**
+ * 规格类型键（4.55.20 实测归因）：只有**同型规格**才可互相比对数值归属。
+ * 实测误报：图纸钢筋表「Φ14 共 11 根」的 11 恰与清单「金属门 2.2mm 11根」同值 →
+ * 被判「11根 属规格 2.2mm」张冠李戴（Φ直径与 mm 厚度是不同量纲规格，本不可比）。
+ * 与 spec-location-mismatch 的「只校验同类型规格」同口径。
+ */
+function specTypeKey(spec: string): string {
+  const text = String(spec || '').trim();
+  if (/^[Φφ]/.test(text)) return 'diameter';
+  if (/^DN/i.test(text)) return 'dn';
+  if (/^C\d/.test(text)) return 'concrete';
+  if (/^M[bBsS]?\d/.test(text)) return 'mortar';
+  if (/^HRB|^HPB/i.test(text)) return 'rebar';
+  if (/mm$/i.test(text)) return 'thickness';
+  if (/^(?:[A-Z]{1,3}\d|\d+(?:\.\d+)?[A-Z])/.test(text)) return 'model';
+  return 'other';
+}
+
 function scanSpecBindingHits(markdown: string, authority: ReconciliationAuthority): SpecBindingHit[] {
   const hits: SpecBindingHit[] = [];
   if (authority.specValues.size === 0 && authority.aggregateSpecs.size === 0) return hits;
@@ -674,6 +692,10 @@ function scanSpecBindingHits(markdown: string, authority: ReconciliationAuthorit
     // 长度量词句不满足）。窄化判据：仅间隙词含总长/全长/长度/管长/延米且单位 m/米/km/公里 时
     // 豁免，保「DN200 管道基础 307m」类部位词场景不放过
     if (/总长|全长|长度|管长|延米/u.test(valueMatch[1]) && /^(?:m|米|km|公里)$/u.test(valueMatch[3])) continue;
+    // 钢筋配料表句式豁免（4.55.20 实测 FP）：图纸钢筋表「Φ14共11根、长度1380mm」的根数是**配筋根数**
+    //（图纸配筋表计数），不是清单工程量——该句含「钢筋/配筋/编号」且数值紧邻「共」时豁免
+    //（实测：11 恰与清单「金属门 2.2mm 11根」同值 → 被判「11根 属规格 2.2mm」张冠李戴）
+    if (/^共$/u.test(valueMatch[1] || '') && /(?:钢筋|配筋|编号)/u.test(markdown.slice(Math.max(0, (match.index || 0) - 60), (match.index || 0) + 60))) continue;
     const value = parseNumeric(valueMatch[2]);
     if (value === undefined) continue;
     // 零值豁免（巢湖实测）：正文「0个/0.0个」只可能来自 OCR 残片或笔误，不构成任何条目的

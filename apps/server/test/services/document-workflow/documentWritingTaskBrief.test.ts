@@ -149,7 +149,8 @@ describe('buildWritingTaskBrief', () => {
     });
     expect(brief.documentType).toBe('施工组织设计');
     // 基础 7 条（含五要素链与规范术语显性落位 2 条 R12 新增）+ 写作红线 5 条（V2 批1-5 四条 + 批2-1 工期时序与分批口径，与结构/表格/口径检测口径同源）+ 招标硬性要求 + 规模事实卡 + 可信基础事实卡 = 17 条
-    expect(brief.globalWritingFocus).toHaveLength(17);
+    // 4.55.20：新增 B7 蓝图权威值写作要求（资源配置须写具体数字）
+    expect(brief.globalWritingFocus).toHaveLength(18);
     expect(brief.globalWritingFocus[0]).toContain('模板化空话');
     expect(brief.globalWritingFocus[2]).toContain('五要素链');
     expect(brief.globalWritingFocus[3]).toContain('规范术语显性落位');
@@ -191,7 +192,7 @@ describe('buildWritingTaskBrief', () => {
       templateName: '某项目施工组织设计',
     });
     expect(brief.documentType).toBe('施工组织设计');
-    expect(brief.globalWritingFocus).toHaveLength(15); // 基础 7 条（含 R12 五要素链/术语显性 2 条）+ 写作红线 5 条 + 招标硬性要求
+    expect(brief.globalWritingFocus).toHaveLength(16); // + 4.55.20 B7 蓝图权威值要求（基础 7 条 + 红线 5 条 + 招标硬性 + B7）
     const chapter = brief.chapters[0];
     expect(chapter.drawingTargets).toEqual([]);
     expect(chapter.gaps).toEqual([]);

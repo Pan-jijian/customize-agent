@@ -706,3 +706,23 @@ describe('巢湖实测口径收口：阈值分档 / 位置高度量 / 零值（�
     expect(issues.some(issue => issue.message.includes('桥架'))).toBe(true);
   });
 });
+
+describe('4.55.20 钢筋配料表句式豁免（图纸钢筋表根数 ≠ 清单工程量）', () => {
+  const lock = lockOf([
+    lockEntry({ name: '塑料管', quantity: 168, unit: 'm', specQuantityPairs: [{ spec: 'Φ14', quantity: '168m' }] }),
+    lockEntry({ name: '金属门', quantity: 11, unit: '根', specQuantityPairs: [{ spec: '2.2mm', quantity: '11根' }] }),
+  ]);
+
+  it('图纸钢筋表「Φ14共11根」→ 不报张冠李戴（配筋根数非清单量）', () => {
+    const issues = factReconciliationIssues({
+      markdown: '盖板钢筋表按J01B1-1型号执行：钢筋编号1采用Φ14共11根、长度1380mm。',
+      billFactLock: lock,
+    });
+    expect(issues.filter(issue => issue.message.includes('Φ14'))).toEqual([]);
+  });
+
+  it('对照：Φ14 11根（无钢筋配料表语境）→ 仍报（豁免未过宽）', () => {
+    const issues = factReconciliationIssues({ markdown: '本工程Φ14 11根。', billFactLock: lock });
+    expect(issues.some(issue => issue.message.includes('Φ14'))).toBe(true);
+  });
+});

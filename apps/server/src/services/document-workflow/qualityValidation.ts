@@ -3157,3 +3157,69 @@ export function hazardParameterBindingIssues(markdown: string, truthValues: Arra
   });
   return issues;
 }
+
+/**
+ * 蓝图权威值落位检测（4.55.20 巢湖终稿实测）：一体化蓝图裁决的项目参数（劳动力峰值、机械设备台数、
+ * 里程碑节点天数）必须在正文写出**具体数值**——实测缺陷：正文 4 处「劳动力峰值按…控制/为口径锁定」
+ * 全是免责式表述，蓝图裁决的峰值人数一次未落位（清洗器只统一了表述口径，没有落数值）。
+ * 判据：蓝图有值 + 正文通篇未出现该数值 → blocker（与"参数义务"同族，但数据源是蓝图而非事实池）。
+ */
+export function blueprintValuePlacementIssues(markdown: string, blueprintData?: {
+  resources?: { labor?: { peakValue?: number }; equipment?: Array<{ name: string; count?: number }> };
+  milestones?: Array<{ label?: string; duration?: number }>;
+}): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  if (!markdown || !blueprintData) return issues;
+  const normalized = markdown.replace(/\s+/gu, '');
+  const missing: string[] = [];
+  const peak = blueprintData.resources?.labor?.peakValue;
+  if (typeof peak === 'number' && peak > 0) {
+    const token = String(peak);
+    const hasPeak = normalized.includes(token) || normalized.includes(`${token}人`) || new RegExp(`峰值[^。；]{0,20}${token}`, 'u').test(normalized);
+    if (!hasPeak) missing.push(`劳动力峰值 ${peak} 人`);
+  }
+  for (const item of (blueprintData.resources?.equipment || []).slice(0, 12)) {
+    if (typeof item.count !== 'number' || item.count <= 0) continue;
+    if (!normalized.includes(`${item.count}台`)) missing.push(`${item.name} ${item.count} 台`);
+  }
+  if (missing.length === 0) return issues;
+  issues.push({
+    level: 'error',
+    severity: 'blocker',
+    category: 'professional_chain',
+    owner: 'llm',
+    repairability: 'llm_repairable',
+    provenance: { detectorId: 'blueprint-value-placement', fingerprint: stableHash(markdown) },
+    message: `蓝图权威值未落位：${missing.slice(0, 6).join('、')}——资源配置类数值由系统蓝图统一裁决，正文必须以具体数值写出，不得以「按…控制/按部署确定」类表述代替`,
+    suggestion: `请在对应章节（劳动力配置/机械设备配置）写明蓝图权威值：${missing.slice(0, 6).join('、')}；这些数值为系统裁决的唯一口径，不得自行推算另设、也不得只写控制原则。`,
+  });
+  return issues;
+}
+
+/**
+ * 悬空连接词截断检测（4.55.20 巢湖终稿实测）：「…探明既有管线的平面位置和。」——句子以
+ * 连接词/结构助词收尾且后无内容，属**语义截断**（衬砌丢了宾语），评标硬伤。
+ * 与既有标点叠用类残片（fixTruncatedSentenceArtifacts）互补：那类改标点，本类缺成分。
+ */
+// 注意：不用「的/了」收尾（「…是必要的。」合法），只判并列连接词收尾；
+// 窗口按**小句**计（允许逗号，从句末标点算起 18 字以上）
+const DANGLING_CONJUNCTION_RE = /[^。；！？\n]{18,}?(?:以及|和|与|及|或|并)\s*[。；]/gu;
+
+export function danglingConjunctionIssues(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  if (!markdown) return issues;
+  const hits: string[] = [];
+  for (const match of markdown.matchAll(DANGLING_CONJUNCTION_RE)) hits.push(match[0].trim());
+  if (hits.length === 0) return issues;
+  issues.push({
+    level: 'error',
+    severity: 'blocker',
+    category: 'structure',
+    owner: 'llm',
+    repairability: 'llm_repairable',
+    provenance: { detectorId: 'dangling-conjunction', fingerprint: stableHash(markdown) },
+    message: `截断句（悬空连接词）：${hits.length} 处句子以连接词/助词收尾且无后续成分——如「${hits[0].slice(-30)}」`,
+    suggestion: '请补全被截断的句子成分（宾语/并列项），或删除悬空连接词使句子完整；不得出现半截句。',
+  });
+  return issues;
+}
