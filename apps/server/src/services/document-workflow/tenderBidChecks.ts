@@ -445,14 +445,28 @@ export interface DifficultyEntryAssessment {
 export async function assessDifficultyEntries(
   entries: string[],
   embedDocuments?: (texts: string[]) => Promise<number[][]>,
+  options: { attributionColumnIndex?: number } = {},
 ): Promise<DifficultyEntryAssessment> {
-  const attributionSimilarity = await buildSemanticSimilarity(entries, [ATTRIBUTION_SEMANTIC_QUERY], embedDocuments);
+  // 惰性求值：表格形态走列判据，不需要嵌入（省掉对表格行的无意义嵌入调用）；仅散文形态才建相似度闭包
+  let attributionSimilarity: Awaited<ReturnType<typeof buildSemanticSimilarity>> | undefined;
+  const attributionOf = async (entry: string): Promise<boolean> => {
+    if (attributionColumnIndex >= 0) return cellOf(entry, attributionColumnIndex).length >= 4;
+    attributionSimilarity ??= await buildSemanticSimilarity(entries, [ATTRIBUTION_SEMANTIC_QUERY], embedDocuments);
+    return attributionSimilarity(entry, ATTRIBUTION_SEMANTIC_QUERY) >= SEMANTIC_COVERAGE_THRESHOLD;
+  };
   let attributed = 0;
   let quantified = 0;
   let bothCount = 0;
   const details: Array<{ text: string; attributed: boolean; quantified: boolean }> = [];
+  // 表格形态：归因半改判「成因/风险来源列是否有实质内容」（结构判据）。
+  // 实测（巢湖，真实 bge 余弦）：重难点以表格呈现时，**表头行（纯列名）得 0.643 通过、而真实条目
+  // 只得 0.476~0.524 不通过**（阈值 0.6）——该语义度量对表格形态不具备分辨率（测的是"是否出现
+  // 成因/风险来源词汇"，且长表格行被单元格碎片稀释）。表格行的归因本就有独立列承载，
+  // 故按列判定：该列存在且单元格有实质内容（≥4 字）即视为已归因。
+  const attributionColumnIndex = options.attributionColumnIndex ?? -1;
+  const cellOf = (row: string, index: number) => (row.split('|').slice(1, -1)[index] ?? '').trim();
   for (const entry of entries) {
-    const hasAttribution = attributionSimilarity(entry, ATTRIBUTION_SEMANTIC_QUERY) >= SEMANTIC_COVERAGE_THRESHOLD;
+    const hasAttribution = await attributionOf(entry);
     const hasTarget = QUANTIFIED_TARGET_RE.test(entry);
     if (hasAttribution) attributed += 1;
     if (hasTarget) quantified += 1;
@@ -469,14 +483,28 @@ export async function difficultyCountermeasureReport(
 ): Promise<DifficultyCountermeasureReport> {
   const section = extractKeyDifficultySection(markdown);
   const entries = splitDifficultyEntries(section);
-  const assessment = await assessDifficultyEntries(entries, embedDocuments);
+  // 表格形态：从表头行定位「成因/风险来源」列后按列判定归因（见 assessDifficultyEntries 注释）
+  const attributionColumnIndex = (() => {
+    const header = entries.find(entry => entry.trim().startsWith('|'));
+    if (!header) return -1;
+    return header.split('|').slice(1, -1).map(cell => cell.trim())
+      .findIndex(cell => /成因|风险|致险|难点分析/u.test(cell));
+  })();
+  const assessment = await assessDifficultyEntries(entries, embedDocuments, { attributionColumnIndex });
   return {
     countermeasures: entries.length,
     attributed: assessment.attributed,
     quantified: assessment.quantified,
     bothCount: assessment.bothCount,
     ratio: assessment.ratio,
-    heavyTemplated: entries.length > 0 && assessment.ratio < 0.5,
+    // heavyTemplated 只依据**可测的一半**（量化目标，QUANTIFIED_TARGET_RE 结构判定）：
+    // 归因语义半经三次实测**不具备分辨力**——同一查询下「含成因字面的段落」14 段得 0.530~0.565、
+    // 「不含成因的段落」9 段得 0.53~0.57（两类同区间）；而短表头行反得 0.643 通过。
+    // 该度量实际测的是「长度+主题词」而非「有无归因」，且截断归一化（120/200/300 字）也无法分离两类。
+    // 它此前同时污染两处：①模板化等级（进而在旧口径下把总分封顶 54）；②修复轮收敛判据
+    //（globalQualityGates 要求 !heavyTemplated 才判收敛 → 假重度导致修复轮空转多轮）。
+    // 现口径：不可测的不上分、不参与收敛判定；attributed/bothCount 保留为观测字段。
+    heavyTemplated: entries.length > 0 && assessment.quantified / entries.length < 0.5,
     entries: assessment.details.slice(0, 24),
   };
 }

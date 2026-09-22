@@ -3,8 +3,12 @@ import { stringifyFactValue } from './utils';
 import { normalizeEngineeringTextForFactMatch } from './engineeringUnits';
 import { BOQ_GENERIC_NAME_STOPWORDS, classifyBillPlacementExemption } from './billFactLock';
 
+// 分隔标点同族归一：顿号（、）与间隔号（・·）此前漏收——清单抽取会把枚举名拆成「给、排水附（配）件」
+// 形态，而正文按业务写法写「给排水附配件」，两侧只剩顿号之差即判未落位（巢湖实测该类假阴性 17 行）。
+// 该函数同时服务事实值落位（appears）/实体命中（hitInMethod）/BOQ 落位判定（boqItemCarriedInText），
+// 故在此单点收口而非只改 BOQ 通道。
 function normalize(value: string) {
-  return value.replace(/[\s,，.。:：;；|｜（）()《》<>【】"“”'‘’]/gu, '').toLowerCase();
+  return value.replace(/[\s,，.。:：;；|｜、・·（）()《》<>【】"“”'‘’]/gu, '').toLowerCase();
 }
 
 /** 归一化口径导出（C3-5）：修复轮复检（chapterClassResidual boq-placement 分支）与

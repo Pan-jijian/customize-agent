@@ -280,6 +280,27 @@ describe('M9 落位判定扩围（首段实体主名 + 短名救回 + 豁免扩�
     expect(issues).toHaveLength(1);
     expect(issues[0]!.message).toContain('口径行 1 行已豁免');
   });
+
+  // 巢湖实测（179 行未落位中 17 行为该类）：清单抽取把枚举名拆成「给、排水附（配）件」，
+  // 正文按业务写法写「给排水附配件」，两侧只差归一化未收的顿号 → 真落位被判未落位
+  it('分隔标点同族归一：清单名含顿号/间隔号，正文按业务写法写出即落位', () => {
+    const model = boq([
+      ['1', '030404017001', '给、排水附（配）件', '22', '个'],
+      ['2', '010515001001', '电梯井壁、电缆井壁模板', '115.23', 'm2'],
+      ['3', '030411001001', '接线·端子箱', '4', '台'],
+    ]);
+    const traces = buildBoqRowTraces(
+      '给排水附配件按设计要求安装；电梯井壁电缆井壁模板采用组合钢模；接线端子箱落地安装。',
+      model,
+    );
+    expect(traces.filter(t => t.placed)).toHaveLength(3);
+  });
+
+  it('分隔标点归一不制造假落位：正文未写出的条目不因去标点而命中', () => {
+    const model = boq([['1', '030404017001', '给、排水附（配）件', '22', '个']]);
+    const traces = buildBoqRowTraces('主要工序包括管道冲洗与消毒。', model);
+    expect(traces[0]!.placed).toBe(false);
+  });
 });
 
 describe('isActionableTraceFact（可执行落位义务判定）', () => {

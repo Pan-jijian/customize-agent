@@ -646,3 +646,63 @@ function citationBlueprintOf(quantities: Record<string, unknown>, totalDays = 0)
     quantities,
   } as unknown as BlueprintData;
 }
+
+describe('巢湖实测口径收口：阈值分档 / 位置高度量 / 零值（误报清除，真错仍报）', () => {
+  // 「单个雨水口接出管采用DN200管，2个及2个以上雨水口接出管采用DN300管」——2个 是雨水口
+  // 分档门槛（阈值），不是 DN200 的数量；该值恰撞清单「混凝土检查井」（C35 2个）报张冠李戴
+  const thresholdLock = lockOf([
+    lockEntry({ name: '塑料管', quantity: 168, unit: 'm', specQuantityPairs: [{ spec: 'DN200', quantity: '168m' }] }),
+    lockEntry({ name: '混凝土检查井', quantity: 2, unit: '个', specQuantityPairs: [{ spec: 'C35', quantity: '2个' }] }),
+  ]);
+
+  it('「DN200管，2个及2个以上雨水口…」阈值分档句 → 不报（分档门槛非清单数量）', () => {
+    const issues = factReconciliationIssues({
+      markdown: '单个雨水口接出管采用DN200管，2个及2个以上雨水口接出管采用DN300管。',
+      billFactLock: thresholdLock,
+    });
+    expect(issues.filter(issue => issue.message.includes('DN200'))).toEqual([]);
+  });
+
+  const zeroLock = lockOf([
+    lockEntry({ name: '塑料管', quantity: 168, unit: 'm', specQuantityPairs: [{ spec: 'DN300', quantity: '168m' }] }),
+    lockEntry({ name: '现浇构件钢筋', quantity: 0, unit: '个', specQuantityPairs: [{ spec: 'HRB400', quantity: '0个' }] }),
+  ]);
+
+  it('「DN300管，0.0个坡百雨求井」（图纸 OCR 残句）→ 不报（零值不构成数量归属）', () => {
+    const issues = factReconciliationIssues({
+      markdown: '无道牙处采用平箅式单箅雨水口，单个雨水口接出管采用DN300管，0.0个坡百雨求井。',
+      billFactLock: zeroLock,
+    });
+    expect(issues.filter(issue => issue.message.includes('DN300'))).toEqual([]);
+  });
+
+  it('对照：DN200 2个（无阈值尾缀）→ 张冠李戴仍报（豁免未过宽）', () => {
+    const issues = factReconciliationIssues({
+      markdown: '单个雨水口接出管采用DN200管，2个。',
+      billFactLock: thresholdLock,
+    });
+    expect(issues.some(issue => issue.message.includes('DN200'))).toBe(true);
+  });
+
+  // 「桥架底边距地7米」的 7米 是安装高度（长度单位），被误绑给「桥架」后恰撞「塑料管 7m」
+  const positionLock = lockOf([
+    lockEntry({ name: '桥架', quantity: 2811, unit: 'm' }),
+    lockEntry({ name: '塑料管', quantity: 7, unit: 'm' }),
+  ]);
+
+  it('「桥架底边距地7米」位置高度句 → 不报（距地高度非工程量）', () => {
+    const issues = factReconciliationIssues({
+      markdown: '桥架底边距地7米，沿墙壁安装。',
+      billFactLock: positionLock,
+    });
+    expect(issues.filter(issue => issue.message.includes('桥架'))).toEqual([]);
+  });
+
+  it('对照：桥架 7米（无位置量词）→ 绑定错位仍报（豁免未过宽）', () => {
+    const issues = factReconciliationIssues({
+      markdown: '桥架 7米，沿墙壁安装。',
+      billFactLock: positionLock,
+    });
+    expect(issues.some(issue => issue.message.includes('桥架'))).toBe(true);
+  });
+});

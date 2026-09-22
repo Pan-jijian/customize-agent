@@ -11,7 +11,7 @@ import type { GenerationSession } from './generationSession';
 import { displayChapterTitle, effectiveTemplateChapters } from '../outline';
 import { selectEvidenceByBudget } from '../evidence';
 import { chineseTokenMatch } from '../textMatch';
-import { filterBidDisciplineFacts, stableHash, throwIfAborted } from '../utils';
+import { ensureUniqueChapterIds, filterBidDisciplineFacts, stableHash, throwIfAborted } from '../utils';
 import { displayStage, upsertProgressStage } from '../progress';
 import { buildSemanticSimilarity } from '../semanticSimilarity';
 import { chapterCriteriaText, extractEvaluationCriteriaItems, validateBidStructureBeforeGeneration } from '../constructionBidStructure';
@@ -346,7 +346,10 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
       return emptyTenderRequirements(false);
     }
   })();
-  session.planning.baseEffectiveChapters = session.understanding.bidStructureAudit.enrichedChapters;
+  // 章 id 唯一性兜底（在生效章清单定型处单点修复，覆盖模板大纲与显式大纲两条来源）：
+  // 下游章预算/章计划/意图证据/图谱映射全部以章 id 为键，重复 id 即后写覆盖先写——
+  // 实测症状为章预算可行性校准守恒断言失守、整轮降级「沿用原章预算」。详见 ensureUniqueChapterIds。
+  session.planning.baseEffectiveChapters = ensureUniqueChapterIds(session.understanding.bidStructureAudit.enrichedChapters);
   session.prepare.template = { ...session.prepare.template, chapters: session.planning.baseEffectiveChapters };
   // P4 确定性并行化：planDocument（章节任务规划，纯确定性逻辑 + 本地嵌入分类，无 LLM 调用）提前启动，
   // 与下方评审条目语义构建、招标要求提取、事实主表构建等前置链并行执行，原串行位置 await 结果；

@@ -2669,7 +2669,27 @@ export async function boqPlacementIssues(markdown: string, chapters: DocumentDra
       message: `清单项落位不足：${placedTotal}/${totalRows} 项（${Math.round(rate * 100)}%）${unplacedSummary ? `。${unplacedSummary}` : ''}`,
       suggestion: `请将未落位清单项按专业工程分组补写进对应章节"主要施工内容"小节（融入各专业工程的作业对象与工程量、工序顺序、施工方法叙述），优先落位主要分部分项、关键规格与大额工程量；对确实不涉及/利旧/甲供/由厂家配套的条目，在正文对应章节显性说明处置方式（说明句须含条目名称）。${unplacedSummary}${auditNote ? `〔落位审计：${auditNote}〕` : ''}`,
     });
+    return issues;
   }
+  // 4.55.12 缺口清单制（口径决定，plan §3.1 原则 4）：阈值线以上不再静默——未落位行**逐条可查**。
+  // 原口径只在 <90% 时说话，阈值以上的残留缺口（巢湖实测 107 行/62 类，其中语义仅承接约 72 行）
+  // 既不进报告也不进人工清单，交付报告只给一个 87% 的比率，无法回答「未落位的那批有没有正当理由」。
+  // 现口径：残留缺口产出**清单型 warning**（不阻断、不额外触发修复轮——语义/说明已承接的部分补写
+  // 收益低，成本在修复轮），按「语义已承接 / 未承接」二分列明，供人工复核与下一轮生成定位。
+  if (remainingUnplaced.length === 0) return issues;
+  const semanticRescued = unplacedTraces.filter(trace => semanticPlacedNames.has(trace.itemName));
+  const semanticOnlyGroups = new Set(semanticRescued.map(trace => trace.itemName.slice(0, 40)));
+  const notCarried = groupList.filter(group => !semanticOnlyGroups.has(group.name.slice(0, 40)));
+  const gapSummary = notCarried.slice(0, 20).map(group => `${group.name.slice(0, 40)}${group.rows > 1 ? `×${group.rows}` : ''}${group.sample.quantity ? ` ${group.sample.quantity}` : ''}（未落位${responsibleChapterOf(group.sample)}）`).join('；');
+  issues.push({
+    level: 'warning',
+    category: 'evidence_coverage',
+    owner: 'user',
+    repairability: 'manual_review',
+    provenance: { detectorId: 'boq-placement', fingerprint: stableHash(markdown) },
+    message: `清单落位缺口清单（已达落位率线，残留缺口供复核）：${placedTotal}/${totalRows} 项（${Math.round(rate * 100)}%），字面未落位 ${remainingUnplaced.length} 行 / ${groupList.length} 类；其中语义已承接 ${semanticRescued.length} 行（${semanticOnlyGroups.size} 类），未承接 ${notCarried.reduce((sum, group) => sum + group.rows, 0)} 行（${notCarried.length} 类）${gapSummary ? `。未承接项：${gapSummary}` : ''}`,
+    suggestion: `以下未落位项须逐条给出处置：补写进对应章节、或显性说明（不涉及/利旧/甲供/由厂家配套）。${gapSummary}${auditNote ? `〔落位审计：${auditNote}〕` : ''}`,
+  });
   return issues;
 }
 

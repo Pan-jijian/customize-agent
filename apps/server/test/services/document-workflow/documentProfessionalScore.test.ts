@@ -64,6 +64,7 @@ const templating = (level: 'heavy' | 'medium' | 'light'): TenderBidTemplatingRep
   crossProjectResidue: [],
   difficultyCountermeasureRatio: 0.6,
   difficultyBothCount: 3,
+  difficultyQuantifiedCount: level === 'heavy' ? 1 : level === 'medium' ? 3 : 5,
   difficultyCountermeasures: 5,
   difficultyHeavyTemplated: false,
   sentencePatternHits: [],
@@ -140,26 +141,44 @@ describe('buildProfessionalScoreReport 总分与等级', () => {
     expect(report.total).toBeGreaterThanOrEqual(72);
   });
 
-  it('重度模板化降档：总分压到合格线以下（≤54）恒为待提升', async () => {
-    const report = await buildProfessionalScoreReport([GOOD_CHAPTER], COMPLETE_TABLE, { templating: templating('heavy') });
-    expect(report.total).toBeLessThanOrEqual(54);
-    expect(report.grade).toBe('待提升');
-    expect(report.summary).toContain('模板化等级：重度（降档已生效）');
-  });
-
-  it('中度模板化降档：总分压到良好线以下（≤69）', async () => {
-    const report = await buildProfessionalScoreReport([GOOD_CHAPTER], COMPLETE_TABLE, { templating: templating('medium') });
-    expect(report.total).toBeLessThanOrEqual(69);
-    expect(report.grade).toBe('合格');
-    expect(report.summary).toContain('模板化等级：中度（降档已生效）');
-  });
-
-  it('轻度模板化不降档', async () => {
+  // D1 合尺决策：取消「重度→封顶 54 / 中度→封顶 69」的单点否决，改为**加权维度**计分。
+  // 理由：封顶把连续质量压成二值，且会掩盖其他维度的真实水平（巢湖实测：六项满分、加权 98.6，
+  // 却因一个已证明失准的归因闸门被压到 54；而实质短板在数据锚定 64、事实一致性 28）。
+  it('重度模板化不再封顶总分：转为「表述实质性」维度扣分，且不影响其他维度得分', async () => {
     const plain = await buildProfessionalScoreReport([GOOD_CHAPTER], COMPLETE_TABLE);
+    const heavy = await buildProfessionalScoreReport([GOOD_CHAPTER], COMPLETE_TABLE, { templating: templating('heavy') });
+    const dimension = (report: typeof heavy, key: string) => report.dimensions.find(item => item.key === key);
+    // 新维度存在且显著低分（按套话比超标折算：0.5 → 扣满）
+    expect(dimension(heavy, 'templating')).toBeDefined();
+    expect(dimension(heavy, 'templating')!.score).toBeLessThan(20);
+    // 仍显著拖累总分（信号不丢），但不再钉死在 54
+    expect(heavy.total).toBeLessThan(plain.total);
+    expect(heavy.total).toBeGreaterThan(54);
+    // 关键：真实水平不被抹掉——结构分与无信号时一致
+    expect(dimension(heavy, 'structure')!.score).toBe(dimension(plain, 'structure')!.score);
+    expect(heavy.summary).toContain('不再封顶总分');
+  });
+
+  it('中度模板化：维度分介于轻/重之间（连续量，非等级跳变）', async () => {
+    const medium = await buildProfessionalScoreReport([GOOD_CHAPTER], COMPLETE_TABLE, { templating: templating('medium') });
     const light = await buildProfessionalScoreReport([GOOD_CHAPTER], COMPLETE_TABLE, { templating: templating('light') });
-    expect(light.total).toBe(plain.total);
+    const scoreOf = (report: typeof medium) => report.dimensions.find(item => item.key === 'templating')!.score;
+    expect(scoreOf(medium)).toBeGreaterThan(0);
+    expect(scoreOf(medium)).toBeLessThan(scoreOf(light));
+  });
+
+  it('轻度模板化：维度满分，且无信号时不引入该维度（不白送分）', async () => {
+    const plain = await buildProfessionalScoreReport([GOOD_CHAPTER], COMPLETE_TABLE);
+    // 无信号 → 7 维（权重和 1）；有信号 → 8 维（权重和 1）
+    expect(plain.dimensions).toHaveLength(7);
+    expect(plain.dimensions.reduce((sum, dimension) => sum + dimension.weight, 0)).toBeCloseTo(1, 6);
+    const light = await buildProfessionalScoreReport([GOOD_CHAPTER], COMPLETE_TABLE, { templating: templating('light') });
+    expect(light.dimensions).toHaveLength(8);
+    expect(light.dimensions.reduce((sum, dimension) => sum + dimension.weight, 0)).toBeCloseTo(1, 6);
+    expect(light.dimensions.find(item => item.key === 'templating')!.score).toBe(100);
     expect(light.summary).not.toContain('降档已生效');
   });
+
 
   it('弱维（<70 分）列入 summary 待提升提示', async () => {
     const report = await buildProfessionalScoreReport([draftChapter('空章节', '')]);

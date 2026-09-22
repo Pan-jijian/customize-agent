@@ -460,7 +460,10 @@ describe('文档级场景命中率推演（4.17.6）', () => {
     expect(combos.length).toBe(32);
     const passCount = combos.filter(combo => simulate(buildDocumentCalls(combo.scene), 'batched-warmup').rate >= 0.9).length;
     expect(passCount).toBeGreaterThanOrEqual(29);
-  });
+    // 显式 timeout：32 组合网格扫描实测约 26s（空载），贴着全局 30s 上限——
+    // 一旦机器上有并发负载（如后台索引/生成任务）即必然超时，使 pnpm check 假红。
+    // 本用例是纯 CPU 推演（无外部依赖），放宽上限不影响其判定力度。
+  }, 180_000);
 });
 
 describe('4.17.8 修复辅助化验收（修复是辅助、写作是主力）', () => {

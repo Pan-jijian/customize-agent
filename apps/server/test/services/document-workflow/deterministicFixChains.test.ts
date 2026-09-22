@@ -57,6 +57,8 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'ambiguous-either-or',
       // 4.27.2 招标元语言清理 + 重复响应行去重（条幅剥离后重复判定同帧）
       'tender-meta-language',
+      // 4.55.12 资料载体残片清理（答疑对答段/图纸 OCR 密集残片/数值堆砌残句，紧随元语言清理）
+      'formal-source-residue',
       // 4.32 配置禁用词清洗（丰乐镇 v6 #59）
       'forbidden-configuration',
       'duplicate-response-line',
@@ -109,6 +111,8 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       'ambiguous-either-or',
       // 4.27.2 招标元语言清理 + 重复响应行去重
       'tender-meta-language',
+      // 4.55.12 资料载体残片清理
+      'formal-source-residue',
       // 4.32 配置禁用词清洗（丰乐镇 v6 #59）
       'forbidden-configuration',
       'duplicate-response-line',

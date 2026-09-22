@@ -46,7 +46,9 @@ import {
   tenderRequirementsSummary,
   tenderRequirementsWritingRules,
   writeCachedTenderRequirements,
+  fixFormalSourceResidue,
 } from '@/services/document-workflow/tenderRequirements';
+import { isMaterialResidueLine } from '@/services/document-workflow/materialResidue';
 import type { TenderClauseUnit, TenderRequirementAssignment } from '@/services/document-workflow/tenderRequirements';
 import { stableHash } from '@/services/document-workflow/utils';
 import type { DocumentEvidence, TenderRequirementEntry, TenderRequirementModel, TenderRequirementPolicy } from '@/services/document-workflow/types';
@@ -800,8 +802,10 @@ describe('消费侧（摘要/检查项/语义查询/写作规则/章分片）', 
     expect(open).toContain('岗位责任矩阵');
     expect(open).toContain('严禁出现人员姓名');
     // 禁图允许表口径（暗标常态 C1）：表格/框图照常落实，图类文字承载 + 图题行，禁止图片
+    // 4.55.12 W5：图类先要求数据表承载（数据取自资料），文字框图/时间轴为等价形态；仅图题行不算落实
     const figurePlain = renderChapterStructureSlice(items, { bodyFigureForbidden: true });
-    expect(figurePlain).toContain('文字框图或表格式时间轴');
+    expect(figurePlain).toContain('数据表（表头字段 + 数据行，数据取自资料，禁止编造）或等价的结构化文字框图/表格式时间轴');
+    expect(figurePlain).toContain('只输出图题行而无数据表/框图内容视为该项未落实');
     expect(figurePlain).toContain('禁止插入图片或图件占位');
     expect(figurePlain).toContain('岗位责任矩阵');
     // 正文禁表口径（显式禁表句）：不得出现任何表格/图片，图文由文末附表区承载
@@ -1414,5 +1418,66 @@ describe('collectRequirementAnchors（条款锚点全清单单源）', () => {
     const anchors = collectRequirementAnchors({ text: '成活率95％以上。', coreTerms: ['成活率95％'] });
     expect(anchors).toEqual(expect.arrayContaining(['成活率', '95%']));
     expect(anchors.every(anchor => !anchor.includes('％'))).toBe(true);
+  });
+});
+
+describe('4.55.12 答疑残片出池 + 资料载体残片清理（巢湖实测）', () => {
+  it('答疑对答行出池（「答：三级钢，见图纸说明7.4.1。门卫同。」不入要求池）', () => {
+    expect(isRequirementPoolNoiseClause('答：三级钢，见图纸说明7.4.1。门卫同。')).toBe(true);
+    expect(isRequirementPoolNoiseClause('答复：按设计图纸执行')).toBe(true);
+    expect(isRequirementPoolNoiseClause('回复：同意调整')).toBe(true);
+  });
+
+  it('正常招标要求不受影响（入池判定未被过宽扩围）', () => {
+    expect(isRequirementPoolNoiseClause('确保工程质量达到合格标准并通过一次验收')).toBe(false);
+    expect(isRequirementPoolNoiseClause('计划工期 330 日历天，开工日期以开工令为准')).toBe(false);
+  });
+
+  it('答疑残片段整行删除（含无长度门槛的短答案行）', () => {
+    const md = ['施工组织总述如下。', '', '答：均改为2：8灰土回填', '', '本工程按上述要求组织实施。'].join('\n');
+    const result = fixFormalSourceResidue(md);
+    expect(result.fixedCount).toBe(1);
+    expect(result.markdown).not.toContain('答：');
+    expect(result.markdown).toContain('施工组织总述如下。');
+  });
+
+  it('图纸 OCR 密集残片段与数值堆砌残句删除（正常数据罗列不受影响）', () => {
+    const ocr = '盖板规格表盖板型号盖板覆土厚板厚h混凝土(m)(mm)(m³)J01B1-10.8≤Hs≤2.01400.271801004@20010018050J01B1-2④①钢筋表18080';
+    const listing = '本工程关键工程参数还包括：80kPa、DN1000-2、55kPa、13.5平方米、22天、28天、56天、15万元、1.5%、1.0%、1.1%、0.8%、0.7%、0.45%、0.55%、0.5%、0.25%、0.35%、0.1%、6000万元、100万元、1.0万元、2.8万元、2.75万元、14万元、2万元、10万元、50万元、10天、60天、5000元、3.4项、1.1项、3年、21.1人、20万元、2000元、12个、4份、1份、1.4项、6个、18个、24个、4.3项、4.4项、JC-07、JC-08、JC-09。';
+    const normal = '1#厂房电气施工涉及配电箱70台、桥架2811m、配管21034.6m、电力电缆12998.83m、电力电缆头170个及各类灯具1222套。';
+    const result = fixFormalSourceResidue([normal, ocr, listing].join('\n'));
+    expect(result.fixedCount).toBe(2);
+    expect(result.markdown).toContain('配电箱70台');
+    expect(result.markdown).not.toContain('盖板规格表');
+    expect(result.markdown).not.toContain('JC-09');
+  });
+
+  it('标题行/表格行豁免（表格是数据形态，由表结构治理链负责）', () => {
+    const md = ['#### 1.2.3 防水做法', '| 名称 | 规格 | 数量 |', '| --- | --- | --- |'].join('\n');
+    const result = fixFormalSourceResidue(md);
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe(md);
+  });
+
+  it('幂等：重复调用不产生二次改写', () => {
+    const md = '答：钢质单扇甲级防火门，门洞尺寸1100*2400mm。\n正常段落内容。';
+    const once = fixFormalSourceResidue(md).markdown;
+    expect(fixFormalSourceResidue(once).fixedCount).toBe(0);
+  });
+});
+
+describe('4.55.12 残片判据防误伤（CAD 标注行 = 图纸真实事实载体，不得删除）', () => {
+  it('CAD 标注行（含基坑底标高等图纸事实）不判残片', () => {
+    const cad = '└── 标注文本: 15.65(基坑底标高) | 关联对象: 邻近标注 坡率 1:1.0 | 状态: 普通标注';
+    expect(isMaterialResidueLine(cad)).toBe(false);
+    expect(fixFormalSourceResidue(cad).fixedCount).toBe(0);
+  });
+  it('正文数据罗列行不判残片（正常工程数据句）', () => {
+    const normal = '1#厂房电气施工涉及配电箱70台、桥架2811m、配管21034.6m、电力电缆12998.83m、电力电缆头170个及各类灯具1222套。';
+    expect(isMaterialResidueLine(normal)).toBe(false);
+  });
+  it('OCR 表格密集串与纯参数堆砌行判残片', () => {
+    expect(isMaterialResidueLine('盖板规格表盖板型号盖板覆土厚板厚h混凝土(m)(mm)(m³)J01B1-10.8≤Hs≤2.01400.271801004@20010018050J01B1-2④①钢筋表18080')).toBe(true);
+    expect(isMaterialResidueLine('本工程关键工程参数还包括：80kPa、55kPa、22天、28天、56天、15万元、1.5%、1.0%、1.1%、0.8%、6000万元、100万元、10天、60天、12个、4份、6个、18个、24个。')).toBe(true);
   });
 });

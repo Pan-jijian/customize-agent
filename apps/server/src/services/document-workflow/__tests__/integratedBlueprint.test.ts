@@ -372,15 +372,25 @@ describe('L2 计划推导（确定性区间，不硬锁具体值）', () => {
       expect(mid).toBeLessThanOrEqual(labor.peakValue); // 阶段人数不得超峰值
       expect((item.max ?? 0)).toBeLessThanOrEqual(labor.peakValue);
     }
-    // 亮化分部无工效可推导条目 → 该阶段不产出（信息缺口由蓝图警告显式暴露，不编造人数）
+    // 亮化分部无工效可推导条目 → 该阶段不产出（不编造人数）
     expect(labor.byPhase.some(item => item.phase.includes('亮化'))).toBe(false);
-    const { diagnostics } = buildBlueprintData({
+    const { data, diagnostics } = buildBlueprintData({
       boq: parseFixture(),
       basicFacts: '项目名称：马老郢村建设项目 计划工期：360日历天 质量标准：合格',
       projectName: '马老郢村建设项目',
       strategy: villageMunicipalStrategy,
     });
-    expect(diagnostics.warnings.some(warning => warning.includes('分阶段劳动力缺「亮化与收尾工程」行'))).toBe(true);
+    // 本项目清单无亮化分部条目 → 该策略阶段整体不产出（不再发 2 天假工期），
+    // 也不得报「分阶段劳动力缺…」——那是把「本项目没有的分部」误报成「劳动力资料不足」
+    //（丰乐镇实测假告警：清单 904 条目中无任何亮化条目，却报劳动力行缺失）。
+    expect(data.milestones.some(item => item.label.includes('亮化'))).toBe(false);
+    expect(diagnostics.warnings.some(warning => warning.includes('分阶段劳动力缺「亮化与收尾工程」行'))).toBe(false);
+    // 缺口仍显式暴露：改述为「策略阶段未命中清单，本阶段不产出」，并指向两个可查端点
+    expect(diagnostics.warnings.some(warning => warning.includes('策略阶段未命中清单') && warning.includes('亮化与收尾工程'))).toBe(true);
+    // 实际产出的阶段里，最后一个必须与劳动力分阶段行对齐（核对对象是产出而非策略模板）
+    const tail = data.milestones[data.milestones.length - 1];
+    expect(tail).toBeDefined();
+    expect(labor.byPhase.some(item => item.phase === tail!.label)).toBe(true);
   });
 
   it('劳动力阶段封顶：推导超峰值的阶段收敛到峰值（丰乐镇景观绿化 1119 人荒谬值根因）', () => {

@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -248,6 +249,18 @@ const TILE_RECALL_MIN_AREA = 8;
 const TILE_RECALL_BOX_SCORE = 0.4;
 /** 切片页的识别行置信度阈值，默认 0.5；与上面两项必须同时放宽才有效 */
 const TILE_RECALL_REC_SCORE = 0.35;
+
+
+/**
+ * 页级 OCR 缓存键（W7 断点续跑，导出供单测）：文件身份（路径+大小+mtime，与变更检测同源）
+ * + 页号 + 渲染 DPI + **解析参数版本**。参数版本变化（切片边长/召回阈值调整）即整体失效——
+ * 宁可重跑，不可复用旧口径的结果。文件被修改（size/mtime 变化）同样失效。
+ */
+export function ocrPageCacheKeyOf(input: { absolutePath: string; fileSize: number; mtime: number; pageIndex: number; dpi: number }): string {
+  const identity = `${input.absolutePath}|${input.fileSize}|${input.mtime}|${input.dpi}|${input.pageIndex}`
+    + `|v1:${TILE_PX}:${TILE_OVERLAP_PX}:${TILE_RECALL_BOX_SCORE}:${TILE_RECALL_REC_SCORE}:${TILE_RECALL_MIN_AREA}`;
+  return createHash('sha256').update(identity).digest('hex').slice(0, 32);
+}
 
 /**
  * 大幅面图纸页的「文本层稀疏」上限（可见字符数）。
@@ -1065,6 +1078,55 @@ export class ContentExtractor {
 
   private getTempRoot(): string {
     return process.env.CUSTOMIZE_TMPDIR || process.env.TMPDIR || tmpdir();
+  }
+
+  /**
+   * 页级 OCR 结果缓存的目录（W7 断点续跑）。
+   * 默认落在系统临时目录下的固定子目录（跨进程重启存活，OS 清理临时目录时一并失效——可接受）；
+   * `CUSTOMIZE_KB_OCR_CACHE_DIR` 可重定向；设为 `off` 关闭缓存。
+   */
+  private ocrPageCacheDir(): string | undefined {
+    const configured = process.env.CUSTOMIZE_KB_OCR_CACHE_DIR;
+    if (configured === 'off') return undefined;
+    return configured && configured.trim() ? configured.trim() : path.join(this.getTempRoot(), 'ca-ocr-page-cache');
+  }
+
+  /**
+   * 页级缓存键：文件身份（路径+大小+mtime，与变更检测同源）+ 页号 + 渲染 DPI + **解析参数版本**。
+   * 参数版本变化（切片边长/召回阈值/清洗口径调整）即整体失效——宁可重跑，不可复用旧口径的结果。
+   */
+  private ocrPageCacheKey(file: ClassifiedFile, pageIndex: number, dpi: number): string {
+    return ocrPageCacheKeyOf({ absolutePath: file.absolutePath, fileSize: file.fileSize, mtime: file.mtime, pageIndex, dpi });
+  }
+
+  /**
+   * 读页级 OCR 缓存。命中即跳过该页的全部 OCR（含 300 DPI 重试）——**结果与未命中路径逐字节一致**
+   * （缓存写入的是最终 ocrText；同文件身份 + 同参数版本下重跑不可能得到不同结果）。
+   */
+  private readCachedPageOcr(file: ClassifiedFile, pageIndex: number, dpi: number): { text: string; score: number; strategy: string; tiled: boolean; tiles: number } | undefined {
+    const dir = this.ocrPageCacheDir();
+    if (!dir) return undefined;
+    const cachePath = path.join(dir, `${this.ocrPageCacheKey(file, pageIndex, dpi)}.json`);
+    try {
+      if (!fs.existsSync(cachePath)) return undefined;
+      const parsed = JSON.parse(fs.readFileSync(cachePath, 'utf8')) as { text?: string; score?: number; strategy?: string; tiled?: boolean; tiles?: number };
+      if (typeof parsed.text !== 'string') return undefined;
+      return { text: parsed.text, score: Number(parsed.score || 0), strategy: String(parsed.strategy || 'cached'), tiled: Boolean(parsed.tiled), tiles: Number(parsed.tiles || 0) };
+    } catch {
+      return undefined; // 缓存损坏按未命中处理（不得影响主流程）
+    }
+  }
+
+  /** 写页级 OCR 缓存（失败静默——缓存是优化，不得因写盘失败影响解析） */
+  private writeCachedPageOcr(file: ClassifiedFile, pageIndex: number, dpi: number, payload: { text: string; score: number; strategy: string; tiled: boolean; tiles: number }): void {
+    const dir = this.ocrPageCacheDir();
+    if (!dir) return;
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, `${this.ocrPageCacheKey(file, pageIndex, dpi)}.json`), JSON.stringify(payload));
+    } catch {
+      // 静默：缓存写失败不影响解析
+    }
   }
 
   private extractBinaryReadableFragments(filePath: string): string[] {
@@ -2162,6 +2224,7 @@ export class ContentExtractor {
     const pageGeometry = this.readPdfPageGeometry(tmpDir);
     const tiledPages: number[] = [];
     const tileCounts: number[] = [];
+    let cachedPageHits = 0; // W7 页级缓存命中数（元数据可观测）
     for (let i = 0; i < pageImages.length; i++) {
       const imgPath = pageImages[i]!;
       try {
@@ -2174,6 +2237,25 @@ export class ContentExtractor {
         if (this.isTooSmallForOcr(dimensions.width, dimensions.height)) {
           failedPages.push({ page: i + 1, reason: `image_too_small_for_ocr_${dimensions.width}x${dimensions.height}` });
           warnings.push(`PDF 第 ${i + 1} 页渲染图片尺寸过小（${dimensions.width}x${dimensions.height}），已跳过 OCR`);
+          continue;
+        }
+        // W7 断点续跑：页级缓存命中即跳过本页全部 OCR（含 300 DPI 重试），结果与未命中路径一致。
+        // 动机：531 页图纸 OCR 约 90 分钟且此前为整文件原子——中断即全损（实测已发生过 OOM 丢库）；
+        // 命中路径同时让「解析器版本升级后的重解析」只重跑真正变化的页。
+        const cachedPage = this.readCachedPageOcr(file, i + 1, initialDpi);
+        if (cachedPage) {
+          cachedPageHits += 1;
+          if (cachedPage.tiled) { tiledPages.push(i + 1); tileCounts.push(cachedPage.tiles); }
+          if (cachedPage.text) {
+            ocrPages.push(i + 1);
+            ocrStrategies.push({ page: i + 1, strategy: cachedPage.strategy, score: cachedPage.score });
+            pageTexts.push(`## PDF 第 ${i + 1} 页（OCR）\n\n${cachedPage.text}`);
+            if (cachedPage.tiled && this.normalizedTextLength(cachedPage.text) < 12) {
+              warnings.push(`PDF 第 ${i + 1} 页为大版面条图，分块 OCR 后仅 ${this.normalizedTextLength(cachedPage.text)} 个有效字符，建议确认该图纸是否本身无文字标注`);
+            }
+          } else {
+            failedPages.push({ page: i + 1, reason: 'empty_ocr' });
+          }
           continue;
         }
         // 外部引擎优先（CUSTOMIZE_PADDLE_OCR_CMD 配置时），失败回退内置 provider（PP-OCRv6 ONNX → tesseract）
@@ -2231,6 +2313,8 @@ export class ContentExtractor {
           }
         }
 
+        // W7：本页最终结果写缓存（含空结果——空也是确定结论，避免重跑再判空）
+        this.writeCachedPageOcr(file, i + 1, initialDpi, { text: ocrText, score: ocrScore, strategy, tiled: tiledPages.includes(i + 1), tiles: tileCounts[tiledPages.indexOf(i + 1)] || 0 });
         if (ocrText) {
           ocrPages.push(i + 1);
           ocrStrategies.push({ page: i + 1, strategy, score: ocrScore });
@@ -2271,6 +2355,8 @@ export class ContentExtractor {
       warnings.push(`PDF 部分页解析失败: ${failedPages.map((p) => `${p.page}:${p.reason}`).join('; ')}`);
     }
 
+    // W7 断点续跑可观测：命中数 = 本次跳过 OCR 的页数（重启续跑时等于已完成页数）
+    if (cachedPageHits > 0) metadata.pdfOcrCachedPages = cachedPageHits;
     const combined = pageTexts.join('\n\n').trim();
     return {
       text: combined ? [this.metadataOnlyText(file), combined].join('\n\n') : '',

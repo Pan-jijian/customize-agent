@@ -33,17 +33,48 @@ export function resolveBillOfQuantities(input: { projectRoot: string; boundFileP
         continue;
       }
       const boq = parseBillOfQuantities({ chunks, sourceFile: filePath });
-      if (boq.totalEntries > 0) parsed.push({ filePath, boq });
-      else failures.push(`${filePath}（解析出 0 条目）`);
+      if (boq.totalEntries > 0) {
+        parsed.push({ filePath, boq });
+        continue;
+      }
+      // 0 条目分两类（实测缺陷：巢湖「A.1 招标工程量清单封面」被报成「解析失败」，使用者据此去查解析器白费）：
+      //   ① 结构性文件（封面/扉页/目录/总说明/填表须知）——天然无分部分项条目，**不是失败**，不告警；
+      //   ② 有明细表特征却解析不出条目——真失败，必须告警。
+      // 判据：全文无「分部分项/项目编码/项目特征描述/综合单价」等明细特征，且有结构性标记。
+      if (isStructuralOnlyBillFile(chunks)) continue;
+      failures.push(`${filePath}（解析出 0 条目）`);
     } catch (error) {
       failures.push(`${filePath}（${error instanceof Error ? error.message : String(error)}）`);
     }
   }
-  if (parsed.length === 0) return { warning: `清单解析失败：${failures.join('；')}` };
+  if (parsed.length === 0) {
+    // 全部为结构性文件时不报「解析失败」（那会把封面当错误）；确无明细表则如实说明
+    return failures.length > 0
+      ? { warning: `清单解析失败：${failures.join('；')}` }
+      : { warning: `绑定清单文件均为封面/目录类结构性文件，未解析到分部分项明细（${candidates.length} 份）` };
+  }
   const boq = parsed.length === 1 ? parsed[0]!.boq : mergeBillOfQuantitiesResults(parsed);
   return failures.length > 0
     ? { boq, warning: `部分清单文件解析失败（已并入其余 ${parsed.length} 份）：${failures.join('；')}` }
     : { boq };
+}
+
+/** 清单明细表特征：取**列名级**标记——「项目编码/项目特征描述」只在明细表头出现。
+ * 不能取「分部分项/工程量清单」这类表名级词：目录页会逐条列出表名
+ *（实测用例：「工作表：目录 / 1 分部分项工程量清单计价表……」），按表名判会把目录误判成明细文件。 */
+const BILL_DETAIL_MARKER = /项目编码|项目特征描述/u;
+/** 结构性表页标记（封面/扉页/目录/总说明等，本身不含条目） */
+const STRUCTURAL_SHEET_MARKER = /封面|扉页|目录|总说明|填表须知|签字|盖章|编制说明/u;
+
+/**
+ * 判定「该文件只有结构性表页、本就不含分部分项条目」。
+ * 用于把「封面/目录类文件解析出 0 条目」与「清单明细表解析失败」分开——
+ * 前者是招标清单的标准组成部分（每份清单都带封面），后者才是需要人工介入的缺陷。
+ */
+export function isStructuralOnlyBillFile(chunks: Array<{ content?: string }>): boolean {
+  const text = chunks.map(chunk => chunk.content || '').join('\n');
+  if (BILL_DETAIL_MARKER.test(text)) return false;
+  return STRUCTURAL_SHEET_MARKER.test(text);
 }
 
 // ═══════════════════════════════ 阶段 A：data 参数桶构建 ═══════════════════════════════

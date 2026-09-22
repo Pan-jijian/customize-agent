@@ -2265,3 +2265,34 @@ export function fixEquipmentBatchConflicts(
   }
   return { markdown: result, fixedCount: details.length, details };
 }
+
+/**
+ * 安全目标承诺句兜底（W4）：安全生产章若通篇未写「安全目标」，在章首补一句**投标人自身承诺**。
+ *
+ * 实测缺陷：写作焦点规则里已明确要求（v4.55.4 补入「安全目标与量化控制指标…须以承诺句式明确写出」），
+ * 但模型未遵循——巢湖成稿该章其余 mustCover 项（危大辨识/临时用电/应急预案）全部落位，
+ * 唯「安全目标」全文 0 处，评标响应度 4/5 唯一缺项。
+ *
+ * 为什么不构成"编造"：该句是投标人的**自我承诺**（安全目标本就是投标人自行确定的管理目标），
+ * 不含任何项目事实数值/规格，故不需要资料出处；写作要求仍保留，本函数只兜底不替代。
+ */
+export function ensureSafetyTargetStatement<T extends { title: string; content: string }>(
+  chapters: T[],
+): { chapters: T[]; insertedIn?: string } {
+  const SAFETY_TARGET_RE = /安全(?:生产)?(?:管理)?目标|文明施工目标/u;
+  const COMMITMENT = '本工程安全生产目标：杜绝重伤及以上生产安全事故，轻伤事故频率控制在行业先进水平，确保实现安全生产标准化达标。';
+  const result = [...chapters];
+  for (let index = 0; index < result.length; index += 1) {
+    const chapter = result[index]!;
+    if (!/安全/u.test(chapter.title)) continue;
+    if (SAFETY_TARGET_RE.test(chapter.content)) continue;
+    const lines = chapter.content.split('\n');
+    // 插到章标题行之后（保留 `## 章标题` 与首个小节之间的开篇位置）
+    const titleIndex = lines.findIndex(line => /^#{1,3}\s+\S/u.test(line));
+    const insertAt = titleIndex >= 0 ? titleIndex + 1 : 0;
+    lines.splice(insertAt, 0, '', COMMITMENT);
+    result[index] = { ...chapter, content: lines.join('\n') };
+    return { chapters: result, insertedIn: chapter.title };
+  }
+  return { chapters: result };
+}

@@ -39,7 +39,7 @@ import { cleanStructureDefects, renumberSectionHeadings } from './structureInteg
 import { dedupeDuplicateSectionHeadings, dedupeTertiaryH4Titles } from './markdownComposer';
 import { fixInternalTermHeadingPhrases } from './internalTerminologyAnchors';
 import { stripAtlasReferencePhrases } from './documentGeneratorHelpers';
-import { fixTenderMetaLanguage, stripDuplicateResponseLines } from './tenderRequirements';
+import { fixFormalSourceResidue, fixTenderMetaLanguage, stripDuplicateResponseLines } from './tenderRequirements';
 import { fixFlowFormRepetition, fixSentenceLikeHeadingSplit, fixSkeletonFingerprintRepetition, fixTemplatedLabels, fixTruncatedTitleCompletion } from './templatingGovernance';
 import { fixSpecQuantityBindings, type FactReconciliationInput } from './factReconciliation';
 import type { DecisionLockEntry } from './integratedBlueprint';
@@ -158,6 +158,10 @@ export const SURFACE_FIX_STEPS: readonly SurfaceFixStep[] = [
   // 4.27.2 招标元语言确定性清理（语气泄漏治理 P0）：清理「按招标文件要求/约定」条幅与
   // 「按上述条款」调用式元语言（4.41 起前置的空响应句改写已删除，本步仅做形态清理）
   { key: 'tender-meta-language', stage5: true, round2: true, fix: markdown => { const r = fixTenderMetaLanguage(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
+  // 4.55.12 资料载体残片清理（巢湖实测：答疑对答段 7 处 + 图纸 OCR 密集残片段 + 数值堆砌残句）：
+  // 紧邻元语言清理——同属「非正文来源的语气/载体残片」家族，且要求池过滤（入池侧根治）之后仍需
+  // 交付前兜底：条款尾收口补写发生在要求池判定之后，可再次把残片搬入正文
+  { key: 'formal-source-residue', stage5: true, round2: true, fix: markdown => { const r = fixFormalSourceResidue(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   // 4.32 配置禁用词确定性清洗（丰乐镇 v6 #59：正文「按设计要求确定」触发模板 forbiddenTexts
   // 「配置要求不得出现：按设计要求」 blocker）：修复器 4.31 已实现但未接入两条链，注册即生效；
   // 「按设计要求/按图纸/见图纸」类责任模糊留白改写为具体出处，与门禁 containsForbiddenText 同豁免口径

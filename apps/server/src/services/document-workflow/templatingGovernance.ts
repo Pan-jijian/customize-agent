@@ -1117,9 +1117,27 @@ const TITLE_CORE_EXEMPT = new Set(['目录', '前言', '摘要', '附录', '索�
 /** 残缺标题判定（纯短汉字标题（无字母含入）不足 3 字即残缺；“小菜园”类 3 字完整专业词、“BIM应用”类含字母标题不在此列）：检测与确定性补全同源。
  * 4.44 #3 根治：阈值 4→3——4.43 实测「2.1.4 小菜园」为完整专业词（项目主要专业构成之一），
  * 旧阈值将 3 字完整词误判残缺；「危大」类 2 字残缺仍保留判定。 */
+/**
+ * 合法 2 字专业术语白名单（完整工程术语，非截断）。
+ * 判据不是长度而是「是否完整术语」：「危大」是截断（应为「危大工程辨识与管控」），
+ * 「排水」「围墙」「屋面」是完整专业词。实测误判：巢湖终检 64 项复核清单里多数属于此类
+ *（「1.4.1 1#厂房」「2.5.2 排水」「2.14.2 矮墙」「2.13.4 围墙」被判「标题核心名不足 3 字」）。
+ */
+const TITLE_CORE_COMPLETE_TERMS = new Set([
+  // 仅收「本身就是完整对象名、加后缀反而不成词」的两字词——实测巢湖误判项：
+  // 「2.14.2 矮墙」「2.13.4 围墙」（不存在「矮墙系统/围墙系统」这类说法）。
+  // 不放「电气/通风/排水/幕墙」等可加后缀成词的术语：它们由 fixTruncatedTitleCompletion
+  // 按正文取证确定性补全为「电气系统/通风系统/…」，这是更完整的标题（既有测试锁定该行为）。
+  '矮墙', '围墙',
+]);
+
 function isTruncatedTitleCore(core: string): boolean {
   if (!core || TITLE_CORE_EXEMPT.has(core)) return false;
+  if (TITLE_CORE_COMPLETE_TERMS.has(core)) return false;
   const hanCount = (core.match(/[\u4e00-\u9fa5]/gu) || []).length;
+  // 具名构建筑物（含编号/井号且中文名 ≥2 字，如「1#厂房」「2#门卫」「3# 泵房」）：具体对象名，非截断
+  //（「1#厂」这类中文名不足 2 字仍判残缺，避免放过真截断）
+  if (/[#＃\d]/u.test(core) && hanCount >= 2) return false;
   if (hanCount === 0 || hanCount >= 3) return false;
   return !/[A-Za-z]/u.test(core) && core.length <= 4;
 }

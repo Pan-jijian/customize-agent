@@ -139,6 +139,8 @@ export async function buildStandardFinalValidationIssues(input: {
   billFactLock?: BillFactLock;
   /** B-T3 图纸事实锁：可用图纸引用率验收（图纸事实在正文落位 ≥1 处/份）的判定源 */
   drawingFactLock?: DrawingFactLock;
+  /** 绑定资料证据池：日期溯源检测用（资料里出现过的日期视为可溯源）——传数组本体而非拷贝，便于检测器按身份记忆化 */
+  materialEvidence?: readonly { content?: string }[];
 }): Promise<ValidationIssue[]> {
   const factVerification = await generatedFactVerificationIssuesAsync(input.markdown, input.factsModel, { scopeClassifier: input.factTokenScopeClassifier });
   // 招标要求正文级语义检测（终局全量对账）：要求条目 ↔（章节标题 + 正文句）同闭包 embedding，
@@ -174,7 +176,7 @@ export async function buildStandardFinalValidationIssues(input: {
     ...det('title-integrity', () => titleIntegrityIssues(input.markdown)),
     ...det('evaluation-criteria-coverage', () => evaluationCriteriaCoverageIssues(input.markdown, input.evaluationCriteriaItems || [], { semanticSimilarity: evaluationCriteriaSimilarity })),
     ...await detSafe('requirements-coverage', () => requirementAcceptanceIssues({ markdown: input.markdown, entries: tenderRequirementCheckItems(input.tenderRequirements).map(({ item }) => item), bodyTexts: requirementBodySentences, semanticSimilarity: requirementsSimilarityForCoverage })),
-    ...det('fabricated-start-date', () => fabricatedStartDateIssues(input.markdown, input.factsModel)),
+    ...det('fabricated-start-date', () => fabricatedStartDateIssues(input.markdown, input.factsModel, input.materialEvidence)),
     ...det('field-value-mismatch', () => fieldValueMismatchIssues(input.markdown, input.factsModel)),
     ...det('area-arithmetic', () => areaArithmeticIssues(input.markdown)),
     ...det('resource-consistency', () => resourceConsistencyIssues(input.markdown, { laborPeakAuthority: blueprintLaborPeakAuthority(input.blueprintData) })),

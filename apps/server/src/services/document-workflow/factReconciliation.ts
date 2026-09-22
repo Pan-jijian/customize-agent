@@ -110,8 +110,17 @@ function numberVariants(value: number): string[] {
 }
 
 /** 槽位/性能/频次词豁免：数字属工艺参数或物理属性（非工程量），不做绑定比对
- * （M24b 导出：arbiter A3 名称-数值绑定扫描与 D4.6a 同源共用） */
-export const SLOT_WORD_RE = /(?:每|厚度|宽度|高度|深度|长度|直径|间距|净距|坡度|标高|偏差|误差|系数|等级|龄期|温度|含水率|压实度|密度|功率|电压|照度|色温|耐火|强度|抗渗|配合比|搭接|错缝|含水|埋深|覆土|预留|预埋|伸缩|沉降|变形|垂直度|平整度|倾角|坡度|模数|螺距|壁厚|净空|层高|埋设|位置|距离|半径|周长|坡度)/u;
+ * （M24b 导出：arbiter A3 名称-数值绑定扫描与 D4.6a 同源共用）
+ * 位置量词扩围（巢湖实测）：「桥架底边距地7米」的 7米 是安装高度（长度单位），被邻近配对
+ * 绑给「桥架」（清单单位 m）后恰撞「塑料管 7m」的权威值 → 报张冠李戴。距地/距墙/距顶/离地/
+ * 离墙同属空间位置表述（既有 高度/标高/净距/距离 已收，安装高度类表述漏收） */
+export const SLOT_WORD_RE = /(?:每|厚度|宽度|高度|深度|长度|直径|间距|净距|坡度|标高|偏差|误差|系数|等级|龄期|温度|含水率|压实度|密度|功率|电压|照度|色温|耐火|强度|抗渗|配合比|搭接|错缝|含水|埋深|覆土|预留|预埋|伸缩|沉降|变形|垂直度|平整度|倾角|坡度|模数|螺距|壁厚|净空|层高|埋设|位置|距离|半径|周长|坡度|距地|距墙|距顶|距梁|距楼|离地|离墙)/u;
+
+/** 阈值/区间尾缀豁免（巢湖实测）：数值后紧跟「及N个以上/以上/以下/以内/左右」时为阈值分档
+ * 表述，非清单数量归属——「单个雨水口接出管采用DN200管，2个及2个以上雨水口接出管采用
+ * DN300管」的 2个 是雨水口分档门槛，被邻近配对绑给 DN200 后恰撞清单「混凝土检查井」（C35 2个）
+ * 报张冠李戴（同句 OCR 残片「DN300管，0.0个坡百雨求井」的 0.0个 同理）。规格通道与名称通道共用 */
+const THRESHOLD_TAIL_RE = /^(?:以上|以下|以内|左右|及[^。；;，,]{0,8}(?:以上|以下|以内|左右))/u;
 
 // ═══════════════════════════ 权威视图 ═══════════════════════════
 
@@ -631,6 +640,8 @@ function scanSpecBindingHits(markdown: string, authority: ReconciliationAuthorit
     if (!valueMatch) continue;
     // 槽位词豁免：规格与数值之间出现埋深/厚度等属性词 → 数值是工艺参数而非该规格工程量
     if (SLOT_WORD_RE.test(valueMatch[1])) continue;
+    // 阈值分档豁免（THRESHOLD_TAIL_RE）：数值是门槛/区间边界，非该规格的清单数量
+    if (THRESHOLD_TAIL_RE.test(after.slice(valueMatch[1].length + valueMatch[2].length + valueMatch[3].length))) continue;
     // 工艺参数约束豁免（4.31 丰乐镇 v6 #2）：「DN25 管不大于 1.0m」的 1.0m 是支架间距的工艺
     // 约束上限（不大于/不超过类），非该规格的清单数量，不得与其他规格数量互比张冠李戴
     if (/不大于|不超过|不得大于|不得超过/.test(valueMatch[1])) continue;
@@ -665,6 +676,10 @@ function scanSpecBindingHits(markdown: string, authority: ReconciliationAuthorit
     if (/总长|全长|长度|管长|延米/u.test(valueMatch[1]) && /^(?:m|米|km|公里)$/u.test(valueMatch[3])) continue;
     const value = parseNumeric(valueMatch[2]);
     if (value === undefined) continue;
+    // 零值豁免（巢湖实测）：正文「0个/0.0个」只可能来自 OCR 残片或笔误，不构成任何条目的
+    // 数量归属声明——「DN300管，0.0个坡百雨求井」（图纸 OCR 残句）的 0.0个 恰撞清单 0 值行
+    //（「现浇构件钢筋」HRB400 0个）报张冠李戴；零值另有「正文出现 0 数量」专属缺陷口径，不在此判
+    if (value === 0) continue;
     if (bound.some(item => nearlyEqual(item.value, value))) continue;
     // R20 规格小计豁免（A2-③ 反向保护·通用）：值 = 该规格在名称合计下的 specBreakdown 小计
     // → 合法放行，防正确值被误报「无源」并被修复轮改写
@@ -1204,8 +1219,12 @@ function scanNameBindingFindings(markdown: string, authority: ReconciliationAuth
         const valueMatch = /^([^。；;\n|]{0,12}?)([\d,，]+(?:\.\d+)?)\s*(座|个|套|处|盏|棵|株|樘|扇|根|块|片|组|件|孔|间|栋|幢|户|米|m|km|公里|平方米|m2|㎡|m²|立方米|m3|m³|kg|吨|t)(?![a-zA-Z0-9²³])/u.exec(window);
         if (!valueMatch) continue;
         if (SLOT_WORD_RE.test(valueMatch[1])) continue;
+        // 阈值分档豁免（与规格通道同源判据）：数值是门槛/区间边界，非名称数量归属（「桥架7米及7米以上」类）
+        if (THRESHOLD_TAIL_RE.test(window.slice(valueMatch[1].length + valueMatch[2].length + valueMatch[3].length))) continue;
         const value = parseNumeric(valueMatch[2]);
         if (value === undefined) continue;
+        // 零值豁免（与规格通道同源判据）：OCR 残片/笔误的 0 值不构成数量归属
+        if (value === 0) continue;
         if (transcribedEqual(value, entry.quantity)) continue;
         const unit = normalizeUnit(valueMatch[3]);
         if (unit !== normalizeUnit(entry.unit)) continue;

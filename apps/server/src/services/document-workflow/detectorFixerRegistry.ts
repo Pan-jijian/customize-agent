@@ -154,6 +154,20 @@ export const FULL_VALIDATION_DETECTORS: readonly DetectorEntry[] = [
   { id: 'spec-gate-rules', scope: 'full-document', category: 'structure', fixerDisposition: 'manual', fixerDispositionReason: '配置门禁容器（事实/章节/表格/图片/页数/文本多族混合，规则随模板与提示词动态生成），无单一可锚定修复目标' },
   { id: 'auto-spec-validation', scope: 'full-document', category: 'structure', fixerDisposition: 'fixed', fixerDispositionReason: '仅唯一阻断族（后台流程话术）由 WORKFLOW_PHRASE_RE 清洗覆盖；后台优化建议/基础事实候选/材料未提供 3 词未入清洗表' },
   { id: 'fact-consistency', scope: 'full-document', category: 'fact_consistency', fixerDisposition: 'manual', fixerDispositionReason: '多值冲突源于绑定材料组内同名不同值，只能由用户确认绑定范围/资料侧裁决，正文改写不可能消除' },
+  {
+    id: 'figure-substitute-table',
+    scope: 'full-document',
+    category: 'structure',
+    fixerDisposition: 'manual',
+    fixerDispositionReason: '图类要求无承载（既无图题也无等效数据表）需补写数据表并加题注，属内容补写而非确定性改写；写入侧应由图类呈现计划同时下达「图 or 等效表」二选一，本检测器为交付前兜底',
+  },
+  {
+    id: 'project-type-consistency',
+    scope: 'full-document',
+    category: 'scope',
+    fixerDisposition: 'manual',
+    fixerDispositionReason: '项目类型与正文用词矛盾（如产业园标准化厂房项目出现「自然村/村内/多村并行」）属内容性质错误：自动改写会改变叙述口径与上下文语义，须人工确认后按正确策略重新生成；根治在写入侧（resolveDerivationStrategy 类型守卫 + 策略驱动分组称谓），本检测器为交付前安全网',
+  },
   { id: 'project-contamination', scope: 'full-document', category: 'scope', fixerDisposition: 'fixed', fixerDispositionReason: '对象名污染分支由 sanitizeContaminationCandidates 覆盖；文档编号分支（documentContaminationService.ts:18）无修复器' },
   { id: 'project-basic-placeholder', scope: 'full-document', category: 'format', fixerDisposition: 'manual', fixerDispositionReason: '同源专用修复器 repairKnownProjectBasicPlaceholders 已按「删除无用代码」口径移除（全仓零调用、注册表看不见）；当前仅表内占位被 canonical 事实替代，表外正文占位无覆盖' },
   { id: 'standard-final', scope: 'full-document', category: 'structure', fixerDisposition: 'exempt', fixerDispositionReason: 'standard-final 组整组重跑的结果容器登记，不产出自身 issue；组内子检测器各自锚定即可' },
@@ -422,6 +436,10 @@ export const DETERMINISTIC_FIXER_ANCHORS: readonly FixerEntry[] = [
   // 4.27.2 招标元语言确定性清理（语气泄漏治理）：与检测器 formal-style（文风泄漏/后台话术）同源锚定——
   // 「按招标文件要求/约定」条幅与调用式元语言属正式文风失分面，检测定位=修复定位
   { id: 'tender-meta-language', kind: 'deterministic', anchoredTo: 'formal-style', giveUpOnFailure: true },
+  // 4.55.12 资料载体残片清理（答疑对答段/图纸 OCR 密集残片/数值堆砌残句，巢湖实测 9 行）：
+  // 同锚 formal-style（文风泄漏·非正文来源话术面）——三类残片均为资料载体原文误入正文的失分面，
+  // 与招标元语言清理同族相邻（链位置紧随其后），检测定位=修复定位口径一致
+  { id: 'formal-source-residue', kind: 'deterministic', anchoredTo: 'formal-style', giveUpOnFailure: true },
   // 4.32 配置禁用词确定性清洗（丰乐镇 v6 #59）：与门禁检测器 formal-text-gate（forbiddenTexts 阻断词）同源
   { id: 'forbidden-configuration', kind: 'deterministic', anchoredTo: 'formal-text-gate', giveUpOnFailure: true },
   // 4.27.2 条款响应重复行去重：与检测器 duplicate-paragraph 同源（整行完全重复的重复段落族）

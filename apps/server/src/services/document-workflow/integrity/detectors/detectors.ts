@@ -21,6 +21,27 @@ const RESOURCE_DATE_LIKE_ANCHOR_RE = /进度计划|里程碑|节点安排|验收
 
 /** 收集 factsModel 中出现的全部具体日历日期（绑定资料中明确给出的日期才是合法日期） */
 
+/**
+ * 绑定资料原文中的日历日期（按证据池**身份**记忆化）。
+ * 校验组在一次 finalize 内会重算数十次（每次修复轮后重算），而资料池不变——
+ * 按数组身份缓存，避免每次都对全量证据做日期扫描。
+ */
+const materialDateCache = new WeakMap<readonly { content?: string }[], Set<string>>();
+export function materialCalendarDates(evidence: readonly { content?: string }[]): Set<string> {
+  const cached = materialDateCache.get(evidence);
+  if (cached) return cached;
+  const dates = new Set<string>();
+  for (const item of evidence) {
+    const text = item.content;
+    if (!text) continue;
+    for (const match of text.matchAll(CALENDAR_DATE_RE)) {
+      dates.add(`${match[1]}年${match[2]}月${match[3]}日`);
+    }
+  }
+  materialDateCache.set(evidence, dates);
+  return dates;
+}
+
 function knownCalendarDates(factsModel: DocumentFactsModel): Set<string> {
   const dates = new Set<string>();
   const texts = [
@@ -38,9 +59,15 @@ function knownCalendarDates(factsModel: DocumentFactsModel): Set<string> {
   return dates;
 }
 
-export function fabricatedStartDateIssues(markdown: string, factsModel: DocumentFactsModel): ValidationIssue[] {
+export function fabricatedStartDateIssues(markdown: string, factsModel: DocumentFactsModel, materialEvidence: readonly { content?: string }[] = []): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const knownDates = knownCalendarDates(factsModel);
+  // 资料原文里出现的日期同样视为「可溯源」。本检测器口径是「正文日期必须可溯源到绑定资料」，
+  // 而 knownCalendarDates 此前只覆盖**事实抽取表**——抽取器不覆盖文件落款/批复/公告类日期，
+  // 于是「资料里有、事实表里没有」的日期被误判编造。实测（巢湖）：`2026年08月05日` 出自答疑文件落款，
+  // 正文写作「招标文件于X日发布」「计划工期于X日变更修改为330日」（用法正确），却被报 4 处
+  // 「编造开工日期」blocker。并入资料日期后，该类误报消失，而**资料里没有的日期仍照旧判编造**（闸门不放松）。
+  for (const date of materialCalendarDates(materialEvidence)) knownDates.add(date);
   // 绑定资料已给出具体日期时，正文使用资料日期合法；此时不做编造检测
   const scheduleTexts = [...factsModel.schedule, ...factsModel.project].map(fact => `${fact.key || ''}${stringifyFactValue(fact.value)}`).join(' ');
   const hasMaterialDates = CALENDAR_DATE_RE.test(scheduleTexts);
@@ -60,6 +87,7 @@ export function fabricatedStartDateIssues(markdown: string, factsModel: Document
     if (knownDates.has(date)) continue;
     const start = Math.max(0, (match.index || 0) - 40);
     const context = markdown.slice(start, (match.index || 0) + date.length + 40);
+
     if (CLAUSE_DATE_CONTEXT_RE.test(context)) continue;
     // 日期右侧紧邻窗口（截断至首个句读）：法规文件成文日期引用豁免（r28h M8）
     const afterRaw = markdown.slice((match.index || 0) + date.length, (match.index || 0) + date.length + 32);
@@ -2209,6 +2237,11 @@ export function crossSectionNumericConflictIssues(markdown: string): ValidationI
         let lineEnd = markdown.indexOf('\n', match.index);
         if (lineEnd === -1) lineEnd = markdown.length;
         if (NEGATIVE_DECLARATION_RE.test(markdown.slice(lineStart, lineEnd))) continue;
+        // 变更记录豁免（巢湖实测）：答疑澄清把计划工期由 365 改为 330，正文如实并列两值
+        //（「计划工期365日历天，现变更修改为330日历天」）——数值前 20 字内含「变更/澄清/修改为」
+        // 类连接语时该值是变更后口径的引用，属招标文件冲突的唯一正解，不参与互斥池；
+        // 真实矛盾句不含变更连接语（「一处写365另一处写330」），照常互查互斥
+        if (/(?:变更|澄清|修改|调整|更正|修正)(?:为|至|如下|后)/u.test(markdown.slice(Math.max(0, (match.index || 0) - 20), match.index || 0))) continue;
         // r25 扩围（r24b B2 归因·通用）：表格行数值处于资源共用表块语境时不参与互斥池
         if (tableBlockHasSharingContext(markdown, match.index || 0, lineStart)) continue;
         const group = locationGroupForMatch(markdown, match.index || 0, raw, lineStart);
@@ -2314,6 +2347,43 @@ export interface SpecLocationMismatchHit {
  *  同一部位语境出现该部位权威之外的规格（垫层写成 C35 而权威 C15）→ blocker（确定性可判）；
  *  权威映射缺失或规格类型不可推导时静默跳过（不误伤无清单项目）。
  *  4.27.0 A2：扫描结构化（hits）——裁决器与检测端共用同一扫描口径（检测定位=修复定位）。 */
+
+/** 限定词消歧（4.55.12 巢湖实测）：清单同部位多规格时的确定性裁决。
+ * 「防火涂料」在清单有两条：非膨胀型 40mm（钢柱及柱间支撑）、膨胀型 6mm（钢梁及屋面支撑/其他钢构件）；
+ * 正文汇总句「钢梁及屋面支撑耐火极限1.5小时、膨胀型防火涂料厚度3mm」的 3mm 与权威（40mm/6mm）
+ * 均不符，但权威多义 → 原口径只能交 LLM（实机 17 轮修复未收敛，残留为终门禁 blocker）。
+ * 本函数用**正文自身的限定词-规格配对**消歧：取部位词紧邻限定词（如「膨胀型」），统计正文中
+ * 「限定词+部位 … 规格」的配对值（只认权威集内值，本处错值天然被排除），恰有一个权威值时即目标
+ * ——同一限定词不得指向两个口径，正文自洽即可裁决，无须外部锚点。
+ * 保守边界：限定词候选从最长后缀逐级回退；多个候选给出不同目标时判歧义返回 undefined（不改）。 */
+const SPEC_QUALIFIER_STOPWORDS = /^(?:采用|选用|使用|本工程|其中|以及|详见|按|为|的|该|各|所有|其他|喷涂|喷刷|涂刷|施工|设计|用|为)$/u;
+
+const SPEC_QUALIFIER_VERB_RE = /(?:采用|选用|使用|应用|为|用)([一-龥]{2,6})$/u;
+
+/** 限定词归一：汉字串取「动词后限定词」优先（「及屋面支撑采用膨胀型」→「膨胀型」），
+ * 无动词时逐级去前导通用词（「其他钢构件膨胀型」→ 无解 → 返回空串，不作为配对依据）。
+ * 关键：必须按动词切分，否则「非膨胀型」与「膨胀型」会因后缀相同而互串（自造歧义）。 */
+function normalizeSpecQualifier(run: string): string {
+  const afterVerb = SPEC_QUALIFIER_VERB_RE.exec(run)?.[1];
+  const candidate = (afterVerb || run).replace(/^(?:本工程|其中|以及|详见|按|为|的|该|各|所有|其他|喷涂|喷刷|涂刷|施工|设计|中|的)+/u, '');
+  if (candidate.length < 2 || candidate.length > 6) return '';
+  if (SPEC_QUALIFIER_STOPWORDS.test(candidate)) return '';
+  return candidate;
+}
+
+function resolveQualifiedSpecTarget(markdown: string, location: string, locationStart: number, authoritySpecs: Set<string>, pattern: RegExp): string | undefined {
+  if (authoritySpecs.size < 2) return undefined;
+  const run = /([一-龥]{1,12})$/u.exec(markdown.slice(Math.max(0, locationStart - 12), locationStart))?.[1] || '';
+  const qualifier = normalizeSpecQualifier(run);
+  if (!qualifier) return undefined;
+  const pairRe = new RegExp(`([一-龥]{1,12})${escapeRegexLiteral(location)}[^。；;\\n|]{0,24}?(${pattern.source})`, 'gu');
+  const targets = new Set<string>();
+  for (const pair of markdown.matchAll(pairRe)) {
+    if (normalizeSpecQualifier(pair[1] || '') !== qualifier) continue;
+    if (authoritySpecs.has(pair[2] || '')) targets.add(pair[2] || '');
+  }
+  return targets.size === 1 ? [...targets][0] : undefined;
+}
 
 export function scanSpecLocationMismatchHits(markdown: string, specAuthorityMap?: SpecAuthorityMap): SpecLocationMismatchHit[] {
   const hits: SpecLocationMismatchHit[] = [];
@@ -2421,7 +2491,10 @@ export function scanSpecLocationMismatchHits(markdown: string, specAuthorityMap?
       }
       if (authoritySpecs.has(found)) continue;
       // 4.27.0 A2：权威规格唯一（同 pattern 类型）时可确定性裁决口径 → 附替换 span
+      // 4.55.12 扩：权威多义时按「正文同限定词自洽」消歧（见 resolveQualifiedSpecTarget）
       const uniqueAuthority = authoritySpecs.size === 1 ? [...authoritySpecs][0] : undefined;
+      const qualifiedAuthority = uniqueAuthority
+        ?? resolveQualifiedSpecTarget(markdown, location, match.index || 0, authoritySpecs, pattern);
       const valueStart = locationStart + foundAt;
       hits.push({
         issue: {
@@ -2434,12 +2507,12 @@ export function scanSpecLocationMismatchHits(markdown: string, specAuthorityMap?
           suggestion: `按工程量清单将“${location}”的规格统一为 ${[...authoritySpecs].join('/')}；同一材料不同部位允许不同规格，但同一部位不得混用其他部位的规格。`,
         },
         location,
-        replacement: uniqueAuthority
+        replacement: qualifiedAuthority
           ? {
               start: valueStart,
               end: valueStart + found.length,
-              replacement: uniqueAuthority,
-              detail: `规格错位“${location}” ${found}→${uniqueAuthority}（以工程量清单锁定口径为准）`,
+              replacement: qualifiedAuthority,
+              detail: `规格错位“${location}” ${found}→${qualifiedAuthority}（以工程量清单锁定口径为准）`,
             }
           : undefined,
       });
@@ -2613,6 +2686,12 @@ export function ambiguousEitherOrIssues(markdown: string): ValidationIssue[] {
     // 判定条件的规范句式（「或」两侧均为阈值比较动词），非设计决策两可枚举——豁免；
     // 表头单元格内「或」并列（任一选项词在表头列名内）同口径豁免
     if (/(?:可能)?(?:达到|超过|大于|小于|高于|低于|不少于|不超过)或(?:达到|超过|大于|小于|高于|低于|不少于|不超过)/u.test(match[0])) continue;
+    // 失效弧枚举豁免（巢湖实测）：「若方案参数与现场实际脱节，极易造成支护失效或吊装失稳」——
+    // 「或」两侧是同一风险源引发的两种失效后果（并列后果，非并列选项）。取「或」所在小句
+    // （左组可能被 8 字窗口截断，故按标点回溯到小句头）含后果动词即豁免；真两可决策
+    //（「采用钢板桩或排桩」「桩基或独立基础」）小句内为选型动词，不受影响
+    const eitherOrClause = normalized.slice(0, (match.index || 0) + match[1].length).split(/[。；，,、]/u).pop() || '';
+    if (/造成|导致|引发|致使|诱发|酿成/u.test(eitherOrClause)) continue;
     if (inTableHeader(match[1]) || inTableHeader(match[2])) continue;
     const start = Math.max(0, (match.index || 0) - 12);
     // 窗口只到左组末尾：右组吞并的「按」（「…施工顺序按现场进度」）不是决策语境，不纳入
@@ -4525,3 +4604,101 @@ export function countTableArithmeticFindings(markdown: string): number {
   return extractMarkdownTables(markdown).reduce((sum, table) => sum + tableArithmeticFindingsOf(table).length, 0);
 }
 
+
+/**
+ * 项目类型一致性（W1 安全网）：**非乡村类**项目正文出现乡村专有表述，即判内容性质错误。
+ *
+ * 实测缺陷（巢湖）：光电新能源产业园标准化厂房项目被判乡村市政策略，正文出现
+ * 「自然村」10 处、「村内/村庄」9 处、「多村并行」7 处——与项目类型完全矛盾，
+ * 而三层评分（七维/六维/模板化）均未察觉（没有任何一维问过"这段内容符合这个项目吗"）。
+ *
+ * 根治在写入侧（resolveDerivationStrategy 增加类型守卫 + 分组称谓由策略提供）；
+ * 本检测器作为交付前安全网，拦住模型自发写出与历史策略残留。
+ */
+export function projectTypeConsistencyIssues(
+  markdown: string,
+  input: { projectName?: string; blueprintStrategyId?: string },
+): ValidationIssue[] {
+  const projectName = input.projectName || '';
+  // 乡村类判定与写入侧同源：策略显式声明乡村，或项目名含乡村特征词
+  const villageOriented = input.blueprintStrategyId === 'village-municipal'
+    || /自然村|美丽乡村|宜居|乡村振兴|行政村|村组|村庄/u.test(projectName);
+  if (villageOriented) return [];
+  // 乡村专有表述（多字词，避免「村」单词误伤「村道」等中性词）
+  const VILLAGE_TERMS = ['自然村', '村内', '村庄', '村民', '多村并行', '村组', '各村'] as const;
+  const matched = VILLAGE_TERMS
+    .map(term => ({ term, count: (markdown.match(new RegExp(term, 'gu')) || []).length }))
+    .filter(item => item.count > 0);
+  if (matched.length === 0) return [];
+  const total = matched.reduce((sum, item) => sum + item.count, 0);
+  return [{
+    level: 'error',
+    severity: 'blocker',
+    category: 'scope',
+    message: `项目类型与正文用词矛盾：本项目非乡村类${projectName ? `（${projectName}）` : ''}，正文却出现乡村专有表述 ${matched.map(item => `「${item.term}」${item.count} 处`).join('、')}（合计 ${total} 处）`,
+    suggestion: '按项目实际类型统一叙述口径：乡村专有表述应改为对应业务称谓（如「自然村分组」→「单位工程/施工区段」、「村内流水作业」→「区段内流水作业」）；若项目确为乡村类，请检查项目名与蓝图策略选型后重新生成。',
+  }];
+}
+
+/** 图类要求 → 等效数据表主题词（图无法呈现时，同一信息须由数据表承载） */
+const FIGURE_SUBSTITUTE_TABLE_PATTERNS: Array<{ figure: RegExp; table: RegExp; label: string }> = [
+  { figure: /进度|工期|横道|网络/u, table: /进度|工期|节点|工序/u, label: '进度计划表' },
+  { figure: /平面|布置|总平面/u, table: /临时设施|临时用地|平面|设施配置/u, label: '临时设施/用地表' },
+  { figure: /组织|机构|岗位|职责/u, table: /岗位|职责|机构|管理人员/u, label: '项目管理机构/岗位职责表' },
+  { figure: /劳动力|人力/u, table: /劳动力|工种|人数/u, label: '劳动力计划表' },
+  { figure: /机械|设备/u, table: /机械|设备|进场/u, label: '机械设备表' },
+  { figure: /材料|物资/u, table: /材料|物资/u, label: '材料计划表' },
+];
+
+/**
+ * 图类要求承载检查（W5）：**每一个图类要求都必须有承载**——要么正文有规范图题（图位），
+ * 要么有等效数据表（图无法呈现时以表的数据承载同一信息）。
+ * 两者皆无 = 该要求彻底落空（既没图、也没数据），是真实缺口。
+ *
+ * 实测背景：招标文件要求横道图/网络图/平面布置图/项目管理机构图等，而**图本身可能无法产出**
+ * （暗标禁图、无绘图能力）；此时若正文也无等效数据表，该项要求就是空的——现有"图位覆盖"
+ * 只检查有图时的图题落位，不检查「无图时是否有表替代」这一路。
+ */
+export function figureSubstituteTableIssues(
+  markdown: string,
+  figureSpecs: Array<{ chapterTitle: string; name: string }>,
+): ValidationIssue[] {
+  if (figureSpecs.length === 0) return [];
+  const issues: ValidationIssue[] = [];
+  const lines = markdown.split('\n');
+  for (const spec of figureSpecs) {
+    // ① 该图名已有规范图题**且图题下有内容承载**（数据表/文字框图/正文段）→ 图位成立，无需替代。
+    // 4.55.12 巢湖实测归因：原判据只问「图名是否在全文出现」，而链尾注入器会无条件补裸图题行
+    // （形态声明），注入即判成立 → W5 的替代表检查永不执行，正文出现五条裸图题（图1-1…图1-5）
+    // 其下无任何内容，"图位 4/4/题注 10/10"却计满分。现要求图题行后 10 行内出现表格行或
+    // ≥8 个汉字的正文行（文字框图形态），否则不构成承载。
+    const figureNameCore = spec.name.replace(/图$/u, '');
+    if (figureNameCore) {
+      const captionRe = new RegExp(`^图\\s*(?:\\d+(?:[-—–－]\\d+)?\\s+)?${figureNameCore.slice(0, 12).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'u');
+      const captionIndex = lines.findIndex(line => captionRe.test(line.trim()));
+      if (captionIndex >= 0) {
+        const following = lines.slice(captionIndex + 1, captionIndex + 11).map(line => line.trim()).filter(Boolean);
+        const hasTable = following.some(line => /^\|.+\|$/u.test(line));
+        const hasCarrier = following.some(line => !/^\|/u.test(line) && !/^图\s/u.test(line) && line.replace(/[^一-龥]/gu, '').length >= 8);
+        if (hasTable || hasCarrier) continue;
+      }
+    }
+    // ② 无图题（或图题下无内容）→ 须有等效数据表（按图名主题词映射到表主题）
+    const mapping = FIGURE_SUBSTITUTE_TABLE_PATTERNS.find(item => item.figure.test(spec.name));
+    const tablePattern = mapping?.table ?? /./u;
+    const hasSubstitute = lines.some(line => {
+      const trimmed = line.trim();
+      if (!/^\|.+\|$/u.test(trimmed)) return false;
+      return tablePattern.test(trimmed);
+    });
+    if (hasSubstitute) continue;
+    issues.push({
+      level: 'warning',
+      severity: 'warning',
+      category: 'structure',
+      message: `图类要求无承载：「${spec.name}」（${spec.chapterTitle}）既无正文图题、也无等效数据表${mapping ? `（应至少提供${mapping.label}）` : ''}`,
+      suggestion: '该图无法呈现时，须以等效数据表承载同一信息（如进度图→进度计划表、平面布置图→临时设施用地表、机构图→岗位职责表），并加规范题注；两者皆无即该项要求落空。',
+    });
+  }
+  return issues;
+}

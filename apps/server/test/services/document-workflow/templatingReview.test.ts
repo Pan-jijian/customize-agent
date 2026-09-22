@@ -15,7 +15,7 @@ function makeReport(overrides: Partial<TenderBidTemplatingReport> = {}): TenderB
   return {
     level: 'light', fillerRatio: 0.05, fillerSentences: 5, totalSentences: 100,
     vagueHitCount: 0, vaguePhrases: [], duplicateSentenceRate: 0.02, crossProjectResidue: [],
-    difficultyCountermeasureRatio: 0.8, difficultyBothCount: 8, difficultyCountermeasures: 10,
+    difficultyCountermeasureRatio: 0.8, difficultyBothCount: 8, difficultyQuantifiedCount: 8, difficultyCountermeasures: 10,
     difficultyHeavyTemplated: false,
     sentencePatternHits: [],
     ...overrides,

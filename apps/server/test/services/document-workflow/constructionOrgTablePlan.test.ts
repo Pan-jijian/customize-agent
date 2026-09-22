@@ -10,6 +10,9 @@
 import { describe, expect, it } from 'vitest';
 import { attachDiagramArtifacts, collectFigurePlaceholderSpecs, completeTitlelessTableTitles, diagramRequirementsPrompt, ensureFigurePlaceholders, extractDiagramArtifacts, extractFigureCaptions, extractMarkdownTableCandidates, figureCoverage, groupTablePlansForSections, injectTableCaptions, mergeStructureDiagramArtifacts, normalizeFigureNumbering, normalizeFigureSpecName, normalizeTableNumbering, recoverTitlelessTableTitlesFromDrafts, splitGluedTableCaptions, tablePlanExecutionGaps } from '@/services/document-workflow/constructionOrgTablePlan';
 import { scanTableNumberingDefects } from '@/services/document-workflow/structureIntegrityRules';
+import { figureSubstituteTableLines } from '@/services/document-workflow/figureSubstituteTables';
+import { figureSubstituteTableIssues } from '@/services/document-workflow/documentIntegrityChecks';
+import type { BlueprintData } from '@/services/document-workflow/integratedBlueprint';
 import type { DocumentTemplateChapter, PlannedTablePlan } from '@/services/document-workflow/types';
 
 function tablePlan(id: string, section: string): PlannedTablePlan {
@@ -866,5 +869,74 @@ describe('B-T1 图位补位（ensureFigurePlaceholders）与规格汇集', () =>
     const again = ensureFigurePlaceholders(numbered, specs);
     expect(again.markdown).toBe(numbered);
     expect(again.inserted).toEqual([]);
+  });
+});
+
+// ═══ 4.55.12 W5 正文侧承载：图位带数据落地（巢湖实测：裸图题无表） ═══
+
+describe('4.55.12 图类替代表（图位必须带内容承载）', () => {
+  const bp = {
+    schedule: [
+      { seq: 1, label: '施工准备', duration: 10, startDay: 1, endDay: 10, critical: false, basis: '里程碑推导' },
+      { seq: 2, label: '基础与主体施工', duration: 120, startDay: 11, endDay: 130, critical: true, basis: '里程碑推导' },
+    ],
+    tempLand: [{ purpose: '钢筋加工区', area: 800, location: '场地东侧', duration: '全过程', note: '硬化处理', basis: '推导' }],
+  } as unknown as BlueprintData;
+  const callback = { substituteTable: (name: string) => figureSubstituteTableLines(bp, name) };
+  const specs = [{ chapterTitle: '第一章 主要施工方法与技术措施', name: '施工进度计划横道图' }];
+
+  it('既有裸图题（模型只输出图题）→ 就地补等效数据表（蓝图直出，零编造）', () => {
+    const src = ['## 第一章 主要施工方法与技术措施', '', '图1-2 施工进度计划横道图', '', '正文内容。'].join('\n');
+    const result = ensureFigurePlaceholders(src, specs, callback).markdown;
+    expect(result).toContain('| 工序 | 持续天数 | 起止天序 | 线路性质 | 依据 |');
+    expect(result).toContain('| 基础与主体施工 | 120 | 第11～130天 | 关键线路 | 里程碑推导 |');
+    // 图题原位保留（只补内容，不改形态声明）
+    expect(result).toContain('图1-2 施工进度计划横道图');
+    expect(result.indexOf('图1-2')).toBeLessThan(result.indexOf('| 工序 |'));
+  });
+
+  it('完全缺失图位 → 注入图题 + 数据表（不再是裸图题）', () => {
+    const src = ['## 第一章 主要施工方法与技术措施', '', '正文内容。'].join('\n');
+    const result = ensureFigurePlaceholders(src, specs, callback).markdown;
+    expect(result).toContain('图 施工进度计划横道图');
+    expect(result).toContain('| 工序 |');
+  });
+
+  it('幂等：重复重放不再补（图题后 8 行内已有表格行）', () => {
+    const src = ['## 第一章 主要施工方法与技术措施', '', '图1-2 施工进度计划横道图', '', '正文内容。'].join('\n');
+    const once = ensureFigurePlaceholders(src, specs, callback).markdown;
+    expect(ensureFigurePlaceholders(once, specs, callback).markdown).toBe(once);
+  });
+
+  it('无对应蓝图数据的图类不造数据（机构图保持图题，无表）', () => {
+    const src = ['## 第一章 主要施工方法与技术措施', '', '图1-5 项目管理机构图', '', '正文内容。'].join('\n');
+    const result = ensureFigurePlaceholders(src, [{ chapterTitle: '第一章 主要施工方法与技术措施', name: '项目管理机构图' }], callback).markdown;
+    expect(result).toBe(src);
+  });
+
+  it('未传替代表回调时保持原行为（纯图题注入，向后兼容）', () => {
+    const src = ['## 第一章 主要施工方法与技术措施', '', '正文内容。'].join('\n');
+    const result = ensureFigurePlaceholders(src, specs).markdown;
+    expect(result).toContain('图 施工进度计划横道图');
+    expect(result).not.toContain('| 工序 |');
+  });
+});
+
+describe('4.55.12 图类承载检测（裸图题不再判成立）', () => {
+  const specs = [{ chapterTitle: '第一章 主要施工方法与技术措施', name: '施工进度计划横道图' }];
+
+  it('裸图题（图题下无内容）→ 判无承载', () => {
+    const md = ['## 第一章', '', '图1-2 施工进度计划横道图', '', '下一条目内容。'].join('\n');
+    expect(figureSubstituteTableIssues(md, specs)).toHaveLength(1);
+  });
+
+  it('图题下有数据表 → 判已承载', () => {
+    const md = ['## 第一章', '', '图1-2 施工进度计划横道图', '', '| 工序 | 持续天数 |', '| --- | --- |', '| 施工准备 | 10 |'].join('\n');
+    expect(figureSubstituteTableIssues(md, specs)).toEqual([]);
+  });
+
+  it('图题下有文字框图（≥8 汉字正文行）→ 判已承载（正文禁表口径下的合法形态）', () => {
+    const md = ['## 第一章', '', '图1-2 施工进度计划横道图', '', '施工准备（第1～10天）→基础与主体施工（第11～130天）→装饰装修。'].join('\n');
+    expect(figureSubstituteTableIssues(md, specs)).toEqual([]);
   });
 });

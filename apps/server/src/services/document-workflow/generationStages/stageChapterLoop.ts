@@ -69,16 +69,24 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       : chapterBlueprintAuthorityGaps(chapter.title, session.blueprint.integratedBlueprint?.validation, session.planning.chapterIntentClassifier);
     if (blueprintGaps.missing.length > 0) {
       const failedCheckText = blueprintGaps.failedChecks.length > 0 ? `蓝图校验项「${blueprintGaps.failedChecks.join('、')}」未通过` : '蓝图校验未通过或构建异常';
-      session.global.progressStages.push(displayStage({
+      const blockMessage = `${displayChapterTitle(chapter.title)} 依赖蓝图权威 [${blueprintGaps.missing.join('、')}]，${failedCheckText}，已按节点级把关阻断生成`;
+      // 阻断范围=本章，不再等于整篇：本闸原在 try 之外抛错，一章缺权威会把全部已完成章节连同 finalize 一起作废。
+      // 与其它章级失败同口径处理（记录失败消息 + 标记该章 failed + 其余章节照常成稿），
+      // 缺章由 finalize 的 missingChapterCount blocker 经终门禁复核清单交付。
+      // 「禁止无权威成稿」的口径不变——该章就是不产出，而不是降级产出。
+      const blockStage = displayStage({
         type: 'chapter_generation',
         roleId: 'chapter_generation',
         status: 'failed',
-        message: `${displayChapterTitle(chapter.title)} 依赖蓝图权威 [${blueprintGaps.missing.join('、')}]，${failedCheckText}，已按节点级把关阻断生成`,
+        message: blockMessage,
         details: ['数值密集型章所需蓝图权威不可用时禁止无权威成稿', '请检查清单解析与蓝图构建诊断后重试'],
         progress: { current: chapterOrder + 1, total: session.planning.effectiveChapters.length, label: '章节阻断' },
-      }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder }));
+      }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
+      session.global.progressStages.push(blockStage);
+      session.understanding.failedChapterMessages.push(blockMessage);
+      session.understanding.chapterGenerationStagesByOrder[chapterOrder] = blockStage;
       session.global.emitProgress();
-      throw new Error(`${displayChapterTitle(chapter.title)} 依赖蓝图权威 [${blueprintGaps.missing.join('、')}]，${failedCheckText}，已按节点级把关阻断生成`);
+      return undefined;
     }
     const chapterStartedAt = Date.now();
     const chapterProgressIndex = session.global.progressStages.length;

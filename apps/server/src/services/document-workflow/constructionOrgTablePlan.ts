@@ -1016,7 +1016,7 @@ export function diagramRequirementsPrompt(chapter: DocumentTemplateChapter) {
   if (items.length === 0) return '';
   return [
     '【本章图表化呈现要求（硬性验收项）】',
-    '以下要素必须以结构化的「文字框图」或「表格式时间轴」在正文中实际呈现；每项呈现内容结束处另起一行输出规范图题行（格式「图 X-X 图名」，X-X 为章序号与本章图序号，图名即要素名），图题行独立成行、不附加任何说明文字；不得引用未在正文出现的其他图号，不得编造图中数据：',
+    '以下要素必须以 Markdown 数据表（表头字段 + 数据行，数据取自资料，禁止编造）或结构化的「文字框图」「表格式时间轴」在正文中实际呈现（≥3 行要点）；每项呈现内容结束处另起一行输出规范图题行（格式「图 X-X 图名」，X-X 为章序号与本章图序号，图名即要素名），图题行独立成行、不附加任何说明文字；不得引用未在正文出现的其他图号，不得编造图中数据；**只输出图题行而无数据表/框图内容视为该项未落实**：',
     ...items.map((item, index) => `${index + 1}. ${item}`),
   ].join('\n');
 }
@@ -1255,23 +1255,40 @@ function repairMalformedFigureLines(lines: string[]): { lines: string[]; repaire
  * C2：注入前先做非规范图题行就地修复（拆分/补尾词），修复行进入既有图题扫描——根治
  * 「宽松认『像』不补、严格不认」的补了白补死循环。
  */
-export function ensureFigurePlaceholders(markdown: string, specs: FigurePlaceholderSpec[]): { markdown: string; inserted: string[] } {
+export function ensureFigurePlaceholders(markdown: string, specs: FigurePlaceholderSpec[], options: { substituteTable?: (figureName: string) => string[] | undefined } = {}): { markdown: string; inserted: string[] } {
   if (specs.length === 0) return { markdown, inserted: [] };
   const repair = repairMalformedFigureLines(markdown.replace(/\r/gu, '').split('\n'));
   const lines = repair.lines;
   const bodyEnd = figureBodyEndIndex(lines);
   // 已有图题（宽松扫描：编号/无编号形态均可）——防重复注入
   const existingNames: string[] = [];
+  const existingCaptionLines: Array<{ index: number; name: string }> = [];
   for (let index = 0; index < bodyEnd; index += 1) {
     const row = (lines[index] || '').trim();
     const numbered = FIGURE_CAPTION_NUMBERED_RE.exec(row);
     const bare = numbered ? null : FIGURE_CAPTION_BARE_RE.exec(row);
     const name = (numbered ? numbered[2] : bare ? bare[1] : '').trim();
-    if (name && figureCaptionNameLike(name)) existingNames.push(name);
+    if (name && figureCaptionNameLike(name)) {
+      existingNames.push(name);
+      existingCaptionLines.push({ index, name });
+    }
   }
   const missing = specs.filter(spec => !existingNames.some(name => figureNamesMatch(name, normalizeFigureSpecName(spec.name))));
+  // 4.55.12 W5 正文侧承载：图位必须「带内容落地」——图题下无数据表且蓝图有对应数据时，就地补等效数据表
+  // （巢湖实测：模型只输出裸图题，图位被判已承载、W5 替代表从未生成；此处按已有图题与新增图题两路补）
+  const captionBackfill = new Map<number, string[]>();
+  if (options.substituteTable) {
+    for (const caption of existingCaptionLines) {
+      const table = options.substituteTable(caption.name);
+      if (!table || table.length === 0) continue;
+      // 幂等：图题后 8 行内已有表格行则视为已承载（重放零改动）
+      const hasTable = lines.slice(caption.index + 1, caption.index + 9).some(line => /^\s*\|.+\|\s*$/u.test(line));
+      if (!hasTable) captionBackfill.set(caption.index, table);
+    }
+  }
   // C2：无缺失但原地修复过时同样输出修复结果（修复即收益；纯补位路径原样返回）
-  if (missing.length === 0) {
+  // 4.55.12：图题替代表回填（captionBackfill）同为实质变更，一并进入输出路径
+  if (missing.length === 0 && captionBackfill.size === 0) {
     return repair.repaired > 0 ? { markdown: lines.join('\n'), inserted: [] } : { markdown, inserted: [] };
   }
   // 一级标题行索引（章区间=[标题行, 下一个一级标题行)；目录/附表标题不计）
@@ -1300,14 +1317,23 @@ export function ensureFigurePlaceholders(markdown: string, specs: FigurePlacehol
     // C2：注入名归一化（尾词补「图」）——注入行须能被严格判据/编号链/覆盖对账闭环识别
     const injectedName = normalizeFigureSpecName(spec.name);
     bucket.push(`图 ${injectedName}`);
+    // 4.55.12 W5：图位注入即带等效数据表（图题 + 数据行，数据源为一体化蓝图，零编造）
+    const table = options.substituteTable?.(injectedName);
+    if (table && table.length > 0) bucket.push('', ...table, '');
     insertAt.set(end, bucket);
     inserted.push(`${spec.chapterTitle}：「${injectedName}」`);
+  }
+  if (captionBackfill.size > 0) {
+    for (const [captionIndex, table] of captionBackfill) inserted.push(`补替代表于图题行 ${captionIndex + 1}（${table.length} 行）`);
   }
   const output: string[] = [];
   for (let index = 0; index < lines.length; index += 1) {
     const bucket = insertAt.get(index);
     if (bucket) output.push('', ...bucket, '');
     output.push(lines[index]);
+    // 4.55.12：既有裸图题就地补等效数据表（紧随图题行之后，前置空行分隔；尾随空行交给原稿）
+    const backfill = captionBackfill.get(index);
+    if (backfill) output.push('', ...backfill);
   }
   // bodyEnd=文末（无附表区）时注入点在数组外：循环结束后补处理
   const trailing = insertAt.get(lines.length);

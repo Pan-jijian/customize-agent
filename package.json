@@ -17,7 +17,8 @@
     "version-packages": "changeset version",
     "release:version": "changeset version && pnpm install",
     "release:publish": "pnpm run release",
-    "release": "pnpm run check && pnpm run build && changeset publish"
+    "release": "pnpm run check && pnpm run build && changeset publish && node scripts/verify-publish.mjs",
+    "verify:publish": "node scripts/verify-publish.mjs"
   },
   "keywords": [
     "ai-agent",

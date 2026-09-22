@@ -91,3 +91,27 @@ describe('classifyPoolNoiseText（D6 池噪声形态判定与防误伤）', () =
     expect(POOL_NOISE_RULE_SOURCES.every(source => String(source).length > 0)).toBe(true);
   });
 });
+
+describe('4.55.12 参数池噪声扩围（巢湖实测缺失项形态）', () => {
+  it('章节号+题名粘连（「2.1招标」）→ numeric_smear', () => {
+    expect(classifyPoolNoiseText('2.1招标')).toBe('numeric_smear');
+    expect(classifyPoolNoiseText('1.3.2计划工期')).toBe('numeric_smear');
+  });
+  it('计量单位结尾的正当值不受影响', () => {
+    expect(classifyPoolNoiseText('1.5米')).toBeUndefined();
+    expect(classifyPoolNoiseText('2.5m')).toBeUndefined();
+    expect(classifyPoolNoiseText('3.2平方米')).toBeUndefined();
+    expect(classifyPoolNoiseText('C30')).toBeUndefined();
+    expect(classifyPoolNoiseText('MU20废渣混凝土实心砖')).toBeUndefined();
+  });
+  it('项目编号+序号粘连（「2026AFMGZ508282.3」）→ numeric_smear', () => {
+    expect(classifyPoolNoiseText('2026AFMGZ508282.3')).toBe('numeric_smear');
+  });
+  it('页眉页码串格（「第页共页」）→ table_fragment', () => {
+    expect(classifyPoolNoiseText('第页共页')).toBe('table_fragment');
+  });
+  it('叙述型长值不误伤（截断散文类判据因「建设地点位于…」误伤风险已放弃，见注释）', () => {
+    expect(classifyPoolNoiseText('建设地点位于巢湖市居巢经开区义成路与南外环路交口北侧')).toBeUndefined();
+    expect(classifyPoolNoiseText('巢湖市光电新能源产业园项目东区标准化厂房二标段位于巢湖市居巢')).toBeUndefined();
+  });
+});

@@ -690,7 +690,7 @@ function makeTemplatingReport() {
   return {
     level: 'light' as const, fillerRatio: 0, fillerSentences: 0, totalSentences: 1,
     vagueHitCount: 0, vaguePhrases: [], duplicateSentenceRate: 0, crossProjectResidue: [],
-    difficultyCountermeasureRatio: 1, difficultyBothCount: 1, difficultyCountermeasures: 1, difficultyHeavyTemplated: false,
+    difficultyCountermeasureRatio: 1, difficultyBothCount: 1, difficultyQuantifiedCount: 1, difficultyCountermeasures: 1, difficultyHeavyTemplated: false,
     sentencePatternHits: [],
   };
 }

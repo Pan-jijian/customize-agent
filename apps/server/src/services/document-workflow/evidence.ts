@@ -6,6 +6,7 @@ import { EVIDENCE_PARAMETER_RE, HAS_QUANTIFIED_VALUE_RE } from './parameterPatte
 import { evidenceMatchesFact } from './factMatching';
 import { selectByScore, textImportanceScore } from './selection';
 import { tuningProfile } from './tuningProfile';
+import { stripMaterialResidueLines } from './materialResidue';
 
 export function readableSourceLabel(item: Pick<DocumentEvidence, 'roleId' | 'processingType' | 'sectionTitle'>, index = 0) {
   const role = item.processingType === 'drawing' || item.roleId?.includes('drawing') ? '视觉资料'
@@ -16,18 +17,20 @@ export function readableSourceLabel(item: Pick<DocumentEvidence, 'roleId' | 'pro
 }
 
 export function cleanEvidenceText(content: string) {
-  return [...content]
-    .filter(char => {
-      const code = char.charCodeAt(0);
-      return code === 9 || code === 10 || code === 13 || code >= 32;
-    })
-    .join('')
-    .replace(CAD_ENTITY_TOKEN_RE, '')
-    .replace(FILE_NAME_RE, '')
-    .replace(/\b(?:Model|Layout\d*|Entity|Handle|ObjectId|ByLayer|Continuous)\b/giu, '')
-    .replace(/[\t ]{2,}/gu, ' ')
-    .replace(/\n{3,}/gu, '\n\n')
-    .trim();
+  return stripMaterialResidueLines(
+    [...content]
+      .filter(char => {
+        const code = char.charCodeAt(0);
+        return code === 9 || code === 10 || code === 13 || code >= 32;
+      })
+      .join('')
+      .replace(CAD_ENTITY_TOKEN_RE, '')
+      .replace(FILE_NAME_RE, '')
+      .replace(/\b(?:Model|Layout\d*|Entity|Handle|ObjectId|ByLayer|Continuous)\b/giu, '')
+      .replace(/[\t ]{2,}/gu, ' ')
+      .replace(/\n{3,}/gu, '\n\n')
+      .trim(),
+  );
 }
 
 export function evidenceQualityScore(content: string) {

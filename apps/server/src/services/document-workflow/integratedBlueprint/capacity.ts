@@ -401,12 +401,73 @@ export interface ChapterSupplyDemandAssessment {
   parameterShortfall: number;
   /** 同源处置建议（充足时为空） */
   remediation: string[];
+  /** 供给分通道计数（供诊断消息说明「可用量化参数 N 个」是怎么数出来的） */
+  supplyChannels?: ChapterParameterSupplyChannels;
+}
+
+/** 章级可用量化参数的分通道计数（去重后的并集为 total） */
+export interface ChapterParameterSupplyChannels {
+  /** 蓝图 must_cite 参数条数 */
+  blueprint: number;
+  /** 本章责任清单行的规格-数量对条数 */
+  bill: number;
+  /** 本章证据中提取的精确参数 token 数 */
+  evidence: number;
+  /** 本章需求解析出的量化事实值条数（写作端 factsForChapterNeeds 通道） */
+  factNeeds: number;
+  /** 各通道去重后的可用参数总数 */
+  total: number;
+}
+
+/**
+ * 章级可用量化参数统计（供给面真实口径）。
+ *
+ * **为什么不是只数蓝图 requiredParams**：`requiredParams` 只从清单工作包的 `quantities` 生成，
+ * 因此凡不是清单驱动工作包的章（工程概况、物资计划、质量/安全/工期措施…）恒为 0 —— 实测
+ * 丰乐镇 9/10 章被判「可用量化参数 0 个」，而同一套蓝图产出的成稿实测每千字 2.5 个量化参数
+ * （专业评分「事实落位率」）、2.2 个工艺参数（「工艺参数密度」），两者不可能同时成立。
+ * 正文里的量化参数来自多路供给，只数一路就会把「本项目正常」误报成「要不到料」。
+ *
+ * 现口径与写作端同源：写作层 `buildChapterFactCoverageContext` 的精确参数池 =
+ * 本章证据精确 token ∪ 事实值，此处再并入蓝图 must_cite 与本章责任清单行的规格-数量对，
+ * 按归一化 token 去重后计数。
+ */
+export function collectChapterParameterSupply(input: {
+  blueprintParams?: Iterable<string>;
+  billSpecs?: Iterable<string>;
+  evidenceTokens?: Iterable<string>;
+  /** 本章需求解析出的量化事实值（写作端 factsForChapterNeeds 通道，已由调用方按 HAS_QUANTIFIED_VALUE_RE 过滤） */
+  factValues?: Iterable<string>;
+}): ChapterParameterSupplyChannels {
+  const normalize = (value: string) => value.trim().toLowerCase().replace(/\s+/gu, '');
+  const collect = (values?: Iterable<string>) => {
+    const set = new Set<string>();
+    for (const value of values ?? []) {
+      const key = normalize(String(value ?? ''));
+      if (key) set.add(key);
+    }
+    return set;
+  };
+  const blueprint = collect(input.blueprintParams);
+  const bill = collect(input.billSpecs);
+  const evidence = collect(input.evidenceTokens);
+  const factNeeds = collect(input.factValues);
+  const total = new Set([...blueprint, ...bill, ...evidence, ...factNeeds]).size;
+  return { blueprint: blueprint.size, bill: bill.size, evidence: evidence.size, factNeeds: factNeeds.size, total };
+}
+
+/** 供给分通道明细（仅当调用方给了明细时拼接，保持历史消息对既有调用方逐字兼容） */
+function supplyChannelLine(channels?: ChapterParameterSupplyChannels): string {
+  if (!channels) return '';
+  return `可用参数来源：蓝图 must_cite ${channels.blueprint} 个、本章责任清单行规格 ${channels.bill} 个、本章证据精确 token ${channels.evidence} 个、本章需求解析事实值 ${channels.factNeeds} 个（按归一化 token 去重后共 ${channels.total} 个）。`;
 }
 
 export function assessChapterSupplyDemand(input: {
   chapterTitle: string;
   targetWords: number;
   availableParameters: number;
+  /** 供给分通道明细（可选；提供后诊断消息会说明计数来源） */
+  supplyChannels?: ChapterParameterSupplyChannels;
 }): ChapterSupplyDemandAssessment {
   const targetWords = Math.max(0, Math.round(input.targetWords));
   const availableParameters = Math.max(0, Math.round(input.availableParameters));
@@ -414,9 +475,11 @@ export function assessChapterSupplyDemand(input: {
   const requiredParameters = Math.ceil((targetWords / 1000) * CHAPTER_PARAMETER_DENSITY_PER_1000);
   const parameterShortfall = Math.max(0, requiredParameters - availableParameters);
   const sufficient = targetWords === 0 || parameterShortfall === 0;
+  const channelLine = supplyChannelLine(input.supplyChannels);
   const remediation = sufficient ? [] : [
-    `本章目标 ${targetWords} 字，可用量化参数 ${availableParameters} 个（${densityPer1000.toFixed(2)}/千字），低于检测端同源密度线 ${CHAPTER_PARAMETER_DENSITY_PER_1000}/千字，缺 ${parameterShortfall} 个。`,
-    '二选一（须与检测口径同源，只动一端会重新制造「要不到料却照常扣分」）：① 扩注入预算——把本章参数池的取用优先级提前、放宽本章参数配额上限；② 同步下调——把本章目标字数降到 ' + `${Math.floor((availableParameters / CHAPTER_PARAMETER_DENSITY_PER_1000) * 1000)} 字` + ' 附近，使供给与要求对齐（目标字数与密度要求必须一起改）。',
+    `本章目标 ${targetWords} 字，可用量化参数 ${availableParameters} 个（${densityPer1000.toFixed(2)}/千字），低于本条要求线 ${CHAPTER_PARAMETER_DENSITY_PER_1000}/千字（与块质检/构造审计同值），缺 ${parameterShortfall} 个。`,
+    ...(channelLine ? [channelLine] : []),
+    '二选一（端点必须一起动，只动一端会重新制造「要不到料却照常扣分」）：① 扩供给——把本章责任清单行/证据的取用优先级提前、放宽本章参数配额上限；② 同步下调——把本章目标字数降到 ' + `${Math.floor((availableParameters / CHAPTER_PARAMETER_DENSITY_PER_1000) * 1000)} 字` + ' 附近，使供给与要求对齐（目标字数与密度要求必须一起改）。',
   ];
-  return { chapterTitle: input.chapterTitle, targetWords, availableParameters, densityPer1000, requiredDensityPer1000: CHAPTER_PARAMETER_DENSITY_PER_1000, sufficient, requiredParameters, parameterShortfall, remediation };
+  return { chapterTitle: input.chapterTitle, targetWords, availableParameters, densityPer1000, requiredDensityPer1000: CHAPTER_PARAMETER_DENSITY_PER_1000, sufficient, requiredParameters, parameterShortfall, remediation, supplyChannels: input.supplyChannels };
 }

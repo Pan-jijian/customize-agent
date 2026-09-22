@@ -247,7 +247,12 @@ export function deriveMilestonesFromBoq(boq: BillOfQuantitiesResult, totalDays: 
       milestones.push({ key: group.key, label: group.label, duration: equalShare, basis: `分部特征未命中策略分组（非 prep 权重占比 ${totalWeight > 0 ? (rawOtherWeight / totalWeight * 100).toFixed(1) : '0.0'}% < 5%），按总工期均分降级（每组 ${equalShare} 天）` });
       continue;
     }
-    // 权重 0 兜底（丰乐镇第 3 轮：亮化分部工程量权重 0.0% → 1 天荒谬值；下限 2 天）
+    // 不适用阶段剔除：权重 0 = 本项目清单里没有该分部的任何条目 → 它不是本项目的阶段。
+    // 历史实现给权重 0 的阶段发 2 天下限（注释「1 天荒谬值」），于是产出一个本项目并不存在的
+    // 阶段与工期，写作层照着写出无依据的该分部内容，劳动力派生又因查无条目而报「资料不足」假告警
+    // （丰乐镇：策略模板含「亮化与收尾工程」，但清单 904 条目中无任何亮化条目）。
+    // 口径：策略模板只是候选阶段，命中不了清单就不产出——不由兜底凭空造阶段。
+    if (group.weight <= 0) continue;
     const duration = Math.max(2, Math.round((group.weight / otherWeight) * remainingDays * 0.95));
     milestones.push({ key: group.key, label: group.label, duration, basis: `分部工程量权重 ${(group.weight / otherWeight * 100).toFixed(1)}% × 剩余工期 ${remainingDays} 天` });
   }
@@ -312,7 +317,7 @@ export function deriveTempUtilitiesFromBoq(equipment: BlueprintEquipmentItem[], 
 /** L3：施工部署（锚定清单村分组与分部编排顺序；无村分组时按策略组兑底话术，不再输出村域话术） */
 export function deriveConstructionDeployment(boq: BillOfQuantitiesResult, strategy: BlueprintDerivationStrategy): BlueprintDeployment {
   const villages = boq.villages.map(village => village.villageGroup);
-  const sections = villages.map(name => ({ name, basis: '清单按自然村分组（工程名称）' }));
+  const sections = villages.map(name => ({ name, basis: `清单按${strategy.groupLabel}（工程名称）` }));
   // 多村平行话术仅村域组提供（multiVillageFlow）；其他类型多段分组也输出通用兑底（宁缺毋错，不输出「村内流水作业」错配话术）
   const flow = sections.length > 1
     ? (strategy.multiVillageFlow?.(sections.length) || strategy.deploymentFlowFallback)
@@ -409,8 +414,12 @@ export function buildBlueprintData(input: {
   const strategy = input.strategy;
   const quantities = deriveQuantitiesFromBoq(boq);
   const redLineFacts = extractRedLineFacts(boq);
-  // 自然村数量红线事实（P2.4）：项目名正则提取（村数表述形如「N个×××自然村」）优先，降级清单分组数；拦截跨项目残留「9 个自然村」
-  const villageCount = extractVillageCount(input.projectName, input.basicFacts || '') || boq.villages.length;
+  // 自然村数量红线事实（P2.4）：项目名正则提取（村数表述形如「N个×××自然村」）优先，降级清单分组数；拦截跨项目残留「9 个自然村」。
+  // 仅乡村类项目（strategy.villageOriented）产出：非乡村项目把清单分组数当「自然村数量」会造出错误红线事实，
+  // 并经 citation.ts 的 village-count 冲突判定污染全文口径（巢湖产业园项目实测）。
+  const villageCount = strategy.villageOriented
+    ? (extractVillageCount(input.projectName, input.basicFacts || '') || boq.villages.length)
+    : 0;
   if (villageCount > 0) {
     redLineFacts.push({ key: '自然村数量', value: `${villageCount} 个自然村`, source: '招标文件项目名称（清单自然村分组兜底）' });
   }
@@ -436,12 +445,29 @@ export function buildBlueprintData(input: {
   if (milestones.some(item => item.basis.includes('均分降级'))) {
     warnings.push('里程碑分组未命中策略特征（非 prep 权重占比 < 5%），已按总工期均分降级，详见 data.milestones.basis');
   }
+  // 策略阶段未命中清单 → 该阶段不产出（见 deriveMilestonesFromBoq）。显式告知而不是静默丢弃：
+  // 这既可能是「本项目确实没有该分部」，也可能是「清单解析漏了」或「策略分部特征没覆盖到」，
+  // 用户看到才知道该去查哪一端。注意措辞是「本阶段不产出」，不是「劳动力资料不足」——
+  // 后者会把「本项目没有的分部」误报成「数据缺失」（丰乐镇亮化分部的历史假告警形态）。
+  const derivedPhaseKeys = new Set(milestones.map(item => item.key));
+  const unmatchedPhases = strategy.milestoneGroups.slice(1).filter(group => !derivedPhaseKeys.has(group.key));
+  if (unmatchedPhases.length > 0) {
+    warnings.push(`策略阶段未命中清单，本阶段不产出：${unmatchedPhases.map(group => group.label).join('、')}（本项目清单中无对应分部条目；若确有该分部工作，请检查清单解析完整性或策略分部特征是否覆盖）`);
+  }
   if (labor.peakValue <= 0) {
     warnings.push('劳动力数据未产出（清单中无可用工效推导条目）：正文不引用劳动力数值，不得自行估计');
   } else {
-    const tailGroup = strategy.milestoneGroups[strategy.milestoneGroups.length - 1];
+    // 核对对象必须是**实际产出**的最后一个阶段，而不是策略模板里的最后一个：
+    // 模板阶段命中不了清单时本就不产出（见 deriveMilestonesFromBoq 不适用阶段剔除），
+    // 拿模板去核对等于给「本项目没有的分部」报「资料不足」——丰乐镇亮化分部即此形态的假告警。
+    const tailGroup = milestones[milestones.length - 1];
     if (tailGroup && !labor.byPhase.some(item => item.phase === tailGroup.label)) {
-      warnings.push(`分阶段劳动力缺「${tailGroup.label}」行：该阶段无工效可推导条目（资料不足，不编造人数）`);
+      // 归因口径（丰乐镇亮化分部实测）：该阶段**有**清单条目（如一般路灯/配电箱/电力电缆），
+      // 条目在 deriveLaborFromBoq 里因「分组落入 fallback 组（安装工程）→ 系数单位不匹配（项 vs 套/m/台）
+      // 或系数占位为 0」而被跳过，因此**不是"资料不足"，而是"无可用工效系数"**。
+      // 原文案「资料不足，不编造人数」会把策略组未配置该类工效的数据缺口误述成资料缺失，
+      // 使用者据此去补资料是白费——应指向策略组工效配置（laborQuotaTable 接入点）。
+      warnings.push(`分阶段劳动力缺「${tailGroup.label}」行：该阶段条目无可用工效系数（分组/计量单位未匹配到工效，策略组未配置该类工效；不编造人数）`);
     }
   }
   if (!climate.rainySeason) {
@@ -451,7 +477,7 @@ export function buildBlueprintData(input: {
     strategyId: strategy.id,
     project: {
       name: input.projectName || '（待提取：项目名称）',
-      scope: boq.villages.length > 0 ? `${boq.villages.length} 个自然村分组（${boq.villages.map(village => village.villageGroup).join('、')}）` : '',
+      scope: boq.villages.length > 0 ? `${boq.villages.length} 个${strategy.groupLabel}（${boq.villages.map(village => village.villageGroup).join('、')}）` : '',
       works,
       location,
     },

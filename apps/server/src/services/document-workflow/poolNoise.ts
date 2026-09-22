@@ -76,6 +76,18 @@ const SECTION_NUMBER_HEAD_RE = /^[1-9]\d?(?:\.\d{1,2}){2,}[^\d\s]{0,4}$/u;
 /** OCR 零串残片（3+ 连续零打头：「000L」「000g」图纸文字识别错切；「0.08」类正当值含小数点/非零数字不命中） */
 const OCR_ZERO_SMEAR_RE = /^0{3,}[A-Za-z]?$/u;
 
+/** 章节号+短尾残片扩围（4.55.12 巢湖实测：「2.1招标」——招标文件条款编号与题名粘连，值是条款标题
+ * 而非工程参数，正文无从落位且永久拉低义务满足率）。尾段限定 1-4 个汉字**且非计量单位**：
+ * 「1.5米」「2.5m」类正当值尾巴是单位词（且拉丁单位不命中），不受影响。 */
+const SECTION_TITLE_SMEAR_RE = /^[1-9]\d?(?:\.\d{1,2}){1,3}[一-龥]{1,4}$/u;
+const MEASURE_TAIL_RE = /(?:米|厘米|毫米|公里|吨|公斤|千克|平方|立方|天|年|月|日|小时|分钟|个|项|套|台|次|份|人|元|万元|度|伏|安|瓦|帕|吨位)$/u;
+
+/** 编号尾粘连（4.55.12 巢湖实测：「2026AFMGZ508282.3」——项目编号 + 表格序号粘连，非可落位参数） */
+const ID_TAIL_SMEAR_RE = /^\d{4}[A-Za-z]{1,8}\d{4,}\.\d+$/u;
+
+/** 页眉/页码串格（4.55.12 巢湖实测：「第页共页」——图签页码栏 OCR 串格产物） */
+const PAGE_HEADER_SMEAR_RE = /第页共页|^第?\d*页共\d*页$/u;
+
 /** 表号/索引标号残片（「H.4」「E.1」「V10.0」独立存在无落位语义；强度等级类整体豁免——
  * M/C 砂浆混凝土「M7.5」、Mb/Ms 砂浆「Mb5.0」、L/LC 轻集料混凝土「LC5.0」、A 加气块「A3.5」、
  * DP 抹灰石膏「DP5.0」均为可落位真实参数，s28l 实测 LC5.0 正文已锚定被误出池） */
@@ -125,6 +137,9 @@ export function classifyPoolNoiseText(text: string): PoolNoiseCategory | undefin
   if (signatureHits >= 1 && !hasConstraint) return 'drawing_signature';
   // 编号粘连族（残片高置信形态，不设约束词守卫——残片条款可含「方案/计划」类词）
   if (NUMERIC_SMEAR_RE.test(normalized)) return 'numeric_smear';
+  if (SECTION_TITLE_SMEAR_RE.test(normalized) && !MEASURE_TAIL_RE.test(normalized)) return 'numeric_smear';
+  if (ID_TAIL_SMEAR_RE.test(normalized)) return 'numeric_smear';
+  if (PAGE_HEADER_SMEAR_RE.test(normalized)) return 'table_fragment';
   if (SECTION_NUMBER_HEAD_RE.test(normalized)) return 'numeric_smear';
   if (OCR_ZERO_SMEAR_RE.test(normalized)) return 'numeric_smear';
   if (INDEX_LABEL_RE.test(normalized)) return 'numeric_smear';
@@ -157,6 +172,10 @@ export const POOL_NOISE_RULE_SOURCES: ReadonlyArray<unknown> = [
   TABLE_FRAGMENT_RE,
   NUMERIC_SMEAR_RE,
   SECTION_NUMBER_HEAD_RE,
+  SECTION_TITLE_SMEAR_RE,
+  MEASURE_TAIL_RE,
+  ID_TAIL_SMEAR_RE,
+  PAGE_HEADER_SMEAR_RE,
   OCR_ZERO_SMEAR_RE,
   INDEX_LABEL_RE,
   FORM_PLACEHOLDER_RE,

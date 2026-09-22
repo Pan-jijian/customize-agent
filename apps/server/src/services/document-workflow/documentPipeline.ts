@@ -16,6 +16,7 @@ import { stageTableRepair } from './finalize/repairRounds/tableRepair';
 import { stageSemanticChoice } from './finalize/repairRounds/semanticChoice';
 import { stageDeterministicStage5 } from './finalize/repairRounds/deterministicStage5';
 import { stagePostReviewSurface, runSurfaceDeterministicCleans, replayBlueprintCitationNumericFixes, replayStage5FactsModelNumericFixes, replaySurfacePunctuationClosure } from './finalize/repairRounds/postReviewSurface';
+import { backfillUsedNotDeclared } from './finalize/repairRounds/basisRegulationsCrossRepair';
 import { stageFactDistribution } from './finalize/repairRounds/factDistribution';
 import { stageNumericVerification } from './finalize/repairRounds/numericVerification';
 import { replayRequirementTailClosure, stageRequirementResponseRepair } from './finalize/repairRounds/requirementResponseRepair';
@@ -37,13 +38,34 @@ import { stageTemplatingTailReplay } from './finalize/repairRounds/templatingTai
 import { stageFinalGate } from './finalize/finalGate';
 import { stageHealthDiagnosis } from './finalize/healthDiagnosis';
 
+/**
+ * 交付前缺章判定：返回 null = 可继续 finalize 交付；返回字符串 = 中断原因。
+ *
+ * 只有「零章节」才是真正无可交付物（没有正文可组合）。**缺章不再致命**——章级失败已由
+ * stageChapterLoop 的 catch 记录进 failedChapterMessages 并标记该章 failed，其余章节照常成稿；
+ * finalize 内 rebuildAndRecompute 的 missingChapterCount 会把「部分章节生成失败：N 章」升级为
+ * blocker，经终门禁复核清单（buildSuspensionChecklist）呈现，文档状态 completed_with_issues
+ * ——可查看/可导出/可基于 checkpoint 续修（4.50「交付与修复解耦」口径）。
+ *
+ * 历史缺陷：此处曾对「显式大纲缺章」（hasExplicitOutline && 缺章）直接抛错，把已完成的其他章节
+ * 连同 finalize 全部修复轮与导出门禁一起作废——本机历史实测 21 次中断（8 次「规划块全部失败」
+ * + 13 次「大模型未返回有效正文」）；且同一缺章在模板大纲下可交付、在显式大纲下却整篇失败，
+ * 口径自相矛盾。缺章的信息量已由 blocker 精确表达，不需要用「整篇作废」再表达一次。
+ */
+export function missingChapterAbortReason(input: { chapterDraftCount: number; failedChapterMessages: string[] }): string | null {
+  if (input.chapterDraftCount === 0) {
+    return `章节生成未完成：${input.failedChapterMessages.join('；') || '没有生成任何有效章节'}`;
+  }
+  return null;
+}
+
 export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<GeneratedDocumentDraft> {
   // P23：注册表一致性检查（每次最终化前执行，开销 O(n) 字符串比对可忽略）——
   // 修复器锚定缺失/权威口径拉扯/llm-patch 缺 patchGuard 任一违反即抛错显性暴露，不静默降级
   assertRegistryConsistency();
   const {
     chapterDraftsByOrder, chapterGenerationStagesByOrder, chapterGenerationStages, effectiveChapters,
-    input, hasExplicitOutline, failedChapterMessages,
+    input, failedChapterMessages,
   } = p;
   const { requirement } = input;
 
@@ -53,8 +75,8 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   const chapterDrafts = chapterDraftsByOrder.filter((item): item is DocumentDraftChapter => Boolean(item));
   session.chapterDrafts = chapterDrafts;
   chapterGenerationStages.push(...chapterGenerationStagesByOrder.filter((item): item is DocumentExecutionStage => Boolean(item)));
-  if (chapterDrafts.length === 0) throw new Error(`章节生成未完成：${failedChapterMessages.join('；') || '没有生成任何有效章节'}`);
-  if (hasExplicitOutline && chapterDrafts.length < effectiveChapters.length) throw new Error(`OUTLINE 指定 ${effectiveChapters.length} 章，实际只生成 ${chapterDrafts.length} 章：${failedChapterMessages.join('；') || '部分章节未生成'}`);
+  const abortReason = missingChapterAbortReason({ chapterDraftCount: chapterDrafts.length, failedChapterMessages });
+  if (abortReason) throw new Error(abortReason);
 
   await stageRebuildFacts(session);
   await stageValidationPack(session);
@@ -204,6 +226,18 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // 追加块（补写/删除类）仍可能带回标点叠用残留（「。。」句段拼接、「、、」并列删除），
   // round-2 链无二次消费点直坠终门禁——同源修复器在终门禁前最后收口（终门禁所检 = 交付所存）
   await replaySurfacePunctuationClosure(session);
+  // 链尾编制依据回补（确定性，零 LLM）：正文引用但未列入编制依据小节的标准，按编号族补入编制依据。
+  // 此处是**真正的链尾**——其后无任何改写正文的轮次，故轮次中途新增的引用（链尾要求收口的补写会带入
+  // 新的《》引用）才有收口点。实测巢湖：链路中段的 basis-regulations-cross-repair 报「未记录」，
+  // 而终检报 13 处「引用未声明」，即轮次之后新增的引用无人收口。
+  {
+    const basisBackfill = backfillUsedNotDeclared(session);
+    if (basisBackfill.inserted > 0) {
+      session.finalMarkdown = session.rebuildFinalMarkdown();
+      await session.recomputeFinalValidationBundle();
+      session.generationDiagnostics.llm.lastInfo = `链尾编制依据回补：${basisBackfill.inserted} 条引用未声明的标准补入编制依据小节（${basisBackfill.labels.slice(0, 6).join('、')}）`;
+    }
+  }
   await stageFinalGate(session);
   // P18 自动健康诊断：finalize 末尾纯读 telemetry 产出显性告警（零 LLM 成本），
   // 告警写回 telemetry.healthAlerts 随 reviewMetadata 归档（导出时进入 exportReports 历史对比存储）

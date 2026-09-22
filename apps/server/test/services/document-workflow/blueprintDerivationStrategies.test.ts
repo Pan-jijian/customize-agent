@@ -272,11 +272,15 @@ describe('里程碑均分兜底（P0：根治跨类型「360 天工期只推导 
     expect(sum).toBeLessThanOrEqual(360);
   });
 
-  it('分部特征权重足够 → 不触发均分降级（房建组）', () => {
+  it('分部特征权重足够 → 不触发均分降级（房建组）；未命中清单的策略阶段不产出', () => {
     const milestones = deriveMilestonesFromBoq(buildingBoq(), 360, buildingStrategy);
-    expect(milestones.length).toBe(buildingStrategy.milestoneGroups.length);
+    // 命中清单的策略阶段逐一出产（基准阶段 + 有工程量权重的分部）
     expect(milestones.map(item => item.label)).toEqual(expect.arrayContaining(['基础工程', '主体结构工程', '装饰装修工程']));
+    expect(milestones.length).toBeLessThanOrEqual(buildingStrategy.milestoneGroups.length);
     for (const item of milestones) expect(item.basis).not.toContain('均分降级');
+    // 房建夹具无任何安装类条目 → 「安装与收尾工程」不产出（不给它造 2 天兜底工期）
+    expect(milestones.some(item => item.key === 'mep')).toBe(false);
+    for (const item of milestones) expect(item.duration || 0).toBeGreaterThan(0);
   });
 });
 
@@ -353,9 +357,11 @@ describe('房建组端到端（二期 fixture：机械/部署/重难点）', () 
     expect(rebar?.basis).not.toContain('FJ-');
     expect(result.data.climate).toEqual({ rainySeason: '6-8月', highTemp: '7-8月', winter: '12-2月' });
     expect(result.data.keyDifficulties.map(item => item.name)).toContain('垂直运输组织');
-    // 尾组「安装与收尾工程」无工效条目 → 缺行显式警告（不兜底不编造），全量仅此 1 条
-    expect(result.diagnostics.warnings).toHaveLength(1);
-    expect(result.diagnostics.warnings[0]).toContain('分阶段劳动力缺「安装与收尾工程」行');
+    // 「安装与收尾工程」在本项目清单中无任何条目 → 该策略阶段整体不产出（不造 2 天兜底工期），
+    // 缺口以「策略阶段未命中清单，本阶段不产出」显式暴露（不再误报为「分阶段劳动力缺行／资料不足」）
+    expect(result.data.milestones.some(item => item.key === 'mep')).toBe(false);
+    expect(result.diagnostics.warnings.some(warning => warning.includes('策略阶段未命中清单') && warning.includes('安装与收尾工程'))).toBe(true);
+    expect(result.diagnostics.warnings.some(warning => warning.includes('分阶段劳动力缺'))).toBe(false);
   });
 
   it('buildBlueprintData（general 无地点）：气候置空 + 诊断警告（宁缺毋错）', () => {
@@ -405,11 +411,19 @@ describe('跨类型端到端同等水平（六类型全链路完整性）', () =
         strategy,
       });
       const data = result.data;
-      // 里程碑：策略组全部分组覆盖，工期非零且不超总工期
-      expect(data.milestones.length).toBe(strategy.milestoneGroups.length);
+      // 里程碑：命中的策略阶段逐一出产（工期非零且不超总工期）；未命中的阶段不产出（不造兜底工期），
+      // 但必须在诊断里显式暴露——静默丢阶段比造阶段更糟
+      expect(data.milestones.length).toBeGreaterThanOrEqual(2);
+      expect(data.milestones.length).toBeLessThanOrEqual(strategy.milestoneGroups.length);
+      expect(data.milestones[0]!.key).toBe('prep');
       for (const item of data.milestones) {
         expect(item.duration).toBeGreaterThanOrEqual(2);
         expect(item.basis).toBeTruthy();
+      }
+      const derivedPhaseKeys = new Set(data.milestones.map(item => item.key));
+      for (const group of strategy.milestoneGroups.slice(1)) {
+        if (derivedPhaseKeys.has(group.key)) continue;
+        expect(result.diagnostics.warnings.some(warning => warning.includes(group.label))).toBe(true);
       }
       expect(data.milestones.reduce((acc, item) => acc + (item.duration || 0), 0)).toBeLessThanOrEqual(360);
       // 劳动力：工种构成完整，峰值非零，每个工种推导依据非空

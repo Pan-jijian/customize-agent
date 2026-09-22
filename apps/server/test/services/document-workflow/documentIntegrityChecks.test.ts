@@ -4,7 +4,7 @@
  * 无不可用降级路径。语义通道全部 mock（避免测试加载 Transformers.js 重依赖）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ambiguousEitherOrIssues, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, invertedDateRangeIssues, paragraphTailRepeatIssues, scanParagraphTailRepeats, collisionNumberedHeadingIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixInvertedDateRanges, fixZeroLengthDayRanges, fixParagraphOpeningRepeats, fixParagraphTailRepeats, fixCollisionNumberedHeadings, fixEmbeddedHeadingLines, fixPlaceholderTableCells, fixTruncatedSentenceArtifacts, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
+import { ambiguousEitherOrIssues, scanSpecLocationMismatchHits, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, invertedDateRangeIssues, paragraphTailRepeatIssues, scanParagraphTailRepeats, collisionNumberedHeadingIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixInvertedDateRanges, fixZeroLengthDayRanges, fixParagraphOpeningRepeats, fixParagraphTailRepeats, fixCollisionNumberedHeadings, fixEmbeddedHeadingLines, fixPlaceholderTableCells, fixTruncatedSentenceArtifacts, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
 import { markdownTableQualityIssues } from '@/services/document-workflow/qualityValidation';
 import { normalizeTableTitleInHeaders, repairTableBlockLines } from '@/services/document-workflow/tableRepairHelpers';
 import { scanStructureDefects } from '@/services/document-workflow/structureIntegrityRules';
@@ -376,6 +376,17 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
   it('并列枚举（50mm/70mm 多规格）→ 豁免不报', () => {
     const markdown = '挤塑聚苯板（XPS）厚度50mm/70mm两种规格选用。';
     expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  // 巢湖实测：答疑澄清把计划工期由 365 改为 330，正文如实并列两值属唯一正解，非矛盾
+  it('变更记录句（「365日历天，现变更修改为330日历天」）→ 豁免不报', () => {
+    const markdown = '本工程计划工期365日历天，现变更修改为330日历天，总进度计划据此编排各阶段节点与资源投入。';
+    expect(crossSectionNumericConflictIssues(markdown).filter(issue => /总工期|计划总工期/u.test(issue.message))).toEqual([]);
+  });
+
+  it('对照：无变更连接语的两套工期口径 → 仍报矛盾（豁免未过宽）', () => {
+    const markdown = '本工程计划工期365日历天。本合同段总工期330日历天，按此组织施工。';
+    expect(crossSectionNumericConflictIssues(markdown).some(issue => /365/u.test(issue.message) && /330/u.test(issue.message))).toBe(true);
   });
 
   it('r25 资源共享表块豁免：表块邻域声明共用调配时表内专项用途列数值不入互斥池（通用形态）', () => {
@@ -2485,5 +2496,43 @@ describe('crossSectionNumericConflictIssues 机械/土方锚点（十五版报�
   it('同锚点同值一致 → 不报', () => {
     const markdown = '施工机械配置挖掘机5台。沟塘清淤配置挖掘机5台。';
     expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+});
+
+describe('4.55.12 规格错位多义权威：限定词自洽消歧（巢湖实测）', () => {
+  const 涂料Map = (): SpecAuthorityMap => ({
+    厚度规格: [
+      { location: '防火涂料', spec: '40mm', quantity: '26494.190m2', sourceFile: '清单.xls' },
+      { location: '防火涂料', spec: '6mm', quantity: '54083.530m2', sourceFile: '清单.xls' },
+    ],
+  } as unknown as SpecAuthorityMap);
+
+  const 正文 = [
+    '钢柱及柱间支撑采用非膨胀型防火涂料，厚度40mm，耐火极限2.5小时；',
+    '钢梁及屋面支撑采用膨胀型防火涂料，厚度6mm，耐火极限1.5小时；',
+    '其他钢构件膨胀型防火涂料厚度6mm，耐火极限1.0小时。',
+    '防火涂装按构件耐火极限分级实施，钢柱及柱间支撑耐火极限2.5小时、非膨胀型防火涂料厚度40mm，钢梁及屋面支撑耐火极限1.5小时、膨胀型防火涂料厚度3mm。',
+  ].join('');
+
+  it('权威双值（40mm/6mm）时，正文同限定词一致绑定 → 确定性给出目标值（6mm）', () => {
+    const hits = scanSpecLocationMismatchHits(正文, 涂料Map());
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.issue.message).toContain('3mm');
+    expect(hits[0]!.replacement?.replacement).toBe('6mm');
+  });
+
+  it('对照：限定词「非膨胀型」不被「膨胀型」串味（40mm 侧自洽仍成立）', () => {
+    const md = '钢柱及柱间支撑采用非膨胀型防火涂料，厚度40mm；其他钢构件膨胀型防火涂料厚度6mm。非膨胀型防火涂料厚度70mm。';
+    const hits = scanSpecLocationMismatchHits(md, 涂料Map());
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.issue.message).toContain('70mm');
+    expect(hits[0]!.replacement?.replacement).toBe('40mm');
+  });
+
+  it('对照：限定词在正文中无权威配对（无法自洽）→ 不硬替换，交 LLM', () => {
+    const md = '钢梁及屋面支撑采用膨胀型防火涂料，厚度3mm。其他钢构件膨胀型防火涂料厚度3mm。';
+    const hits = scanSpecLocationMismatchHits(md, 涂料Map());
+    expect(hits).toHaveLength(2);
+    expect(hits.every(hit => hit.replacement === undefined)).toBe(true);
   });
 });

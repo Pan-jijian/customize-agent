@@ -68,3 +68,15 @@ describe('ambiguousEitherOrIssues C5 连接工艺豁免（安装工法二选一�
     expect(ambiguousEitherOrIssues('落地安装的AL1、AL3箱体，先施工C20混凝土基础，基础顶面标高按设计确定，箱体与基础预埋件焊接或铆接固定，柜体垂直度偏差不大于1.5mm/m。')).toEqual([]);
   });
 });
+
+describe('巢湖实测：失效弧枚举豁免（并列后果 ≠ 并列选项）', () => {
+  it('「极易造成支护失效或吊装失稳」→ 不报（同一风险源的两种后果）', () => {
+    expect(ambiguousEitherOrIssues(
+      '论证意见的落实质量直接决定现场作业安全边界，若方案参数与现场实际脱节，极易造成支护失效或吊装失稳。量化控制目标为：基坑开挖深度与专项方案逐项一致。',
+    )).toEqual([]);
+  });
+  it('对照：真两可决策照报（不受后果动词豁免影响）', () => {
+    expect(ambiguousEitherOrIssues('沟槽开挖采用放坡或钢板桩支护。').length).toBe(1);
+    expect(ambiguousEitherOrIssues('基础采用桩基或独立基础，按图纸施工。').length).toBe(1);
+  });
+});

@@ -47,7 +47,7 @@ export function buildValidationIssues(validation: { warnings: string[]; errors: 
  * \b 不成立（两侧均非 \w），导致「540日历天」「3台」类工期/数量参数漏提；用标点/空白/结尾前瞻替代尾部 \b。 */
 const CHINESE_UNIT_TOKEN_RE = /\b\d+(?:\.\d+)?\s*(?:日历天|小时|分钟|天|周|月|年|万元|元|台|套|个|项|批|次|份|人)(?=[。，,；;：:、\s]|$)/gu;
 
-function extractChapterPreciseTokens(evidence: DocumentEvidence[]) {
+export function extractChapterPreciseTokens(evidence: DocumentEvidence[]) {
   const tokens = new Set<string>();
   for (const item of evidence) {
     const content = stringifyFactValue(item.content).replace(/\s+/gu, ' ');

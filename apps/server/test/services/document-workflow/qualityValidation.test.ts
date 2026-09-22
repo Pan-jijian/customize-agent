@@ -87,8 +87,14 @@ describe('C-T5 落位口径（90% 阈值 + 显性说明审计 + 责任章标注�
     expect(notEnough).toHaveLength(1);
     expect(notEnough[0]!.message).toContain('/20 项');
     expect(notEnough[0]!.message).toContain('85%');
+    // 4.55.12 缺口清单制：90% 边界不再静默——阻断线以上仍有残留缺口时产出清单型 warning
+    //（口径决定：阈值只决定是否升级 blocker，未落位行必须逐条可见；修复轮成本不因此增加）
     const boundary = await boqPlacementIssues(`本工程完成${names.slice(0, 18).join('、')}等施工。`, [], model);
-    expect(boundary).toEqual([]);
+    expect(boundary.filter(issue => issue.level === 'error')).toEqual([]);
+    expect(boundary).toHaveLength(1);
+    expect(boundary[0]!.level).toBe('warning');
+    expect(boundary[0]!.message).toContain('清单落位缺口清单');
+    expect(boundary[0]!.message).toContain('/20 项');
   });
 
   it('显性说明与豁免行登记进落位审计（区分说明式处置与施工内容落位）', async () => {

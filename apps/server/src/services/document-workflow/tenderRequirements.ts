@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { isMaterialResidueLine } from './materialResidue';
 import type {
   DocumentEvidence,
   DocumentGenerationDiagnostics,
@@ -652,6 +653,10 @@ export function isRequirementPoolNoiseClause(text: string): boolean {
   const normalized = text.trim().replace(/\s+/gu, '');
   if (!normalized) return false;
   if (/(?:回复|答复)[:：]/u.test(normalized)) return true;
+  // 4.55.12 巢湖实测：答疑对答残片（「答：三级钢，见图纸说明7.4.1。门卫同。」）此前不在拒绝表内
+  //（仅「回复/答复」入表）→ 入池后由条款尾收口（applyRequirementTailClosure）整段搬入正文，
+  // 交付物出现 7 处对话残片段。答疑残片是问答对的回答侧，没有招标要求语义，不入池。
+  if (/(?:^|[。；;\n])\s*(?:答|答复|回复|答疑|提问|问)\s*[:：]/u.test(normalized)) return true;
   if (/扣\d+(?:\.\d+)?分|总分\d+分|百分制|考核(?:办法|评分|结果|得分|扣分|奖惩)/u.test(normalized)) return true;
   if (/质量保修|保修范围|派人保修|保修通知|保修期如下/u.test(normalized)) return true;
   if (/本表(?:应|须|不|需|作)/u.test(normalized)) return true;
@@ -1098,7 +1103,7 @@ export function renderChapterStructureSlice(items: TenderStructureRequirement[],
   const orgChartPlainHint = '：正文须含「项目管理机构与岗位职责」专项内容——组织架构说明（层级设置、隶属关系、部门与岗位构成）+ 文字框图承载（列出全部岗位与层级关系）+ 岗位责任矩阵（各岗位职责、分工与协作关系）；严禁出现人员姓名、证书编号、身份证号等实名数据（人员实名信息属商务册职责，正文仅写岗位与职责体系）';
   const orgChartTextOnlyHint = '：正文须含「项目管理机构与岗位职责」专项内容——组织架构说明（层级设置、隶属关系、部门与岗位构成）及分岗位的职责分工与协作关系；严禁出现人员姓名、证书编号、身份证号等实名数据（人员实名信息属商务册职责，正文仅写岗位与职责体系）';
   const plainHint = (form: TenderStructureForm): string => {
-    if (form === 'diagram') return '：以文字框图或表格式时间轴承载全部内容要点，内容结束处另起一行输出规范图题行（格式「图 X-X 图名」，X-X 为章序号与本章图序号，图名即要素名），图题行独立成行、不附加任何说明文字';
+    if (form === 'diagram') return '：必须以 Markdown 数据表（表头字段 + 数据行，数据取自资料，禁止编造）或等价的结构化文字框图/表格式时间轴承载全部内容要点（≥3 行要点），内容结束处另起一行输出规范图题行（格式「图 X-X 图名」，X-X 为章序号与本章图序号，图名即要素名），图题行独立成行、不附加任何说明文字；**只输出图题行而无数据表/框图内容视为该项未落实**';
     if (form === 'org_chart') return orgChartPlainHint;
     if (form === 'table') return '：以 Markdown 表格输出，表头字段按要素构成设置并覆盖全部构成项';
     return '';
@@ -1843,6 +1848,37 @@ export function fixTenderMetaLanguage(markdown: string): { markdown: string; fix
       continue;
     }
     out.push(next);
+  }
+  return { markdown: out.join('\n'), fixedCount, details };
+}
+
+/**
+ * 资料载体残片确定性清理（4.55.12 巢湖实测：答疑对答段 + 图纸 OCR 残片段 + 数值堆砌残句）：
+ * 三类都不是可交付正文，而是**资料载体的原文残片**——
+ * ① 答疑残片段：以「答：/答复：/回复：」开头的答案行（要求池未过滤时由条款尾收口整段搬入正文，
+ *    巢湖终稿实测 7 处：答疑文件逐条答案以「答：三级钢，见图纸说明7.4.1。门卫同。」形态成段出现）；
+ * ② 图纸 OCR 残片段：图签/钢筋表/盖板规格表类「数字符号密集串」（序号规格数量粘连、@200 箍筋间距、
+ *    ①②③ 引线编号），OCR 文本被当正文资料引用；
+ * ③ 数值堆砌残句：无成句语义的纯参数罗列（同为字符占比超限形态，与 ② 同判据收口；巢湖实测该行是
+ *    「无主数值审计：疑似编造 JC-07/JC-08/JC-09」的唯一来源）。
+ * 判据：矩形字符（数字+符号）占比 ≥0.45——正常数据句实测占比 ≤0.21（「配电箱70台、桥架2811m、
+ * 配管21034.6m…」类合规数据罗列最高 0.21），阈值留一倍余量；行级整行删除并登记，标题行/表格行豁免。
+ */
+export function fixFormalSourceResidue(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+  const lines = markdown.split(/\r?\n/u);
+  const out: string[] = [];
+  let fixedCount = 0;
+  const details: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!isMaterialResidueLine(line)) {
+      out.push(line);
+      continue;
+    }
+    fixedCount += 1;
+    if (details.length < 6) details.push(line.trim().slice(0, 24));
+    // 整行删除：前后均空行时吞掉尾随空行，防双空行残留（与 fixTenderMetaLanguage 同形态）
+    if (index + 1 < lines.length && !lines[index + 1].trim() && out.length > 0 && !out[out.length - 1].trim()) index += 1;
   }
   return { markdown: out.join('\n'), fixedCount, details };
 }

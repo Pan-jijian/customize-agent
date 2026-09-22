@@ -84,6 +84,17 @@ export interface BlueprintDerivationStrategy {
   multiVillageFlow?: (count: number) => string;
   /** 清单无分部名时的分部编排顺序兜底 */
   sequenceFallback: string;
+  /**
+   * 清单分组的业务称谓（蓝图 project.scope / 施工段编排的措辞来源）。
+   *
+   * 历史缺陷：该措辞此前在 derive.ts 里**硬编码为「自然村分组」**，于是产业园项目产出
+   * 「8 个自然村分组（1#厂房土建工程、1#厂房安装工程…）」——把单位工程当成了自然村，
+   * 正文随之出现「自然村/村内/多村并行」等与项目类型矛盾的话术（巢湖实测：自然村 10 处、
+   * 村内/村庄 9 处、多村并行 7 处），而三层评分均未察觉。现由策略按项目类型提供。
+   */
+  groupLabel: string;
+  /** 是否乡村类项目：决定「自然村数量」红线事实、多村并行话术等乡村专有内容是否适用 */
+  villageOriented?: boolean;
   /** 气候区域：undefined = 不注入气候值（宁缺毋错，写作层按建设地点常识处理） */
   climateZone?: BlueprintClimateZoneId;
   /** 临时用电定性表述（无电动机具时） */
@@ -192,6 +203,8 @@ function villageGroupOfEntry(entry: BoqEntry): string {
 export const villageMunicipalStrategy: BlueprintDerivationStrategy = {
   id: 'village-municipal',
   projectTypes: ['市政', '园林绿化'],
+  groupLabel: '自然村分组',
+  villageOriented: true,
   milestoneGroups: [
     { key: 'prep', label: '施工准备与清杂拆除', pattern: /清杂|拆除|场地平整|临时/u },
     { key: 'pipe', label: '污水管网工程', pattern: /塑料管|检查井|管网|排水|化粪池|雨水口/u },
@@ -296,6 +309,7 @@ function buildingGroupOfEntry(entry: BoqEntry): string {
 export const buildingStrategy: BlueprintDerivationStrategy = {
   id: 'building',
   projectTypes: ['房建', '装饰装修'],
+  groupLabel: '单位工程',
   milestoneGroups: [
     { key: 'prep', label: '施工准备与三通一平', pattern: /清杂|拆除|场地平整|临建|临时|三通一平/u },
     { key: 'foundation', label: '基础工程', pattern: /桩基|基础|基坑|地下室|降水|支护|土方|挖方|回填/u },
@@ -405,6 +419,7 @@ export const buildingStrategy: BlueprintDerivationStrategy = {
 export const generalStrategy: BlueprintDerivationStrategy = {
   id: 'general',
   projectTypes: ['其他'],
+  groupLabel: '清单分组',
   milestoneGroups: [
     { key: 'prep', label: '施工准备', pattern: /清杂|拆除|场地平整|临建|临时/u },
     { key: 'main', label: '主体工程', pattern: /主体|结构|混凝土|钢筋|模板|砌体|土方|基础|安装/u },
@@ -463,6 +478,7 @@ function bridgeTunnelGroupOfEntry(entry: BoqEntry): string {
 export const bridgeTunnelStrategy: BlueprintDerivationStrategy = {
   id: 'bridge-tunnel',
   projectTypes: ['桥梁与隧道'],
+  groupLabel: '施工区段',
   milestoneGroups: [
     { key: 'prep', label: '施工准备与临时设施', pattern: /清杂|拆除|场地平整|临建|临时|三通一平|测量放样/u },
     { key: 'foundation', label: '基础工程', pattern: /桩基|钻孔|灌注桩|围堰|承台|基础|基坑|降水|支护/u },
@@ -560,6 +576,7 @@ function highwayGroupOfEntry(entry: BoqEntry): string {
 export const highwayStrategy: BlueprintDerivationStrategy = {
   id: 'highway',
   projectTypes: ['公路'],
+  groupLabel: '施工标段',
   milestoneGroups: [
     { key: 'prep', label: '施工准备', pattern: /清杂|拆除|场地平整|临建|临时|三通一平|测量放样/u },
     { key: 'subgrade', label: '路基工程', pattern: /路基|土方|挖方|填方|压实|软基|清表|路床/u },
@@ -651,6 +668,7 @@ function waterConservancyGroupOfEntry(entry: BoqEntry): string {
 export const waterConservancyStrategy: BlueprintDerivationStrategy = {
   id: 'water-conservancy',
   projectTypes: ['水利水电'],
+  groupLabel: '施工区段',
   milestoneGroups: [
     { key: 'prep', label: '施工准备与围堰导流', pattern: /清杂|拆除|围堰|导流|截流|临建|临时/u },
     { key: 'earthwork', label: '土方与基础工程', pattern: /土方|挖方|填方|基础|基坑|清淤|疏浚|开挖/u },
@@ -747,7 +765,19 @@ export function resolveDerivationStrategy(input: {
     /路灯|亮化|照明/u,
   ];
   const signalHits = villageSignals.filter(pattern => pattern.test(boqText)).length;
-  if (input.boq.villages.length > 0 && signalHits >= 3) return villageMunicipalStrategy;
+  // 乡村策略守卫（实测缺陷根治）：原判定为「有分组 && 管网/道路/绿化/路灯 ≥3 类」即判乡村市政——
+  // 而**任何带室外附属的园区/房建项目都必然满足这四条**，且 `boq.villages.length > 0` 只要清单按
+  // 工作表分组就恒成立（"villages" 实际是清单分组，见 BillOfQuantitiesResult.villages）。
+  // 后果（巢湖实机）：光电新能源产业园标准化厂房项目被判乡村市政 → 蓝图把 8 个单位工程当成
+  // 「8 个自然村分组」→ 正文出现「自然村」10 处、「村内/村庄」9 处、「多村并行」7 处，
+  // 与项目类型完全矛盾，而三层评分均未察觉。
+  // 现口径：乡村判定必须**有乡村证据**且**无城市/房建强特征**。
+  const projectText = `${input.templateName || ''} ${input.basicFacts || ''}`;
+  const villageGroupNames = input.boq.villages.map(village => village.villageGroup).filter(Boolean);
+  const villageEvidence = /自然村|美丽乡村|宜居|乡村振兴|行政村|村组|村庄/u.test(projectText)
+    || (villageGroupNames.length > 0 && villageGroupNames.filter(name => /村/u.test(name)).length >= Math.max(2, Math.ceil(villageGroupNames.length / 2)));
+  const urbanBuildingEvidence = /产业园|标准化厂房|标准厂房|厂房|住宅|办公楼|综合楼|安置房|车间|仓库|宿舍楼|教学楼|医院|商场/u.test(projectText);
+  if (input.boq.villages.length > 0 && signalHits >= 3 && villageEvidence && !urbanBuildingEvidence) return villageMunicipalStrategy;
   // 清单分部特征信号（跨类型同等水平）：类型专有词在清单分部名/条目名中重复出现（词频 ≥2）
   // 直接命中对应策略组。桥隧/水利资料的分部名（下部结构/上部结构/闸站结构）含通用词「结构」
   // 会令文本判别密度仲裁误判房建，清单特征优先可根治（条目词频对真实资料鲁棒）。

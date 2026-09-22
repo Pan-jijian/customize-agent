@@ -276,6 +276,8 @@ export interface TenderBidTemplatingReport {
   /** 重难点对策"归因+量化目标"双达标占比（<50% 判重度模板化，docx L156） */
   difficultyCountermeasureRatio: number;
   difficultyBothCount: number;
+  /** 量化目标达标条目数（结构判定，可靠）——heavyTemplated 与表述实质性维度只依据它 */
+  difficultyQuantifiedCount: number;
   difficultyCountermeasures: number;
   /** 重难点章节重度模板化警示 */
   difficultyHeavyTemplated: boolean;
@@ -317,6 +319,7 @@ export async function buildTenderBidTemplatingReport(
     crossProjectResidue: residue,
     difficultyCountermeasureRatio: difficulty.ratio,
     difficultyBothCount: difficulty.bothCount,
+    difficultyQuantifiedCount: difficulty.quantified,
     difficultyCountermeasures: difficulty.countermeasures,
     difficultyHeavyTemplated: difficulty.heavyTemplated,
     sentencePatternHits,

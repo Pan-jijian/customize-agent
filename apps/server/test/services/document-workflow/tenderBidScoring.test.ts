@@ -424,12 +424,26 @@ describe('buildTenderBidTemplatingReport', () => {
     expect(report.crossProjectResidue.length).toBeGreaterThan(0);
   });
 
-  it('重难点条目未双达标 → 占比 0 → heavyTemplated 并升级 heavy', async () => {
+  it('归因半项退出判定：量化达标即不判重度（归因语义经实测无分辨力）', async () => {
+    // 实测依据（巢湖终稿，真实 bge 余弦）：同一查询下「字面写着成因/风险源于的段落」14 段得 0.530~0.565、
+    // 「不含成因的段落」9 段得 0.53~0.57——两类同区间，阈值 0.6 下几乎全不过；而纯列名的短表头行反得 0.643 通过。
+    // 截断归一化（120/200/300 字）亦无法分离两类。该度量实际测「长度+主题词」而非「有无归因」，
+    // 且它同时污染模板化等级与修复轮收敛判据（假重度 → 修复轮空转多轮）。
+    // 现口径：量化目标（QUANTIFIED_TARGET_RE 结构判定）为唯一判据，归因半项降为观测字段。
     const markdown = ['## 重点难点分析', '', '基坑工程难点：该条目仅复述现象未给出归因分析，控制要求按50mm执行。'].join('\n');
     const report = await buildTenderBidTemplatingReport(markdown);
     expect(report.difficultyCountermeasures).toBe(1);
     expect(report.difficultyBothCount).toBe(0);
     expect(report.difficultyCountermeasureRatio).toBe(0);
+    // 量化目标存在（50mm）→ 量化达标数 1，占比 100% → 不判重度
+    expect(report.difficultyQuantifiedCount).toBe(1);
+    expect(report.difficultyHeavyTemplated).toBe(false);
+  });
+
+  it('量化目标也缺失 → 判重度（可测半项确实在起作用）', async () => {
+    const markdown = ['## 重点难点分析', '', '基坑工程难点：该条目仅复述现象未给出归因分析，也未给出任何控制要求。'].join('\n');
+    const report = await buildTenderBidTemplatingReport(markdown);
+    expect(report.difficultyQuantifiedCount).toBe(0);
     expect(report.difficultyHeavyTemplated).toBe(true);
     expect(report.level).toBe('heavy');
   });

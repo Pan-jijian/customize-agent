@@ -557,3 +557,31 @@ export async function stageBasisRegulationsCrossRepair(session: FinalizeSession)
   emitRecord(displayStage({ type: 'validation', roleId: 'basis-regulations-cross-repair', status: endGapCount === 0 ? 'success' : 'failed', message: `编制依据双向对账收口完成：补入 ${insertedCount} 条、应用 ${applicationChapters} 章（解决 ${applicationResolved} 条）、移除 ${removedCount} 条；缺口 ${initialGapCount}→${endGapCount}${endGapCount > 0 ? '（残留由终门禁照常复核）' : '（双向清零）'}` }, { subtitle: '评审后兜底' }));
   session.generationDiagnostics.llm.lastInfo = `编制依据双向对账收口：引用未声明 ${entryAudit.usedNotDeclared.length}→${endAudit.usedNotDeclared.length}、声明未用 ${entryAudit.declaredNotUsed.length}→${endAudit.declaredNotUsed.length}（补入 ${insertedCount} 条、应用 ${applicationChapters} 章、移除 ${removedCount} 条；LLM 侧残留 ${applicationResidual} 条含超预算 ${overflowGapCount} 条）`;
 }
+
+/**
+ * 链尾确定性回补（Phase A 单点复用，零 LLM）：正文引用但未列入编制依据小节的标准，按编号族补入。
+ *
+ * **为什么需要第二次**：本轮的 Phase A 在 `postReviewSurface` 内执行，而其后**仍有会改写正文的链尾轮**
+ *（链尾要求收口 `replayRequirementTailClosure` 的补写会带入新的《》引用、交付结构收口会切分/追加段落）。
+ * 实测（巢湖终稿）：报告记「basis-regulations-cross-repair：未记录（无触发或静默通过）」，
+ * 而终检报 13 处「引用未声明」；把该轮同源审计跑在终稿上确实看得到缺口（declaredCodes 10 /
+ * declaredNames 25 / usedNotDeclared 13）——**是轮次之后新增的引用无人收口**。
+ * 故在终门禁前（其后无任何改写正文的轮次）再跑一次：纯确定性、只补编制依据条目、不动正文引用。
+ *
+ * **调用契约**：本函数只写 `session.finalChapterDrafts[i].content`，**不更新** `session.finalMarkdown`——
+ * 调用方须在 inserted > 0 时自行 `rebuildFinalMarkdown()` 并重算校验组（终门禁所检=交付所存）。
+ */
+export function backfillUsedNotDeclared(session: FinalizeSession): { inserted: number; labels: string[] } {
+  const audit = auditBasisRegulationsCross(session.finalMarkdown);
+  if (audit.usedNotDeclared.length === 0) return { inserted: 0, labels: [] };
+  const basisChapterIndex = session.finalChapterDrafts.findIndex(chapter => basisRegulationSectionRanges(chapter.content).length > 0);
+  if (basisChapterIndex < 0) return { inserted: 0, labels: [] };
+  const chapter = session.finalChapterDrafts[basisChapterIndex]!;
+  const sectionText = extractBasisRegulationSection(chapter.content);
+  const missing = audit.usedNotDeclared.filter(gap => !gapDeclaredInSection(sectionText, gap));
+  if (missing.length === 0) return { inserted: 0, labels: [] };
+  const inserted = insertUsedEntries(chapter.content, missing.map(gap => buildInsertionEntry(gap, session.finalMarkdown)));
+  if (!inserted) return { inserted: 0, labels: [] };
+  session.finalChapterDrafts[basisChapterIndex] = { ...chapter, content: inserted };
+  return { inserted: missing.length, labels: missing.map(renderGapLabel) };
+}

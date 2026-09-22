@@ -90,6 +90,32 @@ function processParameterScore(chapters: DocumentDraftChapter[]): { score: numbe
   return { score, detail: `工艺参数 ${processParams.size} 项（每千字 ${density.toFixed(1)}）` };
 }
 
+/**
+ * 表格不完整单元格计数（导出供单测）：空单元格与模糊占位符计为不完整，
+ * **但遵守写时红线的两条明示例外**（documentWritingTaskBrief.WRITING_INTEGRITY_CONSTRAINTS
+ * 「表格规范红线」逐字同源）：「合计行的「—」」与「规格型号列『机具无型号』的「—」」。
+ *
+ * 历史口径冲突：写时明确允许这两类 `—`（不编造型号/无可加总明细），评分器却一律计为空 →
+ * 合规写法被扣分（丰乐镇实测：机械配置表与进场验收表各 4 处规格 `—` 被判不完整，
+ * 表格完整度 91 而非 100）。评分必须与写时标准同源，否则「按规范写」反而扣分。
+ */
+export function countIncompleteTableCells(tableLines: string[]): number {
+  const headerCells = (tableLines[0] || '').split('|').slice(1, -1).map(cell => stripTableCellInvisibleChars(cell.trim()));
+  const isSpecColumn = (columnIndex: number) => /规格|型号/u.test(headerCells[columnIndex] || '');
+  const isTotalRow = (row: string) => /^[\s|]*\|?\s*(?:合计|小计|总计|累计)/u.test(row);
+  const bodyRows = tableLines.slice(1).filter(row => row.replace(/\|/gu, '').replace(/[\s\-:]/gu, '').length > 0);
+  return bodyRows.reduce((total, row) => {
+    const cells = row.split('|').slice(1, -1).map(cell => stripTableCellInvisibleChars(cell.trim()));
+    const totalRow = isTotalRow(row);
+    return total + cells.filter((cell, columnIndex) => {
+      if (cell !== '' && cell !== '-' && cell !== '—' && cell !== '/') return false;
+      if (totalRow && cell === '—') return false;
+      if (cell === '—' && isSpecColumn(columnIndex)) return false;
+      return true;
+    }).length;
+  }, 0);
+}
+
 /** 4. 表格完整度 */
 function tableScore(chapters: DocumentDraftChapter[], markdown = ''): { score: number; detail: string } {
   const wholeText = markdown || chapters.map(chapter => chapter.content).join('\n\n');
@@ -110,11 +136,7 @@ function tableScore(chapters: DocumentDraftChapter[], markdown = ''): { score: n
     }
     if (tableLines.length < 3) continue;
     tableCount += 1;
-    const bodyRows = tableLines.slice(1).filter(row => row.replace(/\|/gu, '').replace(/[\s\-:]/gu, '').length > 0);
-    const emptyCells = bodyRows.reduce((total, row) => {
-      const cells = row.split('|').slice(1, -1).map(cell => stripTableCellInvisibleChars(cell.trim()));
-      return total + cells.filter(cell => cell === '' || cell === '-' || cell === '—' || cell === '/').length;
-    }, 0);
+    const emptyCells = countIncompleteTableCells(tableLines);
     if (emptyCells === 0) completeTables += 1;
   }
   const score = tableCount === 0 ? 40 : clamp((completeTables / tableCount) * 100);
@@ -163,6 +185,38 @@ function reviewResponseScore(chapters: DocumentDraftChapter[], markdown = ''): {
   return { score, detail: `招标硬性要求响应 ${hit.length}/${responseItems.length} 项${missed.length ? `（未响应：${missed.map(item => item.label).join('、')}）` : ''}` };
 }
 
+/**
+ * 表述实质性维度（替代原「重度模板化 → 总分封顶 54」）：
+ * 把模板化报告的各分项按**各自既有验收线**折算为连续分——
+ *   ① 套话句占比（线 ≤10%）：每超 10 个百分点扣 30 分
+ *   ② 模糊应答词（零出现要求）：每处扣 8 分，上限 40
+ *   ③ 重难点「归因+量化」双达标（线 ≥50%）：不足部分按差值 ×60 扣分，上限 30
+ *   ④ 跨项目内容残留（零残留要求）：每处扣 10 分，上限 30
+ * 保留信号、去掉单点否决：模板化严重时该维度显著低分并拖累总分，但不再把其他维度的
+ * 真实水平一并抹掉（巢湖：六项满分被压到 54，掩盖了数据锚定/事实一致性等真实短板）。
+ */
+export function templatingSubstanceScore(report?: TenderBidTemplatingReport): { score: number; detail: string } {
+  if (!report) return { score: 100, detail: '模板化未检测（无信号，按满分计）' };
+  const fillerPenalty = Math.max(0, report.fillerRatio - 0.1) * 300;
+  const vaguePenalty = Math.min(40, report.vagueHitCount * 8);
+  // 重难点扣分只依据**量化目标**达标率（结构判定，可靠）；归因半项经实测无分辨力（见 tenderBidChecks
+  // 的 heavyTemplated 注释：含成因段落 0.53~0.565 / 不含成因段落 0.53~0.57，同区间），故不上分。
+  const measurableRatio = report.difficultyCountermeasures > 0
+    ? report.difficultyQuantifiedCount / report.difficultyCountermeasures
+    : 1;
+  const difficultyPenalty = report.difficultyCountermeasures > 0
+    ? Math.min(30, Math.max(0, 0.5 - measurableRatio) * 60)
+    : 0;
+  const residuePenalty = Math.min(30, report.crossProjectResidue.length * 10);
+  const score = clamp(100 - fillerPenalty - vaguePenalty - difficultyPenalty - residuePenalty);
+  return {
+    score,
+    detail: `套话句占比 ${(report.fillerRatio * 100).toFixed(1)}%（线 ≤10%）、模糊应答词 ${report.vagueHitCount} 处、`
+      + `重难点量化达标 ${report.difficultyQuantifiedCount}/${report.difficultyCountermeasures}（线 ≥50%）、跨项目残留 ${report.crossProjectResidue.length} 处`
+      + `；扣分 ${fillerPenalty.toFixed(0)}+${vaguePenalty.toFixed(0)}+${difficultyPenalty.toFixed(0)}+${residuePenalty.toFixed(0)}`,
+  };
+}
+
 export async function buildProfessionalScoreReport(chapters: DocumentDraftChapter[], markdown = '', options: { templating?: TenderBidTemplatingReport } = {}): Promise<ProfessionalScoreReport> {
   const structure = structureScore(chapters);
   const factLanding = factLandingScore(chapters);
@@ -172,28 +226,38 @@ export async function buildProfessionalScoreReport(chapters: DocumentDraftChapte
   const duplication = duplicationScore(chapters);
   const reviewResponse = reviewResponseScore(chapters, markdown);
 
+  // 表述实质性（模板化信号降权并入，替代原「重度→总分封顶 54」的单点否决）：
+  // 原口径把持续量压成二值且会掩盖真实短板（巢湖实测：七维六项满分、加权 98.6，却因归因闸门
+  // 判重度模板化被压到 54；而实质短板在数据锚定 64、事实一致性 28，与模板化无关）。
+  // 现口径：模板化各分项按**各自既有验收线**折分，作为加权维度参与，不再封顶总分。
+  const templatingSubstance = templatingSubstanceScore(options.templating);
+  // 无模板化信号时**不引入该维度**（否则等于白送 20 分——对抗套件实测：堆词文档本就无套话/残留信号，
+  // 该维度会按"无信号"给满分，把 45 分抬到 47，削弱防骗分闸门）；有信号时才计入并按 0.8 重标定七维。
+  const baseDimensions: Array<ProfessionalDimension & { baseWeight: number }> = [
+    { key: 'structure', label: '结构完整度', score: structure.score, detail: structure.detail, weight: 0, baseWeight: 0.18 },
+    { key: 'factLanding', label: '事实落位率', score: factLanding.score, detail: factLanding.detail, weight: 0, baseWeight: 0.18 },
+    { key: 'processParameter', label: '工艺参数密度', score: processParameter.score, detail: processParameter.detail, weight: 0, baseWeight: 0.16 },
+    { key: 'table', label: '表格完整度', score: table.score, detail: table.detail, weight: 0, baseWeight: 0.12 },
+    { key: 'filler', label: '废话控制', score: filler.score, detail: filler.detail, weight: 0, baseWeight: 0.14 },
+    { key: 'duplication', label: '重复控制', score: duplication.score, detail: duplication.detail, weight: 0, baseWeight: 0.12 },
+    { key: 'reviewResponse', label: '评标响应度', score: reviewResponse.score, detail: reviewResponse.detail, weight: 0, baseWeight: 0.10 },
+  ];
+  const templatingWeight = options.templating ? 0.2 : 0;
   const dimensions: ProfessionalDimension[] = [
-    { key: 'structure', label: '结构完整度', score: structure.score, detail: structure.detail, weight: 0.18 },
-    { key: 'factLanding', label: '事实落位率', score: factLanding.score, detail: factLanding.detail, weight: 0.18 },
-    { key: 'processParameter', label: '工艺参数密度', score: processParameter.score, detail: processParameter.detail, weight: 0.16 },
-    { key: 'table', label: '表格完整度', score: table.score, detail: table.detail, weight: 0.12 },
-    { key: 'filler', label: '废话控制', score: filler.score, detail: filler.detail, weight: 0.14 },
-    { key: 'duplication', label: '重复控制', score: duplication.score, detail: duplication.detail, weight: 0.12 },
-    { key: 'reviewResponse', label: '评标响应度', score: reviewResponse.score, detail: reviewResponse.detail, weight: 0.10 },
+    ...baseDimensions.map(({ baseWeight, ...dimension }) => ({ ...dimension, weight: Number((baseWeight * (1 - templatingWeight)).toFixed(4)) })),
+    ...(templatingWeight > 0 ? [{ key: 'templating', label: '表述实质性', score: templatingSubstance.score, detail: templatingSubstance.detail, weight: templatingWeight }] : []),
   ];
   const total = clamp(dimensions.reduce((sum, dimension) => sum + dimension.score * dimension.weight, 0));
-  // docx 模板化降档：重度模板化直接压到合格线以下，中度压到良好线以下（模板化是核心降档判定）
-  const cappedTotal = options.templating?.level === 'heavy' ? Math.min(total, 54) : options.templating?.level === 'medium' ? Math.min(total, 69) : total;
-  const grade: ProfessionalScoreReport['grade'] = cappedTotal >= 85 ? '专业' : cappedTotal >= 70 ? '良好' : cappedTotal >= 55 ? '合格' : '待提升';
+  const grade: ProfessionalScoreReport['grade'] = total >= 85 ? '专业' : total >= 70 ? '良好' : total >= 55 ? '合格' : '待提升';
   const topIssues = [...duplicateParagraphIssues(chapters), ...await fillerParagraphIssues(chapters), ...processParameterDensityIssues(chapters), ...sectionCardStructureIssues(chapters)]
     .slice(0, 5)
     .map(issue => issue.message);
   const weakDimensions = dimensions.filter(dimension => dimension.score < 70).map(dimension => `${dimension.label}（${dimension.score}分）`);
   return {
-    total: cappedTotal,
+    total,
     grade,
     dimensions,
-    summary: `施工组织设计专业度评分 ${cappedTotal} 分（${grade}；从属口径，交付主尺见六维质量报告）${options.templating && options.templating.level !== 'light' ? `；模板化等级：${options.templating.level === 'heavy' ? '重度' : '中度'}（降档已生效）` : ''}${weakDimensions.length ? `；待提升：${weakDimensions.join('、')}` : ''}`,
+    summary: `施工组织设计专业度评分 ${total} 分（${grade}；从属口径，交付主尺见六维质量报告）${options.templating && options.templating.level !== 'light' ? `；模板化等级：${options.templating.level === 'heavy' ? '重度' : '中度'}（已按「表述实质性」维度计分，不再封顶总分）` : ''}${weakDimensions.length ? `；待提升：${weakDimensions.join('、')}` : ''}`,
     topIssues,
     caliber: PROFESSIONAL_SCORE_CALIBER,
   };

@@ -29,7 +29,18 @@ vi.mock('@/services/document-workflow/integratedBlueprint', async () => {
   };
 });
 
-vi.mock('@/services/document-workflow/billFactLock', () => ({ buildBillFactLock: vi.fn(() => undefined) }));
+vi.mock('@/services/document-workflow/billFactLock', () => ({
+  buildBillFactLock: vi.fn(() => undefined),
+  // 供给面核算用（清单责任行按章归属）：本文件不覆盖该链，返回空映射即可
+  buildBillResponsibilityMap: vi.fn(() => new Map()),
+}));
+
+// 供给面核算的事实通道（写作端同源链）：本文件的关注点是预算重校准，该链返回空即不参与计数
+vi.mock('@/services/document-workflow/factsModel', () => ({
+  buildChapterFactNeeds: vi.fn(() => []),
+  resolveChapterFactNeeds: vi.fn(() => []),
+  factsForChapterNeeds: vi.fn(() => []),
+}));
 
 vi.mock('@/services/document-workflow/tuningProfile', async () => {
   const actual = await vi.importActual<typeof import('@/services/document-workflow/tuningProfile')>('@/services/document-workflow/tuningProfile');
@@ -71,14 +82,19 @@ const templateSections = ['拆除改造与清运施工方法', '填方压实与�
 
 const chapter = (id: string, title: string, sections: string[]): DocumentTemplateChapter => ({ id, title, purpose: '', queries: [], requiredFacts: [], sections });
 
-const makeSession = (options: { longformStrict: boolean; bidCompositionMissing?: boolean }) => {
+const makeSession = (options: { longformStrict: boolean; bidCompositionMissing?: boolean; targetChars?: number }) => {
   const chapters: DocumentTemplateChapter[] = [
     chapter('main', '主要施工方法', templateSections),
     ...Array.from({ length: 10 }, (_, index) => chapter(`c${index + 1}`, `第${index + 2}章 质量保证措施`, ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8'])),
   ];
   const chapterTargets = new Map<string, number>([['main', 15600], ...chapters.slice(1).map(item => [item.id, 12440] as [string, number])]);
   const session = {
-    prepare: { projectRoot: '/tmp/stage-blueprint-test', materialFilePaths: [], template: { name: '测试模板' }, documentSpec: undefined },
+    prepare: {
+      projectRoot: '/tmp/stage-blueprint-test', materialFilePaths: [], template: { name: '测试模板' }, documentSpec: undefined,
+      // 供给面核算沿用写作端同源链，需要 promptPlan（生产由 stagePrepare 恒提供）
+      promptPlan: { writerPrompts: [], chapterPrompts: [], formattingPrompts: [] },
+      generationControlPrompt: '', runtimeRulesText: '', domainProfile: undefined,
+    },
     understanding: {
       availableEvidenceScopePaths: [],
       requestedEvidencePerChapter: 8,
@@ -91,7 +107,7 @@ const makeSession = (options: { longformStrict: boolean; bidCompositionMissing?:
     },
     planning: {
       effectiveChapters: chapters,
-      documentBudget: { chapterTargets, targetChars: 140000, longformStrict: options.longformStrict },
+      documentBudget: { chapterTargets, targetChars: options.targetChars ?? 140000, longformStrict: options.longformStrict },
       generationBudget: { chapterConcurrency: 4, reviewConcurrency: 2 },
       generationDiagnostics: { evidence: { searchQueries: 0, searchMs: 0 }, llm: { lastInfo: '' } },
       // 前置阶段契约（stageOutlinePlanning 恒注入）：本组零要求 → 分配块零副作用（不落盘/无进度行）
@@ -131,6 +147,21 @@ describe('stageBlueprint 章预算可行性重校准挂载（4.35 密度闭环�
     expect(session.blueprint.blueprintActive).toBe(true);
     // 规格展示消费：阶段 1 判定读入并落入蓝图进度行（常规口径桩）
     expect(session.global.progressStages.find(stage => stage.roleId === 'integrated-blueprint')?.details).toContain('标书编制规格：未识别勾选标记（按常规口径）');
+  });
+
+  it('压缩分支（下限合计 > 全文目标）：状态为 success 不得为 failed——消息自称「不阻断」时不得标红', async () => {
+    h.blueprint = makeBlueprint();
+    h.throwBlueprint = false;
+    h.capacityRecalibration = undefined;
+    // 目标压到低于密度下限合计（主要施工方法 96 要点 ≈ 28800 + 其余 10 章各 3600），触发按下限比例压缩
+    const session = makeSession({ longformStrict: true, targetChars: 50000 });
+
+    await stageBlueprint(session as unknown as GenerationSession);
+
+    const stage = calibrationStageOf(session);
+    expect(stage?.message).toContain('不阻断');
+    // 关键断言：非阻断结局不得以 failed 呈现（实测用户据此把该节点当报错排查）
+    expect(stage?.status).toBe('success');
   });
 
   it('非长文（longformStrict=false）跳过：章预算原样、无校准进度行', async () => {

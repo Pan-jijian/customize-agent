@@ -7,14 +7,18 @@ import type { GenerationSession } from './generationSession';
 import { buildIntegratedBlueprint, estimateChapterMinFeasibleWords, findBlueprintChapter, renderBasicFactsForBlueprint, resolveBillOfQuantities, saveBlueprintAsset } from '../integratedBlueprint';
 import { reanchorChapterTargetsByFeasibility } from '../budget';
 import type { DocumentTemplateChapter } from '../types';
-import { buildBillFactLock } from '../billFactLock';
+import { buildBillFactLock, buildBillResponsibilityMap } from '../billFactLock';
+import { evidenceMatchesFact } from '../factMatching';
+import { extractChapterPreciseTokens } from '../chapterGeneration';
+import { buildChapterFactNeeds, factsForChapterNeeds, resolveChapterFactNeeds } from '../factsModel';
+import { HAS_QUANTIFIED_VALUE_RE } from '../parameterPatterns';
 import { buildDrawingFactLock } from '../drawingFactLock';
 import { routeTenderRequirementsToChapters, saveRequirementAssignmentsAsset, assignStructureRequirementsToChapters, saveStructureAssignmentsAsset, STRUCTURE_ROUTE_SCORE_MIN } from '../tenderRequirements';
 import { displayStage, upsertProgressStage } from '../progress';
-import { Semaphore, runWithAdaptiveConcurrency } from '../utils';
-import { PROJECT_BASIC_FACT_QUERIES } from '../documentGeneratorHelpers';
+import { Semaphore, runWithAdaptiveConcurrency, stringifyFactValue } from '../utils';
+import { PROJECT_BASIC_FACT_QUERIES, resolveChapterPromptExecution } from '../documentGeneratorHelpers';
 import { tuningProfile } from '../tuningProfile';
-import { assessChapterSupplyDemand, CHAPTER_PARAMETER_DENSITY_PER_1000 } from '../integratedBlueprint/capacity';
+import { assessChapterSupplyDemand, collectChapterParameterSupply, CHAPTER_PARAMETER_DENSITY_PER_1000 } from '../integratedBlueprint/capacity';
 
 export async function stageBlueprint(session: GenerationSession): Promise<void> {
   const avgChapterTarget = Math.round(([...session.planning.documentBudget.chapterTargets.values()].reduce((sum, value) => sum + value, 0) || session.planning.documentBudget.targetChars || 0) / Math.max(1, session.planning.effectiveChapters.length));
@@ -269,7 +273,10 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
       upsertProgressStage(session.global.progressStages, displayStage({
         type: 'validation',
         roleId: 'chapter-budget-feasibility',
-        status: compressed ? 'failed' : 'success',
+        // 状态语义：校准**执行成功**（已按下限比例压缩并落库），压缩是目标与密度冲突下的既定处置，
+        // 不是本环节失败——消息里自称「不阻断」却标 failed 属于自相矛盾，会让使用者把它当错误排查
+        //（实测用户反馈「章预算又开始报错」即此节点）。冲突本身仍由 message + details 显式暴露，不隐藏。
+        status: 'success',
         message: compressed
           ? '章预算可行性校准：最低密度预算合计超出全文目标，按下限比例压缩（不阻断；容量密度需求与目标字数冲突已显式暴露）'
           : adjustments.length > 0
@@ -312,14 +319,35 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
   // 属产品决策；把差距摆出来即可，避免在无实测依据时自动调参。
   {
     const outlineChapters = session.blueprint.integratedBlueprint?.outline.chapters ?? [];
+    // 清单责任行按章归属（与写作注入同源）：每行条目的规格-数量对即本章可用的量化参数
+    const billResponsibility = buildBillResponsibilityMap(session.blueprint.billFactLock, session.planning.effectiveChapters);
     const assessments = session.planning.effectiveChapters.map(chapter => {
       const blueprintChapter = outlineChapters.find(item => item.title === chapter.title)
         ?? outlineChapters.find(item => chapter.title.includes(item.title) || item.title.includes(chapter.title));
-      const availableParameters = (blueprintChapter?.subSections ?? []).reduce((sum, section) => sum + (section.requiredParams?.length ?? 0), 0);
+      const blueprintParams = (blueprintChapter?.subSections ?? []).flatMap(section => (section.requiredParams ?? []).map(param => param.path));
+      const billSpecs = [...billResponsibility.entries()]
+        .filter(([entry, assignment]) => assignment.chapterTitle === chapter.title && entry)
+        .flatMap(([entry]) => entry.specQuantityPairs.length > 0 ? entry.specQuantityPairs.map(pair => pair.spec) : [entry.name]);
+      const chapterEvidence = session.understanding.writerEvidence.filter(item => item.chapterId === chapter.id || evidenceMatchesFact(item, chapter.title));
+      // 本章需求解析事实（写作端同源链：buildChapterFactNeeds → resolveChapterFactNeeds → factsForChapterNeeds）：
+      // 缺这一路会严重低估供给——实测「拟投入的主要物资计划」只数清单行得 0.90/千字被判不足，
+      // 而其事实实际来自本章需求解析（清单条目事实/参数事实），写作端拿得到、写作时也确实在落位。
+      const chapterPromptExecution = resolveChapterPromptExecution(session.prepare.promptPlan, chapter);
+      const chapterPromptTexts = [chapterPromptExecution.promptTexts, session.prepare.generationControlPrompt, session.prepare.runtimeRulesText].filter(Boolean).join('\n\n');
+      const chapterFactNeeds = buildChapterFactNeeds({ template: session.prepare.template, chapter, spec: session.prepare.documentSpec, profile: session.prepare.domainProfile, promptTexts: chapterPromptTexts, requirement: session.global.input.requirement });
+      const resolvedFactNeeds = resolveChapterFactNeeds({ needs: chapterFactNeeds, factsModel: session.understanding.preliminaryFactsModel, evidence: chapterEvidence, profile: session.prepare.domainProfile, excludedEvidenceKeys: session.understanding.excludedEvidenceKeys });
+      const factValues = factsForChapterNeeds(resolvedFactNeeds).map(fact => stringifyFactValue(fact.value)).filter(value => HAS_QUANTIFIED_VALUE_RE.test(value));
+      const supplyChannels = collectChapterParameterSupply({
+        blueprintParams,
+        billSpecs,
+        evidenceTokens: extractChapterPreciseTokens(chapterEvidence),
+        factValues,
+      });
       return assessChapterSupplyDemand({
         chapterTitle: chapter.title,
         targetWords: session.planning.documentBudget.chapterTargets.get(chapter.id) || 0,
-        availableParameters,
+        availableParameters: supplyChannels.total,
+        supplyChannels,
       });
     });
     session.planning.chapterSupplyDemand = assessments;
@@ -329,8 +357,8 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
       roleId: 'supply-demand-alignment',
       status: underSupplied.length === 0 ? 'success' : 'failed',
       message: underSupplied.length === 0
-        ? `供给面 ↔ 要求面对齐核算通过：${assessments.length} 章参数密度均达检测同源线 ${CHAPTER_PARAMETER_DENSITY_PER_1000}/千字`
-        : `供给面不足：${underSupplied.length}/${assessments.length} 章可用量化参数低于检测同源密度线 ${CHAPTER_PARAMETER_DENSITY_PER_1000}/千字`,
+        ? `供给面 ↔ 要求面对齐核算通过：${assessments.length} 章可用量化参数均达 ${CHAPTER_PARAMETER_DENSITY_PER_1000}/千字`
+        : `供给面不足：${underSupplied.length}/${assessments.length} 章可用量化参数低于 ${CHAPTER_PARAMETER_DENSITY_PER_1000}/千字（按蓝图 must_cite ＋ 清单责任行规格 ＋ 本章证据精确 token 去重计）`,
       details: underSupplied.slice(0, 8).flatMap(item => [`【${item.chapterTitle}】`, ...item.remediation]),
     }, { subtitle: '章预算可行性校准', order: session.global.progressStages.length }));
     session.global.emitProgress();

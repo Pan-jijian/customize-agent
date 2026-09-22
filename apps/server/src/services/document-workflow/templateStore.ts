@@ -13,6 +13,7 @@ import type { DocumentTemplate, ProjectBinding, PromptBinding } from './types';
 import { templateProjectBindings, inferMaterialKind } from './projectMaterialProfile';
 import { isUsableKnowledgeFile, type KnowledgeFile } from './agentWorkflow';
 import { charsPerPageForSettings, explicitLengthTargets } from './budget';
+import { ensureUniqueChapterIds } from './utils';
 import { tuningProfile } from './tuningProfile';
 import { extractExplicitOutlineFromSources } from './outline';
 
@@ -109,7 +110,7 @@ function sanitizeTemplate(template: DocumentTemplate): DocumentTemplate {
     updatedAt: Number.isFinite(template.updatedAt) ? template.updatedAt : Date.now(),
     changeLog: Array.isArray(template.changeLog) ? template.changeLog.filter((e: unknown) => e && typeof e === 'object' && Number.isFinite((e as Record<string, unknown>).version) && typeof (e as Record<string, unknown>).summary === 'string').slice(0, 50) : [],
     projectRoleConfigId: template.projectRoleConfigId || undefined,
-    chapters: Array.isArray(template.chapters) && template.chapters.length > 0 ? template.chapters.map((chapter, index) => ({
+    chapters: Array.isArray(template.chapters) && template.chapters.length > 0 ? ensureUniqueChapterIds(template.chapters.map((chapter, index) => ({
       id: (chapter.id || `chapter-${index + 1}`).replace(/[^a-zA-Z0-9_-]/gu, '-').slice(0, 80),
       title: chapter.title || `第 ${index + 1} 章`,
       purpose: chapter.purpose || '',
@@ -120,7 +121,7 @@ function sanitizeTemplate(template: DocumentTemplate): DocumentTemplate {
       tableRequirements: Array.isArray(chapter.tableRequirements) ? chapter.tableRequirements.filter(Boolean) : [],
       tablePlans: Array.isArray(chapter.tablePlans) ? chapter.tablePlans : [],
       pinnedEvidenceFilePaths: Array.isArray(chapter.pinnedEvidenceFilePaths) ? chapter.pinnedEvidenceFilePaths.filter(Boolean) : [],
-    })) : [{ id: 'document', title: template.outputTitle || template.name || '文档', purpose: template.description || '', queries: [], requiredFacts: [] }],
+    }))) : [{ id: 'document', title: template.outputTitle || template.name || '文档', purpose: template.description || '', queries: [], requiredFacts: [] }],
     exportSettings: template.exportSettings,
     generationSettings: template.generationSettings,
     promptIds: Array.isArray(template.promptIds) ? template.promptIds.filter(Boolean) : [],

@@ -122,6 +122,41 @@ export function normalizeSubsectionTitleForDedup(title: string): string {
     .replace(/工程$/u, '');
 }
 
+/**
+ * 章节 id 去重修复：保证章 id 在列表内唯一。
+ *
+ * 章 id 是下游几乎所有映射的键（章预算 chapterTargets、章计划 chapterPlans、意图证据
+ * evidenceByChapterId、图谱映射 chapterGraphMap…），**id 重复即后写覆盖先写**。
+ * 实测症状：章预算可行性校准的守恒断言失守（`Σ章预算 少于 目标`）→ 校准整轮降级为「沿用原章预算」，
+ * 节点标红（随机化复现：id 全唯一 4 万组零违约；允许重复即稳定违约）。
+ *
+ * 重复来源：模板章 id 直接取自用户输入（`sanitizeTemplate` 不校验唯一性），
+ * 且「无 id 的章」回退为 `chapter-${index+1}`，会与别处显式写死的同名 id 撞车。
+ *
+ * 处置口径：**保留首个出现的 id**，后续重复者改写为 `<id>-dup<N>`——保留章节本身与标题，
+ * 不丢章、不改正文，只让每个章在下游映射里各占一个键。
+ */
+export function ensureUniqueChapterIds<T extends { id: string }>(chapters: readonly T[]): T[] {
+  const seen = new Set<string>();
+  const result: T[] = [];
+  for (const chapter of chapters) {
+    if (!seen.has(chapter.id)) {
+      seen.add(chapter.id);
+      result.push(chapter);
+      continue;
+    }
+    let suffix = 2;
+    let candidate = `${chapter.id}-dup${suffix}`;
+    while (seen.has(candidate)) {
+      suffix += 1;
+      candidate = `${chapter.id}-dup${suffix}`;
+    }
+    seen.add(candidate);
+    result.push({ ...chapter, id: candidate });
+  }
+  return result;
+}
+
 /** 工作包主题域标签（单位工程多工作包切块的语义化标题用）：按施工专业域归类，
  * 域块标题 = 单位工程名 + 域名（「公厕结构与基础工程」），杜绝「公厕（1）（2）」防撞名泄漏目录；
  * 匹配顺序即优先级（混合名如「模板、脚手架及化粪池安装工程」按安装域归类）。
