@@ -190,6 +190,8 @@ export interface FinalizeSession {
   writingTaskBrief?: WritingTaskBrief;
   /** 4.55.17 答疑澄清生效口径（招标与答疑不一致时以答疑为准；终检 superseded-value-usage 消费） */
   clarificationOverrides?: ClarificationOverride[];
+  /** 4.55.19 口径账本（真值层读侧产出：属性/生效值/裁决规则/依据/被取代值） */
+  caliberLedger?: string[];
   globalConsistencyIssues?: string[];
   agentWorkflow: AgentWorkflowContext;
   factExtractionPromptTexts: string;

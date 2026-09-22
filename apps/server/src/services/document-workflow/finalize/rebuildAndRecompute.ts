@@ -49,6 +49,8 @@ import { generatedRoot } from '../../document-core/generatedDocumentService';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { supersededValueIssues } from '../clarificationOverrides';
+import { buildAuthoritativeValues, renderCaliberLedger } from '../authoritativeValues';
+import { collapseOverrideChains, extractValueOverrides } from '../valueOverride';
 import { assignStructureRequirementsToChapters } from '../tenderRequirements';
 import { constructionOrgProfessionalAuditIssues } from '../constructionOrgAudit';
 // 方案 2.2 密度/结构执行器终检同源复核（写作侧 block-fact-density/block-structure-contract 的 finalize 复核函数）
@@ -526,6 +528,28 @@ export async function stageRebuildAndRecompute(session: FinalizeSession): Promis
   if (canonicalFacts.size > 0) session.executionStages.push({ type: 'fact_extraction', roleId: 'canonical-facts', status: 'success', message: `已决策可信基础事实 ${canonicalFacts.size} 项`, details: [...canonicalFacts.values()].map(fact => `${fact.label}=${fact.value}（${fact.source}，confidence=${fact.confidence}）`).slice(0, 12) });
 
   // 修复后重算问题组会重新计算，修复基线只保留基础累计问题，避免重复累加
+  // 4.55.19 真值层读侧（方案 v3 §2-§3）：实体-属性图 + 噪声闸 + 决定性裁决 → 口径账本
+  // （只读产出，不改写作；后续步骤切写侧消费）
+  {
+    const truthFacts = [
+      ...(session.factsModel?.preciseFacts || []), ...(session.factsModel?.project || []),
+      ...(session.factsModel?.schedule || []), ...(session.factsModel?.quality || []),
+      ...(session.factsModel?.safety || []),
+    ].map(fact => ({ key: (fact as { key?: string }).key, label: (fact as { fieldName?: string }).fieldName, value: (fact as { value?: unknown }).value, sourceFile: (fact as { sourceFile?: string }).sourceFile }));
+    const overrides = collapseOverrideChains(extractValueOverrides([
+      ...(session.allEvidence || []).map(item => ({ text: String(item.content || ''), source: `${item.filePath || ''} ${item.sectionTitle || ''}` })),
+      ...truthFacts.map(fact => ({ text: String(fact.value ?? ''), source: String(fact.sourceFile || '') })),
+    ]));
+    const truthAudit = buildAuthoritativeValues({ facts: truthFacts, overrides });
+    session.caliberLedger = renderCaliberLedger(truthAudit);
+    upsertProgressStage(session.progressStages, displayStage({
+      type: 'reference',
+      roleId: 'caliber-ledger',
+      status: 'success',
+      message: `口径账本（真值层）：受管属性 ${truthAudit.resolved.length} 项、噪声剔除 ${truthAudit.noiseRejected.length} 项、值级覆盖 ${overrides.length} 对`,
+      details: [...session.caliberLedger.slice(0, 20), ...(overrides.length > 0 ? [`值级覆盖：${overrides.slice(0, 5).map(item => `${item.superseded}→${item.effective}`).join('、')}`] : [])],
+    }, { subtitle: '口径账本' }));
+  }
   // 4.55.17 答疑澄清生效口径兜底检测（招标与答疑不一致时旧值不得作为现行表述）：
   // 写作硬约束（写作简报注入）未遵循时在此暴露，直进终门禁与修复轮
   const clarificationIssues = supersededValueIssues(session.finalMarkdown, session.clarificationOverrides || []);
