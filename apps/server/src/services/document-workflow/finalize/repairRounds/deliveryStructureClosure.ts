@@ -17,6 +17,7 @@ import { missingPlannedSections, promotePlannedSectionHeadings } from '../../cha
 import { fixTocFromBody } from '../../documentIntegrityChecks';
 import { splitOverlengthBodyParagraphs } from '../../helpers/markdownCleanup';
 import { displayChapterTitle } from '../../outline';
+import { renumberSectionHeadings } from '../../structureIntegrityRules';
 import { displayStage, upsertProgressStage } from '../../progress';
 import { recordRepairActions } from '../../rolePipeline';
 import type { FinalizeSession } from '../finalizeSession';
@@ -75,6 +76,17 @@ export async function stageDeliveryStructureClosure(session: FinalizeSession): P
     session.finalMarkdown = split.markdown;
     repairActions += split.splitCount;
     details.push(`超长段落切分：消除 >380 字符段落 ${split.splitCount} 处`);
+  }
+  // 4.55.19 小节编号重放（链尾）：小节被合并/删除后编号出现空档（实测「1.1 → 1.2 → 1.4」缺 1.3），
+  // 评标人一眼可见。此前 section-renumber 只在确定性清洗链内执行，其后的修复轮（主题小节合并等）
+  // 删除小节后无人重放 → 链尾补一次原子重放（幂等：无空档零改动）
+  {
+    const renumbered = renumberSectionHeadings(session.finalMarkdown);
+    if (renumbered.fixedCount > 0) {
+      session.finalMarkdown = renumbered.markdown;
+      repairActions += renumbered.fixedCount;
+      details.push(`小节编号重放：${renumbered.fixedCount} 处（删除/合并小节后的编号空档收口）`);
+    }
   }
   // ① 目录按正文实际 H2/H3 结构重建（与 tocBodyConsistencyIssues 检测口径同源）
   const toc = fixTocFromBody(session.finalMarkdown);

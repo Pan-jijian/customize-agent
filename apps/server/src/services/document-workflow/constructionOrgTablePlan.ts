@@ -1066,6 +1066,15 @@ function figureCaptionNameLike(name: string): boolean {
   return !FIGURE_NAME_LIKE_EXCLUDE_RE.test(name);
 }
 
+/** 图题行所属章（行号 → 最近的上文 H2 标题文本；用于同章同源去重的章键） */
+function figureChapterOf(lines: string[], index: number): string {
+  for (let cursor = index; cursor >= 0; cursor -= 1) {
+    const heading = /^##\s+(.+?)\s*$/u.exec((lines[cursor] || '').trim());
+    if (heading) return heading[1]!;
+  }
+  return '';
+}
+
 /** 图名核心词键（同图判定）：「横道图」↔「施工进度横道图」同图——去括号注释与图类尾词后比对 */
 function figureNameKey(name: string): string {
   return normalizeText(name).replace(/[（(][^）)]*[）)]/gu, '').replace(/[图表]+$/u, '');
@@ -1286,6 +1295,10 @@ export function ensureFigurePlaceholders(markdown: string, specs: FigurePlacehol
   // （巢湖实测：模型只输出裸图题，图位被判已承载、W5 替代表从未生成；此处按已有图题与新增图题两路补）
   const captionBackfill = new Map<number, string[]>();
   const captionImage = new Map<number, string>();
+  // 4.55.19 同章同源替代表去重（两条路径共用同一签名表）：实测缺陷——回填路径未去重，
+  // 「横道图」「网络图」两个既有图题各补一张**完全相同**的进度表（相邻两表重复；
+  // 模型自己写的表 + 补的表也会撞车）
+  const tableSignatureByChapter = new Map<string, string>();
   for (const caption of existingCaptionLines) {
     // 幂等：图题邻域（前后 8 行）已有图片引用或表格行则视为已承载（重放零改动）
     const neighborhood = lines.slice(Math.max(0, caption.index - 8), caption.index + 9);
@@ -1297,7 +1310,13 @@ export function ensureFigurePlaceholders(markdown: string, specs: FigurePlacehol
       continue;
     }
     const table = options.substituteTable?.(caption.name);
-    if (table && table.length > 0) captionBackfill.set(caption.index, table);
+    if (table && table.length > 0) {
+      const signature = table[0] || '';
+      const chapterKey = `${figureChapterOf(lines, caption.index)}|${signature}`;
+      if (tableSignatureByChapter.has(chapterKey)) continue;   // 同章同源已出表 → 不重复补
+      tableSignatureByChapter.set(chapterKey, signature);
+      captionBackfill.set(caption.index, table);
+    }
   }
   // C2：无缺失但原地修复过时同样输出修复结果（修复即收益；纯补位路径原样返回）
   // 4.55.12：图题替代表回填（captionBackfill）同为实质变更，一并进入输出路径
@@ -1326,7 +1345,6 @@ export function ensureFigurePlaceholders(markdown: string, specs: FigurePlacehol
   const inserted: string[] = [];
   // 4.55.16 替代表去重（巢湖实测：横道图/总进度计划图/网络图三个图位共用同一份 schedule 数据，
   // 注入三张完全相同的表）：同章内同一数据源（表头签名相同）只出一次表，后续图位改为指向该表
-  const tableSignatureByChapter = new Map<number, string>();
   for (const spec of missing) {
     const end = locateChapterEnd(spec.chapterTitle);
     const bucket = insertAt.get(end) || [];
@@ -1341,10 +1359,11 @@ export function ensureFigurePlaceholders(markdown: string, specs: FigurePlacehol
       const table = options.substituteTable?.(injectedName);
       if (table && table.length > 0) {
         const signature = table[0] || '';
-        if (tableSignatureByChapter.get(end) === signature) {
+        const chapterKey = `${end}|${signature}`;
+        if (tableSignatureByChapter.has(chapterKey)) {
           bucket.push('', '> 说明：本图工序数据与本章前述进度数据表同源，见该表（不重复列出）。', '');
         } else {
-          tableSignatureByChapter.set(end, signature);
+          tableSignatureByChapter.set(chapterKey, signature);
           bucket.push('', ...table, '');
         }
       }
