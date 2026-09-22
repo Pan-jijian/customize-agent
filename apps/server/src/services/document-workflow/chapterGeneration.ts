@@ -1165,9 +1165,19 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     const criticalDepthFloor = isCriticalDeepSection(block.title)
       ? Math.min(criticalSectionBlockerMinChars(block.title), Math.max(500, block.targetWords))
       : 0;
-    /** 欠产硬门线（首轮）；末轮不设欠产门（照既有「微缺口重写收敛期望为负」契约放行交终检链兜底） */
-    const underProduceLine = Math.max(Math.floor(block.targetWords * 0.7), criticalDepthFloor);
-    /** 首轮反馈下达的篇幅下限：达标区下沿与绝对门槛取严（重写目标即块真实验收线，不虚报缺口） */
+    /**
+     * 欠产硬门线；末轮不设欠产门（照既有「微缺口重写收敛期望为负」契约放行交终检链兜底）。
+     *
+     * **4.55.22 修复（真实用户实测回归）**：绝对深度门槛一度被并入本线
+     *（`max(0.7×块目标, criticalDepthFloor)`）——而 `criticalDepthFloor = min(blockerMinChars, max(500,块目标))`，
+     * 对「主要施工内容」这类关键小节（blockerMinChars=1800）会把接受区间从 [0.7×目标, 1.15×目标]
+     * **收窄到 [≈目标, 1.15×目标]**：模型一次写不到接近目标字数即被拒 → 全部块失败 → 整章阻断
+     *（用户实测报错「规划块全部失败：主要施工内容」）。绝对门槛的正当职责是**驱动首轮定向补写反馈**
+     *（见 lastDepthFeedback），终态那层已由终检 `critical-section-depth` + `content-depth-repair` 兜底——
+     * 块级不得新增终局失败面（上一段注释本就写明该契约，此次是执行偏离了它）。
+     */
+    const underProduceLine = Math.floor(block.targetWords * 0.7);
+    /** 首轮反馈下达的篇幅下限：可接受区下沿；绝对门槛作为**更高目标**只出现在反馈措辞中 */
     const charFloor = Math.max(Math.floor(block.targetWords * 0.85), criticalDepthFloor);
     // 4.55.22 工作包节结构与要素门禁（生成侧）：复用 sectionStructureIssue 单源（与终检
     // construction-org-major-content / construction-org-division-section 及 utils 三要素判定同源），
@@ -1553,7 +1563,11 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         // 方案 2.2 执行器同步排除：内容质量阻断（数值/模板化/密度/归因/格式/工作包要素）不得被标题层修复
         // 通道放行——修复动作（去重/剥标题）不解决内容质量问题，放行会架空「写作时阻断」
         //（照 V2 批1 structureBlocking 先例；工作包要素门禁为 attempt 0 条件，故其排除同样只作用于首轮）
-        if (missing.length === 0 && !structureBlocking && !numericBlocking && !fillerBlocking && !densityBlocking && !attributionBlocking && !formatBlocking && !elementBlocking) {
+        // 4.55.22：`criticalDepthBlocking` 必须与 elementBlocking 同列——它是**内容质量阻断**
+        //（篇幅深度不足），标题层修复（去重/剥标题）不解决内容量问题。原实现漏列 → 深度不足的块
+        // 经标题清洗后由本通道**直接放行**（且首轮即放行，因 repairedUnderProduce 按比例线判、
+        // 而绝对门槛当时被折进了比例线才侥幸未暴露），深度门因此被架空。
+        if (missing.length === 0 && !structureBlocking && !numericBlocking && !fillerBlocking && !densityBlocking && !attributionBlocking && !formatBlocking && !elementBlocking && !criticalDepthBlocking) {
           // 4.19.1 确定性修复优先：先同 H3 重复 H4 去重，再清单外标题行剥离（正文零丢失），
           // 修复后字数达标即通过——标题层问题由代码确定性修复，不因整块删除掉档触发重试/失败
           const repaired = stripExtraneousBlockHeadings(dedupeRepeatedSubsections(withBlockShell), block.title, sectionTitles, [...block.subPoints.flatMap(point => point.sources)]);
@@ -1577,12 +1591,13 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         blockFailureKinds.set(index, [
           ...(overProduceBlocking ? ['over-produce'] : []),
           ...(underProduceBlocking ? ['under-produce'] : []),
-          // 关键小节绝对深度门槛不足与欠产同族（篇幅类非超产）：并入 under-produce，
-          // 使 C7 章级对冲接纳（仅收 over-produce）不误收深度不足块
-          ...(criticalDepthBlocking && !underProduceBlocking ? ['under-produce'] : []),
+          // 4.55.22：`criticalDepthBlocking` 与 `elementBlocking` **仅首轮生效**（attempt===0），
+          // 不是末轮失败原因，**不进 failureKinds**——否则会与 'over-produce' 组成双元素，
+          // 使章级超产对冲接纳（要求 kinds 恰为 ['over-produce']）拒收本可交付的块，
+          // 制造与用户实测同族的整章阻断。二者仍进下方诊断消息与 console.error。
           ...(missing.length > 0 || duplicates.length > 0 || extraneous.length > 0 ? ['structure-titles'] : []),
           ...(structureBlocking ? ['structure-integrity'] : []),
-          ...(elementBlocking ? ['work-package-elements'] : []),
+          // （elementBlocking 同理：仅首轮生效，不进终态失败类别）
           ...(numericBlocking ? ['numeric'] : []),
           ...(flowFormBlocking ? ['flow-form'] : []),
           ...(fillerBlocking ? ['templating'] : []),

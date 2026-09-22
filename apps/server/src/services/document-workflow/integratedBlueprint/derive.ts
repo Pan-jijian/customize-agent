@@ -421,7 +421,9 @@ export function buildBlueprintData(input: {
   evidence?: DocumentEvidence[];
   facts?: DocumentFact[];
   projectName: string;
-  strategy: BlueprintDerivationStrategy;
+
+  /** 4.55.22 真值层专用证据源：全量资料（未经内容安全过滤），与写作侧口径裁决同源 */
+  truthEvidence?: Array<{ content?: string; filePath?: string; sectionTitle?: string }>;  strategy: BlueprintDerivationStrategy;
 }): { data: BlueprintData; diagnostics: Pick<BlueprintBuildDiagnostics, 'warnings'> } {
   const { boq } = input;
   const strategy = input.strategy;
@@ -440,8 +442,13 @@ export function buildBlueprintData(input: {
   // 4.55.19 真值层（读侧单点真值）：蓝图 contract 不再自行解析文本口径——先裁决再消费。
   // 实测缺陷：招标 365 / 答疑澄清 330 时，蓝图按 365 推导里程碑与进度计划（起止天序排到第 348 天），
   // 而正文按 330 写 → 同文档两套工期。
+  // 4.55.22 根修：真值层证据源 = **全量资料**（`truthEvidence`，未经内容安全过滤）——
+  // 蓝图与写作侧必须共用同一口径裁决输入。此前用 `input.evidence`（= 过滤后的 writerEvidence），
+  // 而答疑页因含商务内容被整页排除，连带把同页的工期/开工日期澄清一起挡掉 →
+  // 真值层只见招标 365 → contract.totalDays=365 → 里程碑与进度表按 365 编排（实测）。
+  // 调用方（stageBlueprint）传 session.understanding.allEvidence；缺省时回退 input.evidence 保持兼容。
   const truthSources = [
-    ...(input.evidence || []).map(item => ({ text: String(item.content || ''), source: `${item.filePath || ''} ${item.sectionTitle || ''}` })),
+    ...(input.truthEvidence || input.evidence || []).map(item => ({ text: String(item.content || ''), source: `${item.filePath || ''} ${item.sectionTitle || ''}` })),
     ...(input.facts || []).map(fact => ({ text: String(fact.value ?? ''), source: String(fact.sourceFile || '') })),
   ];
   const truthAudit = buildAuthoritativeValues({

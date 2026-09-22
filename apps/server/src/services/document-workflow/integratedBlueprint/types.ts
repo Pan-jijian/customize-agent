@@ -355,6 +355,12 @@ export interface BuildIntegratedBlueprintInput {
   composition?: BidCompositionSpec;
   signal?: AbortSignal;
   diagnostics?: DocumentGenerationDiagnostics;
+  /**
+   * 4.55.22 真值层专用证据源：**全量资料**（未经内容安全过滤），与写作侧口径裁决同源。
+   * 内容安全过滤会把含商务内容的**答疑整页**排除，连带挡掉同页的技术口径澄清
+   *（工期 365→330、开工日期、限价），真值层因此只见招标旧值 → 蓝图 totalDays=365、进度表 348 天（实测）。
+   */
+  truthEvidence?: Array<{ content?: string; filePath?: string; sectionTitle?: string }>;
 }
 
 /** 蓝图版本与文档类型 */

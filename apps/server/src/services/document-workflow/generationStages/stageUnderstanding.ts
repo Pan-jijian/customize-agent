@@ -201,8 +201,21 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
   //   ② 覆盖表**就地应用到事实池与证据**（被取代值在写作输入里消失）→
   //   ③ 模型看不到旧值，无需事后替换；链尾替换降为兜底（LLM 仍可能从别处抄到旧值）。
   {
+    /**
+     * 4.55.22 根修（真实生成实测）：真值层的证据源必须是**全量 allEvidence**，不是内容安全过滤后的 writerEvidence。
+     *
+     * 实测事故：内容安全过滤（把投标纪律/商务报价类证据从写作链断开，规则含「暂列金额|报价|澄清」）
+     * 把整份**答疑文件页**判为商务而排除——而答疑把**技术口径变更与商务内容写在同一页**
+     *（如「原计划工期:365日历天，现变更修改为:330日历天」与「最高投标限价…暂列金额4000000.00元」同页）。
+     * 于是真值层只看到招标文件的 365：工期 330 从未进入裁决 → 覆盖表为空 → 蓝图 totalDays=365、
+     * 正文 7 处「365日历天」、进度表按 365 排到 348 天；开工日期澄清表（7号答疑第1页）同样被排除。
+     *
+     * 正确分层：内容安全过滤的目的是**不让商务/纪律内容进正文**；真值层是**系统侧通道**
+     *（与「评分标准条目提取」「招标要求提取」同类，代码中已有"继续直读全量 allEvidence"的既有范式），
+     * 它需要看到现行口径才能裁决。覆盖表只用于改写**写手输入**，不会把商务内容带入正文。
+     */
     const truthSources = [
-      ...session.understanding.writerEvidence.map(item => ({ text: String(item.content || ''), source: `${item.filePath || ''} ${item.sectionTitle || ''}` })),
+      ...session.understanding.allEvidence.map(item => ({ text: String(item.content || ''), source: `${item.filePath || ''} ${item.sectionTitle || ''}` })),
       ...arbitratedFacts.map(fact => ({ text: String(fact.value ?? ''), source: String(fact.sourceFile || '') })),
     ];
     const truthFacts = arbitratedFacts.map(fact => ({ key: fact.key, label: fact.fieldName, value: fact.value, sourceFile: fact.sourceFile }));

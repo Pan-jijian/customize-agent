@@ -100,12 +100,28 @@ describe('巢湖端到端：多份补疑的现行口径裁决（4.55.22 根治�
     expect(pick('开工日期')?.value).toBe('2026年10月10日');
   });
 
-  it('写作前置覆盖表：被取代值均指向现行值，且不含组成部分', () => {
+  it('写作前置覆盖表：被取代值均指向各自现行值（组成部分不冒充总额）', () => {
     const table = audit.resolved.flatMap(item => item.superseded.map(value => `${value}→${item.value}`));
     expect(table).toContain('365日历天→330日历天');
     expect(table).toContain('172460314.52元→157166591.34元');
     expect(table).toContain('22303.66万元→157166591.34元');
-    expect(table.join('|')).not.toContain('4000000.00元');
+    // 4.55.22：**暂列金额是独立属性**（此前只被当作"不是总额"而拒绝，系统并不知道现行是 700 万）。
+    // 关键不变式：暂列金额（含 400万 旧值）只能指向**暂列金额**的现行值，不得指向合同总额；
+    // 反之合同金额的覆盖表也不得出现组成部分。
+    const contractEntries = audit.resolved
+      .filter(item => item.attribute === '合同金额')
+      .flatMap(item => item.superseded.map(value => `${value}→${item.value}`));
+    expect(contractEntries.join('|')).not.toContain('4000000.00元');
+    const provisionalEntries = audit.resolved
+      .filter(item => item.attribute === '暂列金额')
+      .flatMap(item => item.superseded.map(value => `${value}→${item.value}`));
+    expect(provisionalEntries).toContain('4000000.00元→7000000.00元');
+    expect(provisionalEntries.join('|')).not.toContain('157166591.34元');
+  });
+
+  it('暂列金额 = 7000000.00元（独立属性；不被归并为合同金额）', () => {
+    expect(pick('暂列金额')?.value).toBe('7000000.00元');
+    expect(pick('合同金额')?.value).toBe('157166591.34元');
   });
 });
 

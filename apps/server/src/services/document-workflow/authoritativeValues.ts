@@ -254,6 +254,9 @@ export function normalizeAttributeName(key: string, label?: string): string {
   if (/建设规模|建筑面积|规模|scale/i.test(raw)) return '建设规模';
   if (/建设地点|工程地点|location/i.test(raw)) return '建设地点';
   if (/招标人|建设单位|owner/i.test(raw)) return '招标人';
+  // 4.55.22：**暂列金额必须先判**——它含「金额」二字，会被下面的 /金额/ 规则归并成「合同金额」，
+  // 于是 700 万变成"合同金额的被取代值"，正文里合法的暂列金额会被替换成合同总额（实测自测暴露）。
+  if (/暂列金额|暂列金/u.test(raw)) return '暂列金额';
   if (/估算|限价|控制价|投资|金额|amount/i.test(raw)) return '合同金额';
   if (/项目名称|工程名称|projectName/i.test(raw)) return '项目名称';
   if (/项目编号|工程编号|projectCode/i.test(raw)) return '项目编号';

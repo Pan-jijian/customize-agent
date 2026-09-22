@@ -53,6 +53,9 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
       templateName: session.prepare.template.name,
       basicFacts: renderBasicFactsForBlueprint(session.understanding.canonicalFacts),
       evidence: session.understanding.writerEvidence,
+      // 4.55.22：真值层证据源 = 全量 allEvidence（未经内容安全过滤）——答疑页因含商务内容被整页排除，
+      // 连带挡掉同页的工期/开工日期澄清，真值层只见招标 365（实测：contract.totalDays=365、进度表 348 天）
+      truthEvidence: session.understanding.allEvidence,
       facts: [...session.understanding.earlyFactPool.localFacts, ...session.understanding.earlyFactPool.projectBasicFacts, ...session.understanding.earlyFactPool.preciseFacts],
       composition: session.understanding.bidComposition,
       signal: session.global.input.signal,

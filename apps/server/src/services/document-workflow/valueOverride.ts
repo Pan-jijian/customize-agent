@@ -224,7 +224,7 @@ export function applyOverridesToRetrieved<T extends { content?: unknown }>(items
  * 注：该句出自 1 号答疑，其限价已被 5 号答疑的 157166591.34 元取代——此处引它只为说明
  * 抽取机制（同形句式在每份答疑都出现），现行值由时序号裁决给出，不是本条示例值） */
 export interface LabeledAuthorityValue {
-  attribute: '合同金额' | '计划工期' | '开工日期';
+  attribute: '合同金额' | '计划工期' | '开工日期' | '暂列金额';
   value: string;
   source: string;
   /** 该值所在句含「作废/以本次答疑附件为准」类**资料作废声明**时标记（被作废来源的旧值应让位） */
@@ -239,6 +239,11 @@ const LABELED_VALUE_RULES: Array<{ attribute: LabeledAuthorityValue['attribute']
   { attribute: '合同金额', re: /(?:最高投标限价|招标控制价|合同估算价(?:格)?|工程估算价|投标限价)(?<gap>[^。；\n]{0,16}?)(?:现)?(?:调整)?为?\s*[:：]?\s*(?<num>[\d,]+(?:\.\d+)?)\s*(?<unit>亿元|万元|元)/u },
   { attribute: '计划工期', re: /(?:计划工期|合同工期|总工期)(?<gap>[^。；\n]{0,16}?)(?<num>[\d,]+(?:\.\d+)?)\s*个?\s*日历天/u },
   { attribute: '开工日期', re: /(?:计划)?开工日期(?<gap>[^。；\n]{0,8}?)[:：]?\s*(?<num>20\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日)/u },
+  // 4.55.22：暂列金额此前**只被当作"不是合同总额"而拒绝**（组成性标签拦截），系统并不知道它的现行值——
+  // 于是「含暂列金额 7000000.00 元」这类信息既不进真值层也不进正文。现作为**独立属性**治理：
+  // 口径标签「暂列金额/暂列金」+ 数值 + 单位；同句含变更连接语时取**连接语之后**的值
+  //（实测 7号答疑「暂列金额由4000000.00元调整为7000000.00元」→ 生效 7000000.00元）。
+  { attribute: '暂列金额', re: /(?:暂列金额|暂列金)(?<gap>[^。；\n\d]{0,12}?)(?<num>[\d,]+(?:\.\d+)?)\s*(?<unit>亿元|万元|元)/u },
 ];
 /**
  * 变更连接语（带标签值抽取复用）：命中时取连接语后的值为生效值（同句其余数值为旧口径）。
@@ -295,9 +300,26 @@ export function extractLabeledAuthorityValues(sources: Array<{ text: string; sou
         if (durationChange) {
           out.push({ attribute: '计划工期', value: `${durationChange}日历天`, source: item.source, supersedesPriorMaterials, clarified });
         }
+        // 暂列金额同口径：**连接语必须位于标签之后**才取其后值（「暂列金额由400万调整为700万」→ 700万）。
+        // 实测自测暴露的误配：「最高投标限价现调整为:172460314.52元（其中含暂列金额4000000.00元）」
+        // 里连接语在标签之前，取其后值会把**限价**当成暂列金额（1.72亿 ≠ 暂列金）。
+        const amountLabelIndex = sentence.search(/(?:暂列金额|暂列金)/u);
+        const amountConnector = amountLabelIndex >= 0
+          ? new RegExp(`(?:${CHANGE_CONNECTORS})\\s*[:：]?\\s*(\\d+(?:\\.\\d+)?)\\s*(亿元|万元|元)`, 'gu')
+          : undefined;
+        let amountChange: RegExpExecArray | null | undefined;
+        if (amountConnector) {
+          for (const m of sentence.matchAll(amountConnector)) {
+            if ((m.index ?? 0) > amountLabelIndex) { amountChange = m as unknown as RegExpExecArray; break; }
+          }
+        }
+        if (amountChange) {
+          out.push({ attribute: '暂列金额', value: `${amountChange[1]}${amountChange[2] || ''}`, source: item.source, supersedesPriorMaterials, clarified });
+        }
         for (const rule of LABELED_VALUE_RULES) {
-          // 工期变更值已由上一步取「连接语之后」的值，同一句不再按规则正则重复抽工期
+          // 工期/暂列金额的变更值已由上一步取「连接语之后」的值，同一句不再按规则正则重复抽
           if (rule.attribute === '计划工期' && durationChange) continue;
+          if (rule.attribute === '暂列金额' && amountChange) continue;
           const match = rule.re.exec(sentence);
           if (!match?.groups) continue;
           const raw = match.groups.num?.replace(/,/gu, '') || '';
@@ -307,7 +329,9 @@ export function extractLabeledAuthorityValues(sources: Array<{ text: string; sou
           // 值必须带单位的**完整形态**：裸数字「365」会成为全局误替换的种子
           //（实测回归：工期值退化成「365」后，覆盖表变成 365 → 330日历天，
           //  正文里任意位置的 365 都会被替换，包括「1365」「365日历天」本身）
-          const value = rule.attribute === '合同金额' ? `${raw}${match.groups.unit || ''}`
+          // 金额类（合同金额/暂列金额）必须带单位：裸数字「7000000.00」在写手约束块里没有币种语义，
+          // 且会成为后续比对的弱种子（实测：5 号答疑抽出的暂列金额丢了「元」）
+          const value = (rule.attribute === '合同金额' || rule.attribute === '暂列金额') ? `${raw}${match.groups.unit || ''}`
             : rule.attribute === '计划工期' ? `${raw}日历天`
             : raw.trim();
           out.push({ attribute: rule.attribute, value, source: item.source, supersedesPriorMaterials, clarified });
