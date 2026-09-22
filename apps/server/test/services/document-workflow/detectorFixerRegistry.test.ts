@@ -191,6 +191,8 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
 
   it('FINALIZE_REPAIR_ROUNDS 顺序快照（32 轮锁死，变更必须显式改快照并附理由）', () => {
     expect([...FINALIZE_REPAIR_ROUNDS]).toEqual([
+      // 4.55.29：table-caption-repair 由「算术轮之前」移至「duplicate-theme-merge 之后」，
+  // 理由见 documentPipeline.ts 同处注释（题注是结构属性，须在结构类修复全部收敛之后收口）
       'fact-landing-round',
       'table-repair-round',
       'semantic-choice-conflict',
@@ -216,12 +218,12 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
       'toc-consistency',
       'length-compression-repair',
       'fact-distribution-round',
-      'table-caption-repair',
       'table-arithmetic-repair',
       'empty-section-sweep',
       'section-alignment-sweep',
       'templating-sweep',
       'duplicate-theme-merge',
+      'table-caption-repair',
       'delivery-structure-closure',
       'sentence-pattern-sweep',
       'duplicate-sentence-collapse',

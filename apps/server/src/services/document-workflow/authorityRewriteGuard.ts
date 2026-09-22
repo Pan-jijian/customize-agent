@@ -36,7 +36,9 @@ export const AUTHORITY_REWRITE_MAX_MAGNITUDE_RATIO = 5;
 const FOREIGN_ATTRIBUTE_NEAR_RE = /(?:隔热条|胶条|缝|间距|中心距|净距|排距|偏差|误差|不超过|不大于|不小于|范围|工作面|余量|搭接)/u;
 
 /** 通用部位词（自身不构成对象标识；必须带限定语才能定位，如「基础垫层」「地坪垫层」） */
-const GENERIC_BODY_PART_RE = /^(?:垫层|地面|楼面|地面|墙面|屋面|顶棚|天棚|基础|基层|面层|找平层|防水层|保温层|梁|板|柱|墙|门|窗|管道|检查井|路面|道路|散水|台阶|栏杆|扶手)$/u;
+export const GENERIC_BODY_PART_SOURCE = '垫层|地面|楼面|地面|墙面|屋面|顶棚|天棚|基础|基层|面层|找平层|防水层|保温层|梁|板|柱|墙|门|窗|管道|检查井|路面|道路|散水|台阶|栏杆|扶手';
+
+const GENERIC_BODY_PART_RE = new RegExp(`^(?:${GENERIC_BODY_PART_SOURCE})$`, 'u');
 
 function numericPart(value: string): number | undefined {
   const match = /(\d+(?:\.\d+)?)/u.exec(String(value || ''));

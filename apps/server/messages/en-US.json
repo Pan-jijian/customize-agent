@@ -567,7 +567,16 @@
     "addChapter": "Add Chapter",
     "builtIn": "Built-in",
     "deleteTemplateConfirm": "Delete this template?",
-    "noDraft": "Select a template and generate a draft"
+    "noDraft": "Select a template and generate a draft",
+    "exportGateBlockedTitle": "Export gate not passed",
+    "exportAnywayNonDeliverable": "Export anyway (non-deliverable)",
+    "nonDeliverableExportConfirm": "The exported file will be force-marked as a non-deliverable (file-name suffix and on-page banner). It must not be submitted as a formal deliverable.",
+    "nonDeliverableExportTitle": "This export is a non-deliverable",
+    "nonDeliverableExportHint": "The export gate did not pass, so the file is force-marked as a non-deliverable (file-name suffix). It must not be submitted as a formal deliverable.",
+    "nonDeliverableExportIssues": "Unresolved blockers",
+    "nonDeliverableExportTruncated": "…see the gate checklist in the export report for the rest",
+    "nonDeliverableTag": "Non-deliverable",
+    "nonDeliverableChecklistTitle": "Gate checklist of the latest non-deliverable export"
   },
   "specs": {
     "title": "Document Spec Packages",

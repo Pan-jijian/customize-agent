@@ -185,3 +185,99 @@ describe('basis-regulations-repair 行为矩阵', () => {
     expect(stage?.message).toContain('无定向修复目标');
   });
 });
+
+/**
+ * 4.55.29 指令根修（实机 `doc-1790104980418-d47a002e` 归因：修复轮自身缺陷）。
+ *
+ * 实机回滚消息：「编制依据法规漏列修复已回滚：主要施工方法与技术措施（修复复检未通过，保留修复前正文；
+ * 残留 4 类缺口）」。证据链：该章编制依据段**规范条目已有 12 条**，真缺口是法律法规/条例/地方性法规/
+ * 招标文件引用法规；而旧指令第 2 条**无条件**要求"按本工程分部分项选列施工验收规范名称与编号"，
+ * 逼模型从记忆里产出自带编号的规范条目 → 撞上本轮"无来源新增编号"守卫（recheck 指标 3）→ 整轮回滚，
+ * 三类真缺口一个字未补。根因是**任务自相矛盾**（缺口驱动缺失），不是模型不照做。
+ * 现指令按缺口类目逐条下发；未缺规范类目时改为显性禁令（含后果）。
+ */
+describe('basis-regulations-repair 缺口驱动指令（4.55.29）', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  /** 需地方法规判定：location 为工程所在地（省/市两级） */
+  const 蓝图 = { project: { location: '安徽省合肥市巢湖市' }, basisRegulations: [] as string[] };
+  /** 缺法/条例/地方三类、规范类目已满足（且有编号来源）的编制依据段 */
+  const 缺三类 = [
+    '## 编制依据',
+    '本工程编制依据如下：',
+    '《给水排水管道工程施工及验收规范》（GB 50268-2008）',
+    '《建筑地基基础工程施工质量验收标准》（GB 50202-2018）',
+  ].join('\n');
+  /** 补列法/条例/地方三类（法规名来自公开知识 + 属地，规范条目与既有条目一致，无新增编号） */
+  const 补齐三类 = [
+    '## 编制依据',
+    '本工程编制依据如下：',
+    '《中华人民共和国建筑法》（主席令第91号，2019年修正）',
+    '《建设工程质量管理条例》（国务院令第279号）',
+    '《合肥市市政设施管理条例》',
+    '《给水排水管道工程施工及验收规范》（GB 50268-2008）',
+    '《建筑地基基础工程施工质量验收标准》（GB 50202-2018）',
+  ].join('\n');
+
+  it('未缺规范类目：指令下达"不得新增规范编号"禁令，且不再要规范清单（消除自相矛盾）', async () => {
+    const session = makeSession([{ id: 'ch1', title: '主要施工方法与技术措施', content: 缺三类 }], { blueprintData: 蓝图 });
+    repairMock.mockResolvedValueOnce(repairResult(补齐三类));
+    await stageBasisRegulationsRepair(session);
+    const promptTexts = repairMock.mock.calls[0][0].promptTexts as unknown as string;
+    expect(promptTexts).toContain('本轮不得新增任何规范编号');
+    expect(promptTexts).not.toContain('施工验收规范条目：');
+    // 三类真缺口逐条下发补列口径（机制化表述：属地=工程所在地）
+    expect(promptTexts).toContain('国家法律法规条目：');
+    expect(promptTexts).toContain('条例/办法条目：');
+    expect(promptTexts).toContain('地方性法规与政府规章条目：');
+    expect(promptTexts).toContain('工程所在地属地');
+    // 三类补齐即落盘（不再整轮回滚）
+    expect(session.finalChapterDrafts[0].content).toBe(补齐三类);
+    const stage = stageOf(session.progressStages, 'agent-basis-regulations-repair-ch1');
+    expect(stage?.status).toBe('success');
+    expect(stage?.message).toContain('修复完成');
+  });
+
+  it('缺规范类目：仍要求规范名称与编号 + 编号来源可查（判据不因缺口驱动而放宽）', async () => {
+    const session = makeSession([{ id: 'ch1', title: '编制依据', content: DEFECTIVE_CONTENT }]);
+    repairMock.mockResolvedValueOnce(repairResult(REPAIRED_CONTENT));
+    await stageBasisRegulationsRepair(session);
+    const promptTexts = repairMock.mock.calls[0][0].promptTexts as unknown as string;
+    expect(promptTexts).toContain('施工验收规范条目：');
+    expect(promptTexts).toContain('补列的规范编号必须能在项目资料');
+    expect(promptTexts).not.toContain('本轮不得新增任何规范编号');
+  });
+
+  it('反例：禁令分支下模型仍编造编号 → 守卫照常回滚（指令不是唯一防线）', async () => {
+    const session = makeSession([{ id: 'ch1', title: '主要施工方法与技术措施', content: 缺三类 }], { blueprintData: 蓝图 });
+    const 编造 = `${补齐三类}\n《既有建筑维护与改造通用规范》（GB 55022-2099）`;
+    repairMock.mockResolvedValueOnce(repairResult(编造));
+    await stageBasisRegulationsRepair(session);
+    expect(session.finalChapterDrafts[0].content).toBe(缺三类);
+    const stage = stageOf(session.progressStages, 'agent-basis-regulations-repair-ch1');
+    expect(stage?.status).toBe('failed');
+    expect(stage?.message).toContain('已回滚');
+  });
+
+  it('补列走追加锚点：锚点=编制依据段末条书名号条目行，append 模式（防模型自行全章重写删条目）', async () => {
+    const session = makeSession([{ id: 'ch1', title: '主要施工方法与技术措施', content: 缺三类 }], { blueprintData: 蓝图 });
+    repairMock.mockResolvedValueOnce(repairResult(补齐三类));
+    await stageBasisRegulationsRepair(session);
+    expect(repairMock.mock.calls[0][0].anchorTexts).toEqual([{ text: '《建筑地基基础工程施工质量验收标准》（GB 50202-2018）', append: true }]);
+  });
+
+  it('锚点退化：条目行在章内不唯一时不传锚点（防补写插到别处，退回无锚点模式）', async () => {
+    const 重复行段 = [
+      '## 编制依据',
+      '本工程按国家现行规定组织实施。',
+      '本工程按国家现行规定组织实施。',
+    ].join('\n');
+    const session = makeSession([{ id: 'ch1', title: '编制依据', content: 重复行段 }]);
+    repairMock.mockResolvedValueOnce(repairResult(重复行段));
+    await stageBasisRegulationsRepair(session);
+    expect(repairMock).toHaveBeenCalledTimes(1);
+    expect(repairMock.mock.calls[0][0].anchorTexts).toBeUndefined();
+  });
+});

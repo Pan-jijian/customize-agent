@@ -3,7 +3,7 @@
  * 必覆盖/事实域/证据引用/BOQ 目标卡构建、施组全局写作焦点（写作红线约束/规模事实卡/可信事实卡）。
  */
 import { describe, expect, it } from 'vitest';
-import { B7_AUTHORITY_NUMERIC_RULE, B8_EFFECTIVE_CALIBER_RULE, buildWriteTimeFixedBlocks, buildWritingTaskBrief } from '@/services/document-workflow/documentWritingTaskBrief';
+import { B7_AUTHORITY_NUMERIC_RULE, B8_EFFECTIVE_CALIBER_RULE, WRITING_INTEGRITY_CONSTRAINTS, buildWriteTimeFixedBlocks, buildWritingTaskBrief } from '@/services/document-workflow/documentWritingTaskBrief';
 import type { CanonicalFact, DocumentFactsModel, DocumentTemplateChapter, ProjectGraph } from '@/services/document-workflow/types';
 
 function makeChapter(id: string, title: string, extra: Partial<DocumentTemplateChapter> = {}): DocumentTemplateChapter {
@@ -151,7 +151,8 @@ describe('buildWritingTaskBrief', () => {
     // 基础 7 条（含五要素链与规范术语显性落位 2 条 R12 新增）+ 写作红线 5 条（V2 批1-5 四条 + 批2-1 工期时序与分批口径，与结构/表格/口径检测口径同源）+ 招标硬性要求 + 规模事实卡 + 可信基础事实卡 = 17 条
     // 4.55.20：新增 B8 现行口径铁律（禁止旧值/禁止变更过程叙述）与 B7 蓝图权威值写作要求
     // 4.55.24：新增「禁止指向型表述与缺资料搪塞」红线（实测终稿 58 处「按设计图纸」）
-    expect(brief.globalWritingFocus).toHaveLength(22);
+    // 4.55.29：新增「编制依据五类逐项列全」红线（原只挂在标题规则 0，编制依据落在其他章时义务丢失）
+    expect(brief.globalWritingFocus).toHaveLength(23);
     expect(brief.globalWritingFocus.some(item => item.includes('禁止指向型表述与缺资料搪塞'))).toBe(true);
     expect(brief.globalWritingFocus[0]).toContain('模板化空话');
     expect(brief.globalWritingFocus[2]).toContain('五要素链');
@@ -168,13 +169,15 @@ describe('buildWritingTaskBrief', () => {
     expect(brief.globalWritingFocus[15]).toContain('工期时序与分批口径红线');
     // 4.55.24 新增写作前红线：禁止指向型表述与缺资料搪塞（用户口径 D2）
     expect(brief.globalWritingFocus[16]).toContain('禁止指向型表述与缺资料搪塞');
+    // 4.55.29：编制依据五类逐项列全（红线集末位，逐章注入）
+    expect(brief.globalWritingFocus[17]).toContain('编制依据五类逐项列全');
     // 尾部顺序（4.55.20）：B8 现行口径铁律 → 招标硬性要求 → 规模事实卡 → 可信基础事实 → B7 蓝图权威值
-    expect(brief.globalWritingFocus[17]).toContain('B8 现行口径铁律');
-    expect(brief.globalWritingFocus[18]).toContain('招标硬性要求必须逐项明确响应');
-    expect(brief.globalWritingFocus[19]).toContain('项目规模事实卡');
-    expect(brief.globalWritingFocus[19]).toContain('建设规模=总建筑面积 28570.36㎡');
-    expect(brief.globalWritingFocus[20]).toContain('项目可信基础事实');
-    expect(brief.globalWritingFocus[21]).toContain('B7 蓝图权威值');
+    expect(brief.globalWritingFocus[18]).toContain('B8 现行口径铁律');
+    expect(brief.globalWritingFocus[19]).toContain('招标硬性要求必须逐项明确响应');
+    expect(brief.globalWritingFocus[20]).toContain('项目规模事实卡');
+    expect(brief.globalWritingFocus[20]).toContain('建设规模=总建筑面积 28570.36㎡');
+    expect(brief.globalWritingFocus[21]).toContain('项目可信基础事实');
+    expect(brief.globalWritingFocus[22]).toContain('B7 蓝图权威值');
   });
 
   it('规模事实卡只收录规模口径事实（前 8 条），非规模事实不进卡', () => {
@@ -202,11 +205,100 @@ describe('buildWritingTaskBrief', () => {
       templateName: '某项目施工组织设计',
     });
     expect(brief.documentType).toBe('施工组织设计');
-    expect(brief.globalWritingFocus).toHaveLength(20); // 基础 7 条 + 红线 6 条（4.55.24 增指向型禁令）+ 招标硬性 + B8 现行口径铁律 + B7 蓝图权威值（4.55.20）
+    expect(brief.globalWritingFocus).toHaveLength(21); // 基础 7 条 + 红线 7 条（4.55.24 增指向型禁令、4.55.29 增编制依据五类）+ 招标硬性 + B8 现行口径铁律 + B7 蓝图权威值（4.55.20）
     const chapter = brief.chapters[0];
     expect(chapter.drawingTargets).toEqual([]);
     expect(chapter.gaps).toEqual([]);
     expect(chapter.boqTargets).toEqual([]);
+  });
+});
+
+/**
+ * 4.55.29 实机归因（`doc-1790104980418-d47a002e`：编制依据 12 条规范、0 条法律法规/条例/地方性法规）。
+ *
+ * 归因一（指令没送到）：五类义务原文只挂在 `CHAPTER_FOCUS_RULES[0]`（标题正则 /概况|总体|理解|说明|编制/，
+ * first-match）的 mustCover 里，而该小节的宿主章标题是「主要施工方法与技术措施」（命中第 3 条规则）
+ * ⇒ 义务从未进入该章写作 roleContext（`stageChapterLoop:428` 只按标题取一条规则）。
+ * 现改为随 `WRITING_INTEGRITY_CONSTRAINTS` 注入**每一章**（`stageChapterLoop:445` roleContext），
+ * 触发条件改为"本章是否设该小节"（结构驱动，与检测器同口径）。
+ */
+describe('编制依据五类逐项列全（4.55.29 逐章注入）', () => {
+  const 五类红线 = WRITING_INTEGRITY_CONSTRAINTS.find(item => item.includes('编制依据五类逐项列全'));
+
+  it('红线集（逐章注入 roleContext 的唯一载体）必须含该义务', () => {
+    expect(五类红线).toBeTruthy();
+    // 五类逐项点名（类别语义，非具体法规名）
+    for (const 类 of ['招标文件及补疑补遗', '国家法律法规', '规范标准', '地方法规规章', '企业管理体系文件']) {
+      expect(五类红线).toContain(类);
+    }
+    // 判据是"名称+编号可查"，不是"列了类别话术就算"
+    expect(五类红线).toContain('以类别话术代替即判未写');
+    expect(五类红线).toContain('编号必须能在项目资料（招标文件/清单/图纸/设计说明）中查到');
+  });
+
+  it('属地来源机制化：地方性法规按工程所在地属地取（不得写死任何地名/法规名列表）', () => {
+    expect(五类红线).toContain('工程所在地');
+    // 反例：一旦有人把项目地名/法规名列表抄进红线，这条守卫立即失败
+    expect(五类红线).not.toMatch(/安徽|合肥|巢湖|中华人民共和国|建设工程质量管理条例/u);
+  });
+
+  it('反例：不得借该红线给未设该小节的章节新增小节（结构驱动触发，不是无差别新增）', () => {
+    expect(五类红线).toContain('本章设「编制依据/编制说明」小节时适用');
+    expect(五类红线).toContain('未设该小节的章节不得新增该小节');
+    expect(五类红线).toContain('既有条目不得删除或替换');
+  });
+
+  it('标题规则 0 不再是该义务的唯一来源：非该类标题的章节也能拿到义务', () => {
+    // 实机标题：编制依据小节落在该章（标题不匹配规则 0）⇒ 规则通道的 mustCover 里没有该义务
+    const brief = buildWritingTaskBrief({
+      chapters: [makeChapter('c1', '主要施工方法与技术措施')],
+      templateName: '某项目施工组织设计',
+    });
+    const ruleMustCover = brief.chapters[0].mustCover.join('\n');
+    expect(ruleMustCover).not.toContain('按五类逐项列全');
+    // 而逐章注入的红线集里有 —— 义务与标题解耦
+    expect(brief.globalWritingFocus.some(item => item.includes('编制依据五类逐项列全'))).toBe(true);
+  });
+});
+
+/**
+ * 4.55.29 归因（写作上游事实卡）：事实主表 canonical 的量值可能是 OCR 片段误拼
+ * （实测「基坑开挖深度=25m（图纸标注：C25 圈梁…）」，真值 1.7m 来自图纸标注），
+ * 照抄即把项目写成"开挖深度 25m"。过滤判据与危大定死块同源（自证：引文内量值须复现），
+ * **只作用于量值形态**，文本/面积/工期类事实不受影响（反例守住不放宽）。
+ */
+describe('项目可信基础事实的误拼量值过滤（4.55.29）', () => {
+  const build = (byKey: Record<string, CanonicalFact>) => {
+    const factsModel = makeFactsModel();
+    factsModel.canonical = {
+      byKey,
+      projectIdentity: {}, projectScope: {}, schedule: {}, quality: {}, safety: {}, resources: {}, environment: {}, constraints: {}, conflicts: [], gaps: [], scopeConflicts: [],
+    };
+    const brief = buildWritingTaskBrief({ chapters: [makeChapter('c1', '工程概况')], factsModel, templateName: '某项目施工组织设计' });
+    return brief.globalWritingFocus.find(line => line.includes('项目可信基础事实')) || '';
+  };
+
+  it('正例：引文里查无该量值的误拼值不进卡，自证通过的真值进卡', () => {
+    const line = build({
+      'a': makeCanonicalFact('基坑开挖深度', '25m（图纸标注：C25 圈梁,构造柱 C25 《建筑基桩检测技术规范》 (JGJ 106-2014) 8.7.1 基槽开挖到设计标高后，）'),
+      'b': makeCanonicalFact('基坑深度', '1.7m（图纸标注：基坑深度 -1.7 米（余同））'),
+    });
+    expect(line).not.toContain('25m');
+    expect(line).toContain('1.7m');
+  });
+
+  it('反例：非量值形态（面积/工期/文本）不受过滤——判据只针对量值形态', () => {
+    const line = build({
+      'a': makeCanonicalFact('建设规模', '总建筑面积 28570.36㎡'),
+      'b': makeCanonicalFact('计划工期', '600日历天'),
+      'c': makeCanonicalFact('结构形式', '钢筋混凝土框架结构'),
+      'd': makeCanonicalFact('无引文量值', '1.5m以内'),
+    });
+    expect(line).toContain('总建筑面积 28570.36㎡');
+    expect(line).toContain('600日历天');
+    expect(line).toContain('钢筋混凝土框架结构');
+    // 无引文的规整量值不算误拼（清单「3.60内」类省略单位形态实证存在）
+    expect(line).toContain('1.5m以内');
   });
 });
 

@@ -752,11 +752,6 @@ export const FINALIZE_REPAIR_ROUNDS = [
   // 扩散轮（stageFactDistribution），在语义相关章正文块尾追加自然引用句；必须在全部 LLM 补写轮之后
   // （前置轮改写正文会稀释/回退已生效的分布），stageFinalGate 之前收口（评分与门禁按扩散后正文判定）
   'fact-distribution-round',     // 关键事实跨章扩散轮（stageFactDistribution）
-  // r24 B8 实机归因：正文无题名表格（探测 kind='none'）无可注入对象直坠终门禁——确定性补名（章内
-  // 无题表 × 本章计划表表头字段对账）+ LLM 补名（残留表章级定向）写回章 drafts；draft-mutating +
-  // rebuild，必须位于 stageFactDistribution 之后（其 rebuild 回退此前 markdown-only 修改）、链尾
-  // markdown-only 重放（runSurfaceDeterministicCleans 等）之前
-  'table-caption-repair',        // 正文表格题名补全轮（stageTableCaptionRepair）
   // C-T3 表内算术自洽修复轮（C4 归因：含显性合计标记的表格分项和≠合计直坠评审数据可信度判定）：
   // 章级同源重扫（tableArithmeticInconsistencyIssues）+ LLM 定向重算表内数值；draft-mutating +
   // rebuild，必须位于 table-caption-repair 之后、链尾 markdown-only 重放之前（本轮 rebuild 不得
@@ -781,6 +776,11 @@ export const FINALIZE_REPAIR_ROUNDS = [
   // 后续标题行摘除正文并入、规划数组同步、章内编号原子重放；位于 templating-sweep 之后、
   // delivery-structure-closure（链尾 markdown-only 收口）之前
   'duplicate-theme-merge',       // 重复主题小节链尾合并（stageDuplicateThemeMerge）
+  // r24 B8 实机归因：正文无题名表格（探测 kind='none'）无可注入对象直坠终门禁——确定性补名（章内
+  // 无题表 × 本章计划表表头字段对账）+ LLM 补名（残留表章级定向）写回章 drafts；draft-mutating +
+  // rebuild，必须位于 stageFactDistribution 之后（其 rebuild 回退此前 markdown-only 修改）、链尾
+  // markdown-only 重放（runSurfaceDeterministicCleans 等）之前
+  'table-caption-repair',        // 正文表格题名补全轮（stageTableCaptionRepair）
   // D-T6 ①③ 交付结构收口（r28f 门禁 #1 目录 29 vs 28 + 终检长段归因）：长段切分（>380 行切句重组，
   // 与写作期 splitLongParagraphs 同阈值）+ 目录重建（fixTocFromBody 按正文实际结构重建）——
   // 链尾 markdown-only 收口，位于全部 draft-mutating 轮之后、stageFinalGate 之前

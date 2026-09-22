@@ -28,8 +28,12 @@ import { isStructuralLabelTitle } from './templatingGovernance';
 import { DIVISION_SECTION_RE } from './writingSpec';
 import { fiveElementBlockStats, scanTemplatePrefixSentences } from './tenderBidChecks';
 import { buildSemanticGate } from './semanticGate';
+import { classifyValueShape } from './valueOverride';
 import { longestCommonHanSubstring } from './numericalConsistency';
 import { isUnitPairRatioMatch, scanUncoveredEngineeringHeadings } from './integrity/detectors/detectors';
+// 危大判定阈值**单源**（hazardBinding 为写作侧阈值表唯一来源）：本模块只做「引用值是否为规范阈值」的
+// 判别，不得再抄一份阈值数字（4.55.29 判据根修：区分「照抄规范阈值」与「本项目控制值实参」）。
+import { HAZARD_THRESHOLDS } from './hazardBinding';
 
 export function isExportBlockingIssue(issue: ValidationIssue) {
   return EXPORT_BLOCKING_ISSUE_RE.test(issue.message);
@@ -144,16 +148,33 @@ export function classifyBlockingIssue(issue: ValidationIssue) {
   // 校准（材料拆分单位族/工种桥接校验/蓝图 groups 豁免/规格语境豁免），保留的 blocker 即真矛盾，
   // 一律直通硬阻断，由 llm_repairable 修复链闭环。
   if (governedIssue.level === 'error' && governedIssue.severity === 'blocker' && governedIssue.category === 'fact_consistency' && governedIssue.repairability === 'llm_repairable') return true;
+  // 4.55.29 L1-5 标注优先（上一条 P6 直通的同类补全）：检测器**显式声明**「blocker + 修复轮可收敛」时，
+  // 阻断资格不得再由下方按消息文本的白名单（isExportBlockingIssue 等）决定——否则会出现
+  // 「检测器说自己报了阻断、修复链说该修、门禁却因消息不在白名单里静默放行」的假闭环。
+  // 仅收 llm_repairable：manual_review 标注（注册表声明转人工）按既有契约不阻断导出，
+  // not_repair_needed / 无标注仍走下方消息与 category 判据，避免把「已声明无需修复」的项拉进阻断集。
+  if (governedIssue.level === 'error' && governedIssue.severity === 'blocker' && governedIssue.repairability === 'llm_repairable') return true;
   if (/提示词要求|疑似提示词指令标题|适用性自相矛盾|不得出现/u.test(issue.message)) return true;
-  if (/目录与正文/u.test(issue.message)) return false;
+  // ── 4.55.29 L1-5 白名单放行修正（逐条依据，撤销「检测到但不阻断」的后门）─────────────
+  // ① 目录与正文不一致（tocBodyConsistencyIssues）：正文/目录编号与名称漂移是评标硬扣分点，
+  //    且已有确定性修复器（fixTocFromBody / toc-consistency 兜底）——检测到即阻断，交修复轮收敛。
+  // ② 生成后事实反查失败：生产者（documentFactTrace.numericTraceabilityIssues）已显式标注
+  //    severity=blocker + category=evidence_coverage + repairability=llm_repairable，属修复链
+  //    （numericVerification）收敛范围；「未溯源数值不阻断交付」的旧产品口径正是编造数值出闸的通道。
+  // ③ 规划小节正文过短（正文 1–179 字）：空洞小节必须补写，由补写轮/内容深度修复轮收敛；
+  //    与 G 线 P0-5「正文篇幅明显低于目标即阻断」同向。
+  // ④ 证据使用覆盖率偏低：不再由消息文本整体放行，改为**按等级**——error 进阻断集，warning 仅告警
+  //    （唯一生产者 documentDeliveryReport 是 warning 级粗判据：整篇是否提及某类事实，误报面大，
+  //    且该指标是内容侧（事实落位）目标而非可立即收敛的缺陷，保留告警语义）。
   if (/配置要求缺少必要内容/u.test(issue.message)) return issue.level === 'error';
   if (/小节内容补写未完成|空小节|小节只有标题|生成未完成/u.test(issue.message)) return true;
-  if (/生成后事实反查失败/u.test(issue.message)) return false;
   if (/工序规格冲突/u.test(issue.message)) return issue.level === 'error';
   if (/项目特点、重点、难点分析 正文不足|项目主要施工内容 正文不足/u.test(issue.message)) return true;
-  if (/规划小节正文过短/u.test(issue.message)) return false;
+  if (/证据使用覆盖率偏低/u.test(issue.message)) return issue.level === 'error';
+  // ⑤ 事实一致性冲突：项目名称 —— 4.55.29 L1-5 未纳入本轮（该族消息由事实模型层 L0 统一升级处置，
+  //    属 manual_review 标注：检测器报出即入人工复核清单，不静默）。此处行为保持原状，待 L0 口径落地后一并收紧。
   if (/事实一致性冲突：项目名称/u.test(issue.message)) return false;
-  if (/跨章一致性|专业评分不足|专业缺口|泛化套话|缺少关键线路|缺少材料验收|缺少风险识别|缺少进场/u.test(issue.message)) return issue.level === 'error' && !/证据使用覆盖率偏低|章节逻辑依赖不足|文档交付评分报告/u.test(issue.message);
+  if (/跨章一致性|专业评分不足|专业缺口|泛化套话|缺少关键线路|缺少材料验收|缺少风险识别|缺少进场/u.test(issue.message)) return issue.level === 'error' && !/章节逻辑依赖不足|文档交付评分报告/u.test(issue.message);
   if (!isExportBlockingIssue(issue)) return false;
   // G 线 P0-5：内容充足性信号恢复硬阻断。此前「正文篇幅明显低于目标 / 正文存在空泛占位表达 /
   // 结构化事实读取不足 / 正文可能未显式覆盖 / 仅包含文件类型和占位符」被显式豁免出阻断集，
@@ -1741,6 +1762,19 @@ export async function crossChapterConsistencyIssues(markdown: string, factsModel
     { label: '隔油池数量', re: /隔油池[^\d。；;\n|：:，,、]{0,6}(\d+)\s*座/gu },
     { label: '挖沟槽土方', re: /挖沟槽[^\d。；;\n|]{0,15}([\d,]+(?:\.\d+)?)\s*m[³3]/gu, contextAware: true },
   ];
+  /**
+   * 对象区分标识（编号/分区/单体）：`2#门卫`、`3号厂房`、`一区`、`B栋`。
+   * 只取**区分性**标识形态（数字+#/号、序数+区/栋/座/幢、字母+栋/座/幢/区），
+   * 不取通用名词——「门卫」「厂房」这类类别词不构成对象区分。
+   */
+  const OBJECT_MARKER_RE = /(?:\d+\s*[#＃号]|[一二三四五六七八九十]\s*[区栋座幢]|[A-Za-z]\s*[栋座幢区])/gu;
+  const objectMarkers = (context: string) => new Set([...context.matchAll(OBJECT_MARKER_RE)].map(match => match[0].replace(/\s+/gu, '')));
+  const differentObjects = (left: string, right: string) => {
+    const leftMarkers = objectMarkers(left);
+    const rightMarkers = objectMarkers(right);
+    if (leftMarkers.size === 0 || rightMarkers.size === 0) return false;
+    return [...leftMarkers].every(marker => !rightMarkers.has(marker));
+  };
   for (const { label, re, contextAware } of quantityScopeEntries) {
     const entries: Array<{ value: string; context: string }> = [];
     for (const match of markdown.matchAll(re)) {
@@ -1749,7 +1783,14 @@ export async function crossChapterConsistencyIssues(markdown: string, factsModel
       entries.push({ value, context: markdown.slice(Math.max(0, (match.index || 0) - 24), match.index || 0) });
     }
     if (entries.length >= 2) {
-      if (contextAware && entries.every((left, index) => entries.slice(index + 1).every(right => longestCommonHanSubstring(left.context, right.context) < 6))) continue;
+      // 4.55.29 对象维度（方案 L0-8）：同对象同属性多值才是缺陷。前置语境共享判据在**单体并列列举**
+      // 下会误判——「2#门卫按平整场地241.71m²、挖沟槽土方346.88m³」与「3#门卫按平整场地16.07m²、
+      // 挖沟槽土方37.51m³」共享 7 字连续汉字「门卫按平整场地」，但两条分属**不同单体**，
+      // 各单体工程量天然不同（巢湖实测 5 条 blocker：2#门卫 346.88 / 3#门卫 37.51 / 室外 9926.65 等）。
+      // 判据：两侧语境各带对象标识（`2#`/`三区`/`B栋`…）且互不相交 → 分属不同对象，不判冲突。
+      // 标识缺失（两侧都取不到）时维持原判据，真冲突零放松。
+      if (contextAware && entries.every((left, index) => entries.slice(index + 1)
+        .every(right => differentObjects(left.context, right.context) || longestCommonHanSubstring(left.context, right.context) < 6))) continue;
       const values = entries.map(entry => entry.value).join('、');
       issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `跨章一致性冲突：正文${label}出现互相矛盾的取值 ${values}`, suggestion: `${label}必须全文唯一：以工程量清单为最高优先级裁定正确值，将正文全部相关表述统一为该值，并删除其余矛盾口径。` });
     }
@@ -3467,14 +3508,26 @@ function supersededResidueRe(superseded: string): RegExp | undefined {
  * 与写作硬约束（renderTruthConstraintBlock）同源——约束未被遵循时在此暴露，直进修复轮与人工清单。
  * 4.55.22 增加**被取代值残留**判据：只判「生效值是否落位」时，正文同时出现生效值与旧值
  * （如「总工期330日历天」+ 别处「365天」）会被判通过，而旧值仍是最显眼的口径冲突。
+ *
+ * **4.55.29 口径落位判据加形态闸**（巢湖实测 25 条 blocker 中 22 条的直接来源）：
+ * 「落位」的判据是**正文逐字含该值**——这只有在值是**可逐字复现的规格型 token**
+ * （measure/money/date/standard/spec）时才成立。真值层里同时存在大量**章节内容型属性**
+ * （材料投入计划/质量控制点/施工方法工艺流程/机械设备计划…），它们的值是一段资料文字，
+ * 是**写作素材**而非项目口径：要求正文逐字复现「机械设备计划 = 某清单行特征串」在语义上
+ * 不可能成立，写手写不出、修复轮改不掉，产出永久消不掉的 blocker。
+ * 判据用值形态单源判定（不预设属性白名单、不含任何项目数值）：
+ * 只有规格型值参与逐字落位判定；段落型值（`text` 形态）不是口径，不入本判据。
+ * 同源实现见 `authoritativeValues.caliberConsistencyIssues`（该处一直带此形态闸，本处此前缺失）。
  */
+const CALIBER_VERBATIM_SHAPES: ReadonlySet<string> = new Set(['measure', 'money', 'date', 'standard', 'spec']);
+
 export function caliberConsistencyIssues(markdown: string, ledger: Array<{ attribute: string; value: string; rule: string; evidence: Array<{ source: string }>; superseded?: string[] }> = []): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   if (!markdown || ledger.length === 0) return issues;
   const normalized = markdown.replace(/\s+/gu, '');
   for (const item of ledger) {
     const token = String(item.value || '').replace(/\s+/gu, '');
-    if (token.length >= 3 && !normalized.includes(token)) {
+    if (token.length >= 3 && CALIBER_VERBATIM_SHAPES.has(classifyValueShape(String(item.value || ''))) && !normalized.includes(token)) {
       issues.push({
         level: 'error',
         severity: 'blocker',
@@ -3526,8 +3579,16 @@ export function caliberConsistencyIssues(markdown: string, ledger: Array<{ attri
  * 危大工程「参数—判定绑定」检测（4.55.19 方案 §5）：危大分级结论必须挂**本项目实际参数**，
  * 不得只写规范阈值。实测缺陷：正文写「开挖深度超过 3m 的室外排水管道沟槽土方开挖工程」——
  * 3m 是判定阈值，而真值层里本项目基坑开挖深度 = 1.75m，正文 0 次。
- * 判据：含危大判定阈值（3m/5m/24m 等规范阈值表述）的句子，须同时出现真值层的**工程测量值**
- *（measure 形态、且非阈值本身），否则判为"只抄规范、未落项目实参"。
+ * 判据：含危大判定阈值（3m/5m/24m 等规范阈值表述）的句子，须同时出现**工程测量值**
+ *（measure 形态、挂靠工程测量字段、且量值非被引阈值本身），否则判为"只抄规范、未落项目实参"。
+ * 4.55.29 判据根修：
+ * - 豁免不再只认真值层 token（真值层生效值与正文合理表述不同形时会把**合法写法判缺**，实测：
+ *   「最大单跨跨度35.86m｜搭设跨度18m及以上属超过一定规模」被报"只写规范阈值"）；
+ * - 「被引量值不在危大阈值表（单源 `HAZARD_THRESHOLDS`）里」⇒ 该量值本就是本项目控制值
+ *   （实测「每层开挖深度不大于1.5m」），不属"照抄规范阈值"，不判；
+ * - 值正确性（真值层生效值是否落位）由 caliber-consistency 负责，本条只判"有没有挂本项目实参"。
+ * 反例守卫（不得放宽成不设防）：只引阈值、不挂本项目实参的句子照旧判缺——
+ * 「开挖深度超过3m的…工程」（3 是 2.1.1 阈值）与「搭设高度超过24m区段」（24 是 2.4.1 阈值）。
  */
 export function hazardParameterBindingIssues(markdown: string, truthValues: Array<{ attribute: string; value: string }> = []): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
@@ -3561,9 +3622,75 @@ export function hazardParameterBindingIssues(markdown: string, truthValues: Arra
     }
     return issues;
   }
+  // ═══ 4.55.29 判据根修（巢湖实机成稿归因：**正确写法被判缺**）═══
+  // 实测缺陷（`doc-1790104980418-d47a002e`）：正文写了
+  // ①「最大单跨跨度35.86m｜搭设跨度18m及以上属超过一定规模」（本项目实参 35.86m + 阈值 18m + 结论，正是
+  // 本条要求的**三要素**形态）、②「每层开挖深度不大于1.5m」（本项目控制实参）——两者都被判缺。
+  // 两个判据缺陷：
+  // (1) 豁免只认真值层 token（`relatedAttributes` 的 1.7m），与函数文档口径「同句须出现工程测量值
+  //     （measure 形态、且非阈值本身）」不符：真值层生效值与正文合理表述不同形时，**合法写法被判缺**。
+  //     值正确性另有其主（caliber-consistency 负责"真值层生效值未落位"），本条只判「有没有挂本项目实参」。
+  // (2) 「大于」在「不大于/不超过」里命中 ⇒ 本项目控制值被读成规范阈值断言。
+  // 现判据（**阈值单源，不硬编码任何数值**）：句子须出现「挂靠工程测量字段（深度/高度/跨度/重量）的
+  // measure 实参且量值≠被引阈值」；若被引量值**根本不是危大阈值表里的量值**（如 1.5m），说明它本就是
+  // 本项目控制值而非"规范阈值"，不判。
+  const measureTokenRe = /(\d+(?:\.\d+)?)\s*(mm|cm|m|米|t|吨|kg|kN)/gu;
+  const fieldBindingRe = /深度|高度|跨度|重量|起吊|吊装|开挖|搭设|支撑|基坑/u;
+  const normalizeMeasure = (amount: number, unit: string): number => {
+    if (unit === 'mm') return amount / 1000;
+    if (unit === 'cm') return amount / 100;
+    if (unit === 't' || unit === '吨') return amount * 9.8; // 重量与阈值表同口径（kN）
+    if (unit === 'kg') return amount * 0.0098;
+    return amount;
+  };
+  /** 危大阈值表的量值集合（单源：hazardBinding.HAZARD_THRESHOLDS；键 = 量纲:数值） */
+  const specThresholds = new Set<string>();
+  for (const group of Object.values(HAZARD_THRESHOLDS)) {
+    for (const rule of [...group.hazardous, ...group.superHazardous]) {
+      if (rule.value === undefined || !rule.dimension) continue;
+      specThresholds.add(`${rule.dimension}:${rule.value}`);
+    }
+  }
+  const dimensionOfField = (text: string): string | undefined => {
+    const field = /(开挖深度|基坑深度|搭设高度|支撑高度|吊装重量|起吊重量|跨度)/u.exec(text)?.[1];
+    if (!field) return undefined;
+    if (/深度/u.test(field)) return '深度';
+    if (/高度/u.test(field)) return '高度';
+    if (/跨度/u.test(field)) return '跨度';
+    return '重量';
+  };
+  /** 被引用的量值是否为**规范阈值表**里的量值（不是 → 本项目控制值，不属"照抄规范阈值"） */
+  const isSpecificationThreshold = (fragment: string): boolean => {
+    const dimension = dimensionOfField(fragment);
+    const tail = /(\d+(?:\.\d+)?)\s*(mm|cm|m|米|t|吨|kg|kN)\s*$/u.exec(fragment);
+    if (!dimension || !tail) return false;
+    const normalized = normalizeMeasure(Number(tail[1]), tail[2]!);
+    for (const key of specThresholds) {
+      const [dim, raw] = key.split(':');
+      if (dim !== dimension) continue;
+      const target = Number(raw);
+      if (Math.abs(normalized - target) <= Math.max(0.05, target * 0.03)) return true;
+    }
+    return false;
+  };
+  /** 句中的项目实参：measure 形态 + 挂靠危大工程测量字段 + 量值≠被引阈值本身 */
+  const projectMeasureIn = (text: string, compared: string | undefined): string | undefined => {
+    for (const match of text.matchAll(measureTokenRe)) {
+      const start = match.index ?? 0;
+      if (!fieldBindingRe.test(text.slice(Math.max(0, start - 8), start))) continue;
+      const token = match[0].replace(/\s+/gu, '');
+      if (compared && token === compared.replace(/\s+/gu, '')) continue;
+      if (compared) {
+        const comparedTail = /(\d+(?:\.\d+)?)\s*(mm|cm|m|米|t|吨|kg|kN)\s*$/u.exec(compared);
+        if (comparedTail && Math.abs(normalizeMeasure(Number(match[1]), match[2]!) - normalizeMeasure(Number(comparedTail[1]), comparedTail[2]!)) <= 0.001) continue;
+      }
+      return token;
+    }
+    return undefined;
+  };
   const samples: string[] = [];
   // 危大判定阈值句式（规范阈值，非项目实参）
-  const thresholdRe = /(?:开挖深度|搭设高度|支撑高度|吊装重量|跨度|基坑深度)[^。；]{0,14}?(?:超过|达到|不小于|大于)\s*\d+(?:\.\d+)?\s*(?:m|米|t|吨|kg)/gu;
+  const thresholdRe = /(?:开挖深度|搭设高度|支撑高度|吊装重量|跨度|基坑深度)[^。；]{0,14}?(?:超过|达到|不小于|大于)\s*\d+(?:\.\d+)?\s*(?:mm|cm|m|米|t|吨|kg|kN)/gu;
   for (const match of markdown.matchAll(thresholdRe)) {
     const sentenceStart = Math.max(0, markdown.lastIndexOf('。', match.index ?? 0) + 1);
     const sentenceEnd = markdown.indexOf('。', (match.index ?? 0) + match[0].length);
@@ -3571,12 +3698,26 @@ export function hazardParameterBindingIssues(markdown: string, truthValues: Arra
     // 同句须出现任一真值层工程实参（除被引用的阈值本身）
     const hasActual = relatedAttributes.some(item => sentence.replace(/\s+/gu, '').includes(item.token));
     if (hasActual) continue;
+    // 同句/同片段已挂本项目实参（measure 形态、挂靠测量字段、量值非被引阈值）→ 已按三要素表述
+    if (projectMeasureIn(sentence, match[0])) continue;
+    // 被引量值不是危大阈值表里的量值（如「开挖深度不大于1.5m」的本项目控制值）→ 非规范阈值断言
+    if (!isSpecificationThreshold(match[0])) continue;
     const threshold = match[0].replace(/\s+/gu, '');
     samples.push(threshold);
   }
   if (samples.length === 0) return issues;
-  // 全文层面兜底：正文若从未落位任何"危大相关实参"（开挖深度/支护/高度类属性），同样判缺口
-  const relatedPresent = relatedAttributes.some(item => markdown.replace(/\s+/gu, '').includes(item.token));
+  // 全文层面兜底：正文若从未落位任何"危大相关实参"（开挖深度/支护/高度类属性），同样判缺口。
+  // 4.55.29：真值层 token 之外，**measure 形态且挂靠测量字段**的项目实参同样算已落位
+  //（实测正文有「每层开挖深度不大于1.5m」却仍报「全文亦未出现…实参」）。
+  const markdownCompact = markdown.replace(/\s+/gu, '');
+  const hasBoundMeasure = (() => {
+    for (const match of markdown.matchAll(measureTokenRe)) {
+      const start = match.index ?? 0;
+      if (fieldBindingRe.test(markdown.slice(Math.max(0, start - 8), start))) return true;
+    }
+    return false;
+  })();
+  const relatedPresent = relatedAttributes.some(item => markdownCompact.includes(item.token)) || hasBoundMeasure;
   issues.push({
     level: 'error',
     severity: 'blocker',

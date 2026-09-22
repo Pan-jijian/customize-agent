@@ -91,7 +91,7 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // → requirement-response-repair → requirement-verification → content-depth-repair → control-loop-repair → professional-chain-repair
   // → post-review-surface → terminology-strip → regulation-number-typo → quotation-balance-repair
   // → basis-regulations-repair → basis-regulations-cross-repair → dangerous-applicability-repair → auto-spec-gate-repair → toc-consistency → length-compression-repair → fact-distribution-round
-  // → table-caption-repair → table-arithmetic-repair → empty-section-sweep → section-alignment-sweep → templating-sweep → duplicate-theme-merge → delivery-structure-closure → sentence-pattern-sweep → duplicate-sentence-collapse → templating-tail-replay
+  // → table-arithmetic-repair → empty-section-sweep → section-alignment-sweep → templating-sweep → duplicate-theme-merge → table-caption-repair → delivery-structure-closure → sentence-pattern-sweep → duplicate-sentence-collapse → templating-tail-replay
   //（顺序快照测试锁定；新增修复轮必须同时更新声明表）
   // 方案 2.3：全维度评审轮（qingtian-full-review）已删除——九维检出全部由注册表检测器/写作执行器覆盖
   // （含 S1 块级六类执行器），该轮历史实测检出 12 处/修复 0 处，无独有检出项
@@ -139,11 +139,6 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // （建设地点/质量标准/合同估算价/项目编号/标段/招标范围），在语义相关章正文块尾追加自然引用句，
   // 补足跨 ≥2 章分布（方案针对性 distribution 归因：丰乐镇实测 0.087→修复后显著提升）
   await stageFactDistribution(session);
-  // r24 B8 正文表格题名补全轮（实机归因）：终检 table-caption 按「表上方 8 行内可提取表名」判定，无题名
-  // 形态表格（探测 kind='none'）无可注入对象直坠终门禁——确定性补名（章内无题表 × 本章计划表表头字段
-  // 对账）+ LLM 补名（残留无题表章级定向）写回章 drafts；本阶段 draft-mutating + rebuild，必须位于
-  // stageFactDistribution 之后（其 rebuild 会回退此前 markdown-only 修改）、链尾 markdown-only 重放之前
-  await stageTableCaptionRepair(session);
   // C-T3 表内算术自洽修复轮（C4 归因）：终检 table-arithmetic-consistency 消费含显性合计标记表格的
   // 「分项和=合计」不自洽 —— 章级同源重扫 + LLM 定向修正表内数值（收敛修复：每章最多 2 轮，
   // 残留处数下降才继续）；本阶段 draft-mutating + rebuild，必须位于 table-caption-repair 之后、
@@ -172,6 +167,17 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // draft-mutating + rebuild，位于 templating-sweep 之后、delivery-structure-closure（目录按
   // 合并后正文结构重建）之前
   await stageDuplicateThemeMerge(session);
+  // 4.55.29 时序修正：本轮由「factDistribution 之后」移至**链尾最后 draft-mutating 位置**。
+  // 实测（巢湖 doc-d47a002e）：题注补全轮执行后，其后的 table-arithmetic-repair / empty-section-sweep /
+  // section-alignment-sweep / templating-sweep / duplicate-theme-merge 诸轮在重建成稿时引入了新的无题表
+  // ——终稿残留 3 张无题表（「层级｜岗位／班组｜直接上级」「工序｜持续天数｜起止天序」「设施｜面积｜位置」），
+  // 而 table-caption 终检在链尾照常报出。题注是**结构属性**，必须在结构类修复全部收敛之后再收口：
+  // 置于最后 draft-mutating 轮之后，其写回章 drafts 的结果不被后续轮次回退（其后均为 markdown-only 重放）。
+  // r24 B8 正文表格题名补全轮（实机归因）：终检 table-caption 按「表上方 8 行内可提取表名」判定，无题名
+  // 形态表格（探测 kind='none'）无可注入对象直坠终门禁——确定性补名（章内无题表 × 本章计划表表头字段
+  // 对账）+ LLM 补名（残留无题表章级定向）写回章 drafts；本阶段 draft-mutating + rebuild，必须位于
+  // stageFactDistribution 之后（其 rebuild 会回退此前 markdown-only 修改）、链尾 markdown-only 重放之前
+  await stageTableCaptionRepair(session);
   // r14 链尾终局清洗重放（r13 实机归因）：stageFactDistribution 修改章 drafts 后的
   // rebuildFinalMarkdown 会从章 drafts 重拼成稿，把 postReviewSurface 第二遍重放之后的全部
   // 字符串级清洗（规格错位收口/内部术语替换/round-2 链：段落复读/骨架复读/工序形式回退）

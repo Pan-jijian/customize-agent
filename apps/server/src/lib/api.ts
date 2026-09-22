@@ -423,7 +423,9 @@ export interface DocumentAsset { id: string; type: 'image' | 'audio' | 'video' |
 export interface GeneratedAssetRecord extends DocumentAsset { name: string; source: 'knowledge_base' | 'generated' | 'uploaded' | 'external_url'; indexed: boolean; usedByDocumentIds: string[]; createdAt: number; updatedAt: number; }
 export interface GeneratedDocumentRecord { id: string; taskId?: string; templateId: string; templateName?: string; title: string; requirement: string; projectRoot?: string; projectId?: string; knowledgeBasePath?: string; markdown: string; editedMarkdown?: string; status: 'queued' | 'generating' | 'completed' | 'completed_with_issues' | 'warning' | 'failed' | 'aborted'; draft?: GeneratedDocumentDraft; executionStages?: GeneratedDocumentDraft['executionStages']; partialChapters?: GeneratedDocumentDraft['partialChapters']; checkpointChapters?: DocumentDraftChapter[]; reviewMetadata?: GeneratedDocumentDraft['reviewMetadata']; assets: DocumentAsset[]; createdAt: number; updatedAt: number; completedAt?: number; error?: string; warningIssues?: string[]; ownerPid?: number; ownerStartedAt?: number; interruptedAt?: number; interruptionReason?: 'process-exited' | 'heartbeat-lost' | 'owner-unknown'; abortedAt?: number; abortedBy?: string; abortedStage?: string; maxEvidencePerChapter?: number; queuePosition?: number; exportReports?: ExportReport[] }
 /** 导出后闭环报告：归档到记录详情，支持与历史版本对比 */
-export interface ExportReport { format: 'markdown' | 'html' | 'pdf' | 'docx'; exportedAt: number; durationMs?: number; ruleSummary?: string[]; repairedCount?: number; blockingCount?: number; gatePassed?: boolean; healthAlerts?: string[]; repairHeat?: Record<string, { hits: number; repaired: number; failed: number }> }
+export interface ExportReport { format: 'markdown' | 'html' | 'pdf' | 'docx'; exportedAt: number; durationMs?: number; ruleSummary?: string[]; repairedCount?: number; blockingCount?: number; gatePassed?: boolean; healthAlerts?: string[]; repairHeat?: Record<string, { hits: number; repaired: number; failed: number }>; gateIssueCount?: number; gateChecklist?: ExportGateChecklist }
+/** 4.55.29 L1-4：服务端归档的门禁清单最小镜像（含检测器身份与修复路径，供界面按修复轮口径展示） */
+export interface ExportGateChecklist { total: number; items: Array<{ index: number; category: string; location: string; problem: string; action: string; repairPath: string; detectorId?: string }> }
 export interface DocumentReviewMetadata { chapterSummaries: Array<{ chapterId: string; title: string; status: 'pass' | 'warn' | 'fail'; issues: string[]; suggestions: string[]; chars: number }>; globalIssues: string[]; diagnostics: { strategy: { mode: 'fast' | 'balanced' | 'longform' | 'strict'; largeDocumentMode?: boolean; enableChapterReview: boolean; enableGlobalReview: boolean; enableDocumentBudgetExpansion?: boolean; enableFinalQualityReview?: boolean; maxChapterReviewConcurrency: number; targetLlmConcurrency: number }; metrics: Array<{ name: string; startedAt: number; endedAt: number; durationMs: number; meta?: Record<string, string | number | boolean> }>; llm: { calls: number; failures: number; throttledWaits: number; throttledWaitMs?: number; maxActive: number; currentLimit: number; limitAdjustments: number }; evidence?: { raw: number; used: number; filteredNoise: number; avgNoiseScore: number; avgFactDensity: number; searchQueries?: number; searchMs?: number; contextChars?: number }; quality?: { blockingCount: number; importantCount: number; minorCount: number; repairedCount: number } } }
 export interface GeneratedDocumentDraft { templateId: string; templateName: string; title: string; requirement: string; projectRoot?: string; projectId?: string; markdown: string; exportSettings?: DocumentExportSettings; generationSettings?: DocumentGenerationSettings; facts: Record<string, string>; structuredFacts: DocumentFact[]; factsModel: DocumentFactsModel; chapters: DocumentDraftChapter[]; sources: Array<{ filePath: string; count: number }>; missingItems: string[]; validation: { passed: boolean; warnings: string[]; errors: string[] }; validationIssues: ValidationIssue[]; executionStages: DocumentExecutionStage[]; exportGate: ExportGateResult; assets?: DocumentAsset[]; partialChapters?: Array<{ id: string; title: string; chars: number; status: 'completed' | 'failed' | 'in_progress'; updatedAt: number }>; reviewMetadata?: DocumentReviewMetadata; promptRules?: { executionSummary?: string[]; ruleSources?: Record<string, Array<{ promptId: string; roleId: string; pattern: string; matchedText: string }>>; sourceHash?: string; requiredTables?: string[]; requiredKeywords?: string[]; forbiddenPatterns?: string[]; exactHeadings?: string[]; minWords?: number; coverPolicy?: string; tocPolicy?: string }; generatedAt: number; }
 export interface StoredDocumentDraft extends GeneratedDocumentDraft { id: string; updatedAt: number; }
@@ -510,7 +512,15 @@ export async function getDocumentDrafts() { return fetchJson<{ drafts: StoredDoc
 export async function saveDocumentDraft(draft: GeneratedDocumentDraft, id?: string) {
   return fetchJson<{ draft: StoredDocumentDraft }>('/api/documents/drafts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ draft, id }) });
 }
-export async function exportDocument(input: { documentId?: string; title?: string; markdown?: string; format: 'markdown' | 'html' | 'pdf' | 'docx'; enforceGate?: boolean; useClientMarkdown?: boolean; exportGate?: ExportGateResult; wordTemplatePath?: string; projectRoot?: string }) {
+/**
+ * 导出文档。返回结构含交付资格信号（4.55.29 L1-2/L1-3）：
+ * - `notDeliverable`：服务端置位的 X-Export-Not-Deliverable=true（门禁未通过、按用户显式选择放行）；
+ * - `filename`：服务端 Content-Disposition 下发的文件名（非交付物已由服务端强制加「_非交付物_」后缀，
+ *   调用方必须原样使用——这样标注只有服务端一处来源，客户端漏改命名也不会产出未标注产物）。
+ *
+ * 放行通道参数为 `allowNonDeliverable`（显式语义），不再存在 `enforceGate:false` 这类静默关闸布尔量。
+ */
+export async function exportDocument(input: { documentId?: string; title?: string; markdown?: string; format: 'markdown' | 'html' | 'pdf' | 'docx'; allowNonDeliverable?: boolean; useClientMarkdown?: boolean; exportGate?: ExportGateResult; wordTemplatePath?: string; projectRoot?: string }) {
   const response = await fetch('/api/documents/export', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: input.format === 'pdf' ? 'application/pdf' : '*/*' }, body: JSON.stringify(input) });
   const contentType = response.headers.get('content-type') || '';
   const parseExportError = async () => {
@@ -530,7 +540,18 @@ export async function exportDocument(input: { documentId?: string; title?: strin
   if (!response.ok) await parseExportError();
   if (input.format === 'pdf' && !contentType.includes('application/pdf')) await parseExportError();
   if (input.format === 'docx' && !contentType.includes('officedocument.wordprocessingml.document')) await parseExportError();
-  return response.blob();
+  // 交付资格信号：头部名与 services/document-workflow/exportNaming.ts 的 NON_DELIVERABLE_HEADER 同源
+  //（本模块保持零依赖约定，故此处为字面量镜像，服务端导出路由的契约由测试锁定）
+  const notDeliverable = response.headers.get('X-Export-Not-Deliverable') === 'true';
+  const gateIssueHeader = response.headers.get('X-Export-Gate-Issues') || '';
+  let gateIssues: string[] = [];
+  try { gateIssues = gateIssueHeader ? JSON.parse(decodeURIComponent(gateIssueHeader)) as string[] : []; } catch { gateIssues = []; }
+  // 服务端下发的文件名（含非交付物后缀）；头缺失/不可解析时回退 undefined，由调用方按标题构造
+  const disposition = response.headers.get('content-disposition') || '';
+  const encodedName = /filename\*=UTF-8''([^;]+)/iu.exec(disposition)?.[1];
+  let filename: string | undefined;
+  try { filename = encodedName ? decodeURIComponent(encodedName) : undefined; } catch { filename = undefined; }
+  return { blob: await response.blob(), filename, notDeliverable, gateIssues };
 }
 
 // ═══════ 模型配置 ═══════

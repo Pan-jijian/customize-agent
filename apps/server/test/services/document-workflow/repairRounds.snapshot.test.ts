@@ -9,6 +9,8 @@ import { FINALIZE_REPAIR_ROUNDS, LLM_PATCH_REPAIR_ROUNDS } from '@/services/docu
 describe('修复轮顺序快照（变更必须显式改快照并附理由）', () => {
   it('FINALIZE_REPAIR_ROUNDS 35 轮顺序快照', () => {
     expect([...FINALIZE_REPAIR_ROUNDS]).toEqual([
+      // 4.55.29：table-caption-repair 由「算术轮之前」移至「duplicate-theme-merge 之后」，
+  // 理由见 documentPipeline.ts 同处注释（题注是结构属性，须在结构类修复全部收敛之后收口）
       'fact-landing-round',          // 重要事实落位补写轮（uncoveredImportantFacts 触发）
       'table-repair-round',          // 表格数据完整性修复轮（markdownTableQualityIssues error 触发）
       'semantic-choice-conflict',    // 决策锁语义矛盾检测（semanticChoiceConflicts，无修复）
@@ -34,12 +36,12 @@ describe('修复轮顺序快照（变更必须显式改快照并附理由）', (
       'toc-consistency',             // 目录与正文一致性兜底（fixTocFromBody）
       'length-compression-repair',   // D-T3 成稿篇幅压缩轮（成稿超目标 20% 时章级超额定位 + LLM 合并重复段落；位于 toc-consistency 之后、扩散轮之前）
       'fact-distribution-round',     // R12 关键事实跨章扩散轮（stageFactDistribution，链尾收口：全部 LLM 补写轮之后、终门禁之前）
-      'table-caption-repair',        // r24 B8 正文表格题名补全轮（无题表确定性补名 + 残留 LLM 补名；位于 stageFactDistribution 之后、链尾 markdown-only 重放之前）
       'table-arithmetic-repair',     // C-T3 表内算术自洽修复轮（合计行/列与分项和对账 + LLM 定向重算表内数值；位于 table-caption-repair 之后、链尾 markdown-only 重放之前）
       'empty-section-sweep',         // D-T3 无依据空壳小节链尾清扫（确定性整行移除 + 章内编号原子重放；链尾最后 draft-mutating、markdown-only 重放之前）
       'section-alignment-sweep',     // D-T6 小节结构对齐链尾重放（近名合并/漂移改名 + 非近名规划外 H3 降 H4；empty-section-sweep 之后、链尾 markdown-only 重放之前）
       'templating-sweep',            // D-T7 模板化清理链尾重放（零信息前缀句确定性删除 + 逐章段落完全重复去重；section-alignment-sweep 之后、链尾 markdown-only 重放之前）
       'duplicate-theme-merge',       // D-T7 重复主题小节链尾合并（同桶规划小节 ≥2 确定性合并 + 规划数组同步 + 章内编号原子重放；templating-sweep 之后、delivery-structure-closure 之前）
+      'table-caption-repair',        // r24 B8 正文表格题名补全轮（无题表确定性补名 + 残留 LLM 补名；位于 stageFactDistribution 之后、链尾 markdown-only 重放之前）
       'delivery-structure-closure',  // D-T6 交付结构收口（超长段落切分 + 目录按正文实际结构重建；最后净变更点之后、stageFinalGate 之前）
       'sentence-pattern-sweep',      // C8 S3 句模复读链尾收口（宣告引导句确定性剥离 + 密度命中线四端单源；delivery-structure-closure 之后、链尾标点兜底之前）
       'duplicate-sentence-collapse', // C8 S5 句级复读坍塌链尾收口（完全重复句保首次删后续：同章一律坍塌、跨章仅泛化归口帧坍塌；sentence-pattern-sweep 之后、链尾标点兜底之前）

@@ -34,9 +34,7 @@ const EXECUTION_STAGE_ORDER = [
   // D-T3 成稿篇幅压缩轮（draft-mutating + rebuild；位于全部 LLM 补写轮之后、扩散轮之前）
   'stageLengthCompressionRepair',
   'stageFactDistribution',
-  // r24 B8 正文表格题名补全轮（draft-mutating + rebuild；位于扩散轮之后、链尾 markdown-only 重放之前）
-  'stageTableCaptionRepair',
-  // C-T3 表内算术自洽修复轮（draft-mutating + rebuild；位于题名补全轮之后、链尾 markdown-only 重放之前）
+  // C-T3 表内算术自洽修复轮（draft-mutating + rebuild；链尾 markdown-only 重放之前）
   'stageTableArithmeticRepair',
   // D-T3 无依据空壳小节链尾清扫（确定性 draft-mutating + rebuild；链尾最后 draft-mutating、markdown-only 重放之前）
   'stageEmptySectionSweep',
@@ -46,6 +44,10 @@ const EXECUTION_STAGE_ORDER = [
   'stageTemplatingSweep',
   // D-T7 重复主题小节合并（确定性 draft-mutating + rebuild；templating-sweep 之后、delivery-structure-closure 之前）
   'stageDuplicateThemeMerge',
+  // 4.55.29 正文表格题名补全轮（draft-mutating + rebuild；**链尾最后 draft-mutating 位置**）——
+  // 原位于 factDistribution 之后，其实测其后各结构类修复轮重建成稿时引入新无题表，终稿残留无题表；
+  // 题注是结构属性，须在结构类修复全部收敛之后再收口
+  'stageTableCaptionRepair',
   // D-T6 交付结构收口（markdown-only；最后净变更点之后、stageFinalGate 之前）
   'stageDeliveryStructureClosure',
   // C8 S3 句模复读链尾收口（markdown-only；delivery-structure-closure 之后、链尾标点兜底之前）

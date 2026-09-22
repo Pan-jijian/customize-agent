@@ -20,6 +20,15 @@
  *   复核（extraAuthorityTokens：来源在证据/清单而蓝图未投影时不再误报缺口）；
  * - 豁免单源：无主 token 二次过 C-T2 分类器（classifyNumericTraceToken）——规范常数/管理数字
  *   计入 conventionExempt 不计缺口（与修复轮豁免口径完全一致，防两链判据漂移）；
+ *   L0-7 收编（实机 doc-1790104980418 的 9 处假缺口根因）：**提取器粘连假 token** 不是项目数值——
+ *   PRECISE_TOKEN_RE 型号分支贪婪吞并其后数量段（HRB4001.941t / HRB40025.851t / DN405m），
+ *   数字分支吃下 Φ 后的直径数（Φ251.941t 的 251.941t）；拼接核（4001.941 / 405 / 251.941）
+ *   不是正文任何数，据其报缺口即假缺口、据其进修复轮即误删正确正文。同源判定为 C-T2 新族
+ *   R16 规格粘连（isSpecGluedValueToken，正则源 SPEC_GLUED_* 在 parameterPatterns 与主提取器同源）、
+ *   R17 章节编号（isSectionNumberingToken：编号形态 + 语境同形邻号，目录/标题编号被吞成「1.22 周」
+ *   时成立）；R13 语境词族同步扩容（板型/型材/型钢/钢种/钢号/系列——板型 HV470B 不再落缺口）。
+ *   豁免是「提取形态」判定而非放宽未登记桶：真缺口（如上形态之外的 424.2m / 6403.78m² /
+ *   427.000个）照常报出，unattributed 桶口径不变；
  * - 硬门禁：三桶任一非零 → authorityAuditIssues 产出 blocker（fact_consistency + llm_repairable
  *   直通 isHardExportBlockingIssue）——审计失败不可进交付；缺口由修复轮（numeric-verification
  *   同源权威+分类器）与链尾 demote 确定性改定性收敛至 0。

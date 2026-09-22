@@ -401,15 +401,22 @@ function windowParagraph(paragraph: string): string[] {
   return units;
 }
 
-/** 评分判定单元（C0-1 内容级判定）：标题不单独构成判定单元且不参与命中文本——单元=实质正文窗口。
- * 空壳标题（无实质正文）不产出单元（r28l 实测：仅标题块命中 14/19、6 强制模块全部靠标题单独命中，
- * 「### 1.1 编制说明与工程概况」类空壳标题误命中「编制专项施工方案」）；标题词的语义诱饵不计
- * （标题承接由评分细则映射层 partial 独立判定）；目录聚簇行剔除、超长段落切窗。
- * 导出供单测与对抗套件验证切分粒度。 */
+/** 评分判定单元（C0-1 内容级判定，4.55.29 补标题承接单元）：单元=实质节标题 + 该节实质正文窗口。
+ *
+ * **空壳标题仍不产出单元**（r28l 实测：仅标题块命中 14/19、6 强制模块全部靠标题单独命中，
+ * 「### 1.1 编制说明与工程概况」类空壳标题误命中「编制专项施工方案」）——标题只有在**该节确有
+ * 实质正文**时才作为该节的自我声明参与判定，与正文条件同生共死。
+ *
+ * **为什么要补标题单元**（4.55.29 巢湖实测）：判据改为纯正文窗口后，标题声明的承接信号被
+ * 长正文的均值池化稀释掉——同一实验下「2.16 扬尘污染防治措施」节标题对查询余弦 0.916
+ * （模型自相似 1.000 / 无关 0.37~0.47，尺度健全），而该节正文窗口最高仅 0.553，
+ * 强制模块 2/6 中有 3 项（扬尘/实名制/绿色施工）内容齐备却判缺口。判定单元恢复为
+ * 「实质节标题 + 正文窗口」后同一份成稿 2/6 → 5/6，且空壳标题与堆词样本仍被实质正文条件挡住。 */
 export function splitScoringBlocks(markdown: string): string[] {
   const units: string[] = [];
   for (const section of splitScoringSections(markdown)) {
     if (!section.hasSubstantiveBody) continue;
+    if (section.headingText) units.push(section.headingText);
     for (const paragraph of section.substantiveParagraphs) {
       units.push(...windowParagraph(paragraph));
     }

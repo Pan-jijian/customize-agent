@@ -14,6 +14,10 @@ import { generatedRoot, getGeneratedDocument, updateGeneratedDocument, type Expo
 import { getProjectKbRoot, getProjectRoot } from '@/services/knowledge/kbService';
 import type { DocumentExportSettings } from '@/services/document-workflow';
 import type { BidCompositionSpec } from '@/services/document-workflow/bidComposition';
+import type { ValidationIssue } from '@/services/document-workflow/types';
+import type { SuspensionChecklist } from '@/services/document-workflow/suspensionChecklist';
+import { buildSuspensionChecklist } from '@/services/document-workflow/suspensionChecklist';
+import { NON_DELIVERABLE_HEADER, markNonDeliverableFilename } from '@/services/document-workflow/exportNaming';
 import { sanitizeFormalMarkdown } from '@/services/document-workflow/markdownComposer';
 import { recordErrorLog } from '@/services/common/errorLogService';
 import { withApiErrorBoundary } from '@/services/common/apiErrorBoundary';
@@ -1206,13 +1210,18 @@ async function renderPdfBuffer(html: string, settings?: DocumentExportSettings, 
 /**
  * B3 导出后闭环报告：导出成功后归档总用时/规则执行摘要/修复记录到记录详情，
  * 支持与历史版本对比。归档失败不影响导出结果。
+ *
+ * 4.55.29 L1-4：门禁清单归档。此前只归档 `gatePassed` 布尔值，**门禁到底拦了什么**随响应丢失——
+ * 修复轮拿不到「检测器身份 + 定位 + 修复路径」，只能重跑检测器重新猜。现按与其他三处挂载点
+ * 同一构建（suspensionChecklist）归档结构化清单，修复轮按 detectorId 直连修复器闭环。
  */
-function archiveExportReport(record: GeneratedDocumentRecord | null, format: ExportFormat, projectRoot: string, renderAudit?: ExportRenderAuditReport) {
+function archiveExportReport(record: GeneratedDocumentRecord | null, format: ExportFormat, projectRoot: string, renderAudit?: ExportRenderAuditReport, gateIssues: ReadonlyArray<ValidationIssue> = []) {
   if (!record) return;
   try {
     const draft = record.draft;
     const quality = draft?.reviewMetadata?.diagnostics?.quality;
     const durationMs = record.completedAt ? Math.max(0, record.completedAt - record.createdAt) : Math.max(0, Date.now() - record.createdAt);
+    const gateChecklist: SuspensionChecklist | undefined = gateIssues.length > 0 ? buildSuspensionChecklist(gateIssues, draft?.chapters) : undefined;
     const report: ExportReport = {
       format,
       exportedAt: Date.now(),
@@ -1226,6 +1235,7 @@ function archiveExportReport(record: GeneratedDocumentRecord | null, format: Exp
       repairHeat: draft?.reviewMetadata?.telemetry?.repairHeat,
       // A1 导出纯渲染审计（dry-run 误报采样 + 守恒断言证据链）
       ...(renderAudit ? { renderAudit } : {}),
+      ...(gateChecklist ? { gateIssueCount: gateIssues.length, gateChecklist } : {}),
     };
     const history = [...(record.exportReports || []), report].slice(-20);
     updateGeneratedDocument(record.id, { exportReports: history }, projectRoot);
@@ -1242,7 +1252,7 @@ function archiveExportReport(record: GeneratedDocumentRecord | null, format: Exp
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   // 仅允许 POST 请求
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-    const body = req.body as { documentId?: string; title?: string; markdown?: string; format?: ExportFormat; enforceGate?: boolean; useClientMarkdown?: boolean; exportGate?: { passed?: boolean; blockingIssues?: Array<{ message: string }> }; wordTemplatePath?: string; projectRoot?: string };
+    const body = req.body as { documentId?: string; title?: string; markdown?: string; format?: ExportFormat; allowNonDeliverable?: boolean; useClientMarkdown?: boolean; exportGate?: { passed?: boolean; blockingIssues?: Array<{ message: string }> }; wordTemplatePath?: string; projectRoot?: string };
     const projectRoot = body.projectRoot || getProjectRoot();
     const record = body.documentId ? getGeneratedDocument(body.documentId, projectRoot) : null;
     if (body.documentId && !record) return res.status(404).json({ error: 'Document not found' });
@@ -1273,31 +1283,38 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // 此前注释为「导出门禁仅作为风险提示，不阻断用户导出」，结论只写进 X-Export-* 响应头 ——
     // 而该响应头**没有任何客户端读取**（前端只取 response.blob()），形成「有判定、无消费者」的
     // 假闭环：最后一道能拦住不合格交付的闸门实际是敞开的。
-    // 现口径：默认阻断（enforceGate !== false）。调用方显式传 false 时放行，但响应头标注
-    // X-Export-Not-Deliverable，由前端在界面上显式呈现「非交付物」，不允许静默通过。
+    // 4.55.29 L1-1 现口径：门禁**默认生效**，且不再有「一个布尔量静默关闸」的调用面 ——
+    // 唯一的放行通道是调用方显式声明 `allowNonDeliverable: true`（语义即「我知道这是非交付物」），
+    // 且放行必须是**自标注**的：响应头 NON_DELIVERABLE_HEADER 置位 + 下载文件名强制加「_非交付物_」后缀。
+    // 原 `enforceGate: false` 的危险在于：它既表达「不拦」，又对产物零标记——一旦被顺手传上，
+    // 69 项阻断静默出闸、产物与正式交付物外观完全一致（实测事故面）。
     //
     // 同时修掉双重过滤：此前对 blockingIssues 再滤一遍 isExportBlockingIssue（更窄的消息正则），
     // 与 buildExportGate 使用的 isHardExportBlockingIssue 不是同一口径 —— 导出层看到的阻断集
     // 会小于门禁层，形成「门禁说不通过、导出层说通过」的分裂。此处直接采用门禁结论（口径单源）。
-    const gateBlockingIssues = exportGate?.blockingIssues || [];
-    const gateFailedChecklist = exportGate?.passed === false && gateBlockingIssues.length === 0 ? [{ message: '导出门禁未通过：存在未完成的检查项' }] : [];
-    const gateIssues = [...gateBlockingIssues, ...gateFailedChecklist];
-    if (gateIssues.length > 0 && body.enforceGate !== false) {
+    // 请求体（无记录时由前端草稿携带）的门禁条目只保证 message —— 进入阻断清单即按 error 级校验问题处理
+    const gateBlockingIssues: ValidationIssue[] = (exportGate?.blockingIssues || []).map(item => ({ level: 'error' as const, ...item }));
+    const gateFailedChecklist: ValidationIssue[] = exportGate?.passed === false && gateBlockingIssues.length === 0 ? [{ level: 'error', message: '导出门禁未通过：存在未完成的检查项' }] : [];
+    const gateIssues: ValidationIssue[] = [...gateBlockingIssues, ...gateFailedChecklist];
+    const nonDeliverable = gateIssues.length > 0;
+    if (nonDeliverable && !body.allowNonDeliverable) {
       return res.status(422).json({
         error: 'EXPORT_GATE_BLOCKED',
-        message: `导出门禁未通过（${gateIssues.length} 项阻断），文档未达交付标准，已阻止导出。请补齐后重新生成；如确需留档，可选择「仍要导出（非交付物）」。`,
+        message: `导出门禁未通过（${gateIssues.length} 项阻断），文档未达交付标准，已阻止导出。请补齐后重新生成；如确需留档，可选择「仍要导出（非交付物）」——该产物文件名将强制标注「非交付物」，不得作为正式成果提交。`,
         issues: gateIssues.slice(0, 20),
       });
     }
-    res.setHeader('X-Export-Gate-Passed', gateIssues.length === 0 ? 'true' : 'false');
-    if (gateIssues.length > 0) {
+    res.setHeader('X-Export-Gate-Passed', nonDeliverable ? 'false' : 'true');
+    // 非交付物显式声明（恒置位，前端据 'true' 在文件名与界面双标注；缺失/不可解析一律按交付物处理由前端兜底）
+    res.setHeader(NON_DELIVERABLE_HEADER, nonDeliverable ? 'true' : 'false');
+    if (nonDeliverable) {
       res.setHeader('X-Export-Gate-Issues', encodeURIComponent(JSON.stringify(gateIssues.map(item => item.message).slice(0, 20))));
-      res.setHeader('X-Export-Not-Deliverable', 'true');
     }
-    const filename = safeFileName(title);
+    // L1-3：后缀在 safeFileName 截断之后追加，避免标记被 80 字符上限截掉
+    const filename = nonDeliverable ? markNonDeliverableFilename(safeFileName(title)) : safeFileName(title);
     // Markdown 格式直接返回文本
     if (format === 'markdown') {
-      archiveExportReport(record, format, projectRoot, renderAuditReport);
+      archiveExportReport(record, format, projectRoot, renderAuditReport, gateIssues);
       res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.md`)}`);
       return res.status(200).send(markdown);
@@ -1305,7 +1322,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // DOCX 格式
     if (format === 'docx') {
       const docx = await buildDocx(title, markdown, exportSettings, body.wordTemplatePath, projectRoot);
-      archiveExportReport(record, format, projectRoot, renderAuditReport);
+      archiveExportReport(record, format, projectRoot, renderAuditReport, gateIssues);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.docx`)}`);
       return res.status(200).send(docx);
@@ -1313,7 +1330,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // HTML 和 PDF 需要将 Markdown 渲染为 HTML
     const html = await buildExportHtml(title, markdown, exportSettings, projectRoot, composition?.formatRules.monoColor === true);
     if (format === 'html') {
-      archiveExportReport(record, format, projectRoot, renderAuditReport);
+      archiveExportReport(record, format, projectRoot, renderAuditReport, gateIssues);
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.html`)}`);
       return res.status(200).send(html);
@@ -1324,7 +1341,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       // 标书编制规格：总页数上限（超页扣分项）→ 响应头显性提示（不阻断导出，交编制人复核）
       const pageLimit = composition?.formatRules.pageLimit;
       if (pageLimit && pages && pages > pageLimit) res.setHeader('X-Export-Page-Limit', encodeURIComponent(`超出招标规定总页数上限：当前 ${pages} 页 / 上限 ${pageLimit} 页`));
-      archiveExportReport(record, format, projectRoot, renderAuditReport);
+      archiveExportReport(record, format, projectRoot, renderAuditReport, gateIssues);
       res.setHeader('Content-Type', 'application/pdf');
       if (pages) res.setHeader('X-PDF-Page-Count', String(pages));
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.pdf`)}`);

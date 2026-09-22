@@ -7,7 +7,7 @@
  * 「搭设高度超过24m区段属危大」（清单实测 18.05m以内）、「开挖深度超过3m属危大」（清单实测 1.5m内）。
  */
 import { describe, expect, it } from 'vitest';
-import { HAZARD_THRESHOLDS, billOfQuantitiesCorpus, extractHazardBindings, extractHazardParameters, normalizeParameterValue, renderHazardBindingBlock } from '@/services/document-workflow/hazardBinding';
+import { HAZARD_THRESHOLDS, billOfQuantitiesCorpus, extractHazardBindings, extractHazardParameters, normalizeParameterValue, renderHazardBindingBlock, selfCorroboratedMeasure } from '@/services/document-workflow/hazardBinding';
 import { extractLabeledAttributes } from '@/services/document-workflow/integratedBlueprint/parse';
 
 const 清单 = '巢湖项目/4-工程量清单各项分类表/1#厂房土建工程.xls';
@@ -125,6 +125,73 @@ describe('跨度字段左边界（DWG 吊车跨度误判回归）', () => {
     expect(item?.conclusion).toBe('属超过一定规模的危大');
     expect(item?.basis).toContain('35.86');
     expect(item?.basis).toContain('最大单跨跨度');
+  });
+});
+
+/**
+ * 4.55.29 写作侧实参送达（实时缺陷 `doc-1790104980418-d47a002e`）。
+ *
+ * 实测证据链：写作期 canonical「基坑开挖深度」槽位是**误拼值**（图纸标注片段里的混凝土等级 `C25`
+ * 被拼成 `25m`）；清单「挖土深度：1.5m内」使 `depthFallback`（死代码）永不进入；
+ * 真值 1.7m（图纸标注 -1.7 米，终检口径账本裁决 R1）全程未进写作侧 ⇒ 正文只写规范阈值。
+ * 本组锁死：深度通道按**字段名语义 + 形态 + 来源**取值，canonical 量值须**自证**（引文复现）。
+ */
+describe('基坑深度实参通道与 canonical 自证（4.55.29）', () => {
+  const 图纸 = '巢湖项目/2-图纸目录/主体CAD/建筑/1#厂房施工图_t3.dwg';
+  /** 实测原文：图纸标注行（`-1.7-1.7` 为 OCR 重复段，「米」为其单位） */
+  const 图纸标注行 = { content: '0.5m/s0.5m/s ，基坑深度，基坑深度 -1.7-1.7 米（余同）米（余同）', filePath: 图纸 };
+  /** 实测原文：写作期 canonical 槽位（引文里没有 25 这个量值——`C25` 是混凝土强度等级） */
+  const 误拼槽位 = '25m（图纸标注：C25 圈梁,构造柱 C25 《建筑基桩检测技术规范》 (JGJ 106-2014) 8.7.1 基槽开挖到设计标高后，）';
+
+  const 基坑 = (evidence: typeof 巢湖清单, canonical?: Record<string, string>) =>
+    extractHazardBindings(evidence, canonical).find(item => item.category === '基坑工程');
+
+  it('canonical 量值自证：引文里查无该量值即拒（防误拼值进判定）', () => {
+    expect(selfCorroboratedMeasure(误拼槽位)).toBeUndefined();
+    expect(selfCorroboratedMeasure('1.7m（图纸标注：基坑深度 -1.7 米（余同））')).toEqual({ normalized: 1.7, display: '1.7m' });
+    // 无引文的规整量值照常采信；非量值形态（指向型描述）返回 undefined
+    expect(selfCorroboratedMeasure('1.5m以内')).toEqual({ normalized: 1.5, display: '1.5m' });
+    expect(selfCorroboratedMeasure('详见施工图纸、投标人自行综合考虑')).toBeUndefined();
+  });
+
+  it('实机形态：清单 1.5m + 图纸标注「基坑深度 -1.7 米」→ 定死块落 1.7m（真值送达）', () => {
+    const item = 基坑([...巢湖清单, 图纸标注行] as typeof 巢湖清单);
+    expect(item?.parameter).toContain('1.7');
+    expect(item?.parameter).not.toContain('25');
+    expect(item?.conclusion).toBe('不属危大');
+  });
+
+  it('反例：误拼槽位（25m/C25）不得进判定——否则会把项目写成「开挖深度 25m ⇒ 超危大」', () => {
+    const item = 基坑(巢湖清单, { 基坑开挖深度: 误拼槽位 });
+    expect(item?.parameter).not.toContain('25');
+    expect(item?.conclusion).toBe('不属危大');
+  });
+
+  it('正例：canonical 真值自证通过 → 参与「最保守取值」（压过清单 1.5m）', () => {
+    const item = 基坑(巢湖清单, { 基坑开挖深度: '1.7m（图纸标注：基坑深度 -1.7 米（余同））' });
+    expect(item?.parameter).toContain('1.7');
+  });
+
+  it('反例：槽位名非基坑深度语义（「结构跨度」）不得进深度通道（判据按字段名语义，不按数值形态）', () => {
+    const item = 基坑([], { 结构跨度: '35.86m' });
+    expect(item?.parameter).toBe('资料未给出实测参数');
+  });
+
+  it('反例：规范门槛句「基坑深度超过3m」不得当本项目实参', () => {
+    const item = 基坑([{ content: '基坑深度超过3m的基坑（槽）的土方开挖、支护、降水工程。', filePath: '巢湖项目/危大工程范围.docx' }] as typeof 巢湖清单);
+    expect(item?.parameter).not.toContain('3m');
+    expect(item?.parameter).toBe('资料未给出实测参数');
+    expect(item?.conclusion).toBe('不属危大');
+  });
+
+  it('反例：区间形态「3.0m～5.0m」不算单一实测值（形态封闭）', () => {
+    const item = 基坑([{ content: '基坑深度 3.0m～5.0m 区段按专项施工方案实施。', filePath: 图纸 }] as typeof 巢湖清单);
+    expect(item?.parameter).toBe('资料未给出实测参数');
+  });
+
+  it('反例：1.5m 与 1.7m 均在时取更保守者，且不混入速度类量值（0.5m/s）', () => {
+    const item = 基坑([...巢湖清单, 图纸标注行] as typeof 巢湖清单);
+    expect(item?.parameter).not.toContain('0.5');
   });
 });
 

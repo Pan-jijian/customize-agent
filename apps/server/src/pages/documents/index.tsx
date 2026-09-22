@@ -136,6 +136,9 @@ export default function DocumentsPage() {
   const [drafts, setDrafts] = useState<GeneratedDocumentRecord[]>([]);
   const [currentDocumentId, setCurrentDocumentId] = useState<string | null>(null);
   const [exporting, setExporting] = useState<string | null>(null);
+  // 4.55.29 L1-2：本次会话最近一次「非交付物」导出（服务端 X-Export-Not-Deliverable 置位）——
+  // 页面必须显式呈现，禁止非交付物静默出现；交付物导出成功即清除。
+  const [nonDeliverableExport, setNonDeliverableExport] = useState<{ at: number; count: number; issues: string[] } | null>(null);
   const [refinePrompt, setRefinePrompt] = useState('');
   const [refining, setRefining] = useState(false);
   const [refineStep, setRefineStep] = useState<'idle' | 'planning' | 'applying'>('idle');
@@ -943,17 +946,29 @@ export default function DocumentsPage() {
     window.setTimeout(() => URL.revokeObjectURL(u), 1000);
   };
   /**
-   * G 线 P0-3：门禁阻断时的显式二次确认通道。
-   * 默认阻断、绝不静默放行；用户显式确认后放行，产物标记为「非交付物」。
+   * 一次导出（4.55.29 L1-2/L1-3 消费侧接线）：
+   * - 文件名一律采用服务端 Content-Disposition 下发的名字——非交付物后缀由服务端强制追加，
+   *   客户端不再自行拼名，标注只有一处来源（缺头时按标题兜底，头缺失即交付物导出路径）；
+   * - 服务端 X-Export-Not-Deliverable 置位时，在页面显式标注「非交付物」，不允许静默出现。
+   */
+  const downloadExport = async (payload: Parameters<typeof exportDocument>[0], fallbackName: string, mime: string) => {
+    const { blob, filename, notDeliverable, gateIssues } = await exportDocument(payload);
+    dl(blob, filename || fallbackName, mime);
+    setNonDeliverableExport(notDeliverable ? { at: Date.now(), count: gateIssues.length, issues: gateIssues } : null);
+  };
+  /**
+   * G 线 P0-3 / 4.55.29 L1-1：门禁阻断时的显式二次确认通道。
+   * 默认阻断、绝不静默放行；用户显式确认后以 `allowNonDeliverable: true` 重新请求，
+   * 产物由服务端强制标注「非交付物」（文件名后缀 + 界面横幅）。
    */
   const isGateBlockedError = (msg: string) => /导出门禁未通过|EXPORT_GATE_BLOCKED/u.test(msg);
   const confirmNonDeliverableExport = (blockedMessage: string): Promise<boolean> => new Promise(resolve => {
     Antd.Modal.confirm({
-      title: '导出门禁未通过',
-      content: `${blockedMessage}\n\n继续导出得到的文件为「非交付物」，不得直接作为正式成果提交。`,
-      okText: '仍要导出（非交付物）',
+      title: t('documents.exportGateBlockedTitle'),
+      content: `${blockedMessage}\n\n${t('documents.nonDeliverableExportConfirm')}`,
+      okText: t('documents.exportAnywayNonDeliverable'),
       okButtonProps: { danger: true },
-      cancelText: '取消',
+      cancelText: t('common.cancel'),
       onOk: () => resolve(true),
       onCancel: () => resolve(false),
     });
@@ -972,11 +987,10 @@ export default function DocumentsPage() {
     const mimes: Record<string, string> = { markdown: 'text/markdown;charset=utf-8', html: 'text/html;charset=utf-8', pdf: 'application/pdf', docx: docxMime };
     const ext = fmt === 'markdown' ? 'md' : fmt;
     // G 线 P0-3：不再默认传 enforceGate:false —— 那会让服务端门禁成为死参数、最后一道闸门敞开。
-    // 默认由服务端按交付门禁结论决定是否放行。
+    // 默认由服务端按交付门禁结论决定是否放行；放行只能经 handleExportError 的显式确认通道。
     const payload = { documentId: currentDocumentId || undefined, title: draft.title, markdown: content, format: fmt, exportGate: draft.exportGate, useClientMarkdown: true, projectRoot: draft.projectRoot || currentProjectRoot || undefined };
     try {
-      const blob = await exportDocument(payload);
-      dl(blob, `${draft.title}.${ext}`, mimes[fmt]);
+      await downloadExport(payload, `${draft.title}.${ext}`, mimes[fmt]);
       // B3：导出成功后刷新归档的闭环报告，展示最新一次导出与历史对比
       if (currentDocumentId) {
         try {
@@ -985,7 +999,7 @@ export default function DocumentsPage() {
         } catch { /* 报告刷新失败不影响导出 */ }
       }
     } catch (e) {
-      await handleExportError(e, async () => { dl(await exportDocument({ ...payload, enforceGate: false }), `${draft.title}.${ext}`, mimes[fmt]); });
+      await handleExportError(e, async () => { await downloadExport({ ...payload, allowNonDeliverable: true }, `${draft.title}.${ext}`, mimes[fmt]); });
     } finally { setExporting(null); }
   };
   // 工作流模式导出：对 failed/aborted/生成中的记录导出已有正文（不限制导出）
@@ -1003,10 +1017,10 @@ export default function DocumentsPage() {
       const ext = fmt === 'markdown' ? 'md' : fmt;
       const payload = { documentId: record.id, title: record.title, markdown, format: fmt, useClientMarkdown: true, projectRoot: record.projectRoot || currentProjectRoot || undefined };
       try {
-        dl(await exportDocument(payload), `${record.title}.${ext}`, mimes[fmt]);
+        await downloadExport(payload, `${record.title}.${ext}`, mimes[fmt]);
       } catch (e) {
-        // G 线 P0-3：门禁阻断时不静默放行，走显式「非交付物」确认通道
-        await handleExportError(e, async () => { dl(await exportDocument({ ...payload, enforceGate: false }), `${record.title}.${ext}`, mimes[fmt]); });
+        // G 线 P0-3：门禁阻断时不静默放行，走显式「非交付物」确认通道（放行产物由服务端强制标注）
+        await handleExportError(e, async () => { await downloadExport({ ...payload, allowNonDeliverable: true }, `${record.title}.${ext}`, mimes[fmt]); });
       }
     } finally { setExporting(null); }
   };
@@ -1261,6 +1275,20 @@ export default function DocumentsPage() {
         </Space> : undefined}
       >
         <VerticalStack style={{ width: '100%' }} gap={16}>
+          {/* 4.55.29 L1-2：非交付物页面显式标注（服务端 X-Export-Not-Deliverable 置位时）——
+              文件名后缀防误投，界面横幅防误用，两处标注缺一不可 */}
+          {nonDeliverableExport && (
+            <NoticeBox type="error" title={t('documents.nonDeliverableExportTitle')}>
+              <div>{t('documents.nonDeliverableExportHint')}</div>
+              {nonDeliverableExport.count > 0 && (
+                <div style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}>
+                  {`${t('documents.nonDeliverableExportIssues')}（${nonDeliverableExport.count}）`}
+                  {nonDeliverableExport.issues.slice(0, 5).map((issue, index) => <div key={index}>· {issue}</div>)}
+                  {nonDeliverableExport.count > 5 && <div>{t('documents.nonDeliverableExportTruncated')}</div>}
+                </div>
+              )}
+            </NoticeBox>
+          )}
           {/* 工作流模式：执行步骤 */}
           {drawerMode === 'workflow' && flowSteps.length > 0 && (
             <VerticalStack gap={10}>
@@ -1401,11 +1429,29 @@ export default function DocumentsPage() {
                     {report.durationMs !== undefined && <span className="text-[var(--colorTextSecondary)]">总用时 {fmtMs(report.durationMs)}</span>}
                     {report.repairedCount !== undefined && <span className="text-[var(--colorTextSecondary)]">修复 {report.repairedCount} 项{report.blockingCount !== undefined ? `（阻断 ${report.blockingCount}）` : ''}</span>}
                     {report.ruleSummary && report.ruleSummary.length > 0 && <span className="text-[var(--colorTextSecondary)]">规则 {report.ruleSummary.length} 条</span>}
-                    {report.gatePassed === false && <Tag color="error" className="border-0 m-0">门禁未过</Tag>}
+                    {report.gatePassed === false && <Tag color="error" className="border-0 m-0">{t('documents.nonDeliverableTag')} {report.gateIssueCount ?? ''}</Tag>}
                     {/* P18：自动健康诊断告警（导出时归档） */}
                     {report.healthAlerts && report.healthAlerts.length > 0 && <Tag color="warning" className="border-0 m-0">健康告警 {report.healthAlerts.length}</Tag>}
                   </div>
                 ))}
+                {/* 4.55.29 L1-4：归档的门禁清单（修复轮消费面）——最近一次非交付物导出的未收敛项，
+                    含修复路径与检测器身份，可直接作为续修/人工复核的定位清单 */}
+                {(() => {
+                  const latest = [...exportReports].reverse().find(report => report.gateChecklist && report.gateChecklist.items.length > 0);
+                  if (!latest?.gateChecklist) return null;
+                  const items = latest.gateChecklist.items;
+                  return (
+                    <NoticeBox type="warning" title={`${t('documents.nonDeliverableChecklistTitle')}（${latest.gateChecklist.total}）`}>
+                      {items.slice(0, 5).map(item => (
+                        <div key={item.index} style={{ whiteSpace: 'pre-wrap' }}>
+                          {`${item.index}.【${item.category}】${item.problem}`}
+                          <div style={{ color: 'var(--colorTextSecondary)' }}>{`${item.repairPath}${item.detectorId ? `｜检测器：${item.detectorId}` : ''}`}</div>
+                        </div>
+                      ))}
+                      {items.length > 5 && <div>{t('documents.nonDeliverableExportTruncated')}</div>}
+                    </NoticeBox>
+                  );
+                })()}
                 {/* P19：跨文档缺陷热力图（消费导出闭环报告历史：候选退役/写作硬约束建议） */}
                 {(() => {
                   const analysis = analyzeDefectHeatmap(exportReports);

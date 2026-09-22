@@ -7,6 +7,7 @@ import { appendFingerprintEntry, extractHeadingTitles, generateDocumentDraft, ge
 import { preflightLocalSemanticProvider } from '../document-workflow/semanticSimilarity';
 import { collectSectionContentGaps } from '../document-workflow/qualityValidation';
 import { buildSuspensionChecklist, formatSuspensionBanner } from '../document-workflow/suspensionChecklist';
+import type { SuspensionChecklist } from '../document-workflow/suspensionChecklist';
 import { DOCUMENT_WORKFLOW_VERSION } from '../document-workflow/documentWorkflowVersion';
 import { computeProjectId } from '@customize-agent/knowledge';
 import { getProjectKbRoot, getProjectRoot } from '../knowledge/kbService';
@@ -112,6 +113,11 @@ export interface ExportReport {
   repairHeat?: Record<string, { hits: number; repaired: number; failed: number }>;
   /** A1 导出纯渲染审计（批 1）：模式/源层缺陷/渲染层结构操作计数——dry-run 误报采样与守恒断言证据 */
   renderAudit?: ExportRenderAuditReport;
+  /** 4.55.29 L1-4：本次导出时的门禁阻断条数（未通过时归档；仅归档 gatePassed 布尔值会丢失「拦了什么」） */
+  gateIssueCount?: number;
+  /** 4.55.29 L1-4：本次导出时的门禁清单（与 finalGate/reviewMetadata 同一构建 SuspensionChecklist：
+   * 分类/定位/问题/建议/修复路径/检测器身份），修复轮按 detectorId 直连修复器，不再重跑检测器猜靶子 */
+  gateChecklist?: SuspensionChecklist;
 }
 
 /** A1 导出纯渲染审计摘要（导出层写入，export.ts 同形状：响应头与归档共用，禁止两处口径分叉） */

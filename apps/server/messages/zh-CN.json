@@ -567,7 +567,16 @@
     "addChapter": "添加章节",
     "builtIn": "内置",
     "deleteTemplateConfirm": "确定删除该模板吗？",
-    "noDraft": "请选择模板并生成草稿"
+    "noDraft": "请选择模板并生成草稿",
+    "exportGateBlockedTitle": "导出门禁未通过",
+    "exportAnywayNonDeliverable": "仍要导出（非交付物）",
+    "nonDeliverableExportConfirm": "继续导出得到的文件将强制标注「非交付物」（文件名后缀 + 界面横幅），不得作为正式成果提交。",
+    "nonDeliverableExportTitle": "本次导出为非交付物",
+    "nonDeliverableExportHint": "导出门禁未通过，文件已强制标注「非交付物」（文件名后缀）；该文件不得作为正式成果提交。",
+    "nonDeliverableExportIssues": "未收敛阻断项",
+    "nonDeliverableExportTruncated": "……其余见导出闭环报告的门禁清单",
+    "nonDeliverableTag": "非交付物",
+    "nonDeliverableChecklistTitle": "最近一次非交付物导出的门禁清单"
   },
   "specs": {
     "title": "文档规范包",

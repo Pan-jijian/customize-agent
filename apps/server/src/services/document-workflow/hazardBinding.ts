@@ -267,6 +267,73 @@ export function extractHazardParameters(evidence: Array<{ content?: unknown; fil
   return out;
 }
 
+/**
+ * 基坑深度类字段（**第二取数通道**，不依赖 canonical 裁决槽位）。
+ *
+ * 为什么必须有：写作期送入本模块的 canonical 槽位来自 `stageUnderstanding` 的
+ * `understanding.canonicalFacts`（`stageChapterLoop` 只透传 `基坑开挖深度` 一个槽位），
+ * 而该对象由**未过 `arbitrateFactPool` 的** fact 池构建——实测（巢湖实机成稿
+ * `doc-1790104980418-d47a002e`）该槽位在写作时是误解析的「25m（图纸标注：C25 圈梁,构造柱 C25…）」，
+ * 真值（图纸标注 -1.7 米，终检口径账本裁决 R1）直到 finalize 重建事实主表才确立 ⇒
+ * 危大定死块只能落到清单值 1.5m，正文因此写「每层开挖深度不大于1.5m」，真值 1.7m 全文 0 次。
+ *
+ * 通道判据（**字段名语义 + 形态 + 来源，不含任何项目数值硬编码**）：
+ * - 字段名必须是基坑深度类（基坑[开挖]深度/开挖深度/挖土深度）；
+ * - 值须为「数字（可带 OCR 重复段 `-1.7-1.7`）＋长度单位」形态，负号取绝对值（图纸标注以 ±0.000 起算）；
+ * - **同一窗口内的规范门槛句不算本项目实参**（含 超过/不小于/及以上/大于/分级/等级/判定/≥ 等比较语），
+ *   形如「基坑深度超过3m」的规范条文不得被当成实测值；
+ * - 区间形态（`3.0m～5.0m`）不算单一实测值。
+ */
+const DEPTH_FIELD_RE = /(基坑开挖深度|基坑深度|开挖深度|挖土深度)[^\d。；，,]{0,4}(-?\d+(?:\.\d+)?)(?:\s*[-－—~至]\s*-?\d+(?:\.\d+)?)?\s*(米|m)(?![\da-z])(?!\s*[-－—~～至]\s*\d)/gu;
+const DEPTH_THRESHOLD_CONTEXT_RE = /超过|不小于|不大于|及以上|大于|小于|≥|≤|属危大|危大工程|分级|一级|二级|三级|等级|门槛|判定/u;
+
+function depthParametersFromText(text: string, seen: Set<string>): HazardParameter[] {
+  const out: HazardParameter[] = [];
+  for (const match of String(text || '').matchAll(DEPTH_FIELD_RE)) {
+    const index = match.index ?? 0;
+    const window = text.slice(Math.max(0, index - 8), index + match[0].length + 8);
+    if (DEPTH_THRESHOLD_CONTEXT_RE.test(window)) continue;
+    const amount = Math.abs(Number(match[2]));
+    const raw = `${amount}${match[3]}`;
+    const normalized = normalizeParameterValue(raw, 'm');
+    if (!normalized) continue;
+    const key = `基坑工程\u0000${match[1]}\u0000${raw}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ category: '基坑工程', name: match[1]!, raw, normalized: normalized.normalized, unit: 'm', dimension: '深度', bound: normalized.bound, source: '图纸/清单实测（深度通道）' });
+  }
+  return out;
+}
+
+/**
+ * canonical 量值**自证**（防 OCR 片段被误拼成量值后直接进判定）。
+ *
+ * 实测缺陷：图纸标注片段「C25 圈梁,构造柱 C25 《建筑基桩检测技术规范》…」里的 **C25** 被拼成
+ * 「25m」并当成基坑开挖深度（值首部 `25m`，来源引文里根本没有 25 这个量值）——直接采信会把
+ * 本项目判成「开挖深度 25m ⇒ 超过一定规模的危大」，是比"没送到"更严重的误导。
+ *
+ * 判据（不含任何项目数值硬编码）：
+ * 1) 值首部须为「（约/为）数字＋长度/重量单位」形态（无单位按槽位单位）；
+ * 2) 值内自带来源引文（首个「（…：引文）」）时，该数字必须在引文里作为**独立量值**复现
+ *    （前后不与其他字母数字粘连——`C25`／`JGJ106` 这类不算），拼装错值即被拒。
+ */
+export function selfCorroboratedMeasure(raw: string, unit: 'm' | 'kN' = 'm'): { normalized: number; display: string } | undefined {
+  const text = String(raw || '').replace(/\s+/gu, '');
+  if (!text) return undefined;
+  const head = /^[约为]?[:：]?(\d+(?:\.\d+)?)(mm|cm|米|m|kN|KN|kn|kg|t|吨)?/u.exec(text);
+  if (!head) return undefined;
+  const digits = head[1]!;
+  const unitChar = head[2] || (unit === 'kN' ? 'kN' : 'm');
+  const parsed = normalizeParameterValue(`${digits}${unitChar}`, unit);
+  if (!parsed) return undefined;
+  const quoteIndex = text.search(/[（(][^）)]{0,10}[:：]/u);
+  if (quoteIndex >= 0) {
+    const pattern = new RegExp(`(?<![0-9A-Za-z])${digits.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}(?![0-9])`, 'u');
+    if (!pattern.test(text.slice(quoteIndex))) return undefined;
+  }
+  return { normalized: parsed.normalized, display: `${digits}${unitChar}` };
+}
+
 /** 起重设备形态信号：常规设备 vs 非常规设备（决定 2.3.1 前提是否成立） */
 const CONVENTIONAL_LIFTING_RE = /塔式起重机|塔吊|汽车吊|履带吊|施工升降机|龙门架|物料提升机/u;
 const UNCONVENTIONAL_LIFTING_RE = /非常规起重设备|非常规起重方法|液压提升|顶升|滑移|整体提升/u;
@@ -282,26 +349,39 @@ export function extractHazardBindings(
 ): HazardBinding[] {
   const parameters = extractHazardParameters(evidence);
   const corpus = billOfQuantitiesCorpus(evidence);
-  // 图纸标注的基坑深度作为基坑类别补充实测（canonical 槽位由 extractDrawingAnnotationFacts 确定性填充）
-  const canonicalDepth = (() => {
-    const raw = canonical?.['基坑开挖深度'];
-    if (!raw) return undefined;
-    const parsed = normalizeParameterValue(raw, 'm');
-    return parsed ? { raw, normalized: parsed.normalized } : undefined;
-  })();
+  /**
+   * 基坑深度补充实测（4.55.29 根修）：原实现把 canonical 深度写成 `depthFallback`，而
+   * `measured` 先走 `maxOfDimension('深度') ?? …` —— 只要清单里有任何深度字段（巢湖：挖土深度 1.5m内），
+   * 该分支**永不进入**（死代码），canonical 深度既不进"最保守取值"也不进逐条阈值对照。
+   * 现改为**并入深度维度候选池**（与清单/图纸实测同台比较），并新增不依赖 canonical 的
+   * 深度通道（见 `depthParametersFromText`）——实测写作期 canonical 槽位是误拼值，只有原文通道可靠。
+   */
+  const depthSeen = new Set<string>();
+  const depthCandidates: HazardParameter[] = [
+    ...(evidence || []).flatMap(item => depthParametersFromText(String(item.content || ''), depthSeen)),
+    ...[...Object.values(canonical || {})].flatMap(value => depthParametersFromText(String(value || ''), depthSeen)),
+    // canonical 槽位（字段名语义为基坑深度类）+ **自证**：误拼值（引文里查无该量值）一律不采信
+    ...Object.entries(canonical || {}).flatMap(([name, raw]) => {
+      if (!/基坑|开挖|挖土|槽/u.test(name) || !/深度/u.test(name)) return [];
+      const trusted = selfCorroboratedMeasure(String(raw || ''), 'm');
+      if (!trusted) return [];
+      const key = `基坑工程\u0000${name}\u0000${trusted.display}`;
+      if (depthSeen.has(key)) return [];
+      depthSeen.add(key);
+      return [{ category: '基坑工程' as const, name, raw: trusted.display, normalized: trusted.normalized, unit: 'm' as const, dimension: '深度' as const, bound: 'exact' as const, source: '图纸标注（canonical 自证）' }];
+    }),
+  ];
   const bindings: HazardBinding[] = [];
   for (const category of Object.keys(HAZARD_THRESHOLDS) as HazardCategory[]) {
-    const own = parameters.filter(item => item.category === category);
+    const own = parameters.filter(item => item.category === category)
+      .concat(category === '基坑工程' ? depthCandidates : []);
     // 最保守取值：**按量纲分别取最大值**（最深的坑、最高的架、最重的吊件、最大的跨度才决定判定）。
     // 实测缺陷：不分量纲地对整类取最大，会把「支撑高度 3.6m」与「单跨跨度 12m」混为一谈，
     // 拿跨度去比高度的 5m 阈值。
     const maxOfDimension = (dimension: HazardParameter['dimension']): HazardParameter | undefined =>
       own.filter(item => item.dimension === dimension)
         .reduce<HazardParameter | undefined>((best, item) => ((item.normalized ?? 0) > (best?.normalized ?? -1) ? item : best), undefined);
-    const depthFallback = category === '基坑工程' && canonicalDepth && ((maxOfDimension('深度')?.normalized ?? 0) < canonicalDepth.normalized)
-      ? canonicalDepth : undefined;
-    const measured = maxOfDimension('深度') ?? maxOfDimension('高度') ?? maxOfDimension('跨度') ?? maxOfDimension('重量')
-      ?? (depthFallback ? { category, name: '基坑开挖深度', raw: depthFallback.raw, normalized: depthFallback.normalized, unit: 'm' as const, dimension: '深度' as const, bound: 'exact' as const, source: '图纸标注（canonical）' } : undefined);
+    const measured = maxOfDimension('深度') ?? maxOfDimension('高度') ?? maxOfDimension('跨度') ?? maxOfDimension('重量');
     /** 命中判定：**同量纲**的本项目参数 ≥ 阈值才算命中 */
     const hitsDimension = (rule: HazardThreshold): HazardParameter | undefined => {
       if (rule.value === undefined || !rule.dimension) return undefined;

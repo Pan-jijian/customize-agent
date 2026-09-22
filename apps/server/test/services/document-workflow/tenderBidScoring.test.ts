@@ -71,7 +71,7 @@ describe('禁用词库', () => {
   });
 });
 
-describe('splitScoringBlocks 评分判定单元（C0-1 内容级判定：标题不单独成单元且不参与命中文本）', () => {
+describe('splitScoringBlocks 评分判定单元（C0-1 内容级判定 + 4.55.29 实质节标题承接）', () => {
   it('空壳标题（无实质正文）不构成判定单元（标题党封堵）', () => {
     // C0 基线：r28l 仅标题块命中 14/19、6 强制模块全部靠标题单独命中；
     // 「#### 9.1.2 扬尘污染防治措施」类空壳标题不得单独命中模块查询
@@ -79,12 +79,12 @@ describe('splitScoringBlocks 评分判定单元（C0-1 内容级判定：标题�
     expect(blocks).toEqual([]);
   });
 
-  it('单元=正文窗口（标题词的语义诱饵不计，标题承接由映射层 partial 独立判定）', () => {
+  it('单元=实质节标题 + 正文窗口（4.55.29：标题承接不得被长正文均值池化稀释）', () => {
     const blocks = splitScoringBlocks(['#### 7.1.1 扬尘污染防治措施', '现场设置围挡并定期洒水降尘，出入口配置车辆冲洗设施。'].join('\n'));
-    expect(blocks).toEqual(['现场设置围挡并定期洒水降尘，出入口配置车辆冲洗设施。']);
+    expect(blocks).toEqual(['扬尘污染防治措施', '现场设置围挡并定期洒水降尘，出入口配置车辆冲洗设施。']);
   });
 
-  it('正文不足 12 字（口水句）不构成实质正文 → 无单元', () => {
+  it('正文不足 12 字（口水句）不构成实质正文 → 无单元（标题一并不产出）', () => {
     const blocks = splitScoringBlocks(['#### 7.1.4 生产安全事故应急预案与应急演练', '', '正文段落。'].join('\n'));
     expect(blocks).toEqual([]);
   });
@@ -93,19 +93,18 @@ describe('splitScoringBlocks 评分判定单元（C0-1 内容级判定：标题�
     const tocline = '第一章 工程概况 1.1 编制说明与工程概况 1.2 编制依据 1.3 工程范围';
     const markdown = ['## 施工部署', tocline, '按施工段组织流水作业，主体结构与装饰装修分阶段穿插施工。'].join('\n');
     const blocks = splitScoringBlocks(markdown);
-    expect(blocks).toHaveLength(1);
-    expect(blocks[0]).not.toContain('第一章');
-    expect(blocks[0]).toContain('按施工段组织流水作业');
+    expect(blocks).toEqual(['施工部署', '按施工段组织流水作业，主体结构与装饰装修分阶段穿插施工。']);
+    expect(blocks.join('\n')).not.toContain('第一章 工程概况');
   });
 
-  it('R13 回归：6 小节单换行串联 → 每小节 1 正文单元（超窗才切分）', () => {
+  it('R13 回归：6 小节单换行串联 → 每小节 1 标题单元 + 1 正文单元（超窗才切分）', () => {
     const sections = Array.from({ length: 6 }, (_, i) => [
       `#### 7.1.${i + 1} 小节标题第${i + 1}部分内容说明`,
       `本小节正文内容用于验证切分粒度，段落编号 ${i + 1}。`,
     ].join('\n'));
     const blocks = splitScoringBlocks(sections.join('\n'));
-    expect(blocks).toHaveLength(6);
-    expect(blocks.every(block => block.startsWith('本小节正文内容'))).toBe(true);
+    expect(blocks).toHaveLength(12);
+    expect(blocks.filter(block => block.startsWith('本小节正文内容'))).toHaveLength(6);
   });
 });
 

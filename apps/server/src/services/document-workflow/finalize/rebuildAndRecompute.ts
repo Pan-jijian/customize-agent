@@ -11,6 +11,7 @@ import type { ProfessionalDepthClassifier } from '../professionalDepthClassifier
 import type { BlueprintData } from '../integratedBlueprint';
 import type { BillFactLock } from '../billFactLock';
 import { buildBoundFactAudit, buildParameterUsageAudit } from '../chapterParameterFacts';
+import { normalizeEngineeringTextForFactMatch } from '../engineeringUnits';
 import { buildKeyFactPlacementAudit } from '../keyFactPlacement';
 import type { DrawingFactLock } from '../drawingFactLock';
 import { validateDraftWithAutoSpec } from '../../document-validation/documentValidationService';
@@ -50,7 +51,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { supersededValueIssues } from '../clarificationOverrides';
 import { buildAuthoritativeValues, renderCaliberLedger } from '../authoritativeValues';
-import { collapseOverrideChains, extractValueOverrides } from '../valueOverride';
+import { collapseOverrideChains, extractLabeledAuthorityValues, extractValueOverrides } from '../valueOverride';
 import { assignStructureRequirementsToChapters } from '../tenderRequirements';
 import { constructionOrgProfessionalAuditIssues } from '../constructionOrgAudit';
 // 方案 2.2 密度/结构执行器终检同源复核（写作侧 block-fact-density/block-structure-contract 的 finalize 复核函数）
@@ -262,6 +263,8 @@ const FLOW_DIAGNOSTIC_ISSUE_RE = /章节级证据覆盖较弱|章节事实覆盖
 
 /** 质量报告组：覆盖报告、事实追踪、章节覆盖、质量报告、修复策略与导出门禁（首次含检索覆盖复核，修复后重算时不重复累加） */
 export async function buildQualityReportBundle(input: {
+  /** 真值层已裁决取代的旧值（归一文本）：参数义务集排除集（4.55.29 被取代值不得作为落位义务） */
+  supersededTruthValues?: ReadonlySet<string>;
   finalChapterDrafts: DocumentDraftChapter[]; effectiveChapters: DocumentTemplateChapter[]; factsModel: any; allEvidence: DocumentEvidence[];
   finalMarkdown: string; validationIssues: ValidationIssue[]; retrievalCoverageReports: RetrievalCoverageReport[]; includeRetrievalCoverage: boolean; template: DocumentTemplate;
   /** v2 评分输入：要求模型与编制规格（模式感知），缺失时质量报告对应构成分量显式降级 */
@@ -293,7 +296,7 @@ export async function buildQualityReportBundle(input: {
   issues = issues.map(issue => FLOW_DIAGNOSTIC_ISSUE_RE.test(issue.message) && issue.level === 'warning' ? { ...issue, level: 'info' as const } : issue);
   // 可落地性目标基准（4.26.0 起固化字数口径）：每 1500 字 1 块完整五要素块。
   // 参考库锚点已随模板参考库移除下线，单一逻辑：target = max(6, ceil(字数/1500))
-  const qualityReport = await buildDocumentQualityReport({ markdown: finalMarkdown, chapters: finalChapterDrafts, issues, knowledgeCoverage, factTraces, template, tenderRequirements, bidComposition, effectiveChapters, drawingFactLock, boqRowTraces: buildBoqRowTraces(finalMarkdown, factsModel), parameterUsageAudit: buildParameterUsageAudit({ markdown: finalMarkdown, factsModel, chapters: finalChapterDrafts }), keyFactPlacementAudit: buildKeyFactPlacementAudit(finalMarkdown, [...(structuredFacts || []), ...((factsModel && factsModel.preciseFacts) || [])]), authorityAuditReport, professionalDepthClassifier, evaluationCriteriaItems });
+  const qualityReport = await buildDocumentQualityReport({ markdown: finalMarkdown, chapters: finalChapterDrafts, issues, knowledgeCoverage, factTraces, template, tenderRequirements, bidComposition, effectiveChapters, drawingFactLock, boqRowTraces: buildBoqRowTraces(finalMarkdown, factsModel), parameterUsageAudit: buildParameterUsageAudit({ markdown: finalMarkdown, factsModel, chapters: finalChapterDrafts, supersededValues: input.supersededTruthValues }), keyFactPlacementAudit: buildKeyFactPlacementAudit(finalMarkdown, [...(structuredFacts || []), ...((factsModel && factsModel.preciseFacts) || [])]), authorityAuditReport, professionalDepthClassifier, evaluationCriteriaItems });
   const repairStrategies = buildRepairStrategies({ issues, qualityReport, knowledgeCoverage, factTraces, chapterCoverage });
   issues = collectValidationIssueGroups(issues, qualityReportIssues(qualityReport), repairStrategyIssues(repairStrategies));
   const finalExportGate = buildExportGate(issues, factsModel, finalChapterDrafts);
@@ -542,11 +545,18 @@ export async function stageRebuildAndRecompute(session: FinalizeSession): Promis
       ...(session.factsModel?.schedule || []), ...(session.factsModel?.quality || []),
       ...(session.factsModel?.safety || []),
     ].map(fact => ({ key: (fact as { key?: string }).key, label: (fact as { fieldName?: string }).fieldName, value: (fact as { value?: unknown }).value, sourceFile: (fact as { sourceFile?: string }).sourceFile }));
-    const overrides = collapseOverrideChains(extractValueOverrides([
+    const truthSources = [
       ...(session.allEvidence || []).map(item => ({ text: String(item.content || ''), source: `${item.filePath || ''} ${item.sectionTitle || ''}` })),
       ...truthFacts.map(fact => ({ text: String(fact.value ?? ''), source: String(fact.sourceFile || '') })),
-    ]));
-    const truthAudit = buildAuthoritativeValues({ facts: truthFacts, overrides });
+    ];
+    const overrides = collapseOverrideChains(extractValueOverrides(truthSources));
+    // 4.55.29 读侧/写侧同源：写作侧（stageUnderstanding/stageOutlinePlanning/derive）一直以
+    // `labeledValues`（原文口径标签抽取：最高投标限价/计划工期/开工日期/暂列金额）划定**单值型项目口径**，
+    // 而 finalize 读侧此前不传该入参 → `caliberAttributes` 恒空，真值层的口径集退化为**原始字段名池**
+    //（含「材料投入计划/质量控制点/施工方法工艺流程」等章节内容型属性）。
+    // 口径终检再以该池逐条要求正文逐字落位，写手从未被告知这些"口径" → 永久消不掉的 blocker。
+    // 现读写同源：同一批证据、同一抽取器，口径集在两侧恒等。
+    const truthAudit = buildAuthoritativeValues({ facts: truthFacts, overrides, labeledValues: extractLabeledAuthorityValues(truthSources) });
     session.caliberLedger = renderCaliberLedger(truthAudit);
     session.truthValues = truthAudit.resolved;
     // 4.55.25 P4：参数绑定审计（值必须携带对象；无对象的裸值不作为可改写权威，其正确数量为 0）
@@ -580,7 +590,7 @@ export async function stageRebuildAndRecompute(session: FinalizeSession): Promis
   // P5 M6/F-T4：先审计后评分——评分读本次最新审计报告（数据锚定「数字溯源」分量），审计 blocker
   // 随输入 validationIssues 进入 blockingIssues 计数（消除「评分读上一版审计、审计 blocker 不计分」脱节）
   recordAuthorityAudit(session);
-  session.qualityBundle = await buildQualityReportBundle({ finalChapterDrafts: session.finalChapterDrafts, effectiveChapters: session.effectiveChapters, factsModel: session.factsModel, allEvidence: session.allEvidence, finalMarkdown: session.finalMarkdown, validationIssues: session.validationIssues, retrievalCoverageReports: session.retrievalCoverageReports, includeRetrievalCoverage: true, template: session.template, tenderRequirements: session.tenderRequirements, bidComposition: session.bidComposition, drawingFactLock: session.drawingFactLock, structuredFacts: session.structuredFacts, authorityAuditReport: session.authorityAuditReport, professionalDepthClassifier: session.professionalDepthClassifier, evaluationCriteriaItems: session.evaluationCriteriaItems });
+  session.qualityBundle = await buildQualityReportBundle({ finalChapterDrafts: session.finalChapterDrafts, effectiveChapters: session.effectiveChapters, factsModel: session.factsModel, allEvidence: session.allEvidence, finalMarkdown: session.finalMarkdown, validationIssues: session.validationIssues, retrievalCoverageReports: session.retrievalCoverageReports, includeRetrievalCoverage: true, template: session.template, tenderRequirements: session.tenderRequirements, bidComposition: session.bidComposition, drawingFactLock: session.drawingFactLock, structuredFacts: session.structuredFacts, authorityAuditReport: session.authorityAuditReport, professionalDepthClassifier: session.professionalDepthClassifier, evaluationCriteriaItems: session.evaluationCriteriaItems, supersededTruthValues: new Set((session.truthValues || []).flatMap(item => item.superseded || []).map(value => normalizeEngineeringTextForFactMatch(value))) });
   session.validationIssues = session.qualityBundle.validationIssues;
   session.finalGateRepairStages = [];
   // 修复后重算校验组（事实落位轮/表格修复轮后共用）：过滤旧快照 issue，
@@ -599,7 +609,7 @@ export async function stageRebuildAndRecompute(session: FinalizeSession): Promis
     // P5 M6/F-T4：重算后先刷新无主数值审计（报告始终反映最新 finalMarkdown）再评分——
     // 评分读本版审计；审计 blocker 随输入 validationIssues 进入 blockingIssues 计数（双数同版收敛）
     recordAuthorityAudit(session);
-    session.qualityBundle = await buildQualityReportBundle({ finalChapterDrafts: session.finalChapterDrafts, effectiveChapters: session.effectiveChapters, factsModel: session.factsModel, allEvidence: session.allEvidence, finalMarkdown: session.finalMarkdown, validationIssues: session.validationIssues, retrievalCoverageReports: session.retrievalCoverageReports, includeRetrievalCoverage: false, template: session.template, tenderRequirements: session.tenderRequirements, bidComposition: session.bidComposition, drawingFactLock: session.drawingFactLock, structuredFacts: session.structuredFacts, authorityAuditReport: session.authorityAuditReport, professionalDepthClassifier: session.professionalDepthClassifier, evaluationCriteriaItems: session.evaluationCriteriaItems });
+    session.qualityBundle = await buildQualityReportBundle({ finalChapterDrafts: session.finalChapterDrafts, effectiveChapters: session.effectiveChapters, factsModel: session.factsModel, allEvidence: session.allEvidence, finalMarkdown: session.finalMarkdown, validationIssues: session.validationIssues, retrievalCoverageReports: session.retrievalCoverageReports, includeRetrievalCoverage: false, template: session.template, tenderRequirements: session.tenderRequirements, bidComposition: session.bidComposition, drawingFactLock: session.drawingFactLock, structuredFacts: session.structuredFacts, authorityAuditReport: session.authorityAuditReport, professionalDepthClassifier: session.professionalDepthClassifier, evaluationCriteriaItems: session.evaluationCriteriaItems, supersededTruthValues: new Set((session.truthValues || []).flatMap(item => item.superseded || []).map(value => normalizeEngineeringTextForFactMatch(value))) });
     session.validationIssues = session.qualityBundle.validationIssues;
   };
 }

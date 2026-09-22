@@ -80,6 +80,26 @@ const DRAWING_SIGNATURE_VALUE_RE = /^(?:子项名称|图名|图号|比例|制图
 const DRAWING_SIGNATURE_BARE_RE = /^(?:子项名称图名|图名图号|设计单位名称|制图人|审核人|比例尺)$/u;
 /** 占位/未提供类值（实测「【清单未体现】」在最新答疑文件里胜出成"生效工期"——垃圾值必须拦在闸外） */
 const PLACEHOLDER_VALUE_RE = /^(?:【[^】]{0,16}】|—+|待定|暂无?|未提供|详见|如上|同前)$/u;
+
+/**
+ * **缺席声明**（4.55.29 L0-1）：值本身在声明「资料没有给出该信息」，不是信息。
+ *
+ * 实测根因（巢湖 4.55.29 终稿）：LLM 抽取通道在无对应资料时**自行写出**「未在资料中明确体现」
+ * 作为字段值，原闭集（待定|未提供|详见|如上|同前）未覆盖 → 缺席声明经 R 链裁决成真值层的
+ * **生效值**，口径终检随即要求正文逐字落位「项目编号 = 未在资料中明确体现」
+ *（正文没照写是正确的，照写才是缺陷）。缺席声明的正确归宿是 `missing`，不是值。
+ *
+ * 判据（机制，整值形态而非子串）：剥去书名号/方括号与尾部标点后，**整值**是缺席声明。
+ * 只认「整值即声明」，不认句中含「未」——`未经处理的原土`/`未筛分碎石`/`未注明的按设计`
+ * 这类合法值带实质内容，不以本族形态开头或收尾，不受影响。
+ */
+const ABSENCE_DECLARATION_RE = /^(?:【[^】]{0,24}】|—+|[待暂](?:定|补充|确认|核实|无|缺)|不详|未知|不适用|未在资料(?:中|里)?(?:明确)?(?:体现|给出|提供|说明|标注|载明|列明|查到|查得)|(?:资料|文件|图纸|清单)(?:中|里)?(?:均|也)?未(?:明确|体现|给出|提供|说明|标注|载明|列明|涉及|提及|查到)|未(?:明确|体现|提供|涉及|提及|给出|标注|说明|描述|予明确|查到)|系统暂未(?:从知识库确认)?|无法确认|无相关(?:资料|信息|内容|记录)|无此(?:项|内容|信息)|以(?:图纸|清单|资料|招标文件)为准|详见|如上|同前|同上)$/u
+
+/** 缺席声明判定（剥括号与尾部标点后整值匹配；长度上界防长段落借首词命中） */
+function isAbsenceDeclaration(text: string): boolean {
+  const bare = text.replace(/^【/u, '').replace(/】$/u, '').replace(/[\s。；;，,、.．]+$/u, '').trim();
+  return bare.length > 0 && bare.length <= 24 && ABSENCE_DECLARATION_RE.test(bare);
+}
 /** 指向值（非值本身） */
 const POINTER_VALUE_RE = /^(?:见|详见|参见|按|依据)\s*(?:招标文件|招标公告|投标须知|图纸|设计|清单|规范|合同)/u;
 /** 内部口径词（清单计价表专用词，非工程内容） */
@@ -100,6 +120,8 @@ export function rejectValueNoise(value: string, options: { allowProse?: boolean;
   if (DRAWING_SIGNATURE_VALUE_RE.test(text) && text.length <= 14) return '图签/图名串格';
   if (DRAWING_SIGNATURE_BARE_RE.test(text)) return '图签/图名串格';
   if (PLACEHOLDER_VALUE_RE.test(text)) return '占位/未提供值';
+  // 缺席声明（4.55.29 L0-1）：整值在声明「资料未给出该信息」——信息缺席不是信息，归宿是 missing
+  if (isAbsenceDeclaration(text)) return '缺席声明（资料未给出该信息）';
   // 指向值（实测：「见招标公告计划开工日期：2026年08月31日…」整句作为"工期值"胜出——
   // 指向句不是值；其内嵌字段由内嵌展开步骤归属到正确属性，此处整句剔除）
   if (POINTER_VALUE_RE.test(text)) return '指向值（非值本身）';
@@ -480,6 +502,19 @@ const BARE_MODEL_TOKEN_RE = /^[A-Za-z]{1,6}\s?[-/]?\s?\d{1,6}(?:\.\d+)?$/u;
 const SPEC_ATTRIBUTE_RE = /(?:规格|型号|等级|管径|直径|厚度|强度等级|牌号|标号|尺寸)$/u;
 const GENERIC_FIELD_TAIL_WORDS = ['参数', '要求', '标准', '数据', '指标', '信息'];
 
+/**
+ * 时间型属性（4.55.29 L0-3 扩围）：属性名本身声明「这里的值是时间口径」。
+ * 实测根因：图签串格值「1#厂房建筑超高施工增加，檐口高度22.2m、一层」经值 token 抽取后
+ * 取到「22.2m」，挂到「工期关键节点」名下成为**语义上不可能落位**的口径——
+ * 一个长度值被当成工期节点权威，正文没照写（正确），口径终检却判「正文未按该口径落位」。
+ * 判据取自属性名语义（不是项目数值）：时间型属性的值必须含**日期或时长 token**。
+ */
+const TEMPORAL_ATTRIBUTE_RE = /(?:工期|节点|日期|期限|周期|时长|时间|时刻|进度计划)$/u;
+/** 日期或时长 token（与 conflictComparableFactValue 的槽位分桶同口径） */
+const TEMPORAL_VALUE_TOKEN_RE = /\d{4}\s*年\s*\d{1,2}\s*月|\d+\s*个?\s*(?:日历天|天|个月|月|周|年|小时|工作日)/u;
+/** 时间语义词：节点名单（「基础完成、主体封顶、竣工验收」）不带日期也合法，不得按形态误剔 */
+const TEMPORAL_VOCAB_RE = /(?:工期|节点|阶段|开工|竣工|完工|完成|封顶|验收|日历天|工作日|月份|年度|季度)/u;
+
 /** 返回不相容原因（相容返回 undefined） */
 export function attributeValueShapeMismatch(attribute: string, value: string): string | undefined {
   const attr = String(attribute || '').trim();
@@ -487,6 +522,10 @@ export function attributeValueShapeMismatch(attribute: string, value: string): s
   if (!attr || !val) return undefined;
   if (TEXTUAL_ATTRIBUTE_RE.test(attr) && BARE_MODEL_TOKEN_RE.test(val)) {
     return `值-标签形态不相容：文本型属性「${attr}」取了裸型号值「${val}」`;
+  }
+  // 时间型属性：值须含日期/时长 token 或时间语义词（节点名单如「基础完成、主体封顶」合法，不误伤）
+  if (TEMPORAL_ATTRIBUTE_RE.test(attr) && !TEMPORAL_VALUE_TOKEN_RE.test(val) && !TEMPORAL_VOCAB_RE.test(val)) {
+    return `值-标签形态不相容：时间型属性「${attr}」取了无日期/时长的值「${val.slice(0, 40)}」`;
   }
   // 计**出现次数**而非"命中的词种数"：「技术参数精确参数」里「参数」出现两次才是拼接信号
   const tailHits = GENERIC_FIELD_TAIL_WORDS.reduce((total, word) => total + (attr.split(word).length - 1), 0);

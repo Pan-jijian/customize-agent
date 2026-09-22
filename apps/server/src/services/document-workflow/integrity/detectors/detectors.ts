@@ -10,8 +10,8 @@ import { buildSemanticGate } from '../../semanticGate';
 import { isQualificationSectionTitle } from '../../evidenceContentSafety';
 import { LABOR_STAGE_LIMIT_WORDS, PEAK_LABOR_RE, PILE_SUPPORT_LITERAL_RE, TRADE_WORKER_WORD_RE, cnNumberToArabic, collectLaborTableBlocks, excavationDepthFromFacts, extractGreeningMaintenanceAuthority, extractStreetLightAuthority, flexNamePattern, laborPeakStageOf, quantityUnitVariants } from '../authorities/authorities';
 import { matchDecisionCategory } from '../../integratedBlueprint';
-import { authorityRewriteVerdict } from '../../authorityRewriteGuard';
-import { isLegalConcreteGradeToken } from '../../factsModel';
+import { authorityRewriteVerdict, GENERIC_BODY_PART_SOURCE } from '../../authorityRewriteGuard';
+import { extractObjectAnchor, isLegalConcreteGradeToken } from '../../factsModel';
 import { buildCitationSentenceContext, defaultCitationAdjudicator } from '../../semanticAdjudication';
 import type { CitationAdjudicationCandidate, CitationAdjudicator } from '../../semanticAdjudication';
 import type { SupportSystemAuthorityKind } from '../authorities/authorities';
@@ -2440,6 +2440,41 @@ function normalizeSpecQualifier(run: string): string {
   return candidate;
 }
 
+/** 对象限定语尾缀判据（4.55.29，见 specObjectScope）：类型语素收尾（「膨胀型」「70系列」「Ⅱ级」） */
+const SPEC_OBJECT_TYPE_TAIL_RE = /(?:型|系列|级别|等级|型号|牌号|级|类|种)$/u;
+
+/** 部位词收尾：仓库通用部位词表（LOCATION_WORD_SOURCE）∪ 改写闸门通用部位词（GENERIC_BODY_PART_SOURCE） */
+const SPEC_OBJECT_PART_TAIL_RE = new RegExp(`(?:${LOCATION_WORD_SOURCE}|${GENERIC_BODY_PART_SOURCE})$`, 'u');
+
+/** 命中部位词前紧邻的对象限定语（≤8 个汉字；数字/拉丁字母/句读即断——「300厚塘渣垫层」取「厚塘渣」） */
+function specObjectQualifier(markdown: string, locationStart: number): string {
+  return /([一-龥]{1,8})$/u.exec(markdown.slice(Math.max(0, locationStart - 8), locationStart))?.[1] || '';
+}
+
+/**
+ * 对象限定语分类（4.55.29 规格错位「对象维度」闸的判据）。
+ *
+ * 权威映射（specAuthorityMap）只记录「清单条目名/部位 + 规格」，**不记录该规格所属的对象**，
+ * 而正文命中处的限定语决定的正是「这一处说的是不是同一个对象」：
+ * · bare：无限定（裸条目名，「垫层采用C20」）→ 对象即条目名自身，权威适用；
+ * · same-class：部位限定（「管道基础」+垫层、「承台」+垫层）或类型限定（「膨胀型」+防火涂料）
+ *   → 与清单条目同类对象，权威适用；
+ * · other-class：材质/工艺/形状等其它语素（砂+垫层、塘渣+垫层、机动车+地面、机械开挖至+垫层…）
+ *   → **另一类对象**，裸条目名的权威对该处无管辖权（清单「垫层」100mm 说的是清单里那个垫层，
+ *   不是砂垫层/塘渣垫层；历史实测这 5 处被当「垫层」错位而误判 blocker）。
+ *
+ * 判据全部为通用词法（部位词表 / 类型语素 / 表内条目名），不含任何项目数值或材料名（机制而非白名单）。
+ */
+function specObjectScope(markdown: string, locationStart: number, location: string, allLocations: string[]): 'bare' | 'same-class' | 'other-class' {
+  const qualifier = specObjectQualifier(markdown, locationStart);
+  if (!qualifier) return 'bare';
+  // 限定语+部位词构成表内更长的清单条目名（「厂房地坪」+垫层）→ 就是该条目自己的对象
+  if (allLocations.some(candidate => candidate.length > location.length && candidate === `${qualifier}${location}`)) return 'same-class';
+  if (SPEC_OBJECT_PART_TAIL_RE.test(qualifier)) return 'same-class';
+  if (SPEC_OBJECT_TYPE_TAIL_RE.test(qualifier)) return 'same-class';
+  return 'other-class';
+}
+
 function resolveQualifiedSpecTarget(markdown: string, location: string, locationStart: number, authoritySpecs: Set<string>, pattern: RegExp): string | undefined {
   if (authoritySpecs.size < 2) return undefined;
   const run = /([一-龥]{1,12})$/u.exec(markdown.slice(Math.max(0, locationStart - 12), locationStart))?.[1] || '';
@@ -2454,8 +2489,10 @@ function resolveQualifiedSpecTarget(markdown: string, location: string, location
   return targets.size === 1 ? [...targets][0] : undefined;
 }
 
-export function scanSpecLocationMismatchHits(markdown: string, specAuthorityMap?: SpecAuthorityMap): SpecLocationMismatchHit[] {
+export function scanSpecLocationMismatchHits(markdown: string, specAuthorityMap?: SpecAuthorityMap, limit = 8): SpecLocationMismatchHit[] {
   const hits: SpecLocationMismatchHit[] = [];
+  let blockerHits = 0;
+  let warningHits = 0;
   if (!specAuthorityMap) return hits;
   // V5 P6 更长复合条目名碰撞豁免（run1 重建实测）备查表：全维度条目名集合
   const allLocations = [...new Set(Object.values(specAuthorityMap).flat().map(item => item.location).filter(Boolean))];
@@ -2570,44 +2607,83 @@ export function scanSpecLocationMismatchHits(markdown: string, specAuthorityMap?
       // 4.27.0 A2：权威规格唯一（同 pattern 类型）时可确定性裁决口径 → 附替换 span
       // 4.55.12 扩：权威多义时按「正文同限定词自洽」消歧（见 resolveQualifiedSpecTarget）
       const uniqueAuthority = authoritySpecs.size === 1 ? [...authoritySpecs][0] : undefined;
-      const qualifiedAuthority = uniqueAuthority
-        ?? resolveQualifiedSpecTarget(markdown, location, match.index || 0, authoritySpecs, pattern);
+      const selfQualifiedAuthority = uniqueAuthority === undefined
+        ? resolveQualifiedSpecTarget(markdown, location, match.index || 0, authoritySpecs, pattern)
+        : undefined;
+      const qualifiedAuthority = uniqueAuthority ?? selfQualifiedAuthority;
       const valueStart = locationStart + foundAt;
+      // ── 4.55.29 对象维度闸（规格错位系统性误报根治；机制口径，非白名单）────────────────────
+      // 规格错位只在**同一对象同一属性**上成立。权威映射缺对象维度，正文命中处的对象要靠两处判据取：
+      // ① 位置侧对象限定语（specObjectScope）：
+      //    材质/工艺/形状限定（砂垫层/塘渣垫层/机动车地面/机械开挖至垫层…）= **另一类对象**，
+      //    裸条目名的权威无管辖权 → 静默（判错位属范畴错误，且这类值正是不许机器改写的那一类）；
+      // ② 值侧主语锚点（4.55.25 extractObjectAnchor）：主语取不到、或主语不覆盖本部位词
+      //    （「接地极以…打入2500mm深」的主语是「极以…打入」，「接地」只是更长对象名的子串；
+      //      「刷界面剂2131.22m²，P3…」的值前是句读）→ 对象维度缺失 → **降级 warning**：
+      //    用全局唯一值硬判会制造误报，静默又会掩盖真实缺陷，故保留可观测但不阻断、不给替换 span。
+      // ③ 权威本身逐项多值且正文限定词自证消歧失败（4.55.12）→ 无唯一口径可比 → 同样降级 warning。
+      const objectScope = specObjectScope(markdown, locationStart, location, allLocations);
+      if (objectScope === 'other-class') continue;
+      const bodyWindow = markdown.slice(Math.max(0, valueStart - 24), valueStart + found.length + 16);
+      // 值侧主语锚点取**命中值所在小句**（最近句读之后）为主语语境：extractObjectAnchor 按目标值
+      // 首次出现定位，跨句读的宽窗口会把前一处同型值当成本处的值而取错主语（同句重复实测）
+      const valueClause = /([^。；;，、|\n]*)$/u.exec(markdown.slice(0, valueStart))?.[1] || '';
+      const subjectAnchor = extractObjectAnchor(`${valueClause}${found}`, found);
+      const objectGrounded = Boolean(subjectAnchor && subjectAnchor.includes(location));
+      // 硬判（blocker）：有可比权威口径（唯一值 / 正文自证消歧）且对象维度成立（主语覆盖本部位词）
+      const hardJudge = Boolean(qualifiedAuthority) && (Boolean(selfQualifiedAuthority) || objectGrounded);
       // 4.55.26 统一闸门（单源 authorityRewriteGuard）：对象限定 / 同量级 / 异义语境 / 形态合法 /
       // 权威标识充分性——不通过则**不改写**（仍照常报出交修复轮/人工），与其余 B 类路径同源
       const rewriteVerdict = authorityRewriteVerdict({
         authorityOwner: qualifiedAuthority ? authorityOwnerName : undefined,
         bodyLocation: location,
-        bodyWindow: markdown.slice(Math.max(0, valueStart - 24), valueStart + found.length + 16),
+        bodyWindow,
         found,
         authority: qualifiedAuthority || '',
       });
-      const replacementAllowed: string | undefined = qualifiedAuthority && rewriteVerdict.allowed ? qualifiedAuthority : undefined;
+      // 替换 span 与检测同口径：仅硬判命中才提供（A2 裁决器 / postReviewSurface 只消费 replacement，
+      // 降级命中自动失去硬改写通道——检测放过则修复也不得照改）
+      const replacementAllowed: string | undefined = hardJudge && rewriteVerdict.allowed ? qualifiedAuthority : undefined;
+      if (!hardJudge && warningHits >= limit) continue;
+      if (hardJudge) blockerHits += 1; else warningHits += 1;
+      const authorityText = [...authoritySpecs].join('/');
       hits.push({
-        issue: {
-          level: 'error',
-          severity: 'blocker',
-          category: 'fact_consistency',
-          owner: 'llm',
-          repairability: 'llm_repairable',
-          message: `规格错位：“${location}”使用的规格 ${found} 与工程量清单权威（${[...authoritySpecs].join('/')}）不一致`,
-          suggestion: `按工程量清单将“${location}”的规格统一为 ${[...authoritySpecs].join('/')}；同一材料不同部位允许不同规格，但同一部位不得混用其他部位的规格。`,
-        },
+        issue: hardJudge
+          ? {
+              level: 'error',
+              severity: 'blocker',
+              category: 'fact_consistency',
+              owner: 'llm',
+              repairability: 'llm_repairable',
+              message: `规格错位：“${location}”使用的规格 ${found} 与工程量清单权威（${authorityText}）不一致`,
+              suggestion: `按工程量清单将“${location}”的规格统一为 ${authorityText}；同一材料不同部位允许不同规格，但同一部位不得混用其他部位的规格。`,
+            }
+          : {
+              level: 'warning',
+              severity: 'warning',
+              category: 'fact_consistency',
+              owner: 'system',
+              repairability: 'not_repair_needed',
+              message: `规格错位：“${location}”使用的规格 ${found} 与工程量清单权威（${authorityText}）不一致`,
+              // 降级理由上屏：对象维度不足时机器没有唯一口径可比，不得硬判、更不得改写
+              suggestion: `按工程量清单将“${location}”的规格统一为 ${authorityText}；同一材料不同部位允许不同规格，但同一部位不得混用其他部位的规格。（本条已降级为告警：正文该处未能绑定到清单条目的具体对象${uniqueAuthority === undefined ? '或权威本身逐项多值无唯一口径' : ''}，不作机器改写，交人工复核）`,
+            },
         location,
         replacement: replacementAllowed
           ? {
               start: valueStart,
               end: valueStart + found.length,
               replacement: replacementAllowed,
-              detail: `规格错位“${location}” ${found}→${qualifiedAuthority}（以工程量清单锁定口径为准）`,
+              detail: `规格错位“${location}” ${found}→${replacementAllowed}（以工程量清单锁定口径为准）`,
             }
           : undefined,
       });
-      if (hits.length >= 8) return hits;
+      // 阻断项上限（告警不占阻断预算：误报降级不得挤掉真错位的报告额度）
+      if (blockerHits >= limit) return hits;
       }
     }
   }
-  return hits.slice(0, 8);
+  return hits;
 }
 
 /** 检测端入口（行为保持）：扫描命中只取 issue */

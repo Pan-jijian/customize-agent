@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { boqDivisionCoverageIssues, boqRowTraceIssues, buildBoqRowTraces, buildDocumentFactTraces, buildNumericTraceFindings, classifyNumericTraceToken, cleanFactValue, demoteUnsourcedNumericTokens, enforceBoqDivisionCoverageInMethodChapters, extractBoqDivisionCoverage, factTraceIssues, formatBoqDivisionCoverage, isActionableFactValue, isActionableTraceFact, numericTraceabilityIssues, scanNumericTrace } from '@/services/document-workflow/documentFactTrace';
+import { boqDivisionCoverageIssues, boqRowTraceIssues, buildBoqRowTraces, buildDocumentFactTraces, buildNumericTraceFindings, classifyNumericTraceToken, cleanFactValue, demoteUnsourcedNumericTokens, enforceBoqDivisionCoverageInMethodChapters, extractBoqDivisionCoverage, factTraceIssues, formatBoqDivisionCoverage, isActionableFactValue, isActionableTraceFact, isSectionNumberingToken, isSpecGluedValueToken, numericTraceabilityIssues, scanNumericTrace } from '@/services/document-workflow/documentFactTrace';
 import type { DocumentDraftChapter, DocumentFact, DocumentFactsModel } from '@/services/document-workflow/types';
 
 function factsModel(project: DocumentFact[] = [], preciseFacts: DocumentFact[] = [], tables: DocumentFactsModel['tables'] = []): DocumentFactsModel {
@@ -686,6 +686,15 @@ describe('C-T2 classifyNumericTraceToken 三分类（r28f 实测合法数字全�
     // M24d D3 M7 工期合计编排（r28l 89天 / s28k 344天）
     { token: '89天', context: '预留机动工期1天，各节点用时合计89天，控制在90日历天总工期以内', kind: 'management', basis: '工期合计编排' },
     { token: '344天', context: '30天、168天、107天，合计344天，预留16天机动工期用于工序衔接', kind: 'management', basis: '工期合计编排' },
+    // L0-7 R16 规格粘连（实机成稿 doc-1790104980418：型号/牌号与数量无分隔粘连，数值核为拼接产物）
+    { token: 'HRB4001.941t', context: '圈梁C25、有梁板C30，钢筋HRB4001.941t、钢筋连接Φ16共364个', kind: 'regulatory', basis: '规格粘连' },
+    { token: 'HRB40025.851t', context: '钢筋工程现浇构件钢筋HRB40025.851t', kind: 'regulatory', basis: '规格粘连' },
+    { token: 'DN405m', context: 'DN15管卡间距不大于1.0m，DN405m；', kind: 'regulatory', basis: '规格粘连' },
+    { token: '251.941t', context: 'Φ8、Φ10、Φ12、Φ20、Φ251.941t，钢筋连接Φ16共364个', kind: 'regulatory', basis: '规格粘连' },
+    // L0-7 R17 章节编号（「1.22 周月计划报送与纠偏」：1.22 是小节编号、周是标题首字，邻号 1.23 即编号序列）
+    { token: '1.22 周', context: '总进度计划编制与图表管理 1.22 周月计划报送与纠偏 1.23', kind: 'regulatory', basis: '章节编号' },
+    // L0-7 R13 语境扩容：板型（实机「压型钢板，板型HV470B」）
+    { token: 'HV470B', context: '屋面压型钢板，板型HV470B，镀铝锌镁量165g/m²', kind: 'regulatory', basis: '材料/设备规格型号' },
   ];
   it.each(samples)('$token → $kind/$basis', ({ token, context, kind, basis }) => {
     const result = classifyNumericTraceToken({ token, context });
@@ -704,11 +713,38 @@ describe('C-T2 classifyNumericTraceToken 三分类（r28f 实测合法数字全�
     // M24d D4 反向守护：DN 管径前缀不借型号族豁免；直径语境不借图纸编号族豁免
     { token: 'DN50', context: '配电箱引出DN50管' },
     { token: 'D300', context: '管段直径D300mm' },
+    // L0-7 反向守护（一）：真缺口不得借粘连族豁免——无 Φ/DN/HRB 语境代号的纯数值（424.2m 可切出 4|24.2m）、
+    // 正文自算合计（6403.78m²）与清单投影缺口（427.000个）必须照常报出
+    { token: '424.2m', context: '室外排水塑料管424.2m，按设计坡度敷设' },
+    { token: '6403.78m²', context: '检验批总量6403.78m²，按分项工程划分' },
+    { token: '427.000个', context: '配套混凝土管道接口427.000个口、砌筑检查井54座' },
+    // L0-7 反向守护（二）：整数段带多余前导零不是粘连值段（Φ1000mm 的 1000、φ700人孔 的 700 是真实量值；
+    // 若按「纯形态」切分会被切成 1|000 / 7|00 而错判粘连）
+    { token: '1000mm', context: 'Φ1000mm检查井井筒，井盖与井筒同径' },
+    { token: '700人', context: 'φ700人孔井盖，安装后与路面齐平' },
+    // L0-7 反向守护（三）：纯代号（无数量段）不得被粘连族吞掉（HRB400 可切出 4|00）
+    { token: 'HRB400', context: '钢筋HRB400，Φ16共364个' },
+    { token: 'DN40', context: 'DN40管卡间距不大于1.0m' },
+    // L0-7 反向守护（四）：粘连形态但语境无代号不成立（251.941t 无 Φ 前缀即普通量值）；
+    // 编号形态但语境无同形邻号不成立（无邻号的「1.22 周」类时量表述照报）
+    { token: '251.941t', context: '钢筋用量合计251.941t，按批次进场' },
+    { token: '1.22 周', context: '首段养护历时 1.22 周后进入下道工序' },
   ];
   it.each(unsourcedSamples)('未溯源样本 $token 不豁免', ({ token, context }) => {
     const result = classifyNumericTraceToken({ token, context });
     expect(result.kind).toBe('unsourced');
     expect(result.basis).toBe('');
+  });
+
+  it('L0-7 R16/R17 判定为「存在性 + 语境」双要件，不写死具体值（同形异构样本随值改变结论）', () => {
+    // 粘连族：换任意代号/数量仍成立（机制，非白名单）；代号换成无关字母且无数值段则不成立
+    expect(isSpecGluedValueToken({ token: 'XGQ2512.5kg', context: '构架XGQ2512.5kg' })).toBe(true);
+    expect(isSpecGluedValueToken({ token: '500kg', context: '钢筋500kg' })).toBe(false);
+    // 编号族：整数段/小数段同形邻号任一方向成立（1.22↔1.23 / 1.22↔2.22）；无邻号不成立
+    expect(isSectionNumberingToken({ token: '3.14 天', context: '… 3.13 … 3.14 天 … 3.15 …' })).toBe(true);
+    expect(isSectionNumberingToken({ token: '1.22 周', context: '总进度计划 1.22 周月计划报送 1.23' })).toBe(true);
+    expect(isSectionNumberingToken({ token: '1.22 周', context: '养护历时 1.22 周' })).toBe(false);
+    expect(isSectionNumberingToken({ token: '427.000个', context: '接口427.000个' })).toBe(false);
   });
 });
 

@@ -639,6 +639,46 @@ describe('basisRegulationsCoverageIssues 编制依据法规/规范完整性兑�
     ].join('\n');
     expect(basisRegulationsCoverageIssues(markdown)).toEqual([]);
   });
+
+  // 4.55.29（实机归因：编制依据漏三类）三类别定向锁定：齐全 → 零 issue；**任一**缺失 → 对应 blocker。
+  // 地方性法规条目按建设地点（属地）驱动，用例中为含「合肥市」地名的属地法规/规范。
+  it('4.55.29 法/条例/规范/属地四类齐全 → 零 issue', () => {
+    const markdown = section('依据《中华人民共和国建筑法》、《建设工程质量管理条例》（国务院令第279号）、《合肥市公共资源交易管理条例》、《给水排水管道工程施工及验收规范》（GB 50268-2008）编制。');
+    expect(basisRegulationsCoverageIssues(markdown, blueprint('安徽省合肥市巢湖市'))).toEqual([]);
+  });
+
+  it('4.55.29 缺国家法律法规 → 对应 blocker（其余类目不连坐）', () => {
+    const markdown = section('依据《建设工程质量管理条例》（国务院令第279号）、《合肥市公共资源交易管理条例》、《给水排水管道工程施工及验收规范》（GB 50268-2008）编制。');
+    const issues = basisRegulationsCoverageIssues(markdown, blueprint('安徽省合肥市巢湖市'));
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toContain('国家法律法规');
+  });
+
+  it('4.55.29 缺条例类条目 → 对应 blocker（属地规范条目不算条例）', () => {
+    const markdown = section('依据《中华人民共和国建筑法》、《合肥市城市绿化技术规范》、《给水排水管道工程施工及验收规范》（GB 50268-2008）编制。');
+    const issues = basisRegulationsCoverageIssues(markdown, blueprint('安徽省合肥市巢湖市'));
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toContain('条例');
+  });
+
+  it('4.55.29 缺施工验收规范 → 对应 blocker', () => {
+    const markdown = section('依据《中华人民共和国建筑法》、《建设工程质量管理条例》（国务院令第279号）、《合肥市公共资源交易管理条例》编制。');
+    const issues = basisRegulationsCoverageIssues(markdown, blueprint('安徽省合肥市巢湖市'));
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toContain('验收规范');
+  });
+
+  it('4.55.29 缺属地地方性法规 → 对应 blocker', () => {
+    const markdown = section('依据《中华人民共和国建筑法》、《建设工程质量管理条例》（国务院令第279号）、《给水排水管道工程施工及验收规范》（GB 50268-2008）编制。');
+    const issues = basisRegulationsCoverageIssues(markdown, blueprint('安徽省合肥市巢湖市'));
+    expect(issues).toHaveLength(1);
+    // 消息点名工程所在地（location 解析出的省/市两级中的首个）
+    expect(issues[0]!.message).toContain('安徽省');
+    expect(issues[0]!.message).toContain('地方性法规');
+    // 反例：名称含属地地名的条目一旦出现，该类即不再报出（判据不是"见到条例就算"）
+    const covered = basisRegulationsCoverageIssues(section('依据《中华人民共和国建筑法》、《建设工程质量管理条例》（国务院令第279号）、《给水排水管道工程施工及验收规范》（GB 50268-2008）、《合肥市公共资源交易管理条例》编制。'), blueprint('安徽省合肥市巢湖市'));
+    expect(covered).toHaveLength(0);
+  });
 });
 
 /** 资源章数值拆分一致性兑底：工种构成/机械台数/同名多规格材料拆分与蓝图权威漂移即 error（十度实测缺陷） */

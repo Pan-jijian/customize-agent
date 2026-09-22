@@ -1500,6 +1500,108 @@ describe('specLocationMismatchIssues 规格错位检测（F14）', () => {
   });
 });
 
+// ═══════ 4.55.29 规格错位对象维度闸（真实 draft 8 条误报根治，机制口径） ═══════
+// 归因：规格错位只在**同一对象同一属性**上成立；权威映射只记录「清单条目名 + 规格」，不含对象维度。
+// ① 正文限定语把对象改成另一类（砂垫层/塘渣垫层/机动车地面/机械开挖至垫层…）→ 裸条目名权威无管辖权 → 静默；
+// ② 对象维度缺失（值侧主语取不到、或权威逐项多值且正文限定词自证消歧失败）→ 降级 warning（不阻断、不改写）。
+// 对照：位置侧部位/类型限定（承台垫层、管道基础垫层、膨胀型防火涂料）与裸条目名仍按 blocker 判。
+
+describe('4.55.29 规格错位对象维度闸：对象维度不同的命中不再产 blocker', () => {
+  /** 真实 draft doc-1790104980418-d47a002e 的权威形状（厚度维度多条目，垫层权威 100mm 单值） */
+  function realDraftMap(): SpecAuthorityMap {
+    return {
+      厚度规格: [
+        { location: '垫层', spec: '100mm', quantity: '5466.840m3', sourceFile: '清单.xls' },
+        { location: '地面', spec: '180mm', quantity: '13.350m2', sourceFile: '清单.xls' },
+        { location: '铝合金幕墙窗', spec: '2.2mm', quantity: '59.130m2', sourceFile: '清单.xls' },
+        { location: '接地', spec: '16mm', quantity: '10276.400m', sourceFile: '清单.xls' },
+        { location: '刷界面剂', spec: 'P1', quantity: '2131.220m2', sourceFile: '清单.xls' },
+        { location: '铝扣板吊顶', spec: 'P3', quantity: '230.170m2', sourceFile: '清单.xls' },
+      ],
+    };
+  }
+
+  it('实测 8 条误报（垫层×5 / 铝合金幕墙窗 / 地面 / 接地）→ 0 blocker', () => {
+    const markdown = [
+      '植草砖铺设砂垫层厚度30mm，绿化草坪满铺后浇透定根水。',
+      '非机动车区域路面结构自下而上为素土夯实、300厚塘渣垫层（最大粒径不大于150mm）、250厚水泥稳定碎石基层。',
+      '沟槽开挖：机械开挖至垫层底标高以上200mm，余土人工清底至设计标高。',
+      '雨季施工时，室外排水管网沟槽开挖后当日完成垫层浇筑，沟槽两侧设300mm高挡水坎。',
+      '门窗工程按铝合金幕墙窗399.5m²组织安装，框料采用金属隔热铝合金门窗（暖边隔热条26mm宽）。',
+      '本工程机动车地面停车位划线采用白色热熔反光涂料标线，线宽150mm。',
+      '避雷引下线φ16共2969.52m，避雷网φ12及25×4共1909.5m，接地母线40×4、25×4共450.6m，接地极50×5、2500mm共36根。',
+      '电缆敷设完成后制作干包式电缆终端头，接地极以50×5角钢打入2500mm深。',
+    ].join('');
+    const issues = specLocationMismatchIssues(markdown, realDraftMap());
+    expect(issues.filter(issue => issue.severity === 'blocker')).toEqual([]);
+    // 对象限定语为材质/工艺语素者静默（另一类对象，连告警都不该有）；主语锚点缺失者降级 warning
+    expect(issues.filter(issue => /垫层|铝合金幕墙窗|地面/u.test(issue.message))).toEqual([]);
+    expect(issues.map(issue => issue.severity)).toEqual(['warning', 'warning']);
+  });
+
+  it('对象限定语为材质语素（砂垫层/塘渣垫层/机动车地面）→ 静默（非 blocker 亦非 warning）', () => {
+    const markdown = '植草砖铺设砂垫层厚度30mm；非机动车区域300厚塘渣垫层（最大粒径不大于150mm）；机动车地面标线线宽150mm。';
+    expect(specLocationMismatchIssues(markdown, realDraftMap())).toEqual([]);
+  });
+
+  it('值侧主语取不到（值前是顿号/枚举）→ 降级 warning，且不产替换 span（A2/收口路径同步失去改写依据）', () => {
+    const markdown = '接地母线40×4、25×4共450.6m，接地极50×5、2500mm共36根。';
+    const hits = scanSpecLocationMismatchHits(markdown, realDraftMap());
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.issue.severity).toBe('warning');
+    expect(hits[0]!.issue.level).toBe('warning');
+    expect(hits[0]!.replacement).toBeUndefined();
+  });
+
+  it('对象限定语为句读/部件名残留（「顶棚P1、P5刷界面剂…，P3」）→ 降级 warning，不硬替换 P 标号', () => {
+    const markdown = '顶棚P1、P5刷界面剂2131.22m²，P3有水房间铝扣板吊顶230.17m²。';
+    const issues = specLocationMismatchIssues(markdown, realDraftMap());
+    expect(issues.filter(issue => issue.severity === 'blocker')).toEqual([]);
+  });
+});
+
+describe('4.55.29 反向验证：同一对象同一属性写成清单外规格 → 仍必须报出', () => {
+  it('承台垫层（部位限定，同对象）正文写 200mm vs 清单 100mm → blocker', () => {
+    const map: SpecAuthorityMap = {
+      厚度规格: [
+        { location: '垫层', spec: '100mm', quantity: '5466.840m3', sourceFile: '清单.xls' },
+        { location: '地面', spec: '180mm', quantity: '13.350m2', sourceFile: '清单.xls' },
+      ],
+    };
+    // 真实误报「砂垫层30mm」的对象限定语是材质（砂）→ 静默；本处限定语是部位（承台）→ 同一类对象，必须报
+    //（消息按清单条目名“垫层”表述，正文对象名由命中上下文承担）
+    const issues = specLocationMismatchIssues('承台垫层厚度为200mm，分层浇筑振捣密实。', map);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.severity).toBe('blocker');
+    expect(issues[0]!.message).toContain('垫层');
+    expect(issues[0]!.message).toContain('200mm');
+    expect(issues[0]!.message).toContain('100mm');
+  });
+
+  it('清单条目名即带对象（承台垫层 100mm）正文同对象写 200mm → blocker', () => {
+    const map: SpecAuthorityMap = {
+      厚度规格: [
+        { location: '承台垫层', spec: '100mm', quantity: '120m3', sourceFile: '清单.xls' },
+        { location: '地面', spec: '180mm', quantity: '13.350m2', sourceFile: '清单.xls' },
+      ],
+    };
+    const hits = scanSpecLocationMismatchHits('承台垫层厚度为200mm，分层浇筑振捣密实。', map);
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.issue.severity).toBe('blocker');
+  });
+
+  it('反向验证边界：同句对象被材质限定语改写（砂垫层 200mm）→ 不与承台垫层权威比对', () => {
+    const map: SpecAuthorityMap = {
+      厚度规格: [
+        { location: '承台垫层', spec: '100mm', quantity: '120m3', sourceFile: '清单.xls' },
+        { location: '地面', spec: '180mm', quantity: '13.350m2', sourceFile: '清单.xls' },
+      ],
+    };
+    // 承台垫层权威对「砂垫层」无管辖权：限定语改成材质即另一类对象（与真实「垫层 100mm vs 砂垫层30mm」同理）
+    expect(specLocationMismatchIssues('植草砖铺设砂垫层厚度200mm。', map)).toEqual([]);
+  });
+});
+
 // ═══════ F6 劳动力口径隔离（resourceConsistencyIssues） ═══════
 // 历史缺陷：管理口径（18人）与全员峰值（286人）、不同工种（钢筋工60/木工80）被当同口径互斥误报；
 // 改造后仅同组互查：管理 vs 管理、同工种 vs 同工种、峰值 vs 峰值。
@@ -2701,6 +2803,47 @@ describe('hazardParameterBindingIssues（危大须写本项目实参 + 阈值对
 
   it('真值层无工程测量值且正文无危大阈值断言 → 仍静默（不误伤无参数项目）', () => {
     expect(hazardParameterBindingIssues('本项目主要施工内容包括土方开挖与回填。', [{ attribute: '合同金额', value: '100万元' }])).toEqual([]);
+  });
+
+  // ═══ 4.55.29 判据根修（巢湖实机成稿归因：**正确写法被判缺**）═══
+  // 实测 blocker 原文：「危大工程只写规范阈值、未落本项目实参：开挖深度不大于1.5m、跨度35.86m，
+  // 超过18m、跨度35.86m，超过18m（全文亦未出现本项目开挖深度/支护/高度类实参）」
+  // —— 两处样本恰是「本项目实参 + 阈值对照」形态，旧判据只认真值层 token（1.7m）故误判。
+
+  it('4.55.29 正例｜本项目实参 + 阈值对照（跨度 35.86m ＞ 18m 门槛）→ 不报', () => {
+    const md = '本项目最大单跨跨度35.86m，超过18m的搭设跨度阈值，判定模板支撑工程属超过一定规模的危大工程。';
+    expect(hazardParameterBindingIssues(md, truth)).toEqual([]);
+  });
+
+  it('4.55.29 正例｜本项目控制值（开挖深度不大于1.5m）非规范阈值 → 不报', () => {
+    const md = '土方分层开挖，每层开挖深度不大于1.5m，开挖至基底后及时验槽。';
+    expect(hazardParameterBindingIssues(md, truth)).toEqual([]);
+  });
+
+  it('4.55.29 正例｜真值层生效值落位（基坑开挖深度1.7m 对照 3m 门槛）→ 不报', () => {
+    const md = '本项目基坑开挖深度1.7m，未达3m危大判定门槛，判定本工程基坑不属危大工程。';
+    expect(hazardParameterBindingIssues(md, [{ attribute: '基坑开挖深度', value: '1.7m' }])).toEqual([]);
+  });
+
+  it('4.55.29 反例｜只抄规范阈值、无本项目实参 → 照旧报缺口（未放宽成不设防）', () => {
+    const md = '本项目危大工程包括：开挖深度超过3m的基坑（槽）的土方开挖、支护、降水工程。';
+    const issues = hazardParameterBindingIssues(md, truth);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toContain('3m');
+  });
+
+  it('4.55.29 反例｜同句另有非挂靠量值（面层厚度80mm）不算本项目实参 → 仍报缺口', () => {
+    const md = '开挖深度超过3m的基坑工程，支护采用土钉墙，喷射混凝土面层厚度80mm。';
+    const issues = hazardParameterBindingIssues(md, truth);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toContain('只抄规范阈值');
+  });
+
+  it('4.55.29 反例｜规范阈值表以外的量值不得反向免疫全文（同文档仍有阈值句时照报）', () => {
+    const md = '基坑开挖深度1.5m以内。模板支撑搭设高度超过24m区段属危大工程。';
+    const issues = hazardParameterBindingIssues(md, truth);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toContain('24m');
   });
 });
 

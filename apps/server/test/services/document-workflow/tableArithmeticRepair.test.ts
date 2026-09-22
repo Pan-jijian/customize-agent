@@ -124,20 +124,24 @@ describe('table-arithmetic-repair 接线（防「修复器存在但未接线」�
     const rounds = [...FINALIZE_REPAIR_ROUNDS];
     const index = rounds.indexOf('table-arithmetic-repair');
     expect(index).toBeGreaterThan(-1);
-    expect(rounds.indexOf('table-caption-repair')).toBeLessThan(index);
+    // 4.55.29：题注轮移至链尾（算术轮之后），声明表同步换序——约束变为「题注轮在算术轮之后」
+    expect(rounds.indexOf('table-caption-repair')).toBeGreaterThan(index);
     const llmRound = LLM_PATCH_REPAIR_ROUNDS.find(entry => entry.id === 'table-arithmetic-repair');
     expect(llmRound?.kind).toBe('llm-patch');
     expect(llmRound?.anchoredTo).toBe('table-arithmetic-consistency');
   });
 
-  it('documentPipeline.ts 在 table-caption-repair 之后、链尾 markdown-only 重放之前调用', () => {
+  it('documentPipeline.ts 在链尾 markdown-only 重放之前调用（4.55.29：题注轮移至算术轮之后）', () => {
     const source = readFileSync(path.join(SRC_DIR, 'documentPipeline.ts'), 'utf8');
     const captionIndex = source.indexOf('await stageTableCaptionRepair(session);');
     const arithmeticIndex = source.indexOf('await stageTableArithmeticRepair(session);');
     const replayIndex = source.indexOf('await runSurfaceDeterministicCleans(session);');
-    expect(captionIndex).toBeGreaterThan(-1);
-    expect(arithmeticIndex).toBeGreaterThan(captionIndex);
+    expect(arithmeticIndex).toBeGreaterThan(-1);
     expect(replayIndex).toBeGreaterThan(arithmeticIndex);
+    // 4.55.29 时序修正：题注补全轮移为**链尾最后 draft-mutating 轮**（其后的结构类修复轮
+    // 重建成稿时会引入新无题表，原序下终稿残留无题表）。约束变为：算术轮先于题注轮、题注轮先于链尾重放。
+    expect(captionIndex).toBeGreaterThan(arithmeticIndex);
+    expect(replayIndex).toBeGreaterThan(captionIndex);
   });
 });
 

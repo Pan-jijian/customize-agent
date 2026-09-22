@@ -2,6 +2,7 @@ import type { BoqRowTrace, DocumentDraftChapter, DocumentFact, DocumentFactTrace
 import { stringifyFactValue } from './utils';
 import { normalizeEngineeringTextForFactMatch } from './engineeringUnits';
 import { BOQ_GENERIC_NAME_STOPWORDS, classifyBillPlacementExemption } from './billFactLock';
+import { SPEC_GLUED_DIGITS_RE, SPEC_GLUED_VALUE_RE, SPEC_GLUE_MARK_RE } from './parameterPatterns';
 
 // 分隔标点同族归一：顿号（、）与间隔号（・·）此前漏收——清单抽取会把枚举名拆成「给、排水附（配）件」
 // 形态，而正文按业务写法写「给排水附配件」，两侧只剩顿号之差即判未落位（巢湖实测该类假阴性 17 行）。
@@ -728,13 +729,68 @@ function corpusContainsQuantity(corpus: string, normalizedToken: string): boolea
   return variants.some(variant => new RegExp(`(?<![\\d.])${escapeRegExp(variant)}(?![\\d.])`, 'u').test(corpus));
 }
 
+/** 章节/目录编号形态（「1.22」：1~2 位整数段 + 2 位小数段）——目录与标题编号的书写口径。 */
+const SECTION_NUMBERING_SHAPE_RE = /^(?:\d{1,2})\.\d{2}$/u;
+
+/** 语境内的同形邻号（前后带数字边界，防从 251.941 里抠出无关小数）。 */
+const SECTION_NUMBERING_SIBLING_RE = /(?<![\d.])(\d{1,2})\.(\d{2})(?![\d])/gu;
+
+/**
+ * 章节编号误报单源判定（L0-7；无主数值审计与 C-T2 溯源链共用——两处各写一套必漂移）：
+ * 目录/标题里的编号被提取器连同标题首字吞成「数值 token」——真实成稿
+ * 「1.22 周月计划报送与纠偏」的 token「1.22 周」中 1.22 是小节编号、周是标题首字，
+ * 其相邻小节「1.21 / 1.23」即编号序列本身。
+ * 判据（机制，不写死具体值）：token 数值核为编号形态 `\d{1,2}.\d{2}`，且语境中出现**同形邻号**
+ * ——整数段相同且小数段相差 1（1.22 ↔ 1.23），或小数段相同且整数段相差 1（1.22 ↔ 2.22）。
+ * 连续邻号是目录/标题编号的机制特征：正文量值不会以这种「同层 +1」序列成串出现。
+ * 反例（仍按未溯源处理）：无同形邻号的「1.22 周」类时量表述——不得因本族被静默放过。
+ */
+export function isSectionNumberingToken(input: { token: string; context: string }): boolean {
+  const numericPart = /^\d+(?:\.\d+)?/u.exec(input.token.replace(/\s+/gu, ''))?.[0] ?? '';
+  if (!SECTION_NUMBERING_SHAPE_RE.test(numericPart)) return false;
+  const [integerText, decimalText] = numericPart.split('.');
+  const integerPart = Number(integerText);
+  const decimalPart = Number(decimalText);
+  const context = input.context || '';
+  for (const match of context.matchAll(SECTION_NUMBERING_SIBLING_RE)) {
+    const sibling = match[0];
+    if (sibling === numericPart) continue;
+    const siblingInteger = Number(match[1]);
+    const siblingDecimal = Number(match[2]);
+    if (siblingInteger === integerPart && Math.abs(siblingDecimal - decimalPart) === 1) return true;
+    if (siblingDecimal === decimalPart && Math.abs(siblingInteger - integerPart) === 1) return true;
+  }
+  return false;
+}
+
+/**
+ * 规格粘连误报单源判定（L0-7；无主数值审计与 C-T2 溯源链共用）：型号/牌号/编号代号与其后数量
+ * 无分隔符粘连时，提取器把两段吞成一个 token，其数值核是**拼接产物**——不是正文中的任何一个数
+ * （实机：钢筋HRB4001.941t、钢筋工程…HRB40025.851t、DN405m、Φ251.941t）。
+ * 据拼接产物报缺口 → 假缺口进硬门禁；据其进修复轮 → 误删/改写正确正文。故两侧同判豁免。
+ * 形态一：token 自身为「字母/直径符号起头的代号段 + 完整数值段」（SPEC_GLUED_VALUE_RE）；
+ * 形态二：代号在 token 之外（提取器自数字起匹配，Φ 不入 ASCII 型号分支）——token 为
+ * 「数字段 + 完整数值段」且语境中该 token 前紧邻直径/管径/牌号代号（Φ251.941t 的 251.941t）。
+ * 形态二是存在性判定，单用会误伤普通量值（424.2m 亦可切出 4|24.2m），故必须与语境代号同判。
+ */
+export function isSpecGluedValueToken(input: { token: string; context: string }): boolean {
+  const rawToken = input.token.replace(/\s+/gu, '');
+  if (!rawToken) return false;
+  const token = normalizeEngineeringTextForFactMatch(input.token);
+  if (token && SPEC_GLUED_VALUE_RE.test(token)) return true;
+  if (!token || !SPEC_GLUED_DIGITS_RE.test(token)) return false;
+  const context = input.context || '';
+  if (!SPEC_GLUE_MARK_RE.test(context)) return false;
+  // 代号须紧邻 token 前（Φ251.941t）：代号码段与 token 首段之间无分隔符才算粘连
+  return new RegExp(`(?:DN|De|HRB|HPB|Φ|φ)\\s*${escapeRegExp(rawToken)}`, 'iu').test(context);
+}
+
 /**
  * 数字溯源三分类器（C-T2 核心；qualityValidation / numericVerification / 本模块扫描共用单源）：
  * 返回 regulatory/management 即豁免（合法数字，不进资料事实反查与修复轮）；unsourced 为候选，
  * 由调用方语料反查最终判定（项目事实可溯源 → 排除；未命中 → 真未溯源）。
  * 判定输入为原文 token 与语境窗口（句子或 ±36 字窗口均可），内部统一归一化形态匹配。
- */
-export function classifyNumericTraceToken(input: { token: string; context: string }): NumericTraceClassification {
+ */export function classifyNumericTraceToken(input: { token: string; context: string }): NumericTraceClassification {
   const rawToken = input.token.replace(/\s+/gu, '');
   const token = normalizeEngineeringTextForFactMatch(input.token);
   const context = input.context || '';
@@ -774,7 +830,9 @@ export function classifyNumericTraceToken(input: { token: string; context: strin
   // R13 材料/设备规格型号（r28m M24d D4；s28l 实机 INT125-3P-50 / Q345-B——厂家型号与材质牌号，
   // 非项目数值）；前缀排除 DN/De/SC/JDG/HRB/HPB（规格管类防误吞）与混凝土/钢筋/砂浆语境（C30 类
   // 强度等级有自身溯源途径，不得借本族豁免）
-  if (/^(?!(?:dn|de|sc|jdg|hrb|hpb)\d)[a-z]{1,4}\d[\w./-]*$/u.test(token) && /材质|牌号|型号|配置|开关|断路器|配电|电缆|配电箱|控制箱|规格型号/u.test(context) && !/混凝土|钢筋|砂浆/u.test(context)) return { kind: 'regulatory', basis: '材料/设备规格型号' };
+  // L0-7 语境扩容：板型/型材/型钢/钢种/钢号/系列（实机「压型钢板，板型HV470B」——板型型号
+  // 语境原词表不覆盖而落缺口；按语境词族扩容，不为单个型号开口子）
+  if (/^(?!(?:dn|de|sc|jdg|hrb|hpb)\d)[a-z]{1,4}\d[\w./-]*$/u.test(token) && /材质|牌号|钢号|钢种|型号|板型|型材|型钢|系列|配置|开关|断路器|配电|电缆|配电箱|控制箱|规格型号/u.test(context) && !/混凝土|钢筋|砂浆/u.test(context)) return { kind: 'regulatory', basis: '材料/设备规格型号' };
   // R14 图纸构件/洞口/管段编号（r28m M24d D4；r28l D258、s28k M1222 实机——图内编号引用，非项目数值）；
   // D→d 由归一化处理；排除直径/壁厚/管径语境（D300 管径规格）与砂浆语境（R10 已先行）
   if (/^[md]\d{3,5}$/u.test(token) && /门窗|洞口|管段|管节|桩号|里程|井位|大样|详图|图集|编号|图纸/u.test(context) && !/直径|壁厚|管径|外径|内径|砂浆|砌筑/u.test(context)) return { kind: 'regulatory', basis: '图纸编号' };
@@ -801,6 +859,12 @@ export function classifyNumericTraceToken(input: { token: string; context: strin
   if (/^\d+天$/u.test(token) && /合计|共计|总计|累计|总和|总共/u.test(context) && /工期|工序|节点|进度|衔接|机动|预留|缓冲/u.test(context)) return { kind: 'management', basis: '工期合计编排' };
   // 商务金额（暂列金额 60 万元等由商务条款检测器治理（commercial-data-in-body），不属溯源反查对象）
   if (/(?:万元|亿元|元)$/u.test(token) && /暂列金额|暂估价|报价|单价|合价|综合单价|税率|增值税|预留金|招标控制价|限价|造价/u.test(context)) return { kind: 'management', basis: '商务金额' };
+  // R16 规格粘连（L0-7；实机 HRB4001.941t / HRB40025.851t / DN405m / Φ251.941t）：数值核是代号段与
+  // 数量段的拼接产物，不是正文任何数——豁免而非「未溯源」（判定见 isSpecGluedValueToken 单源）
+  if (isSpecGluedValueToken({ token: input.token, context })) return { kind: 'regulatory', basis: '规格粘连' };
+  // R17 章节编号（L0-7；实机「1.22 周月计划报送与纠偏」的 token「1.22 周」）：小数编号 + 语境同形
+  // 邻号 → 目录/标题编号，不是量值（判定见 isSectionNumberingToken 单源）
+  if (isSectionNumberingToken({ token: input.token, context })) return { kind: 'regulatory', basis: '章节编号' };
   return NUMERIC_TRACE_UNSOURCED;
 }
 

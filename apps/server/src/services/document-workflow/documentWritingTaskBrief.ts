@@ -1,5 +1,6 @@
 import type { DocumentFactsModel, DocumentTemplateChapter, ProjectGraph, WritingTaskBrief, WritingTaskBriefChapter } from './types';
 import { inferConstructionOrgProjectTypes } from './constructionOrgProjectTypes';
+import { selfCorroboratedMeasure } from './hazardBinding';
 
 /**
  * L3 生成管线：施工组织设计写作任务书构建器。
@@ -78,6 +79,15 @@ export const WRITING_INTEGRITY_CONSTRAINTS: readonly string[] = [
   // 评标人拿不到具体做法即等同没写；写不出来的根因在上游（权威值未绑定到条目），在证据层修，
   // 不许在写作端留逃生口。
   '【禁止指向型表述与缺资料搪塞】不得以指向他处替代具体做法与参数——禁止「按设计图纸控制/计量/要求/施工/确定/执行」「按图纸」「以图纸为准」「详见××大样图/详图」「参见《…》＋图集编号（如20S515/29、皖2015S209）」类写法；**同样禁止**「资料未提供该参数」「待补充/待确认/待核实」「以设计文件为准」类搪塞（本产品不存在资料缺参数的情形）。每一条都必须写出本项目已确认的具体做法与参数实值（取蓝图／工程量清单／图纸标注／规范的确定值）；若该条目的权威值尚未绑定给出，按**同专业已确认的等效做法＋已有资料**写实，不得指向、不得留空、不得写「未提供」',
+  // 4.55.29（实机归因：编制依据漏三类的写作侧根因）：「编制依据五类逐项列全」此前只挂在
+  // `CHAPTER_FOCUS_RULES[0]`（标题正则 /概况|总体|理解|说明|编制/，first-match）——承载编制依据小节的章
+  // 标题若不是该类（巢湖实机：编制依据落在「主要施工方法与技术措施」章，命中第 3 条规则），
+  // 该义务**从未进入该章写作 roleContext**，写手只知道"要列编制依据"、不知道要按五类列全 ⇒
+  // 终稿 12 条规范、0 条法律法规/条例/地方性法规，终检 3 类 blocker 送修复轮。
+  // 本约束随 WRITING_INTEGRITY_CONSTRAINTS 注入**每一章**，触发条件是"本章是否设该小节"（结构驱动，
+  // 与检测器 basisRegulationsCoverageIssues 同口径）；类目与取值来源均为机制化表述（属地取自工程
+  // 所在地、编号须能在项目资料中查到），不含任何法规名/地名列表。
+  '【编制依据五类逐项列全（本章设「编制依据/编制说明」小节时适用）】设该小节的章节必须**逐条列出具体名称**（以类别话术代替即判未写：「国家现行法律、行政法规」「现行规范标准」「地方法规规章」式写法不得出现），五类缺一不可：① 招标文件及补疑补遗（名称、编号与招标文件一致，含答疑澄清文件）；② 国家法律法规（《…法》形态的具体法律名称）；③ 国家/行业现行规范标准（《…规范/规程/标准》＋编号—年号，按本工程分部分项选择现行版本，**编号必须能在项目资料（招标文件/清单/图纸/设计说明）中查到**，查不到的编号视为编造）；④ 地方法规规章（工程所在地属地的现行地方性法规与政府规章，名称须含工程所在地的省/市名，不得写笼统一句话）；⑤ 企业管理体系文件（质量/环境/职业健康安全管理体系文件与内部管理制度）。**未设该小节的章节不得新增该小节**；既有条目不得删除或替换（补列条目与既有条目并列成行或成表）',
 ];
 
 /**
@@ -154,7 +164,20 @@ export function buildWritingTaskBrief(input: {
 }): WritingTaskBrief {
   const projectTypes = inferConstructionOrgProjectTypes({ template: { id: 'runtime', name: input.templateName || '', outputTitle: '', description: '', category: '', chapters: input.chapters }, chapters: input.chapters, requirement: input.requirement });
   const isConstructionOrg = /施工组织设计|施工组织|施组|技术标/u.test(`${input.templateName || ''} ${input.requirement || ''} ${input.chapters.map(chapter => chapter.title).join(' ')}`) || projectTypes.length > 0;
-  const canonicalLines = Object.values(input.factsModel?.canonical?.byKey || {}).map(fact => `${fact.label}=${fact.value}`);
+  /**
+   * 可取信量值过滤（4.55.29，巢湖实机归因）：事实主表 canonical 的量值可能是**OCR 片段误拼**——
+   * 实测「基坑开挖深度=25m（图纸标注：C25 圈梁,构造柱 C25 《建筑基桩检测技术规范》…）」把 C25 拼成
+   * 「25m」，它与真值（图纸标注 -1.7 米）矛盾、且直接写进写作上游卡片（写手照抄即错），
+   * 也污染危大判定。判据与危大定死块同源（hazardBinding.selfCorroboratedMeasure）：长度/重量量值形态 +
+   * 自带来源引文时须在引文里**自证**（引文内以独立量值复现）；非量值形态（面积/文本/指向型）不受本过滤。
+   */
+  const canonicalLines = Object.values(input.factsModel?.canonical?.byKey || {})
+    .filter(fact => {
+      const value = String(fact.value || '').replace(/\s+/gu, '');
+      const measureShaped = /^[约为]?[:：]?\d+(?:\.\d+)?(?:mm|cm|米|m|kN|KN|kn|kg|t|吨)/u.test(value);
+      return !measureShaped || Boolean(selfCorroboratedMeasure(value, 'm'));
+    })
+    .map(fact => `${fact.label}=${fact.value}`);
   // 模块2：项目规模事实卡——将规模口径裁决值单独显化，写作 LLM 必须区分「总占地」与「建筑总量」，
   // 历史缺陷：正文把占地约10970㎡误当建筑规模写入（实际单体建筑面积 28570.36㎡），被反向改错 13 处
   const scaleFactLines = canonicalLines.filter(line => /建设规模|建筑面积|占地|用地面积|装配|层数|高度/u.test(line)).slice(0, 8);

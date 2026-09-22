@@ -13,6 +13,7 @@ import { buildSemanticSimilarity } from './semanticSimilarity';
 import { normalizeChapterTitleLine, requirementAcceptanceIssues, tenderRequirementCheckItems, tenderRequirementSemanticQuery } from './tenderRequirements';
 import { internalTerminologyAnchorIssues } from './internalTerminologyAnchors';
 import { parameterConceptConflictIssues } from './parameterConceptConflicts';
+import { normalizeEngineeringTextForFactMatch } from './engineeringUnits';
 import { parameterObligationUsageIssues } from './chapterParameterFacts';
 import type { BillFactLock } from './billFactLock';
 import type { DrawingFactLock } from './drawingFactLock';
@@ -147,6 +148,11 @@ export async function buildStandardFinalValidationIssues(input: {
   const factVerification = await generatedFactVerificationIssuesAsync(input.markdown, input.factsModel, { scopeClassifier: input.factTokenScopeClassifier });
   // 招标要求正文级语义检测（终局全量对账）：要求条目 ↔（章节标题 + 正文句）同闭包 embedding，
   // 正文句采样与 documentIntegrityChecks.bodySentencesForSemantic 同口径；语义模型恒可用，空输入返回恒零函数
+  /** 真值层已裁决取代的旧值（归一文本）：参数义务集与落位判据共用的排除集（4.55.29） */
+  const supersededTruthValues = new Set(
+    (input.truthValues || []).flatMap(item => item.superseded || []).map(value => normalizeEngineeringTextForFactMatch(value)),
+  );
+
   const requirementQueries = tenderRequirementCheckItems(input.tenderRequirements).map(({ item }) => tenderRequirementSemanticQuery(item));
   const requirementChapterLines = input.markdown.split(/\n/u).filter(line => /^#{2,4}\s/u.test(line.trim())).map(line => normalizeChapterTitleLine(line)).filter(Boolean).slice(0, 80);
   const requirementBodySentences = bodySentencesForSemantic(input.markdown, REQUIREMENTS_SEMANTIC_SENTENCE_LIMIT);
@@ -345,7 +351,7 @@ export async function buildStandardFinalValidationIssues(input: {
     // C3-4 可靠参数义务落位（参数池净化后义务满足率 <90% → error）：与报告出口 parameterUsageAudit.rate /
     // 修复出口 assignMissingParameterChapters 同源（classifyParameterUsage）——此前参数义务缺口仅在关键参数
     // blocker 存在时随轮消费（挂靠缺口，s28l 关键池达标其余额 94 条零消费直坠终门禁）
-    ...det('parameter-obligation-usage', () => parameterObligationUsageIssues(input.markdown, input.factsModel, input.chapters)),
+    ...det('parameter-obligation-usage', () => parameterObligationUsageIssues(input.markdown, input.factsModel, input.chapters, { supersededValues: supersededTruthValues })),
     // Q1 清单落位（C3-5 单源化）：行识别/豁免/落位判定消费 buildBoqRowTraces（与报告出口同源），
     // 字面三通道（首段 12/整名 12/编码 8）+ 本地 bge 语义兜底，有效行处置率 <90% 升 error（provenance
     // 锚定 'boq-placement' 供修复轮消费；历史挂靠缺口：17 轮修复无一消费直坠终门禁）

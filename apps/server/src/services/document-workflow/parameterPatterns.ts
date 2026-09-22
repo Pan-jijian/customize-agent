@@ -36,3 +36,33 @@ export const DEVICE_SPEC_RE = /\d[A-Z][A-Z0-9a-z]*\b|[A-Z]{1,2}\d{2,3}\b|\d+(?:\
 
 /** 正文量化参数（专业评分"事实落位率"与参数密度检查共用口径）：数值+常用单位 */
 export const QUANTIFIED_BODY_PARAM_RE = /\d+(?:\.\d+)?\s*(?:m²|㎡|m3|m³|mm|cm|m|km|kg|t|MPa|kPa|℃|%|日历天|天|层|台|套|个|项|次|份|人|小时)/giu;
+
+/** 规格粘连值段的单位集（与 PRECISE_TOKEN_RE 单位组同口径；含归一化形态——判定在
+ * normalizeEngineeringTextForFactMatch 之后进行，平方米→m2、日历天→天、小时→h、吨→t）。
+ * 粘连判定只问「此处是否存在一个完整数值段」，故单位集与主提取器同源即可，不另立口径。 */
+const GLUED_VALUE_UNIT = 'mm|cm|m2|m3|m³|m²|㎡|平方米|m|km|kg|g|t|吨|l|ml|mpa|kpa|kn|kw|kv|℃|%|台|套|个|项|批|次|份|人|h|d|min|天|周|月|年|万元|元';
+
+/** 粘连值段（数量段）形态：带小数（1.941 / 25.851，可带单位）或带单位（5m），且整数段无多余
+ * 前导零（0.5 合法、000 非法）。两要件缺一不可：
+ * - 「小数或单位必居其一」——否则纯代号（HRB400 可切出 4|00）会被误判粘连；
+ * - 「整数段无多余前导零」——否则 Φ1000mm 会被切成 1|000mm 误判粘连（1000 是真实量值）。 */
+const GLUED_VALUE_SEGMENT = `(?:[1-9]\\d*\\.\\d+(?:${GLUED_VALUE_UNIT})?|(?:[1-9]\\d*|0\\.\\d+)\\s*(?:${GLUED_VALUE_UNIT}))`;
+
+/** 规格粘连（字母/直径符号起头的代号段 + 数量段无分隔粘连）单源判定：代号段以数字收尾、其后
+ * 紧跟完整数量段，两段之间无任何分隔符——
+ *   HRB400+1.941t → HRB4001.941t；HRB400+25.851t → HRB40025.851t；DN40+5m → DN405m。
+ * 该 token 的数值核（4001.941 / 40025.851 / 405）**不是正文中存在的任何一个数**，是提取器
+ * 按型号分支贪婪吞并数量段产生的拼接产物：据其报缺口即假缺口、据其进修复轮即误删正确正文。
+ * 判定为「存在性」——只要 token 内存在一个合法的「代号|数量段」边界即成立（无需定准切分点：
+ * 代号位长是行业惯例而非项目数据，写死切分反成新的知识表）。 */
+export const SPEC_GLUED_VALUE_RE = new RegExp(`^[A-Za-zΦφΔ][\\w./-]*\\d${GLUED_VALUE_SEGMENT}$`, 'iu');
+
+/** 规格粘连（代号在 token 之外：提取器自数字起匹配）：token 自身为「数字段 + 完整数量段」——
+ * Φ25+1.941t 的 token 是 251.941t（Φ 不入 ASCII 型号分支），拼接核 251.941 非正文任何数。
+ * 单用本式会误伤普通量值（424.2m 亦可切出 4|24.2m），故必须与语境代号同判（见
+ * isSpecGluedValueToken）。 */
+export const SPEC_GLUED_DIGITS_RE = new RegExp(`^\\d+${GLUED_VALUE_SEGMENT}$`, 'u');
+
+/** 直径/管径/钢筋牌号代号（语境侧，紧邻 token 前）：与 SPEC_GLUED_DIGITS_RE 合判，
+ * 命中即「代号 + 数量」粘连（Φ251.941t 的 251.941t）。 */
+export const SPEC_GLUE_MARK_RE = /(?:DN|De|HRB|HPB|Φ|φ)/iu;

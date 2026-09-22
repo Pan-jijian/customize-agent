@@ -364,4 +364,71 @@ describe('V5 P5 无主数值审计（M6）', () => {
     expect(report.matched).toBe(1);
     expect(report.unregisteredCount).toBe(0);
   });
+
+  // ═══ L0-7 提取粘连/编号假 token 的豁免（实机成稿 doc-1790104980418；含/不含两侧） ═══
+
+  const reportedTokens = (report: ReturnType<typeof auditAuthorityCoverage>): string[] =>
+    [...report.derivationGaps, ...report.processGaps, ...report.unattributed].map(finding => finding.token);
+
+  it('L0-7 规格粘连：型号/牌号与数量无分隔粘连（HRB4001.941t / HRB40025.851t / DN405m / Φ251.941t）不落任何缺口桶', () => {
+    // 逐句单 token（scanned=1 证明该粘连形态确实进了扫描，豁免不是「没扫到」）
+    for (const [markdown, glued] of [
+      ['钢筋HRB4001.941t。', 'HRB4001.941t'],
+      ['钢筋工程现浇构件钢筋HRB40025.851t。', 'HRB40025.851t'],
+      ['DN405m；', 'DN405m'],
+      ['Φ251.941t。', '251.941t'],
+    ] as const) {
+      const report = auditAuthorityCoverage(markdown);
+      expect(report.scanned).toBe(1);
+      expect(report.conventionExempt).toBe(1);
+      expect(reportedTokens(report)).toEqual([]);
+      expect(reportedTokens(report)).not.toContain(glued);
+      // 豁免走 C-T2 分类器（conventionExempt），不是靠「放宽未登记桶」达成
+      expect(report.unattributed).toEqual([]);
+    }
+  });
+
+  it('L0-7 章节编号：目录/标题编号 token（1.22 周，邻号 1.23）不计缺口；同形无邻号的时量表述照报', () => {
+    const numbering = auditAuthorityCoverage('总进度计划编制与图表管理 1.22 周月计划报送与纠偏 1.23');
+    expect(numbering.scanned).toBe(1);
+    expect(numbering.conventionExempt).toBe(1);
+    expect(reportedTokens(numbering)).toEqual([]);
+    const quantity = auditAuthorityCoverage('首段养护历时 1.22 周后进入下道工序。');
+    expect(quantity.scanned).toBe(1);
+    expect(quantity.conventionExempt).toBe(0);
+    expect(reportedTokens(quantity)).toContain('1.22 周');
+  });
+
+  it('L0-7 型材语境扩容：板型型号（HV470B）按 R13 语境词族豁免，非按单个值开口子', () => {
+    const report = auditAuthorityCoverage('屋面压型钢板，板型HV470B。');
+    expect(report.scanned).toBe(1);
+    expect(report.conventionExempt).toBe(1);
+    expect(reportedTokens(report)).toEqual([]);
+  });
+
+  it('L0-7 反向守护：真缺口不得借豁免族静默——清单投影缺口与正文自算合计照常报出（427.000个 属缺口桶，不进未登记）', () => {
+    for (const [markdown, token] of [
+      ['配套混凝土管道接口427.000个口、砌筑检查井54座。', '427.000个'],
+      ['室外排水塑料管424.2m，按设计坡度敷设。', '424.2m'],
+      ['检验批总量6403.78m²，按分项工程划分。', '6403.78m²'],
+    ] as const) {
+      const report = auditAuthorityCoverage(markdown);
+      expect(report.conventionExempt).toBe(0);
+      expect(reportedTokens(report)).toContain(token);
+      // 投影/推导缺口（须收编或改定性），不是编造信号桶
+      expect(report.unattributed.map(finding => finding.token)).not.toContain(token);
+    }
+  });
+
+  it('L0-7 反向守护：整数段带前导零的真实量值（Φ1000mm 的 1000mm、φ700人孔 的 700人）不被粘连族吞掉', () => {
+    const report = auditAuthorityCoverage('Φ1000mm检查井井筒；φ700人孔井盖与路面齐平。');
+    expect(report.conventionExempt).toBe(0);
+    expect(reportedTokens(report)).toEqual(expect.arrayContaining(['1000mm', '700人']));
+  });
+
+  it('L0-7 反向守护：纯代号（无数量段，HRB400/DN40）不进粘连族豁免', () => {
+    const report = auditAuthorityCoverage('钢筋HRB400，Φ16共364个。');
+    expect(report.conventionExempt).toBe(0);
+    expect(reportedTokens(report)).toEqual(expect.arrayContaining(['HRB400']));
+  });
 });
