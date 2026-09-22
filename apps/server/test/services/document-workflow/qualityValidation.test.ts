@@ -3,7 +3,7 @@
  * 均为 L2 确定性结构检测，无需语义通道。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { applyDeterministicConsistencyFixesToMarkdown, basisRegulationsCoverageIssues, boqPlacementIssues, resourceBreakdownConsistencyIssues, collectSectionContentGaps, crossChapterConsistencyIssues, criticalPreciseTokens, degenerateContentIssues, evaluationCriteriaCoreKeywords, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, isNonExemptTablePlaceholderCell, markdownTableQualityIssues, missingCriticalPreciseTokens, preciseFactUsageIssues, processSpecConflictIssues, punctuationArtifactIssues, scanTablePlaceholderCells } from '@/services/document-workflow/qualityValidation';
+import { applyDeterministicConsistencyFixesToMarkdown, stageScheduleConsistencyIssues, basisRegulationsCoverageIssues, boqPlacementIssues, resourceBreakdownConsistencyIssues, collectSectionContentGaps, crossChapterConsistencyIssues, criticalPreciseTokens, degenerateContentIssues, evaluationCriteriaCoreKeywords, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, isNonExemptTablePlaceholderCell, markdownTableQualityIssues, missingCriticalPreciseTokens, preciseFactUsageIssues, processSpecConflictIssues, punctuationArtifactIssues, scanTablePlaceholderCells } from '@/services/document-workflow/qualityValidation';
 import type { BlueprintData } from '@/services/document-workflow/integratedBlueprint';
 import type { DocumentDraftChapter, DocumentFactsModel } from '@/services/document-workflow/types';
 
@@ -322,6 +322,52 @@ describe('evaluationCriteriaCoreKeywords（4.12.12 核心词剥离残余条款�
   it('无编号标题核心词不受影响', () => {
     const keywords = evaluationCriteriaCoreKeywords('确保黄山杯奖项创建目标实现');
     expect(keywords.some(keyword => keyword.includes('黄山杯'))).toBe(true);
+  });
+});
+
+describe('4.55.25 阶段用时内部自洽（实测：合计 390 ≠ 自称 315 ≠ 总工期 330）', () => {
+  // 逐字取自巢湖 4.55.24 自测终稿（54 项阻断里没有任何一条提到它——整类缺陷原先不可见）
+  const realDoc = [
+    '本工程总工期为330日历天，计划开工日期为2026年10月10日。',
+    '各阶段合计用时315天，预留15天机动工期用于不可预见因素与工序衔接缓冲，确保总工期330日历天受控。',
+    '施工准备与三通一平阶段用时50天，基础工程阶段用时120天，主体结构工程阶段用时71天，装饰装修工程阶段用时123天，安装与收尾工程阶段用时26天。',
+  ].join('\n');
+
+  it('阶段用时合计超总工期 → blocker（390 > 330）', () => {
+    const issues = stageScheduleConsistencyIssues(realDoc);
+    expect(issues.some(issue => issue.message.includes('阶段用时合计超出总工期'))).toBe(true);
+  });
+
+  it('自称合计 ≠ 逐项相加 → blocker（315 ≠ 390）', () => {
+    const issues = stageScheduleConsistencyIssues(realDoc);
+    expect(issues.some(issue => issue.message.includes('阶段用时自相矛盾'))).toBe(true);
+  });
+
+  it('里程碑倒挂 → blocker（装饰装修 第123天 早于主体结构 第166天）', () => {
+    const table = [
+      '| 施工阶段 | 计划完成时间 | 责任岗位 |',
+      '| --- | --- | --- |',
+      '| 施工准备与三通一平 | 第26天 | 项目经理 |',
+      '| 基础工程 | 第95天 | 技术负责人 |',
+      '| 主体结构工程 | 第166天 | 项目经理 |',
+      '| 装饰装修工程 | 第123天 | 施工员 |',
+      '| 安装与收尾工程 | 第315天 | 项目经理 |',
+    ].join('\n');
+    expect(stageScheduleConsistencyIssues(table).some(issue => issue.message.includes('阶段完成时间倒挂'))).toBe(true);
+  });
+
+  it('自洽文档零产出（不误报）', () => {
+    const ok = [
+      '本工程总工期为330日历天。',
+      '各阶段合计用时315天。',
+      '施工准备与三通一平阶段用时50天，基础工程阶段用时120天，主体结构工程阶段用时71天，装饰装修工程阶段用时48天，安装与收尾工程阶段用时26天。',
+    ].join('\n');
+    expect(stageScheduleConsistencyIssues(ok)).toEqual([]);
+  });
+
+  it('单值与无表头时不误报（阶段用时表按表头列精确取值）', () => {
+    const withOtherDays = ['| 工序 | 养护 |', '| --- | --- |', '| 混凝土 | 14天 |', '| 砌体 | 7天 |'].join('\n');
+    expect(stageScheduleConsistencyIssues(withOtherDays)).toEqual([]);
   });
 });
 

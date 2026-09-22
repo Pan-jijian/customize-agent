@@ -168,19 +168,18 @@ describe('empty-section-sweep 行为矩阵', () => {
     expect(session.recomputeFinalValidationBundle).toHaveBeenCalledTimes(1);
     const stage = stageOf(session.progressStages, 'empty-section-sweep');
     expect(stage?.status).toBe('success');
-    expect(stage?.message).toContain('移除无依据空壳小节标题 1 处（0 章重排编号）');
+    expect(stage?.message).toContain('移除无依据空壳标题 1 处（0 章重排编号）');
     expect(stage?.details?.[0]).toContain('第 1 章移除空壳标题「特殊技术标准和要求」');
     expect(stageOf(session.finalGateRepairStages, 'empty-section-sweep')?.status).toBe('success');
   });
 
-  it('规划近名归属空壳：跳过（补写辖区），核对通过零改动', async () => {
+  it('4.55.25 规划归属空壳同样移除（没有内容不出标题），缺口由规划落位检测器单一报出', async () => {
     const session = makeSession([{ id: 'ch1', title: '安全文明施工', content: PLANNED_GAP_CONTENT, sections: ['安全责任体系与目标落实'] }]);
     await stageEmptySectionSweep(session);
-    expect(session.finalChapterDrafts[0].content).toBe(PLANNED_GAP_CONTENT);
-    expect(session.rebuildFinalMarkdown).not.toHaveBeenCalled();
+    expect(session.finalChapterDrafts[0].content).not.toContain('安全责任体系与目标落实');
     const stage = stageOf(session.progressStages, 'empty-section-sweep');
     expect(stage?.status).toBe('success');
-    expect(stage?.message).toContain('核对通过');
+    expect(stage?.message).toContain('移除无依据空壳标题');
   });
 
   it('非空壳（正文、表格承载）不删：保守零信息风险', async () => {
@@ -196,7 +195,7 @@ describe('empty-section-sweep 行为矩阵', () => {
     await stageEmptySectionSweep(session);
     expect(session.finalChapterDrafts[0].content).toBe(NUMBERED_GAP_CLEANED);
     const stage = stageOf(session.progressStages, 'empty-section-sweep');
-    expect(stage?.message).toContain('移除无依据空壳小节标题 1 处（1 章重排编号）');
+    expect(stage?.message).toContain('移除无依据空壳标题 1 处（1 章重排编号）');
   });
 
   it('空壳 H3 内嵌空壳 H4：guard 逐轮收敛（先清 H4 再清 H3）', async () => {
@@ -204,7 +203,7 @@ describe('empty-section-sweep 行为矩阵', () => {
     await stageEmptySectionSweep(session);
     expect(session.finalChapterDrafts[0].content).toBe(NESTED_GAP_CLEANED);
     const stage = stageOf(session.progressStages, 'empty-section-sweep');
-    expect(stage?.message).toContain('移除无依据空壳小节标题 2 处（1 章重排编号）');
+    expect(stage?.message).toContain('移除无依据空壳标题 2 处（1 章重排编号）');
   });
 
   it('幂等：清扫后再运行零变化（无 rebuild/recompute）', async () => {
@@ -220,5 +219,66 @@ describe('empty-section-sweep 行为矩阵', () => {
     expect(rebuildMock).not.toHaveBeenCalled();
     expect(recomputeMock).not.toHaveBeenCalled();
     expect(stageOf(session.progressStages, 'empty-section-sweep')?.message).toContain('核对通过');
+  });
+});
+
+describe('4.55.25 规划标题被自拟标题顶替 → 确定性归位（实测形态 100% 覆盖空小节）', () => {
+  it('规划空壳「1.3 场地条件核查与交接」+ 紧随「1.4 现场踏勘」→ 删除自拟标题、内容归规划标题', async () => {
+    const chapter = { id: 'c1', title: '第一章 主要施工方法与技术措施', sections: ['场地条件核查与交接'], content: [
+      '## 第一章 主要施工方法与技术措施',
+      '### 1.3 场地条件核查与交接',
+      '### 1.4 现场踏勘',
+      '项目部组织技术、安全、施工人员对场地标高、周边管线与既有构筑物逐项踏勘并记录，形成踏勘记录台账。',
+    ].join('\n') } as unknown as FinalizeSession['finalChapterDrafts'][number];
+    const session = {
+      finalChapterDrafts: [chapter],
+      progressStages: [],
+      finalGateRepairStages: [],
+      rebuildFinalMarkdown: () => chapter.content,
+      recomputeFinalValidationBundle: async () => {},
+      emitProgress: () => {},
+    } as unknown as FinalizeSession;
+    await stageEmptySectionSweep(session);
+    // 字面只共享 1 字 → 不做无凭据的"归位"；按「无内容不出标题」移除空壳规划标题，
+    // 内容留在自拟标题下（零内容丢失），缺口由 planned-section-placement 单一报出
+    expect(chapter.content).not.toContain('场地条件核查与交接');
+    expect(chapter.content).toContain('现场踏勘');
+    expect(chapter.content).toContain('踏勘记录台账');
+  });
+
+  it('字面不相关（共享 <2 字）不做归位（宁缺毋滥，防内容错挂）', async () => {
+    const chapter = { id: 'c1', title: '第一章 主要施工方法与技术措施', sections: ['场地条件核查与交接'], content: [
+      '## 第一章 主要施工方法与技术措施',
+      '### 1.3 场地条件核查与交接',
+      '### 1.4 文明施工',
+      '现场设置围挡、冲洗设施与降尘措施，出入口配置洒水车与清洗平台，落实文明施工要求。',
+    ].join('\n') } as unknown as FinalizeSession['finalChapterDrafts'][number];
+    const session = {
+      finalChapterDrafts: [chapter],
+      progressStages: [],
+      finalGateRepairStages: [],
+      rebuildFinalMarkdown: () => chapter.content,
+      recomputeFinalValidationBundle: async () => {},
+      emitProgress: () => {},
+    } as unknown as FinalizeSession;
+    await stageEmptySectionSweep(session);
+    expect(chapter.content).toContain('文明施工');   // 未合并：内容仍挂自拟标题
+  });
+
+  it('字面相关（共享 ≥2 字）→ 归位：删除自拟标题、内容归规划标题、规划标题保留', async () => {
+    const chapter = { id: 'c1', title: '第一章 主要施工方法与技术措施', sections: ['基坑围护结构与变形监测'], content: [
+      '## 第一章 主要施工方法与技术措施',
+      '### 1.17 基坑围护结构与变形监测',
+      '### 1.18 深基坑支护与监测',
+      '基坑采用放坡开挖，坡率1:0.5，坡顶设置截水沟并对周边建构筑物布设变形监测点，每日观测一次。',
+    ].join('\n') } as unknown as FinalizeSession['finalChapterDrafts'][number];
+    const session = {
+      finalChapterDrafts: [chapter], progressStages: [], finalGateRepairStages: [],
+      rebuildFinalMarkdown: () => chapter.content, recomputeFinalValidationBundle: async () => {}, emitProgress: () => {},
+    } as unknown as FinalizeSession;
+    await stageEmptySectionSweep(session);
+    expect(chapter.content).toContain('基坑围护结构与变形监测');
+    expect(chapter.content).not.toContain('### 1.18 深基坑支护与监测');
+    expect(chapter.content).toContain('变形监测点');
   });
 });

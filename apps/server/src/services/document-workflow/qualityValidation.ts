@@ -1307,6 +1307,38 @@ export function emptyUnplannedSectionSpans(chapter: Pick<DocumentDraftChapter, '
 }
 
 /**
+ * 全部空壳小节跨度（4.55.25 用户口径：**没有内容就不要出现该标题**）。
+ *
+ * 与 `emptyUnplannedSectionSpans` 的差别：**不再排除规划归属的空壳**——实测 7 处空小节全部是
+ * 「规划标题被模型近义标题顶替」的产物（规划标题空壳 + 紧随自拟标题承载内容）；
+ * 规划归属的空壳若在链尾仍为空，说明补写轮与归位器都未能落位，此时**保留空标题**只会同时
+ * 制造「空小节」blocker 与读者的空洞观感——按同一口径移除标题，改为由 `planned-section-placement`
+ * 以「规划小节未落位」**单一**报出（一个真实原因只报一次）。
+ * 判据与既有函数同为「切片内零可见字符」（表格承载/带内容小节不删，保守零删信息风险）。
+ */
+export function emptySectionSpans(chapter: Pick<DocumentDraftChapter, 'title' | 'content' | 'sections'>): Array<{ line: number; rawTitle: string; level: 3 | 4; planned: boolean }> {
+  const source = chapter.content?.trim() ? chapter.content : '';
+  if (!source) return [];
+  const plannedSections = (chapter.sections || []).filter(section => !isStructuralLabelTitle(section)
+    && !(DIVISION_SECTION_RE.test(chapter.title) && WORK_PACKAGE_SECTION_RE.test(section.trim()))
+    && !/^附录/u.test(section.trim()));
+  const matches = [...source.matchAll(/^(#{3,4})\s+(.+)$/gmu)];
+  const spans: Array<{ line: number; rawTitle: string; level: 3 | 4; planned: boolean }> = [];
+  matches.forEach((match, index) => {
+    const level = match[1]!.length as 3 | 4;
+    const rawTitle = (match[2] || '').trim();
+    if (!rawTitle) return;
+    const start = (match.index || 0) + match[0].length;
+    const nextMatch = matches.slice(index + 1).find(item => item[1]!.length <= level);
+    const end = nextMatch?.index ?? source.length;
+    if (source.slice(start, end).trim() !== '') return;
+    const line = source.slice(0, match.index || 0).split('\n').length - 1;
+    spans.push({ line, rawTitle, level, planned: plannedSections.some(section => sameSectionTitle(section, rawTitle)) });
+  });
+  return spans;
+}
+
+/**
  * L5 结构完整性门禁·「主题块数 = 成稿 H3 数」守恒（终检注册，多节方向）：
  * 每章成稿 H3 唯一标题数不得超出规划小节数——超出 = LLM 擅加分节/规划外小节穿透到交付
  *（缺节方向由 sectionContentIntegrityIssues 的 missing_planned_section 覆盖，两者互补构成守恒闭环）；
@@ -3301,6 +3333,95 @@ export function scheduleDurationOverrunIssues(markdown: string, options: { toler
     message: `进度计划超出声明工期：正文声明总工期 ${effective} 日历天，而进度计划/节点的天序排到第 ${maxSpan} 天（超出 ${maxSpan - effective} 天）——工期口径必须单一（招标工期经答疑澄清变更时以变更后为准）`,
     suggestion: `请统一工期口径：以答疑/澄清后的生效工期（${effective} 日历天）为唯一基准，重排进度计划表与各阶段节点的起止天序，使最大天序不超过 ${effective} 天（可留 ${tolerance} 天收尾余量）；正文任何位置的工期表述必须与此一致。`,
   }];
+}
+
+/**
+ * 阶段用时内部自洽检测（4.55.25 实测新增）。
+ *
+ * **实测缺陷**（巢湖 4.55.24 自测终稿）：同一段文字里三个数字互相矛盾——
+ * ①「施工准备…用时50天，基础工程阶段用时120天，主体结构…71天，装饰装修…123天，安装与收尾…26天」
+ *   → 合计 **390 天**；② 同句自称「各阶段合计用时 **315 天**」；③ 全文声明总工期 **330 日历天**。
+ * 390 ≠ 315 ≠ 330，且 390 > 330。**54 项阻断里没有任何一条提到它**——现有
+ * `schedule-duration-overrun` 只看「第N天」天序，看不到「用时N天」的合计，故整类缺陷不可见。
+ *
+ * 判据（**同一文档内部即可证伪，无需外部权威**）：
+ * ① 阶段用时合计 > 声明总工期 + 余量 → blocker；
+ * ② 正文自称的「合计用时W天」与实际合计不等 → blocker；
+ * ③ 同一表的「第N天」列（按行序）出现递减 → 时间倒挂 blocker（实测：装饰装修 第123天 早于
+ *    主体结构 第166天）。
+ */
+export function stageScheduleConsistencyIssues(markdown: string): ValidationIssue[] {
+  if (!markdown) return [];
+  const issues: ValidationIssue[] = [];
+  const declared = [...markdown.matchAll(/(?:总工期|计划工期|合同工期|工期)[^。；;\n]{0,12}?(\d{2,4})\s*个?\s*(?:日历天|天|日)/gu)].map(match => Number(match[1])).filter(Number.isFinite);
+  const totalDays = declared.length > 0 ? Math.max(...declared) : undefined;
+  // ① 阶段用时（表格「阶段用时」列优先；否则取正文「XX阶段用时N天」句式）
+  const stageDurations: number[] = [];
+  for (const match of markdown.matchAll(/[^|。；;\n]{0,16}?阶段用时\s*[:：]?\s*(\d{1,4})\s*天/gu)) stageDurations.push(Number(match[1]));
+  // 表格路径：只统计**表头含「阶段用时」**的表块（防把「养护14天」等其它 N天 单元格误计入合计）
+  {
+    const rows = markdown.split('\n').map(line => line.trim());
+    for (let index = 0; index < rows.length; index += 1) {
+      const header = rows[index]!;
+      if (!/^\|/.test(header) || !/阶段用时/u.test(header)) continue;
+      const columnIndex = header.slice(1, -1).split('|').findIndex(cell => /阶段用时/u.test(cell));
+      for (let cursor = index + 1; cursor < rows.length && /^\|/.test(rows[cursor]!); cursor += 1) {
+        if (/^\|[\s:\-|]+\|$/u.test(rows[cursor]!)) continue;
+        const cell = rows[cursor]!.slice(1, -1).split('|')[columnIndex] ?? '';
+        const value = Number(/(\d{1,4})/u.exec(cell)?.[1]);
+        if (Number.isFinite(value) && value > 0) stageDurations.push(value);
+      }
+      break;
+    }
+  }
+  const sum = stageDurations.reduce((acc, value) => acc + value, 0);
+  const tolerance = totalDays ? Math.max(3, Math.round(totalDays * 0.02)) : 3;
+  if (totalDays && stageDurations.length >= 2 && sum > totalDays + tolerance) {
+    issues.push({
+      level: 'error',
+      severity: 'blocker',
+      category: 'fact_consistency',
+      owner: 'llm',
+      repairability: 'llm_repairable',
+      provenance: { detectorId: 'stage-schedule-consistency', fingerprint: stableHash(markdown) },
+      message: `阶段用时合计超出总工期：各阶段用时 ${stageDurations.join('+')} = ${sum} 天，而声明总工期 ${totalDays} 日历天（超出 ${sum - totalDays} 天）——同文档内工期口径自相矛盾`,
+      suggestion: `请以声明的总工期 ${totalDays} 日历天为唯一基准重排各阶段用时（含机动工期的分配），使各阶段用时合计不超过 ${totalDays} 天，并与进度计划表的起止天序逐项对应；不得在正文同时保留两套合计口径。`,
+    });
+  }
+  // ② 自称合计 vs 实际合计
+  const claimed = [...markdown.matchAll(/(?:各阶段)?合计用时\s*[:：]?\s*(\d{1,4})\s*天/gu)].map(match => Number(match[1])).filter(Number.isFinite);
+  for (const value of claimed) {
+    if (stageDurations.length >= 2 && value !== sum) {
+      issues.push({
+        level: 'error',
+        severity: 'blocker',
+        category: 'fact_consistency',
+        owner: 'llm',
+        repairability: 'llm_repairable',
+        provenance: { detectorId: 'stage-schedule-consistency', fingerprint: stableHash(markdown) },
+        message: `阶段用时自相矛盾：正文自称「合计用时 ${value} 天」，而各阶段用时逐项相加为 ${sum} 天`,
+        suggestion: `请统一为同一口径：按各阶段实际用时重算合计（或修正阶段用时），使「合计用时」与逐项相加一致，并与总工期对照。`,
+      });
+      break;
+    }
+  }
+  // ③ 里程碑倒挂：同一表内「计划完成时间 / 第N天」列按行序须非递减
+  const milestones: number[] = [];
+  for (const match of markdown.matchAll(/\|\s*[^|\n]{1,24}?\s*\|\s*第\s*(\d{1,4})\s*天\s*\|/gu)) milestones.push(Number(match[1]));
+  const firstDrop = milestones.findIndex((value, index) => index > 0 && value < milestones[index - 1]!);
+  if (firstDrop > 0) {
+    issues.push({
+      level: 'error',
+      severity: 'blocker',
+      category: 'fact_consistency',
+      owner: 'llm',
+      repairability: 'llm_repairable',
+      provenance: { detectorId: 'stage-schedule-consistency', fingerprint: stableHash(markdown) },
+      message: `阶段完成时间倒挂：表格中第 ${firstDrop + 1} 行的完成时间「第 ${milestones[firstDrop]} 天」早于上一行「第 ${milestones[firstDrop - 1]} 天」——按阶段推进顺序必须单调不减`,
+      suggestion: '请按施工阶段推进顺序重排完成时间，后一阶段不得早于前一阶段结束；同一表的里程碑应单调递增并与进度计划表起止天序对应。',
+    });
+  }
+  return issues;
 }
 
 /**

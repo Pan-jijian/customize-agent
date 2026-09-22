@@ -10,23 +10,26 @@
  * table-arithmetic-repair 之后、链尾 markdown-only 重放（runSurfaceDeterministicCleans 等）之前。
  */
 import { displayStage, upsertProgressStage } from '../../progress';
-import { stripEmptyUnplannedSectionHeadings } from '../../globalQualityGates';
+import { mergeShadowedPlannedHeadings, stripEmptyUnplannedSectionHeadings } from '../../globalQualityGates';
 import type { FinalizeSession } from '../finalizeSession';
 
 export async function stageEmptySectionSweep(session: FinalizeSession): Promise<void> {
+  // 4.55.25：先做「规划标题被自拟标题顶替」的确定性归位（内容归规划标题、空壳消失），再清扫无依据空壳。
+  // 实测形态：规划「1.3 场地条件核查与交接」空壳 + 紧随「1.4 现场踏勘」承载内容——归位后两者同时消解。
+  const merged = mergeShadowedPlannedHeadings(session.finalChapterDrafts);
   const outcome = stripEmptyUnplannedSectionHeadings(session.finalChapterDrafts);
   const stage = displayStage({
     type: 'validation',
     roleId: 'empty-section-sweep',
     status: 'success',
-    message: outcome.removedCount > 0
-      ? `空节清扫完成：移除无依据空壳小节标题 ${outcome.removedCount} 处（${outcome.renumberedChapters} 章重排编号）`
-      : '空节清扫核对通过：无无规划归属的空壳小节',
-    details: outcome.details.length > 0 ? outcome.details : undefined,
+    message: merged.mergedCount > 0 || outcome.removedCount > 0
+      ? `空节清扫完成：规划标题归位 ${merged.mergedCount} 处、移除无依据空壳标题 ${outcome.removedCount} 处（${outcome.renumberedChapters} 章重排编号）`
+      : '空节清扫核对通过：无空壳小节',
+    details: [...merged.details, ...outcome.details].length > 0 ? [...merged.details, ...outcome.details] : undefined,
   }, { subtitle: '空节清扫' });
   upsertProgressStage(session.progressStages, stage);
   upsertProgressStage(session.finalGateRepairStages, stage);
-  if (outcome.removedCount > 0) {
+  if (merged.mergedCount > 0 || outcome.removedCount > 0) {
     session.finalMarkdown = session.rebuildFinalMarkdown();
     await session.recomputeFinalValidationBundle();
   }

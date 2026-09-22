@@ -11,7 +11,7 @@ import { arbitrateNumericConflicts } from './numericConflictArbiter';
 import type { BillFactLock } from './billFactLock';
 import { blueprintCitationVerdict, rebaseCitationAnchorsForChapters, type BlueprintCitationAdjudicationSummary, type BlueprintData, type QuantityConflictAnchor } from './integratedBlueprint';
 import { blueprintEquipmentAuthorities, blueprintLaborPeakAuthority, blueprintPhaseLaborAuthorities, blueprintQuantityGroupAuthorities, buildAuthorityIndex } from './authorityIndex';
-import { applyDeterministicConsistencyFixes, classifyThematicSectionKey, collectSectionContentGaps, crossChapterConsistencyIssues, emptyUnplannedSectionSpans, normalizeSectionTitleForGap, processSpecConflictIssues } from './qualityValidation';
+import { applyDeterministicConsistencyFixes, classifyThematicSectionKey, collectSectionContentGaps, crossChapterConsistencyIssues, emptySectionSpans, normalizeSectionTitleForGap, processSpecConflictIssues } from './qualityValidation';
 import { professionalSectionTaskCard } from './promptRuleExtraction';
 import { reviewGlobalConsistency } from './chapterReview';
 import { dataConsistencyConflictIssue, reviewDataConsistency } from './dataConsistencyReview';
@@ -1125,6 +1125,68 @@ export function reconcileUnplannedSectionHeadings(chapterDraftsFinal: DocumentDr
  * 章内编号空档由 renumberSectionHeadings 章片段模式原子重放（与 stage5/装配层同口径，幂等）。
  * 零内容生成：只删标题行不删任何正文与表格。返回删除数与重编号章数供阶段消息。
  */
+/**
+ * 规划小节标题被模型近义标题「顶替」时的确定性归位（4.55.25 实测新增）。
+ *
+ * **实测形态**（巢湖 4.55.24 自测终稿：7 处空小节 **100%** 是这一形态）：
+ *   规划标题「1.3 场地条件核查与交接」（空壳，标题下无任何内容）
+ *   紧随其后「1.4 现场踏勘」（内容都在这里）
+ * ——模型用近义标题替代了规划标题：规划标题成空壳、内容挂在自拟标题下；
+ * 于是终检同时报「空小节」blocker 与「规划小节未落位」，两条都指向同一个真实原因。
+ *
+ * **处置**：把**自拟标题行删除**、其内容上移到规划标题之下（规划标题保留）——
+ * 空壳消失、规划小节落位、内容**零丢失**、可确定性执行（与「无内容不出标题」同口径）。
+ *
+ * **判据（结构 + 字面双闸，防内容错挂）**：
+ * ① 规划归属：空壳标题出现在该章 `sections`（规划清单）中；
+ * ② 紧随同级：下一标题就是同级小节且两行之间无内容；
+ * ③ 字面相关：两标题去编号后**共享 ≥2 个汉字**（实测 7 处中 5 处满足；不满足的不动，
+ *    交既有空壳清扫/补写通道——宁可少合并，不做无凭据的"归位"）。
+ */
+export function mergeShadowedPlannedHeadings(chapterDraftsFinal: DocumentDraftChapter[]): { mergedCount: number; details: string[] } {
+  let mergedCount = 0;
+  const details: string[] = [];
+  chapterDraftsFinal.forEach((chapter, index) => {
+    const content = chapter.content;
+    if (!content?.trim()) return;
+    const planned = (chapter.sections || []).map(section => normalizeSectionTitleForGap(section)).filter(Boolean);
+    const lines = content.split('\n');
+    const dropLines = new Set<number>();
+    const strip = (raw: string) => normalizeSectionTitleForGap(raw.replace(/^#{2,6}\s*/u, '').replace(/^\d+(?:\.\d+)*[、.．\s]*/u, '').trim());
+    for (let cursor = 0; cursor < lines.length; cursor += 1) {
+      const heading = /^(#{3,4})\s+(.+?)\s*$/u.exec((lines[cursor] || '').trim());
+      if (!heading) continue;
+      const level = heading[1]!;
+      const title = strip(heading[2]!);
+      if (!title || !planned.includes(title)) continue;
+      // 空壳判定：直到下一个同级或更高标题之间没有任何实质内容
+      let next = cursor + 1;
+      let body = 0;
+      while (next < lines.length) {
+        const row = (lines[next] || '').trim();
+        if (new RegExp(`^#{2,${level.length}}\\s`).test(row)) break;
+        if (row && !/^#{1,6}\s/u.test(row)) body += row.length;
+        next += 1;
+      }
+      if (body >= 12 || next >= lines.length) continue;   // 非空壳
+      const sibling = new RegExp(`^${level}\\s+(.+?)\\s*$`).exec((lines[next] || '').trim());
+      if (!sibling) continue;                              // 下一标题不是同级 → 不动
+      const siblingTitle = strip(sibling[1]!);
+      if (!siblingTitle || planned.includes(siblingTitle)) continue;   // 同级也是规划标题 → 不是顶替
+      const sharedChars = [...new Set(siblingTitle.split(''))].filter(char => title.includes(char)).length;
+      if (sharedChars < 2) continue;                       // 字面不相关 → 不做无凭据归位
+      dropLines.add(next);                                 // 删除自拟标题行，内容归规划标题
+      mergedCount += 1;
+      details.push(`第 ${index + 1} 章「${title}」归位：合并自拟标题「${siblingTitle}」`);
+    }
+    if (dropLines.size === 0) return;
+    chapter.content = lines.filter((_, lineIndex) => !dropLines.has(lineIndex)).join('\n').replace(/\n{3,}/gu, '\n\n');
+    const renumbered = renumberSectionHeadings(chapter.content, { chapterNumber: index + 1 });
+    chapter.content = renumbered.markdown;
+  });
+  return { mergedCount, details };
+}
+
 export function stripEmptyUnplannedSectionHeadings(chapterDraftsFinal: DocumentDraftChapter[]): { removedCount: number; renumberedChapters: number; details: string[] } {
   let removedCount = 0;
   let renumberedChapters = 0;
@@ -1133,12 +1195,12 @@ export function stripEmptyUnplannedSectionHeadings(chapterDraftsFinal: DocumentD
     if (!chapter.content?.trim()) return;
     let removedInChapter = 0;
     for (let guard = 0; guard < 4; guard += 1) {
-      const spans = emptyUnplannedSectionSpans(chapter);
+      const spans = emptySectionSpans(chapter);
       if (spans.length === 0) break;
       const removeLines = new Set(spans.map(span => span.line));
       chapter.content = chapter.content.split('\n').filter((_, lineIndex) => !removeLines.has(lineIndex)).join('\n').replace(/\n{3,}/gu, '\n\n');
       removedInChapter += spans.length;
-      for (const span of spans) details.push(`第 ${index + 1} 章移除空壳标题「${span.rawTitle}」`);
+      for (const span of spans) details.push(`第 ${index + 1} 章移除空壳标题「${span.rawTitle}」${span.planned ? '（规划小节未落位，缺口由规划落位检测器单一报出）' : ''}`);
     }
     if (removedInChapter === 0) return;
     removedCount += removedInChapter;
