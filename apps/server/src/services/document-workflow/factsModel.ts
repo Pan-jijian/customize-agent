@@ -123,6 +123,8 @@ export function extractBillItemFacts(tables: StructuredTableFact[]): DocumentFac
         key: `清单条目：${name}`,
         fieldName: '清单条目',
         fieldId: 'bill_item',
+        // 4.55.25 绑定层：对象=特征描述里的「部位：X」（资料自带结构化锚点），无部位则退条目名
+        objectName: /(?:部位|位置)[:：]\s*([^\s，。；、｜|（）()]{1,20})/u.exec(feature)?.[1]?.trim() || name,
         value: `${feature.slice(0, 160)}${quantityPart ? `｜工程量：${quantityPart}` : ''}`,
         sourceFile: table.sourceFile,
         roleId: 'bill_of_quantities',
@@ -644,6 +646,47 @@ export function extractProjectBasicFactsFromEvidence(evidence: DocumentEvidence[
   return facts;
 }
 
+/**
+ * 对象锚点抽取（4.55.25 绑定层）。
+ *
+ * **原则**：绑定**只能来自原文中与值紧邻的限定主语**，不做任何推断、不做值反查
+ *（实测值→对象是重度多对多：`C15` 出现在 1,089 个资料块、`100mm` 110 个、`1.5mm` 82 个，
+ * 反查要么恒多义、要么凭空造出资料没给的绑定）。取不到 → 返回 undefined（**不绑定**，
+ * 该值不参与对象化注入、也不作为可改写权威——按缺陷处理，补抽取规则而不是兜底猜）。
+ *
+ * 判据（全部要求同句相邻）：
+ * ① 显式部位标签「部位：D4」「位置：…」优先；
+ * ② 值前 ≤16 字的**同行片段**（遇到句读/竖线即断），取尾部中文名词短语，剥通用前后缀
+ *   （本工程/本项目/该、地上/地下/的、采用/为/按…）与属性词尾（面积/厚度/强度等级/管径…）。
+ */
+export function extractObjectAnchor(context: string, value: string): string | undefined {
+  const text = String(context || '');
+  const target = String(value || '');
+  if (!text || !target) return undefined;
+  const labeled = /(?:部位|位置|单体|楼栋|楼层)[:：]\s*([^\s，。；、｜|]{1,20})/u.exec(text);
+  if (labeled) return labeled[1]!.trim();
+  const at = text.indexOf(target);
+  if (at <= 0) return undefined;
+  const before = text.slice(0, at);
+  const lastBreak = Math.max(
+    before.lastIndexOf('。'), before.lastIndexOf('；'), before.lastIndexOf('，'), before.lastIndexOf('、'),
+    before.lastIndexOf('|'), before.lastIndexOf('\n'), before.lastIndexOf('：'), before.lastIndexOf(':'),
+  );
+  const segment = before.slice(lastBreak + 1).trim();
+  if (!segment) return undefined;
+  const ATTRIBUTE_TAIL = /(?:的)?(?:建筑面积|占地面积|面积|厚度|强度等级|强度|等级|规格|型号|管径|直径|长度|宽度|高度|数量|重量|间距|坡率|埋深|标高|比例|配比|用量|含量|厚度规格)$/u;
+  const stripped = segment.replace(ATTRIBUTE_TAIL, '').trim();
+  const run = /([\u4e00-\u9fa5][\u4e00-\u9fa5A-Za-z0-9#（）()]{0,11})$/u.exec(stripped);
+  if (!run) return undefined;
+  const object = run[1]!
+    .replace(/^(?:本工程|本项目|本标段|该项|该|其)+/u, '')
+    .replace(/(?:地上|地下|的)$/u, '')
+    .replace(/(?:采用|选用|使用|设置|为|是|按|共|约|取)+$/u, '')
+    .trim();
+  if (!object || /^(?:的|了|是|为|按|共|约|及|和|与|在|由|其中|详见|参见)$/u.test(object)) return undefined;
+  return object;
+}
+
 export function extractPreciseFactsFromEvidence(evidence: DocumentEvidence[], profile: DocumentDomainProfile = DEFAULT_DOCUMENT_DOMAIN_PROFILE): DocumentFact[] {
   const facts: DocumentFact[] = [];
   const seen = new Set<string>();
@@ -668,6 +711,8 @@ export function extractPreciseFactsFromEvidence(evidence: DocumentEvidence[], pr
         key: '精确参数',
         fieldName: '技术参数',
         fieldId: 'technical_parameter',
+        // 4.55.25 绑定层：抽取期即取对象锚点（原文共现），取不到则 undefined（不绑定，不猜）
+        objectName: extractObjectAnchor(context, token),
         value: token,
         sourceFile: item.filePath,
         roleId: item.roleId || 'precise_fact',

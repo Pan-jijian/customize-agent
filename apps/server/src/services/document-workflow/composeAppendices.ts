@@ -73,17 +73,18 @@ function quantityText(item: { quantity?: number; min?: number; max?: number }): 
   if (typeof min === 'number' && typeof max === 'number') return min === max ? String(min) : `${min}-${max}`;
   if (typeof min === 'number') return String(min);
   if (typeof max === 'number') return String(max);
-  return DASH;
+  // 4.55.25：无数据返回空串（而非「—」占位）——空串会让该列被 pruneEmptyColumns 整列剔除，
+  // 从而「无数据即不出该列」，符合「无数据不出该行/该表」口径
+  return '';
 }
 
 /** 数据缺口骨架：编制说明 + 招标表头（不造数据；说明为投标人视角中性表述，无内部流程话术） */
-function appendixGapSkeleton(header: string[], gapLabel: string): string[] {
-  return [
-    `> 本表为${gapLabel}，按招标文件规定的表头格式编制。`,
-    '',
-    ...renderTable(header, []),
-  ];
-}
+/**
+ * 4.55.25（用户口径）：**无数据不出表**——某附表无蓝图数据时，不再产出「只有表头的骨架表 + 缺口标注」。
+ * 表头行无数据行正是交付物里被判「空表（仅表头与分隔线）」blocker 的形态；改为**不产出该表**，
+ * 缺口由质量报告/检测器以「要求未落实」显性暴露，修数据而不是用假表撑着。
+ */
+const OMIT_APPENDIX = '' as const;
 
 const EQUIPMENT_HEADER = ['序号', '设备名称', '型号规格', '数量', '国别产地', '制造年份', '额定功率（kW）', '生产能力', '用于施工部位', '备注'];
 const INSTRUMENT_HEADER = ['序号', '仪器设备名称', '型号规格', '数量', '国别产地', '制造年份', '已使用台时数', '用途', '备注'];
@@ -114,7 +115,7 @@ function pruneEmptyColumns<T>(header: string[], rows: T[][]): { header: string[]
  * 无权威来源的列（国别产地/制造年份/额定功率/生产能力/用于施工部位）整列不出——见 pruneEmptyColumns */
 function renderEquipmentAppendix(data?: BlueprintData): string[] | '' {
   const items = data?.resources?.equipment || [];
-  if (items.length === 0) return appendixGapSkeleton(EQUIPMENT_HEADER, '施工设备配置');
+  if (items.length === 0) return OMIT_APPENDIX;
   // 4.55.22：投产信息列（国别产地/制造年份/额定功率/生产能力/用于施工部位）**有源就填**——
   // 从蓝图该项保留的源标签字段（extractLabeledAttributes）按表头名取值；无源则该列整列不出
   //（pruneEmptyColumns）。按字段名硬编码留空再靠检测端豁免，是「生成端与检测端口径打架」的老路。
@@ -149,13 +150,8 @@ function renderEquipmentAppendix(data?: BlueprintData): string[] | '' {
 function renderLaborAppendix(data?: BlueprintData): string[] | '' {
   const composition = data?.resources?.labor?.composition || [];
   const byPhase = data?.resources?.labor?.byPhase || [];
-  if (composition.length === 0 && byPhase.length === 0) {
-    return [
-      '> 本表为劳动力配置数据，按招标文件规定的表头格式编制。',
-      '',
-      ...renderTable(['工种', '人数', '备注'], []),
-    ];
-  }
+  // 4.55.25（用户口径）：无劳动力数据 → **整表不产出**（不再输出只有表头的骨架表 + 缺口标注）
+  if (composition.length === 0 && byPhase.length === 0) return OMIT_APPENDIX;
   const parts: string[] = [];
   if (composition.length > 0) {
     const comp = pruneEmptyColumns(['工种', '人数', '备注'], composition.map(item => [item.trade, String(item.count), item.basis || '']));
@@ -172,7 +168,7 @@ function renderLaborAppendix(data?: BlueprintData): string[] | '' {
 /** C2 附表二：试验检测仪器配置表（蓝图 testInstruments 直出；产地/年份/台时数为投产信息，如实留空不编造） */
 function renderInstrumentAppendix(data?: BlueprintData): string[] | '' {
   const items = data?.testInstruments || [];
-  if (items.length === 0) return appendixGapSkeleton(INSTRUMENT_HEADER, '试验检测仪器配置');
+  if (items.length === 0) return OMIT_APPENDIX;
   const rows = items.map((item, index) => [
     String(index + 1),
     item.name,
@@ -187,12 +183,11 @@ function renderInstrumentAppendix(data?: BlueprintData): string[] | '' {
   return renderTable(pruned.header, pruned.rows);
 }
 
-/** C2 附表四：进度计划表（图类附表表格化：图件说明 + 工序数据表，图件按表绘制）。
- * 数据源 schedule 由里程碑顺序累加推导（起止天序）；无数据时保留图件说明（不造数据）。 */
-function renderScheduleAppendix(data?: BlueprintData): string[] {
-  const note = '> **图件说明**：本附表以施工进度网络图（或以横道图）形式表达，标明计划开工日期、竣工日期及各关键日期节点；工序逻辑与工期安排与本施工组织设计进度计划一致，图件按下列工序数据表绘制。';
+/** 附表四：施工进度计划表（4.55.25 零图口径：原「图件说明」块删除，直接以工序数据表落实）。
+ * 数据源 schedule 由里程碑顺序累加推导（起止天序）；无数据 → 不出该表。 */
+function renderScheduleAppendix(data?: BlueprintData): string[] | '' {
   const items = data?.schedule || [];
-  if (items.length === 0) return [note];
+  if (items.length === 0) return OMIT_APPENDIX;
   const rows = items.map(item => [
     item.label,
     String(item.duration),
@@ -201,14 +196,14 @@ function renderScheduleAppendix(data?: BlueprintData): string[] {
     item.basis || '',
   ]);
   const pruned = pruneEmptyColumns(SCHEDULE_HEADER, rows);
-  return [note, '', ...renderTable(pruned.header, pruned.rows)];
+  return renderTable(pruned.header, pruned.rows);
 }
 
-/** C2 附表五：施工总平面设施数据表（图类附表表格化：图件说明 + 设施数据表，图件按表绘制） */
-function renderSiteFacilityAppendix(data?: BlueprintData): string[] {
-  const note = '> **图件说明**：本附表为施工总平面布置图，反映现场临时设施布置（含加工车间、现场办公、设备及仓储、供电、供水、卫生、生活、道路、消防等设施）；图件按下列设施数据表绘制，并附相应文字说明。';
+/** 附表五：施工总平面设施数据表（4.55.25 零图口径：原「图件说明」块删除，直接以设施数据表落实）。
+ * 无数据 → 不出该表。 */
+function renderSiteFacilityAppendix(data?: BlueprintData): string[] | '' {
   const items = data?.tempLand || [];
-  if (items.length === 0) return [note];
+  if (items.length === 0) return OMIT_APPENDIX;
   const rows = items.map(item => [
     item.purpose,
     typeof item.area === 'number' ? String(item.area) : '',
@@ -216,13 +211,13 @@ function renderSiteFacilityAppendix(data?: BlueprintData): string[] {
     item.note || '',
   ]);
   const pruned = pruneEmptyColumns(SITE_FACILITY_HEADER, rows);
-  return [note, '', ...renderTable(pruned.header, pruned.rows)];
+  return renderTable(pruned.header, pruned.rows);
 }
 
 /** C2 附表六：临时用地表（蓝图 tempLand 直出；表头按招标原文格式，需用时间列取设施时长口径） */
 function renderTempLandAppendix(data?: BlueprintData): string[] | '' {
   const items = data?.tempLand || [];
-  if (items.length === 0) return appendixGapSkeleton(TEMP_LAND_HEADER, '临时用地规划');
+  if (items.length === 0) return OMIT_APPENDIX;
   const rows = items.map(item => [
     item.purpose,
     typeof item.area === 'number' ? String(item.area) : '',
@@ -234,16 +229,10 @@ function renderTempLandAppendix(data?: BlueprintData): string[] | '' {
 }
 
 /** 图类附表（进度网络图/总平面图）：图件说明（投标人视角，零内部流程话术） */
-function graphAppendixNote(name: string): string[] {
-  if (/进度网络图|施工进度网络图|横道图/u.test(name)) {
-    return ['> **图件说明**：本附表以施工进度网络图（或以横道图）形式表达，标明计划开工日期、竣工日期及各关键日期节点，工序逻辑与工期安排与本施工组织设计进度计划一致。'];
-  }
-  if (/总平面/u.test(name)) {
-    return ['> **图件说明**：本附表为施工总平面布置图，反映现场临时设施布置（含加工车间、现场办公、设备及仓储、供电、供水、卫生、生活、道路、消防等设施）并附相应文字说明。'];
-  }
-  return ['> **图件说明**：本附表为图件类附表，按招标文件规定的格式与内容要求以图件形式呈现。'];
-}
-
+/**
+ * 4.55.25 零图口径：图类附表**不再输出「图件说明」块**——一律以数据表落实
+ *（进度类→施工进度计划表、总平面类→临时设施用地表）；无绑定数据源的图类附表**整表不产出**。
+ */
 /** 单条附表渲染（按数据源与 kind 绑定分发；C2：四附表数据化，图类附表表格化落位；
  * 无法识别的表类附表输出按招标格式编制标注，不猜表头） */
 function renderAppendixEntry(entry: BidAppendixEntry, data?: BlueprintData): string[] | '' {
@@ -259,7 +248,9 @@ function renderAppendixEntry(entry: BidAppendixEntry, data?: BlueprintData): str
     case 'blueprint.tempLand':
       return entry.kind === 'figure' ? renderSiteFacilityAppendix(data) : renderTempLandAppendix(data);
     default:
-      if (entry.kind === 'figure') return graphAppendixNote(entry.title);
+      // 图类附表无绑定数据源 → 无数据不出表（原「图件说明」块已删除，符合零图口径）
+      if (entry.kind === 'figure') return OMIT_APPENDIX;
+      // 编制人补充类附表（manual）：无数据源，仅标注按招标格式编制（不产出空表）
       return ['> 本附表按招标文件规定的格式与内容要求编制。'];
   }
 }

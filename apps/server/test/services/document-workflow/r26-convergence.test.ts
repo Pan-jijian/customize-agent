@@ -195,20 +195,24 @@ describe('文末附表区：appendixPlan 蓝图直出（composeTenderAppendixMar
     expect(section).toContain('| 基础阶段 | 80-90 |');
   });
 
-  it('无数据源附表输出招标表头骨架 + 显性缺口标注（不造数据）；图类附表输出图位说明', () => {
+  it('4.55.25 零图口径：无数据附表整表不产出（不再出「表头骨架 + 缺口标注」），图类附表以数据表落实', () => {
     const plan = [
+      entry({ no: '一', title: '附表一 拟投入本标段的主要施工设备表', dataSource: 'blueprint.equipment' }),
       entry({ no: '二', title: '附表二 拟配备本标段的试验和检测仪器设备表', dataSource: 'blueprint.testInstruments' }),
       entry({ no: '六', title: '附表六 临时用地表', dataSource: 'blueprint.tempLand' }),
       entry({ no: '四', title: '附表四 计划开、竣工日期和施工进度网络图', kind: 'figure', dataSource: 'manual' }),
     ];
     const section = composeTenderAppendixMarkdown(plan, blueprintData);
-    expect(section).toContain('## 附表二 拟配备本标段的试验和检测仪器设备表');
-    expect(section).toContain('> 本表为试验检测仪器配置，按招标文件规定的表头格式编制。');
-    expect(section).toContain('| 序号 | 仪器设备名称 | 型号规格 | 数量 | 国别产地 | 制造年份 | 已使用台时数 | 用途 | 备注 |');
-    expect(section).toContain('## 附表六 临时用地表');
-    expect(section).toContain('| 用途 | 面积（平方米） | 位置 | 需用时间 |');
-    expect(section).toContain('## 附表四 计划开、竣工日期和施工进度网络图');
-    expect(section).toContain('图件');
+    // 无数据（本 fixture 无 testInstruments / tempLand）→ 整表不产出：不出现表标题、不出现缺口说明块
+    expect(section).not.toContain('附表二');
+    expect(section).not.toContain('附表六');
+    expect(section).not.toContain('> 本表为试验检测仪器配置');
+    expect(section).not.toContain('本表为临时用地规划');
+    // 有数据 → 以数据表落实
+    expect(section).toContain('## 附表一 拟投入本标段的主要施工设备表');
+    expect(section).toContain('| 1 | 挖掘机 | PC200 | 2 |');
+    // 图类附表无绑定数据源 → 不产出（原「图位说明」块已删除）
+    expect(section).not.toContain('附表四');
   });
 
   it('append 幂等：重复追加不重复生成；空清单/未定义时不改动正文', () => {

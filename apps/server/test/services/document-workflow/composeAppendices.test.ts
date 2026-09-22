@@ -93,19 +93,16 @@ describe('composeTenderAppendixMarkdown（appendixPlan 蓝图直出）', () => {
     expect(section).toContain('| 主体阶段 | 60 |');
   });
 
-  it('试验仪器/临时用地：蓝图数据源为空 → 招标表头骨架 + 显性缺口标注（不造数据）', () => {
+  it('4.55.25 蓝图数据源为空 → 不产出该附表（无数据不出表，不再出「只有表头的骨架表」）', () => {
     const plan = [
       entry({ no: '二', title: '附表二 拟配备本标段的试验和检测仪器设备表', dataSource: 'blueprint.testInstruments' }),
       entry({ no: '六', title: '附表六 临时用地表', dataSource: 'blueprint.tempLand' }),
     ];
     const section = composeTenderAppendixMarkdown(plan, bp({}));
-    expect(section).toContain('## 附表二 拟配备本标段的试验和检测仪器设备表');
-    expect(section).toContain('> 本表为试验检测仪器配置，按招标文件规定的表头格式编制。');
-    expect(section).toContain('| 序号 | 仪器设备名称 | 型号规格 | 数量 | 国别产地 | 制造年份 | 已使用台时数 | 用途 | 备注 |');
-    expect(section).toContain('## 附表六 临时用地表');
-    expect(section).toContain('> 本表为临时用地规划，按招标文件规定的表头格式编制。');
-    expect(section).toContain('| 用途 | 面积（平方米） | 位置 | 需用时间 |');
-    expect(section).not.toMatch(/\| 1 \|/u);
+    // 无数据即不出该表：不出现表标题、不出现表头行、不出现缺口说明块
+    expect(section).not.toContain('附表二');
+    expect(section).not.toContain('附表六');
+    expect(section).not.toMatch(/^\|/mu);
   });
 
   it('C2 三源数据化：仪器/进度/临时用地直出（产地/年份/台时数如实留空；图类附表表格化）', () => {
@@ -122,7 +119,7 @@ describe('composeTenderAppendixMarkdown（appendixPlan 蓝图直出）', () => {
     expect(section).toContain('| 工序 | 持续天数 | 起止天序 | 关键线路 | 说明 |');
     expect(section).toContain('| 主体施工 | 180 | 第21～200天 | 关键线路 |');
     expect(section).toContain('| 施工准备 | 20 | 第1～20天 | 非关键线路 |');
-    expect(section).toContain('**图件说明**');
+    expect(section).not.toContain('图件说明');
     // 附表五：设施数据表（面积/位置/说明）
     expect(section).toContain('| 设施 | 面积（平方米） | 位置 | 说明 |');
     expect(section).toContain('| 材料堆放场 | 800 |');
@@ -132,25 +129,24 @@ describe('composeTenderAppendixMarkdown（appendixPlan 蓝图直出）', () => {
     expect(section).not.toContain('本表为试验检测仪器配置');
   });
 
-  it('图类附表：图件说明；manual 表类：按招标格式编制标注（不猜表头）', () => {
+  it('4.55.25 零图口径：图类附表以数据表落实（无图件说明块）；manual 表类保留按招标格式编制标注', () => {
     const plan = [
-      entry({ no: '四', title: '附表四 计划开、竣工日期和施工进度网络图', kind: 'figure' }),
-      entry({ no: '五', title: '附表五 施工总平面图', kind: 'figure' }),
+      entry({ no: '四', title: '附表四 计划开、竣工日期和施工进度网络图', kind: 'figure', dataSource: 'blueprint.schedule' }),
+      entry({ no: '五', title: '附表五 施工总平面图', kind: 'figure', dataSource: 'blueprint.tempLand' }),
       entry({ no: '七', title: '附表七 拟分包项目情况表', dataSource: 'manual' }),
     ];
     const section = composeTenderAppendixMarkdown(plan, blueprintData);
     expect(section).toContain('## 附表四 计划开、竣工日期和施工进度网络图');
-    expect(section).toContain('图件');
-    expect(section).toContain('施工总平面布置图');
+    expect(section).toMatch(/^\|/mu);                       // 出的是数据表
+    expect(section).not.toContain('图件说明');               // 不再有图件说明块
     expect(section).toContain('> 本附表按招标文件规定的格式与内容要求编制。');
   });
 
-  it('设备数据缺失：输出骨架 + 缺口标注，不编造数据行', () => {
+  it('4.55.25 设备数据缺失 → 不产出该附表（无数据不出表，不编造数据行也不出空表头）', () => {
     const empty = bp({ resources: { equipment: [], labor: { peak: { min: 0, max: 0 }, peakValue: 0, peakBasis: '', byPhase: [], byTrade: [], composition: [] } } });
     const section = composeTenderAppendixMarkdown([entry({ title: '附表一 拟投入本标段的主要施工设备表', dataSource: 'blueprint.equipment' })], empty);
-    expect(section).toContain('> 本表为施工设备配置，按招标文件规定的表头格式编制。');
-    expect(section).toContain('| 序号 | 设备名称 | 型号规格 | 数量 |');
-    expect(section).not.toMatch(/\| 1 \|/u);
+    expect(section).not.toContain('附表一');
+    expect(section).not.toMatch(/^\|/mu);
   });
 
   it('F-T2 话术合规：附表区说明块零内部流程话术', () => {
@@ -165,10 +161,10 @@ describe('composeTenderAppendixMarkdown（appendixPlan 蓝图直出）', () => {
     ];
     const empty = bp({ resources: { equipment: [], labor: { peak: { min: 0, max: 0 }, peakValue: 0, peakBasis: '', byPhase: [], byTrade: [], composition: [] } } });
     const notes = (data: BlueprintData) => composeTenderAppendixMarkdown(plan, data).split('\n').filter(line => line.startsWith('>'));
-    // 数据齐备：仅图类附表四/五（图件说明）与 manual 附表七输出说明块
-    expect(notes(blueprintData)).toHaveLength(3);
-    // 数据全空：七个附表全部输出说明块/骨架说明
-    expect(notes(empty)).toHaveLength(7);
+    // 4.55.25 零图口径：图类附表改为**数据表**落实（不再有「图件说明」块）；
+    // 唯一保留说明块的是 manual（编制人补充）类附表
+    expect(notes(blueprintData)).toHaveLength(1);
+    expect(notes(empty)).toHaveLength(1);
     for (const note of [...notes(blueprintData), ...notes(empty)]) {
       expect(note).not.toMatch(/编制人|绘制后附|补充填报|一体化蓝图|数据源|骨架/u);
     }
@@ -187,10 +183,10 @@ describe('composeTenderAppendixMarkdown（appendixPlan 蓝图直出）', () => {
       '| 工种 | 人数 |', '| --- | --- |', '| 电工 | 32 |', '',
       // 反样本：图类纯图件说明（无数据化内容）不计承载
       '## 附表四 计划开、竣工日期和施工进度网络图', '',
-      '> **图件说明**：本附表以施工进度网络图形式表达。', '',
+      '> 图件说明：本附表以施工进度网络图形式表达。', '',
       // 正样本：图类数据化（图件说明 + 2 条数据行）计入承载
       '## 附表五 施工总平面图', '',
-      '> **图件说明**：本附表为施工总平面布置图。', '',
+      '> 图件说明：本附表为施工总平面布置图。', '',
       '| 设施 | 面积（平方米） |', '| --- | --- |', '| 材料堆放场 | 800 |', '| 项目部办公区 | 60 |', '',
       '## 附表八 仅有标题的表', '',
       '## 附表九 说明块表', '> 本附表按招标文件规定的格式与内容要求编制。',
@@ -264,7 +260,7 @@ describe('cleanAppendixInternalPhrases（C2 D4 附表区话术中性化）', () 
       '',
       '## 附表四 计划开、竣工日期和施工进度网络图',
       '',
-      '> **图件说明**：本附表以施工进度网络图形式表达，工序逻辑与工期安排与本施工组织设计进度计划一致。相关内容纳入施工组织设计与作业流程管理，资料员每日更新记录、测量员每周复核数据。',
+      '> 图件说明：本附表以施工进度网络图形式表达，工序逻辑与工期安排与本施工组织设计进度计划一致。相关内容纳入施工组织设计与作业流程管理，资料员每日更新记录、测量员每周复核数据。',
     ].join('\n');
     const cleaned = cleanAppendixInternalPhrases(md);
     // 附表区外零改动

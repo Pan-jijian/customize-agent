@@ -74,8 +74,18 @@ describe('renderChapterParameterLines（写作注入）', () => {
     );
     expect(lines).toEqual([
       '【本章可靠参数清单（资料事实链参数索引：1 项与本章相关的规格/参数/数量/时间/比例/标准编号，须逐项在正文对应位置自然写入，保持原值原形态（数字、单位、编号中的连字符与年份不得改写、拆分或省略）；商务金额/单价/税率/预留金类数据一律不得写入正文）】',
+      '【逐对象写实铁律】带对象前缀的条目（「对象｜属性=值」）必须写到**该对象**的正文处——**禁止把某对象的参数写到另一对象**；同一属性在不同对象下各有其值（如「基础垫层 100mm」与「地坪垫层 300mm」并列）是**正确**的，不得"统一"或只取其一。',
       '- 排水管道（管径）：DN400 120m',
     ]);
+  });
+
+  it('4.55.25 对象化注入：带对象锚点的值渲染为「对象｜属性=值」', () => {
+    const lines = renderChapterParameterLines(
+      modelOf([fact({ key: '排水管道', fieldName: '管径', value: 'DN400', objectName: '雨水管道' })]),
+      CHAPTERS[1]!.title,
+      { sections: CHAPTERS[1]!.sections },
+    );
+    expect(lines.some(line => line.includes('- 雨水管道｜排水管道（管径）=DN400'))).toBe(true);
   });
 
   it('无相关参数返回空数组（不注入空清单）', () => {
@@ -103,7 +113,8 @@ describe('renderChapterParameterLines（写作注入）', () => {
       CHAPTERS[0]!.title,
       { sections: CHAPTERS[0]!.sections },
     );
-    expect(lines.slice(1)).toEqual(['- 工程估算价：1200万元']);
+    expect(lines.slice(2)).toEqual(['- 工程估算价：1200万元']);
+    expect(lines[1]).toContain('逐对象写实铁律');
   });
 });
 

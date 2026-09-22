@@ -246,6 +246,10 @@ export interface FactSourceRef {
 export interface DocumentFact {
   key: string;
   value: string;
+  /** 4.55.25 绑定层：该值归属的**工程对象**（部位/条目名/构件/层位；项目级属性为"项目主体"）。
+   * 抽取期从原文共现锚点取得（见 factsModel 的 objekt 提取），**不允许事后推断补绑**；
+   * 取不到则为 undefined——该值不参与写作注入的"对象化"渲染，也不作为可改写权威。 */
+  objectName?: string;
   sourceFile: string;
   roleId: string;
   processingType?: string;

@@ -24,8 +24,6 @@ export const ORG_CHART_HIERARCHY = {
   third: ['土建施工班组', '钢结构安装班组', '安装专业班组', '装饰装修班组', '试验与检测组'],
 } as const;
 
-const DASH = '—';
-
 /** 各图类替代表的表头（单源：表构造与「图类要求是否已以表落实」的覆盖率判定共用） */
 export const FIGURE_TABLE_HEADERS = {
   schedule: ['工序', '持续天数', '起止天序', '线路性质', '依据'],
@@ -43,10 +41,22 @@ export function figureTableHeaderRow(figureName: string): string | undefined {
   return undefined;
 }
 
-function tableLines(header: string[], rows: string[][]): string[] {
+/**
+ * 表行构造（4.55.25 用户口径）：**无数据的行不出，无数据的表不出**。
+ * · 任一单元格为空/占位（—、/、待定、无数据…）→ **该行整行丢弃**（不用「—」搪塞）
+ * · 有效数据行为 0 → 返回 undefined（该表不出现，宁可少一张表，不出一张空话表）
+ */
+const PLACEHOLDER_CELL_RE = /^(?:—+|--+|-|\/|待定|待补充|待确认|待查|暂无|无数据|无|若干|N\/A|n\/a|略)$/u;
+
+function tableLines(header: string[], rows: string[][]): string[] | undefined {
+  const usable = rows.filter(row => row.length === header.length && row.every(cell => {
+    const text = String(cell ?? '').trim();
+    return text.length > 0 && !PLACEHOLDER_CELL_RE.test(text);
+  }));
+  if (usable.length === 0) return undefined;
   const head = `| ${header.join(' | ')} |`;
   const divider = `| ${header.map(() => '---').join(' | ')} |`;
-  return [head, divider, ...rows.map(row => `| ${row.join(' | ')} |`)];
+  return [head, divider, ...usable.map(row => `| ${row.join(' | ')} |`)];
 }
 
 /** 进度类图（横道图/网络图/总进度计划图）：工序/持续天数/起止天序/线路性质/依据 */
@@ -55,10 +65,10 @@ function scheduleTableLines(data: BlueprintData): string[] | undefined {
   if (items.length === 0) return undefined;
   const rows = items.map(item => [
     item.label,
-    Number.isFinite(item.duration) ? String(item.duration) : DASH,
+    Number.isFinite(item.duration) ? String(item.duration) : '',
     `第${item.startDay}～${item.endDay}天`,
     item.critical ? '关键线路' : '非关键线路',
-    item.basis || DASH,
+    item.basis || '',
   ]);
   return tableLines([...FIGURE_TABLE_HEADERS.schedule], rows);
 }
@@ -69,10 +79,10 @@ function tempLandTableLines(data: BlueprintData): string[] | undefined {
   if (items.length === 0) return undefined;
   const rows = items.map(item => [
     item.purpose,
-    typeof item.area === 'number' && Number.isFinite(item.area) ? String(item.area) : DASH,
-    item.location || DASH,
-    item.duration || DASH,
-    item.note || DASH,
+    typeof item.area === 'number' && Number.isFinite(item.area) ? String(item.area) : '',
+    item.location || '',
+    item.duration || '',
+    item.note || '',
   ]);
   return tableLines([...FIGURE_TABLE_HEADERS.tempLand], rows);
 }
@@ -83,7 +93,7 @@ function tempLandTableLines(data: BlueprintData): string[] | undefined {
  * 与「图类一律数据化」口径冲突。现改用机构图的**同一份层级数据**（ORG_CHART_HIERARCHY 单源）
  * 输出「层级／岗位班组／直接上级」表——只陈述层级归属，不编造职责与人数。
  */
-function orgChartTableLines(): string[] {
+function orgChartTableLines(): string[] | undefined {
   const rows: string[][] = [
     ['第一层', ORG_CHART_HIERARCHY.top, '公司管理层'],
     ...ORG_CHART_HIERARCHY.second.map(title => ['第二层', title, ORG_CHART_HIERARCHY.top]),

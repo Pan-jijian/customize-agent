@@ -149,7 +149,12 @@ export function renderChapterParameterLines(
   let total = 0;
   for (const fact of selected) {
     const field = fact.fieldName && fact.fieldName !== fact.key ? `（${fact.fieldName}）` : '';
-    const line = `- ${fact.key}${field}：${String(fact.value).slice(0, 80)}`;
+    // 4.55.25 绑定层：有对象锚点的值以「对象｜属性=值」形态注入——写手据此把值写到**该对象**处，
+    // 不得跨对象借用（多对象多值并列合规）；无对象锚点的保持原形态（不阻断既有链路）
+    const object = String(fact.objectName || '').trim();
+    const line = object
+      ? `- ${object}｜${fact.key}${field}=${String(fact.value).slice(0, 80)}`
+      : `- ${fact.key}${field}：${String(fact.value).slice(0, 80)}`;
     if (total + line.length + 1 > maxChars) break;
     lines.push(line);
     total += line.length + 1;
@@ -158,6 +163,7 @@ export function renderChapterParameterLines(
   if (lines.length === 0) return [];
   return [
     `【本章可靠参数清单（资料事实链参数索引：${selected.length} 项与本章相关的规格/参数/数量/时间/比例/标准编号，须逐项在正文对应位置自然写入，保持原值原形态（数字、单位、编号中的连字符与年份不得改写、拆分或省略）；商务金额/单价/税率/预留金类数据一律不得写入正文）】`,
+    '【逐对象写实铁律】带对象前缀的条目（「对象｜属性=值」）必须写到**该对象**的正文处——**禁止把某对象的参数写到另一对象**；同一属性在不同对象下各有其值（如「基础垫层 100mm」与「地坪垫层 300mm」并列）是**正确**的，不得"统一"或只取其一。',
     ...lines,
     // 上限治理：超预算的条目**降级为仅列名**（原实现直接 break 掉、在提示词中彻底消失）。
     // 名字+值是落位义务的最小载体，压缩详略可以，丢弃义务不行。
