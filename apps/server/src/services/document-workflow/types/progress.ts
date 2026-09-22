@@ -19,7 +19,10 @@ export interface DocumentExecutionStage {
   type: 'role_binding' | 'knowledge_retrieval' | 'file_understanding' | 'fact_extraction' | 'chapter_generation' | 'llm_review' | 'validation' | 'reference';
   roleId: string;
   promptId?: string;
-  status: 'running' | 'success' | 'skipped' | 'failed';
+  /** 4.55.27：`partial` = 修复轮**有净下降但未清零**（收敛中，非异常）；
+   *  `failed` 收敛为**零净下降 / 回滚 / 定位失败**（真异常，需排查）。
+   *  原实现把两者都标 failed，造成「修复节点第一次就异常」的观感，并把真正的零进展淹没。 */
+  status: 'running' | 'success' | 'skipped' | 'failed' | 'partial';
   message?: string;
   details?: string[];
   progress?: { current: number; total: number; label?: string };

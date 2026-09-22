@@ -11,6 +11,7 @@
  * 不造数据）→ 复检该章归属术语缺失数 + 汉字数不明显减少（防删除式修复），变差即回滚。
  * 位置在 basis-regulations-repair 之后（同一编制依据段族系的链尾收口点）、toc-consistency 之前。
  */
+import { repairOutcomeReason, repairOutcomeStatus } from './repairOutcome';
 import { plannedAutoSpecGateIssues } from '../../qualityValidation';
 import { displayStage, upsertProgressStage } from '../../progress';
 import { repairChapterByQuality, repairPatchGuard } from '../../rolePipeline';
@@ -155,7 +156,7 @@ export async function stageAutoSpecGateRepair(session: FinalizeSession): Promise
     else if (chapterRepaired) message = `配置必要内容缺失补写部分生效：${chapter.title}（已执行 ${rounds} 轮，残留 ${residualTerms.length} 项缺口，由终门禁照常复核）`;
     else if (anyRollback) message = `配置必要内容缺失补写已回滚：${chapter.title}（修复复检未通过，保留修复前正文；残留 ${residualTerms.length} 项缺口，由终门禁照常复核）`;
     else message = `配置必要内容缺失补写未生效：${chapter.title}（模型未产生有效修改；残留 ${residualTerms.length} 项缺口，由终门禁照常复核）`;
-    const completedStage = displayStage({ type: 'llm_review', roleId, status: residualTerms.length === 0 ? 'success' : 'failed', message, details: residualTerms.length > 0 ? residualTerms.map(term => `${MISSING_REQUIRED_TEXT_PREFIX}${term}`) : ['复检：本章配置必要术语覆盖检测通过'] }, { subtitle: '评审后兜底' });
+    const completedStage = displayStage({ type: 'llm_review', roleId, status: repairOutcomeStatus({ after: residualTerms.length, repaired: chapterRepaired }), message, details: residualTerms.length > 0 ? residualTerms.map(term => `${MISSING_REQUIRED_TEXT_PREFIX}${term}`) : ['复检：本章配置必要术语覆盖检测通过'] }, { subtitle: '评审后兜底' });
     upsertProgressStage(session.progressStages, completedStage);
     upsertProgressStage(session.finalGateRepairStages, completedStage);
     session.emitProgress(session.finalChapterDrafts, session.progressStages);

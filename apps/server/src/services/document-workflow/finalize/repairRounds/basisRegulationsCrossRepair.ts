@@ -19,6 +19,7 @@
  * qualityValidation.basisRegulationSectionRanges（与检测端排除区段同源）。编制依据区段位于
  * 章外结构（章级无区段）时确定性插入/移除无定向目标，显性记录交终门禁，不猜测改写。
  */
+import { repairOutcomeReason, repairOutcomeStatus } from './repairOutcome';
 import { basisRegulationSectionRanges, extractBasisRegulationSection } from '../../qualityValidation';
 import {
   auditBasisRegulationsCross,
@@ -554,7 +555,7 @@ export async function stageBasisRegulationsCrossRepair(session: FinalizeSession)
     session.generationDiagnostics.llm.lastInfo = `编制依据双向对账收口：${changed.length} 章变更因复检未通过整体回滚（缺口 ${initialGapCount} 条残留，由终门禁照常复核）`;
     return;
   }
-  emitRecord(displayStage({ type: 'validation', roleId: 'basis-regulations-cross-repair', status: endGapCount === 0 ? 'success' : 'failed', message: `编制依据双向对账收口完成：补入 ${insertedCount} 条、应用 ${applicationChapters} 章（解决 ${applicationResolved} 条）、移除 ${removedCount} 条；缺口 ${initialGapCount}→${endGapCount}${endGapCount > 0 ? '（残留由终门禁照常复核）' : '（双向清零）'}` }, { subtitle: '评审后兜底' }));
+  emitRecord(displayStage({ type: 'validation', roleId: 'basis-regulations-cross-repair', status: repairOutcomeStatus({ before: initialGapCount, after: endGapCount }), message: `编制依据双向对账收口完成：补入 ${insertedCount} 条、应用 ${applicationChapters} 章（解决 ${applicationResolved} 条）、移除 ${removedCount} 条；缺口 ${initialGapCount}→${endGapCount}${endGapCount > 0 ? '（残留由终门禁照常复核）' : '（双向清零）'}` }, { subtitle: '评审后兜底' }));
   session.generationDiagnostics.llm.lastInfo = `编制依据双向对账收口：引用未声明 ${entryAudit.usedNotDeclared.length}→${endAudit.usedNotDeclared.length}、声明未用 ${entryAudit.declaredNotUsed.length}→${endAudit.declaredNotUsed.length}（补入 ${insertedCount} 条、应用 ${applicationChapters} 章、移除 ${removedCount} 条；LLM 侧残留 ${applicationResidual} 条含超预算 ${overflowGapCount} 条）`;
 }
 

@@ -13,6 +13,7 @@
  * toc-consistency 之前。跨章抵消形态（章级全平衡但全文不平衡）无定向修复目标：
  * 显性记录交终门禁，不得猜测改写。
  */
+import { repairOutcomeReason, repairOutcomeStatus } from './repairOutcome';
 import { PAIRED_PUNCTUATION_SYMBOLS } from '../../structureIntegrityRules';
 import { displayStage, upsertProgressStage } from '../../progress';
 import { repairChapterByQuality, repairPatchGuard } from '../../rolePipeline';
@@ -131,7 +132,7 @@ export async function stageQuotationBalanceRepair(session: FinalizeSession): Pro
     else if (chapterRepaired) message = `引文成对性残缺修复部分生效：${chapter.title}（已执行 ${rounds} 轮，残留 ${residual} 对不配对，由终门禁照常复核）`;
     else if (anyRollback) message = `引文成对性残缺修复已回滚：${chapter.title}（修复复检未通过，保留修复前正文；残留 ${residual} 对不配对，由终门禁照常复核）`;
     else message = `引文成对性残缺修复未生效：${chapter.title}（模型未产生有效修改；残留 ${residual} 对不配对，由终门禁照常复核）`;
-    const completedStage = displayStage({ type: 'llm_review', roleId, status: residual === 0 ? 'success' : 'failed', message, details: [`残缺定位：${pendingDefectSummary(chapter.content)}`] }, { subtitle: '评审后兜底' });
+    const completedStage = displayStage({ type: 'llm_review', roleId, status: repairOutcomeStatus({ after: residual, repaired: chapterRepaired }), message, details: [`残缺定位：${pendingDefectSummary(chapter.content)}`] }, { subtitle: '评审后兜底' });
     upsertProgressStage(session.progressStages, completedStage);
     upsertProgressStage(session.finalGateRepairStages, completedStage);
     session.emitProgress(session.finalChapterDrafts, session.progressStages);

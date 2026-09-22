@@ -712,6 +712,7 @@
     "statusCompleted": "Completed",
     "statusSkipped": "Skipped",
     "statusFailed": "Failed",
+    "statusPartial": "Partial",
     "statusReview": "Needs Review",
     "statusAbnormal": "Abnormal",
     "statusIndexed": "Indexed",

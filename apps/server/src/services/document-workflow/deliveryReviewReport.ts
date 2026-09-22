@@ -78,6 +78,7 @@ const STAGE_STATUS_LABEL: Record<DocumentExecutionStage['status'], string> = {
   failed: '失败',
   skipped: '跳过',
   running: '进行中',
+  partial: '部分生效',
 };
 
 const MODE_LABEL: Record<NonNullable<DocumentQualityReport['mode']>, string> = {

@@ -34,6 +34,7 @@
  * provenance）按 provenance 精确过滤同轮消费——未落位项重算 → 责任章映射 → 逐章载荷定向补写
  *（逐项在正文最相关专业小节写入条目名称与工程量），修历史挂靠缺口：17 轮修复无一消费直坠终门禁。
  */
+import { repairOutcomeReason, repairOutcomeStatus } from './repairOutcome';
 import { displayStage, upsertProgressStage } from '../../progress';
 import { recordRepairActions, repairChapterByQuality, repairPatchGuard } from '../../rolePipeline';
 import { withPatchRollback } from '../../patchRollback';
@@ -765,7 +766,7 @@ export async function stageContentDepthRepair(session: FinalizeSession): Promise
       else if (chapterRepaired) message = `内容深度补写部分生效${cycleLabel}：${draftChapter.title}（残留轨迹 ${residualTrajectory.join('→')}，已执行 ${rounds} 轮；${residualNote}）`;
       else if (anyRollback) message = `内容深度补写已回滚${cycleLabel}：${draftChapter.title}（修复后缺口数未下降，保留修复前正文；${residualNote}）`;
       else message = `内容深度补写未生效${cycleLabel}：${draftChapter.title}（模型未产生有效修改；${residualNote}）`;
-      const completedStage = displayStage({ type: 'llm_review', roleId, status: finalResidual === 0 && chapterRepaired ? 'success' : 'failed', message, details: [...todos.map(todo => `缺陷：${todo.issue.message.slice(0, 90)}`), ...(finalResidual > 0 ? [`残留深度缺口量 ${finalResidual}`] : [])] }, { subtitle: '内容深度补写核验' });
+      const completedStage = displayStage({ type: 'llm_review', roleId, status: repairOutcomeStatus({ before: residualTrajectory[0], after: finalResidual, repaired: chapterRepaired }), message, details: [...todos.map(todo => `缺陷：${todo.issue.message.slice(0, 90)}`), ...(finalResidual > 0 ? [`残留深度缺口量 ${finalResidual}`] : [])] }, { subtitle: '内容深度补写核验' });
       upsertProgressStage(session.progressStages, completedStage);
       upsertProgressStage(session.finalGateRepairStages, completedStage);
       session.emitProgress(session.finalChapterDrafts, session.progressStages);

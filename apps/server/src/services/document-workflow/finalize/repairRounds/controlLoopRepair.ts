@@ -14,6 +14,7 @@
  * 位置在 content-depth-repair 之后（同族补写轮）、post-review-surface 之前（其复读剥离/
  * 格式清洗覆盖本轮补写引入的残留）。
  */
+import { repairOutcomeReason, repairOutcomeStatus } from './repairOutcome';
 import { displayStage, upsertProgressStage } from '../../progress';
 import { repairChapterByQuality, repairPatchGuard } from '../../rolePipeline';
 import { withPatchRollback } from '../../patchRollback';
@@ -145,7 +146,7 @@ export async function stageControlLoopRepair(session: FinalizeSession): Promise<
     else if (chapterRepaired) message = `闭环链补写部分生效：${draftChapter.title}（残留轨迹 ${residualTrajectory.join('→')}，已执行 ${rounds} 轮；${residualNote}）`;
     else if (anyRollback) message = `闭环链补写已回滚：${draftChapter.title}（修复后缺失数未下降或汉字大幅减少，保留修复前正文；${residualNote}）`;
     else message = `闭环链补写未生效：${draftChapter.title}（模型未产生有效修改；${residualNote}）`;
-    const completedStage = displayStage({ type: 'llm_review', roleId, status: finalResidual === 0 ? 'success' : 'failed', message, details: initialDeficits.map(deficit => `缺陷：${deficit.label}缺${deficit.missing.join('、')}`) }, { subtitle: '闭环链补写核验' });
+    const completedStage = displayStage({ type: 'llm_review', roleId, status: repairOutcomeStatus({ before: residualTrajectory[0], after: finalResidual, repaired: chapterRepaired }), message, details: initialDeficits.map(deficit => `缺陷：${deficit.label}缺${deficit.missing.join('、')}`) }, { subtitle: '闭环链补写核验' });
     upsertProgressStage(session.progressStages, completedStage);
     upsertProgressStage(session.finalGateRepairStages, completedStage);
     session.emitProgress(session.finalChapterDrafts, session.progressStages);

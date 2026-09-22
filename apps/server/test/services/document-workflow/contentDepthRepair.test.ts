@@ -190,6 +190,7 @@ describe('content-depth-repair 行为矩阵', () => {
     await stageContentDepthRepair(session);
     expect(session.finalChapterDrafts[1].content).toBe(RECAP_CHAPTER_CONTENT);
     const stage = stageOf(session.progressStages, 'agent-content-depth-repair-ch-2');
+    // 4.55.27 三档口径：残差有净下降但未清零 = partial（收敛中）
     expect(stage?.status).toBe('failed');
     expect(stage?.message).toContain('已回滚');
   });
@@ -203,6 +204,7 @@ describe('content-depth-repair 行为矩阵', () => {
     await stageContentDepthRepair(session);
     expect(session.rebuildFinalMarkdown).not.toHaveBeenCalled();
     const stage = stageOf(session.progressStages, 'agent-content-depth-repair-ch-2');
+    // 4.55.27 三档口径：残差有净下降但未清零 = partial（收敛中）
     expect(stage?.status).toBe('failed');
     expect(stage?.message).toContain('未生效');
   });
@@ -214,6 +216,7 @@ describe('content-depth-repair 行为矩阵', () => {
     await stageContentDepthRepair(session);
     expect(repairMock).not.toHaveBeenCalled();
     const stage = stageOf(session.progressStages, 'content-depth-repair');
+    // 4.55.27 三档口径：残差有净下降但未清零 = partial（收敛中）
     expect(stage?.status).toBe('failed');
     expect(stage?.message).toContain('无法定位');
   });
@@ -377,7 +380,8 @@ describe('professional-score 专业评分补写（D-T1 消费链）', () => {
     // 残差 8→4（靶线 10：2/12→6/12）真实下降但未清零：预算上限 1 轮，不再追加第 2 轮（与六类 blocker 的每章 2 轮相互独立）
     expect(repairMock).toHaveBeenCalledTimes(1);
     const stage = stageOf(session.progressStages, 'agent-content-depth-repair-ch-res');
-    expect(stage?.status).toBe('failed');
+    // 4.55.27 三档口径：残差有净下降但未清零 = partial（收敛中）
+    expect(stage?.status).toBe('partial');
     expect(stage?.message).toContain('部分生效');
     expect(stage?.message).toContain('8→4');
   });
@@ -497,6 +501,7 @@ describe('清单落位补写（C3-5 第八类消费：boq-placement）', () => {
     await stageContentDepthRepair(session);
     expect(repairMock).not.toHaveBeenCalled();
     const stage = stageOf(session.progressStages, 'content-depth-repair');
+    // 4.55.27 三档口径：残差有净下降但未清零 = partial（收敛中）
     expect(stage?.status).toBe('failed');
     expect(stage?.message).toContain('无法定位');
   });
@@ -516,6 +521,7 @@ describe('清单落位补写（C3-5 第八类消费：boq-placement）', () => {
     expect(repairMock).toHaveBeenCalledTimes(1);
     expect(session.finalChapterDrafts[0].content).toBe(CRITICAL_SHORT);
     const stage = stageOf(session.progressStages, 'agent-content-depth-repair-ch-1');
+    // 4.55.27 三档口径：残差有净下降但未清零 = partial（收敛中）
     expect(stage?.status).toBe('failed');
     expect(stage?.message).toContain('已回滚');
   });
@@ -593,7 +599,8 @@ describe('图纸落位补写（C3-6-4 第九类消费：drawing-reference）', (
     await stageContentDepthRepair(session);
     expect(repairMock).toHaveBeenCalledTimes(1);
     const stage = stageOf(session.progressStages, 'agent-content-depth-repair-ch-1');
-    expect(stage?.status).toBe('failed');
+    // 4.55.27 三档口径：残差有净下降但未清零 = partial（收敛中）
+    expect(stage?.status).toBe('partial');
     expect(stage?.message).toContain('部分生效');
     expect(stage?.message).toContain('2→1');
   });
@@ -641,6 +648,7 @@ describe('图纸落位补写（C3-6-4 第九类消费：drawing-reference）', (
     expect(call.promptTexts).toContain('s13图纸.pdf');
     expect(call.promptTexts).not.toContain('s13图纸.pdf［参考事实行');
     const stage = stageOf(session.progressStages, 'agent-content-depth-repair-ch-1');
+    // 4.55.27 三档口径：残差有净下降但未清零 = partial（收敛中）
     expect(stage?.status).toBe('failed');
     expect(stage?.message).toContain('未生效');
   });
@@ -674,6 +682,7 @@ describe('图纸落位补写（C3-6-4 第九类消费：drawing-reference）', (
     await stageContentDepthRepair(session);
     expect(repairMock).not.toHaveBeenCalled();
     const stage = stageOf(session.progressStages, 'content-depth-repair');
+    // 4.55.27 三档口径：残差有净下降但未清零 = partial（收敛中）
     expect(stage?.status).toBe('failed');
     expect(stage?.message).toContain('无法定位');
   });

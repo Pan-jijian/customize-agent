@@ -11,6 +11,7 @@
  * rebuild 后以全文检测复核（残留显性记录交终门禁，不猜测改写）。
  * 位置在 basis-regulations-repair 之后（同族链尾收口）、auto-spec-gate-repair 之前。
  */
+import { repairOutcomeReason, repairOutcomeStatus } from './repairOutcome';
 import { dangerousApplicabilityGaps, extractDangerZone, uncoveredDangerousItems } from '../../dangerousApplicability';
 import { displayStage, upsertProgressStage } from '../../progress';
 import { repairChapterByQuality, repairPatchGuard } from '../../rolePipeline';
@@ -114,7 +115,7 @@ export async function stageDangerousApplicabilityRepair(session: FinalizeSession
     else if (chapterRepaired) message = `危大辨识清单漏项修复部分生效：${chapter.title}（已执行 ${rounds} 轮，残留 ${residualItems.join('、')} 未覆盖，由终门禁照常复核）`;
     else if (anyRollback) message = `危大辨识清单漏项修复已回滚：${chapter.title}（修复复检未通过，保留修复前正文；残留 ${residualItems.join('、')} 未覆盖，由终门禁照常复核）`;
     else message = `危大辨识清单漏项修复未生效：${chapter.title}（模型未产生有效修改；残留 ${residualItems.join('、')} 未覆盖，由终门禁照常复核）`;
-    const completedStage = displayStage({ type: 'llm_review', roleId, status: residualItems.length === 0 ? 'success' : 'failed', message, details: residualItems.length > 0 ? residualItems.map(item => `遗漏适用项：${item}`) : ['复检：危大工程辨识清单适用项覆盖检测通过'] }, { subtitle: '评审后兜底' });
+    const completedStage = displayStage({ type: 'llm_review', roleId, status: repairOutcomeStatus({ after: residualItems.length, repaired: chapterRepaired }), message, details: residualItems.length > 0 ? residualItems.map(item => `遗漏适用项：${item}`) : ['复检：危大工程辨识清单适用项覆盖检测通过'] }, { subtitle: '评审后兜底' });
     upsertProgressStage(session.progressStages, completedStage);
     upsertProgressStage(session.finalGateRepairStages, completedStage);
     session.emitProgress(session.finalChapterDrafts, session.progressStages);

@@ -163,6 +163,7 @@ describe('dangerous-applicability-repair 行为矩阵', () => {
     expect(repairMock).toHaveBeenCalledTimes(1);
     expect(session.finalChapterDrafts[0].content).toBe(original);
     const stage = stageOf(session.progressStages, 'agent-dangerous-applicability-repair-ch6');
+    // 4.55.27 三档口径：残差有净下降但未清零 = partial（收敛中），failed 专指零净下降/回滚
     expect(stage?.status).toBe('failed');
     expect(stage?.message).toContain('已回滚');
   });
@@ -177,7 +178,7 @@ describe('dangerous-applicability-repair 行为矩阵', () => {
     await stageDangerousApplicabilityRepair(session);
     expect(repairMock).toHaveBeenCalledTimes(2);
     const stage = stageOf(session.progressStages, 'agent-dangerous-applicability-repair-ch6');
-    expect(stage?.status).toBe('failed');
+    expect(stage?.status).toBe('partial');
     expect(stage?.message).toContain('部分生效');
     expect(stage?.message).toContain('拆除工程');
     expect(session.generationDiagnostics.llm.lastInfo).toContain('终态残留 1 项缺口');

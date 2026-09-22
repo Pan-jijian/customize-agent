@@ -11,6 +11,7 @@
  * 误报代价是修复轮把正确数值改坏，漏报代价是残留数值进交付；修复轮带 patchGuard 与回滚保护，
  * 白名单只豁免确定无疑的通用表述，工艺惯例数值不豁免（交 LLM 结合上下文复核）。
  */
+import { repairOutcomeReason, repairOutcomeStatus } from './repairOutcome';
 import { displayStage, upsertProgressStage } from '../../progress';
 import { repairChapterByQuality, repairPatchGuard } from '../../rolePipeline';
 import { withPatchRollback } from '../../patchRollback';
@@ -233,7 +234,7 @@ export async function stageNumericVerification(session: FinalizeSession): Promis
     if (chapterRepaired) repairedChapters += 1;
     const afterSuspects = collectSuspects(chapterContent).length;
     residualSuspects += afterSuspects;
-    const completedStage = displayStage({ type: 'llm_review', roleId: `agent-numeric-verification-${chapterId}`, status: afterSuspects === 0 ? 'success' : 'failed', message: afterSuspects === 0 ? `数值核对修复完成：${draftChapter.title}（${suspects.length} 处疑似数值已处理，残留轨迹 ${residualTrajectory.join('→')}）` : chapterRepaired ? `数值核对修复部分生效：${draftChapter.title}（疑似数值残留轨迹 ${residualTrajectory.join('→')}，已执行 ${rounds} 轮定向修复（每章最多 ${MAX_NUMERIC_REPAIR_ROUNDS} 轮）；残留项以 warning 记录，不阻断交付）` : anyRollback ? `数值核对修复已回滚：${draftChapter.title}（修复后疑似数值增多，保留修复前正文；残留 ${afterSuspects} 处以 warning 记录，不阻断交付）` : `数值核对修复未生效：${draftChapter.title}（模型未产生有效修改；残留 ${afterSuspects} 处以 warning 记录，不阻断交付）`, details: [...suspects.map(item => `疑似：${item.sentence}`), afterSuspects > 0 ? `已执行 ${rounds} 轮定向修复，残留项以 warning 记录，不阻断交付` : ''] }, { subtitle: '数值确定性核对' });
+    const completedStage = displayStage({ type: 'llm_review', roleId: `agent-numeric-verification-${chapterId}`, status: repairOutcomeStatus({ before: suspects.length, after: afterSuspects, repaired: chapterRepaired, rolledBack: anyRollback }), message: afterSuspects === 0 ? `数值核对修复完成：${draftChapter.title}（${suspects.length} 处疑似数值已处理，残留轨迹 ${residualTrajectory.join('→')}）` : chapterRepaired ? `数值核对修复部分生效：${draftChapter.title}（疑似数值残留轨迹 ${residualTrajectory.join('→')}，已执行 ${rounds} 轮定向修复（每章最多 ${MAX_NUMERIC_REPAIR_ROUNDS} 轮）；残留项以 warning 记录，不阻断交付）` : anyRollback ? `数值核对修复已回滚：${draftChapter.title}（修复后疑似数值增多，保留修复前正文；残留 ${afterSuspects} 处以 warning 记录，不阻断交付）` : `数值核对修复未生效：${draftChapter.title}（模型未产生有效修改；残留 ${afterSuspects} 处以 warning 记录，不阻断交付）`, details: [...suspects.map(item => `疑似：${item.sentence}`), afterSuspects > 0 ? `已执行 ${rounds} 轮定向修复，残留项以 warning 记录，不阻断交付` : ''] }, { subtitle: '数值确定性核对' });
     upsertProgressStage(session.progressStages, completedStage);
     upsertProgressStage(session.finalGateRepairStages, completedStage);
     session.emitProgress(session.finalChapterDrafts, session.progressStages);

@@ -9,6 +9,7 @@
  * - 任一落地：重建终稿 + 重算校验组（终检按最新成稿复核）。
  * 产品级通用：判据仅凭表格结构与数值绑定，无项目/表名硬编码。
  */
+import { repairOutcomeReason, repairOutcomeStatus } from './repairOutcome';
 import { displayStage, upsertProgressStage } from '../../progress';
 import { repairChapterByQuality, repairPatchGuard } from '../../rolePipeline';
 import { withPatchRollback } from '../../patchRollback';
@@ -108,7 +109,7 @@ export async function stageTableArithmeticRepair(session: FinalizeSession): Prom
     if (chapterRepaired) repairedChapters += 1;
     const afterFindings = countTableArithmeticFindings(chapterContent);
     residualFindings += afterFindings;
-    const completedStage = displayStage({ type: 'llm_review', roleId: `agent-table-arithmetic-${chapterId}`, status: afterFindings === 0 ? 'success' : 'failed', message: afterFindings === 0 ? `表内算术自洽修复完成：${draftChapter.title}（残留轨迹 ${residualTrajectory.join('→')}）` : chapterRepaired ? `表内算术自洽修复部分生效：${draftChapter.title}（不自洽处数残留轨迹 ${residualTrajectory.join('→')}，已执行 ${rounds} 轮定向修复（每章最多 ${MAX_TABLE_ARITHMETIC_REPAIR_ROUNDS} 轮）；残留由终检照常复核）` : anyRollback ? `表内算术自洽修复已回滚：${draftChapter.title}（修复后不自洽处数未下降，保留修复前正文；残留 ${afterFindings} 处由终检照常复核）` : `表内算术自洽修复未生效：${draftChapter.title}（模型未产生有效修改；残留 ${afterFindings} 处由终检照常复核）`, details: [...initialIssues.map(issue => issue.message), afterFindings > 0 ? `已执行 ${rounds} 轮定向修复，残留由终检照常复核` : ''] }, { subtitle: '表内算术自洽' });
+    const completedStage = displayStage({ type: 'llm_review', roleId: `agent-table-arithmetic-${chapterId}`, status: repairOutcomeStatus({ before: initialIssues.length, after: afterFindings, repaired: chapterRepaired, rolledBack: anyRollback }), message: afterFindings === 0 ? `表内算术自洽修复完成：${draftChapter.title}（残留轨迹 ${residualTrajectory.join('→')}）` : chapterRepaired ? `表内算术自洽修复部分生效：${draftChapter.title}（不自洽处数残留轨迹 ${residualTrajectory.join('→')}，已执行 ${rounds} 轮定向修复（每章最多 ${MAX_TABLE_ARITHMETIC_REPAIR_ROUNDS} 轮）；残留由终检照常复核）` : anyRollback ? `表内算术自洽修复已回滚：${draftChapter.title}（修复后不自洽处数未下降，保留修复前正文；残留 ${afterFindings} 处由终检照常复核）` : `表内算术自洽修复未生效：${draftChapter.title}（模型未产生有效修改；残留 ${afterFindings} 处由终检照常复核）`, details: [...initialIssues.map(issue => issue.message), afterFindings > 0 ? `已执行 ${rounds} 轮定向修复，残留由终检照常复核` : ''] }, { subtitle: '表内算术自洽' });
     upsertProgressStage(session.progressStages, completedStage);
     upsertProgressStage(session.finalGateRepairStages, completedStage);
     session.emitProgress(session.finalChapterDrafts, session.progressStages);

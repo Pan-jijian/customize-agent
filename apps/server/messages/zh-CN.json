@@ -712,6 +712,7 @@
     "statusCompleted": "完成",
     "statusSkipped": "已跳过",
     "statusFailed": "失败",
+    "statusPartial": "部分生效",
     "statusReview": "需复核",
     "statusAbnormal": "异常",
     "statusIndexed": "已索引",

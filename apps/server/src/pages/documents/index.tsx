@@ -113,7 +113,7 @@ const STAGE_ROLE_NAMES: Record<string, string> = {
 };
 /** 流程步骤/执行阶段/校验级别的状态枚举 → i18n 键：内部状态码不得直出界面 */
 const FLOW_STEP_STATUS_TEXT: Record<FlowStepStatus, string> = { wait: 'common.statusWaiting', process: 'common.statusRunning', finish: 'common.statusCompleted', warning: 'common.statusReview', error: 'common.statusAbnormal' };
-const EXECUTION_STAGE_STATUS_TEXT: Record<GeneratedDocumentDraft['executionStages'][number]['status'], string> = { running: 'common.statusRunning', success: 'common.statusCompleted', skipped: 'common.statusSkipped', failed: 'common.statusFailed' };
+const EXECUTION_STAGE_STATUS_TEXT: Record<GeneratedDocumentDraft['executionStages'][number]['status'], string> = { running: 'common.statusRunning', success: 'common.statusCompleted', skipped: 'common.statusSkipped', failed: 'common.statusFailed', partial: 'common.statusPartial' };
 const VALIDATION_LEVEL_TEXT: Record<GeneratedDocumentDraft['validationIssues'][number]['level'], string> = { error: 'common.levelError', warning: 'common.levelWarning', info: 'common.levelInfo' };
 
 export default function DocumentsPage() {
@@ -352,7 +352,8 @@ export default function DocumentsPage() {
     const first = step.subSteps.findIndex(s => s.status === 'wait');
     return step.subSteps.map((s, i) => i < first || first === -1 ? { ...s, status: 'finish' as const } : i === first ? { ...s, status: 'process' as const } : s);
   };
-  const stageToFlowStatus = (status: GeneratedDocumentDraft['executionStages'][number]['status']): FlowStepStatus => status === 'failed' ? 'error' : status === 'running' ? 'process' : 'finish';
+  // 4.55.27：partial（有净下降未清零）显示为 warning 黄灯，与 failed（真异常）区分
+  const stageToFlowStatus = (status: GeneratedDocumentDraft['executionStages'][number]['status']): FlowStepStatus => status === 'failed' ? 'error' : status === 'partial' ? 'warning' : status === 'running' ? 'process' : 'finish';
   const stageDetailsToSubSteps = (stage: GeneratedDocumentDraft['executionStages'][number], status: FlowStepStatus, index: number): FlowSubStep[] => {
     const details = Array.isArray(stage.details) ? stage.details.filter(Boolean) : [];
     const progressText = stage.progress ? `${stage.progress.label || '进度'}：${stage.progress.current}/${stage.progress.total}` : '';

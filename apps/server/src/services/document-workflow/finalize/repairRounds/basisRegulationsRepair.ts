@@ -11,6 +11,7 @@
  * toc-consistency 之前。章级均通过而全文报出（编制依据标题位于章外结构）时显性记录交终门禁，
  * 不得猜测改写。
  */
+import { repairOutcomeReason, repairOutcomeStatus } from './repairOutcome';
 import { basisRegulationsCoverageIssues } from '../../qualityValidation';
 import { REGULATION_CODE_RE } from '../../basisRegulationsCross';
 import { displayStage, upsertProgressStage } from '../../progress';
@@ -131,7 +132,7 @@ export async function stageBasisRegulationsRepair(session: FinalizeSession): Pro
     else if (chapterRepaired) message = `编制依据法规漏列修复部分生效：${chapter.title}（已执行 ${rounds} 轮，残留 ${residualIssues.length} 类缺口，由终门禁照常复核）`;
     else if (anyRollback) message = `编制依据法规漏列修复已回滚：${chapter.title}（修复复检未通过，保留修复前正文；残留 ${residualIssues.length} 类缺口，由终门禁照常复核）`;
     else message = `编制依据法规漏列修复未生效：${chapter.title}（模型未产生有效修改；残留 ${residualIssues.length} 类缺口，由终门禁照常复核）`;
-    const completedStage = displayStage({ type: 'llm_review', roleId, status: residualIssues.length === 0 ? 'success' : 'failed', message, details: residualIssues.length > 0 ? residualIssues.map(issue => issue.message) : ['复检：编制依据小节法规/规范覆盖检测通过'] }, { subtitle: '评审后兜底' });
+    const completedStage = displayStage({ type: 'llm_review', roleId, status: repairOutcomeStatus({ after: residualIssues.length, repaired: chapterRepaired }), message, details: residualIssues.length > 0 ? residualIssues.map(issue => issue.message) : ['复检：编制依据小节法规/规范覆盖检测通过'] }, { subtitle: '评审后兜底' });
     upsertProgressStage(session.progressStages, completedStage);
     upsertProgressStage(session.finalGateRepairStages, completedStage);
     session.emitProgress(session.finalChapterDrafts, session.progressStages);
