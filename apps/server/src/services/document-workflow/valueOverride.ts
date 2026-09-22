@@ -194,3 +194,55 @@ export function applyOverridesToText(text: string, overrides: ValueOverride[]): 
   }
   return { text: result, applied };
 }
+
+/** 带标签的权威值（4.55.20 实测：答疑「最高投标限价现调整为:172460314.52元」——
+ * 金额挂在泛标签「精确参数」下无法归属，但**原文句子**含口径标签，可确定性归属到合同金额） */
+export interface LabeledAuthorityValue {
+  attribute: '合同金额' | '计划工期' | '开工日期';
+  value: string;
+  source: string;
+  /** 该值所在句含「作废/以本次答疑附件为准」类**资料作废声明**时标记（被作废来源的旧值应让位） */
+  supersedesPriorMaterials: boolean;
+}
+
+const LABELED_VALUE_RULES: Array<{ attribute: LabeledAuthorityValue['attribute']; re: RegExp }> = [
+  // 口径标签（最高投标限价/招标控制价/合同估算价…）后 16 字内的金额即该口径的权威值
+  { attribute: '合同金额', re: /(?:最高投标限价|招标控制价|合同估算价(?:格)?|工程估算价|投标限价)[^。；\n]{0,16}?(?:现)?(?:调整)?为?\s*[:：]?\s*([\d,]+(?:\.\d+)?)\s*(亿元|万元|元)/u },
+  { attribute: '计划工期', re: /(?:计划工期|合同工期|总工期)[^。；\n]{0,16}?([\d,]+(?:\.\d+)?)\s*个?\s*日历天/u },
+  { attribute: '开工日期', re: /(?:计划)?开工日期[^。；\n]{0,8}?[:：]?\s*(20\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日)/u },
+];
+/** 变更连接语（带标签值抽取复用）：命中时取连接语后的值为生效值（同句其余数值为旧口径） */
+const LABELED_CHANGE_RE = new RegExp(`${CHANGE_CONNECTORS}\\s*[:：]?\\s*(\\d{1,4})\\s*个?\\s*日历天`, 'u');
+
+/** 从资料文本抽取「带口径标签的权威值」（金额/工期/开工日期），供真值层作为候选并入裁决 */
+export function extractLabeledAuthorityValues(sources: Array<{ text: string; source: string }>): LabeledAuthorityValue[] {
+  const out: LabeledAuthorityValue[] = [];
+  const MATERIAL_VOID_RE = /作废|以本次(?:招标)?答疑附件(?:中材料)?为准|以澄清(?:文件)?为准/u;
+  for (const item of sources) {
+    const text = String(item.text || '');
+    if (!text) continue;
+    for (const sentence of text.split(/[。；;\n]/u)) {
+      if (sentence.length < 6) continue;
+      const supersedesPriorMaterials = MATERIAL_VOID_RE.test(sentence);
+      for (const rule of LABELED_VALUE_RULES) {
+        const match = rule.re.exec(sentence);
+        if (!match) continue;
+        const raw = match[1]?.replace(/,/gu, '') || '';
+        if (!raw) continue;
+        // 变更连接语优先：同句含「现变更修改为:330日历天」时取**变更后**值（实测：原实现取首个数值=365）
+        if (rule.attribute === '计划工期') {
+          const changed = LABELED_CHANGE_RE.exec(sentence)?.[1];
+          if (changed) {
+            out.push({ attribute: '计划工期', value: `${changed}日历天`, source: item.source, supersedesPriorMaterials });
+            continue;
+          }
+          out.push({ attribute: '计划工期', value: `${raw}日历天`, source: item.source, supersedesPriorMaterials });
+          continue;
+        }
+        const value = rule.attribute === '合同金额' ? `${raw}${match[2] || ''}` : (match[1] || '').trim();
+        out.push({ attribute: rule.attribute, value, source: item.source, supersedesPriorMaterials });
+      }
+    }
+  }
+  return out;
+}

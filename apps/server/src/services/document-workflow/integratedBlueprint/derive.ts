@@ -8,7 +8,7 @@ import type { BillOfQuantitiesResult, BoqEntry } from '../billOfQuantitiesParser
 import type { DocumentEvidence, DocumentFact } from '../types';
 import { buildBlueprintDecisionLock } from './decisionLock';
 import { buildAuthoritativeValues } from '../authoritativeValues';
-import { collapseOverrideChains, extractValueOverrides } from '../valueOverride';
+import { collapseOverrideChains, extractLabeledAuthorityValues, extractValueOverrides } from '../valueOverride';
 import { deriveQuantitiesFromBoq, deriveSpecAuthoritiesFromBoq, extractBasisRegulations, extractContractFromFacts, extractLocationFromFacts, extractRedLineFacts, extractVillageCount } from './parse';
 import { BLUEPRINT_AMOUNT_RULE } from './types';
 import type { BlueprintBuildDiagnostics, BlueprintData, BlueprintDeployment, BlueprintDifficulty, BlueprintEarthworkBalance, BlueprintEquipmentItem, BlueprintInspectionBatch, BlueprintInstrumentItem, BlueprintLabor, BlueprintMaterialPlanItem, BlueprintMilestone, BlueprintScheduleItem, BlueprintTempLandItem, BlueprintTempUtilities } from './types';
@@ -429,12 +429,15 @@ export function buildBlueprintData(input: {
   // 4.55.19 真值层（读侧单点真值）：蓝图 contract 不再自行解析文本口径——先裁决再消费。
   // 实测缺陷：招标 365 / 答疑澄清 330 时，蓝图按 365 推导里程碑与进度计划（起止天序排到第 348 天），
   // 而正文按 330 写 → 同文档两套工期。
+  const truthSources = [
+    ...(input.evidence || []).map(item => ({ text: String(item.content || ''), source: `${item.filePath || ''} ${item.sectionTitle || ''}` })),
+    ...(input.facts || []).map(fact => ({ text: String(fact.value ?? ''), source: String(fact.sourceFile || '') })),
+  ];
   const truthAudit = buildAuthoritativeValues({
     facts: (input.facts || []).map(fact => ({ key: fact.key, label: fact.fieldName, value: fact.value, sourceFile: fact.sourceFile })),
-    overrides: collapseOverrideChains(extractValueOverrides([
-      ...(input.evidence || []).map(item => ({ text: String(item.content || ''), source: `${item.filePath || ''} ${item.sectionTitle || ''}` })),
-      ...(input.facts || []).map(fact => ({ text: String(fact.value ?? ''), source: String(fact.sourceFile || '') })),
-    ])),
+    overrides: collapseOverrideChains(extractValueOverrides(truthSources)),
+    // 带口径标签的权威值（答疑「最高投标限价现调整为:172460314.52元」→ 合同金额生效值）
+    labeledValues: extractLabeledAuthorityValues(truthSources),
   });
   const truth = new Map(truthAudit.resolved.map(item => [item.attribute, item.value]));
   const contract = extractContractFromFacts(input.basicFacts || '', boq, {

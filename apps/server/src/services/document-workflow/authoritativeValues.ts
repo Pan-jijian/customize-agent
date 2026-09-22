@@ -66,7 +66,9 @@ function sourceOrder(source: string): number {
   const dates = [...String(source || '').matchAll(/(20\d{2})[.\-年](\d{1,2})[.\-月](\d{1,2})/g)]
     .map(match => Number(match[1]) * 10000 + Number(match[2]) * 100 + Number(match[3]));
   if (dates.length > 0) return Math.max(...dates);
-  const index = /(\d{1,2})\s*(?:招标)?答疑文件/u.exec(source)?.[1];
+  // 序号形态扩围（实测：答疑/澄清/补遗/补疑 各有编号文件——「5招标答疑文件」「6招标澄清文件」，
+  // 原实现只认「答疑文件」→「6招标澄清文件」的发布时间指纹为 0，时序比较失效）
+  const index = /(\d{1,2})\s*(?:招标)?(?:答疑|澄清|补遗|补疑)(?:文件|公告|书)?/u.exec(source)?.[1];
   return index ? 1000 + Number(index) : 0;
 }
 
@@ -240,7 +242,10 @@ export function stripTrailingOcrGarbage(value: string): string {
 
 /** 属性名归一（同义/别名/编号族合并；实测 `duration` 与 `schedule_requirement` 两条工期值并存） */
 export function normalizeAttributeName(key: string, label?: string): string {
-  const raw = `${label || ''}${key || ''}`.replace(/\s+/gu, '');
+  // label 与 key 同值时只取一份（实测缺陷：属性名被拼成「安全合规要求安全合规要求」「测评合格编号测评合格编号」）
+  const labelText = String(label || '').trim();
+  const keyText = String(key || '').trim();
+  const raw = (labelText && labelText === keyText ? labelText : `${labelText}${keyText}`).replace(/\s+/gu, '');
   if (!raw) return '';
   // 具体字段优先（「计划开工日期」必须归到开工日期，不能被 /工期/ 抢先归成计划工期）
   if (/开工日期|开工时间|startDate/i.test(raw)) return '开工日期';
@@ -353,6 +358,8 @@ function arbitrate(candidates: TruthCandidate[], overrides: ValueOverride[]): { 
 export function buildAuthoritativeValues(input: {
   facts: Array<{ key?: string; label?: string; value?: unknown; sourceFile?: string; source?: string }>;
   overrides?: ValueOverride[];
+  /** 带口径标签的权威值（原文句式抽取：最高投标限价/计划工期/开工日期；作废声明者优先） */
+  labeledValues?: Array<{ attribute: string; value: string; source: string; supersedesPriorMaterials?: boolean }>;
   /** 主体推导（默认按来源文件归属，未知时 ''） */
   subjectOf?: (fact: { key?: string; label?: string; sourceFile?: string }) => string;
 }): AuthoritativeValueAudit {
@@ -412,17 +419,41 @@ export function buildAuthoritativeValues(input: {
     }
     pushCandidate(attribute, normalizedValue);
   });
+  // 带标签权威值并入候选：作废声明（「原资料全部作废，以本次答疑为准」）者给最高优先级+澄清标记
+  for (const labeled of input.labeledValues || []) {
+    const attribute = normalizeAttributeName(labeled.attribute, labeled.attribute);
+    if (!attribute) continue;
+    const cleaned = cleanValueForm(labeled.value);
+    if (rejectValueNoise(cleaned.value, { allowProse: true, includePoolNoise: false })) continue;
+    const list = byAttribute.get(attribute) || [];
+    list.push({
+      subject: '',
+      attribute,
+      value: extractValueAndShape(cleaned.value).value,
+      source: labeled.source,
+      priority: labeled.supersedesPriorMaterials ? 99 : sourcePriority(labeled.source),
+      order: sourceOrder(labeled.source) * 1000 + 500,
+      clarified: true,
+    });
+    byAttribute.set(attribute, list);
+  }
   const resolved: ResolvedValue[] = [];
   for (const [attribute, candidates] of byAttribute) {
     const result = arbitrate(candidates, overrides);
     if (!result) continue;
+    // 4.55.20：落选候选登记为被取代值（非文本形态）——同一口径的旧值必须被禁止再出现在正文
+    //（实测：1/5 号答疑各有最高投标限价，正文不得再用作废的 22303.66万元/172460314.52元）
+    const winnerShape = classifyValueShape(result.winner.value);
+    const losers = ['measure', 'money', 'date', 'standard'].includes(winnerShape)
+      ? candidates.map(candidate => candidate.value).filter(value => value !== result.winner.value)
+      : [];
     resolved.push({
       subject: result.winner.subject,
       attribute,
       value: result.winner.value,
       rule: result.rule,
       evidence: [{ source: result.winner.source, snippet: result.winner.value.slice(0, 120) }],
-      superseded: result.superseded.filter(value => value !== result.winner.value),
+      superseded: [...new Set([...result.superseded.filter(value => value !== result.winner.value), ...losers])],
       candidates,
     });
   }

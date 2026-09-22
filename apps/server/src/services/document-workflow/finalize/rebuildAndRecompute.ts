@@ -547,13 +547,16 @@ export async function stageRebuildAndRecompute(session: FinalizeSession): Promis
     const truthAudit = buildAuthoritativeValues({ facts: truthFacts, overrides });
     session.caliberLedger = renderCaliberLedger(truthAudit);
     session.truthValues = truthAudit.resolved;
-    upsertProgressStage(session.progressStages, displayStage({
+    const caliberStage = displayStage({
       type: 'reference',
       roleId: 'caliber-ledger',
       status: 'success',
       message: `口径账本（真值层）：受管属性 ${truthAudit.resolved.length} 项、噪声剔除 ${truthAudit.noiseRejected.length} 项、值级覆盖 ${overrides.length} 对`,
       details: [...session.caliberLedger.slice(0, 20), ...(overrides.length > 0 ? [`值级覆盖：${overrides.slice(0, 5).map(item => `${item.superseded}→${item.effective}`).join('、')}`] : [])],
-    }, { subtitle: '口径账本' }));
+    }, { subtitle: '口径账本' });
+    // 双写（4.36.2 口径）：finalStages=executionStages(快照)+finalGateRepairStages，只写 progressStages 会丢
+    upsertProgressStage(session.progressStages, caliberStage);
+    upsertProgressStage(session.finalGateRepairStages, caliberStage);
   }
   // 4.55.17 答疑澄清生效口径兜底检测（招标与答疑不一致时旧值不得作为现行表述）：
   // 写作硬约束（写作简报注入）未遵循时在此暴露，直进终门禁与修复轮

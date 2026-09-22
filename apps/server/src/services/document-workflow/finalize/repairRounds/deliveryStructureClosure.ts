@@ -18,6 +18,7 @@ import { fixTocFromBody } from '../../documentIntegrityChecks';
 import { splitOverlengthBodyParagraphs } from '../../helpers/markdownCleanup';
 import { displayChapterTitle } from '../../outline';
 import { renumberSectionHeadings } from '../../structureIntegrityRules';
+import { applyOverridesToText } from '../../valueOverride';
 import { displayStage, upsertProgressStage } from '../../progress';
 import { recordRepairActions } from '../../rolePipeline';
 import type { FinalizeSession } from '../finalizeSession';
@@ -76,6 +77,26 @@ export async function stageDeliveryStructureClosure(session: FinalizeSession): P
     session.finalMarkdown = split.markdown;
     repairActions += split.splitCount;
     details.push(`超长段落切分：消除 >380 字符段落 ${split.splitCount} 处`);
+  }
+  // 4.55.20 现行口径链尾确定性落地（真值层 superseded → effective）：实测缺陷——真值层诊断出
+  // 「正文 4 处仍以被取代值 365日历天 作为现行口径」，但该检测器为 manual（不自动修复）→ 只进人工清单、
+  // 正文照旧。链尾按覆盖表**确定性替换**（引用变更过程形态豁免：如「原为365日历天，现澄清为330日历天」保留）
+  {
+    const overrides = (session.truthValues || []).flatMap(item => (item.superseded || []).map(superseded => ({
+      superseded,
+      effective: item.value,
+      scope: [item.attribute],
+      evidence: item.evidence,
+      kind: 'override' as const,
+    })));
+    if (overrides.length > 0) {
+      const applied = applyOverridesToText(session.finalMarkdown, overrides);
+      if (applied.applied.length > 0) {
+        session.finalMarkdown = applied.text;
+        repairActions += applied.applied.length;
+        details.push(`现行口径落地：${applied.applied.length} 处（${[...new Set(applied.applied.map(item => `${item.from}→${item.to}`))].slice(0, 3).join('、')}）`);
+      }
+    }
   }
   // 4.55.19 小节编号重放（链尾）：小节被合并/删除后编号出现空档（实测「1.1 → 1.2 → 1.4」缺 1.3），
   // 评标人一眼可见。此前 section-renumber 只在确定性清洗链内执行，其后的修复轮（主题小节合并等）

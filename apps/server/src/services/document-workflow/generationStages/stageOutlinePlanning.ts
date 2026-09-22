@@ -21,7 +21,7 @@ import { buildProfessionalDepthClassifier } from '../professionalDepthClassifier
 import { buildWritingTaskBrief } from '../documentWritingTaskBrief';
 import { extractClarificationOverrides, renderClarificationConstraintBlock } from '../clarificationOverrides';
 import { buildAuthoritativeValues, renderCaliberLedger, renderTruthConstraintBlock } from '../authoritativeValues';
-import { collapseOverrideChains, extractValueOverrides } from '../valueOverride';
+import { collapseOverrideChains, extractLabeledAuthorityValues, extractValueOverrides } from '../valueOverride';
 import { buildPlannedTablePlans, attachDiagramArtifacts, extractDiagramArtifacts, mergeStructureDiagramArtifacts } from '../constructionOrgTablePlan';
 import { auditPlannedTableScope, type PlannedTableScopeEntry } from '../tableScopeAudit';
 import { isBodyTableForbidden } from '../bidComposition';
@@ -356,12 +356,15 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
       ...(session.understanding.preliminaryFactsModel?.quality || []),
       ...(session.understanding.preliminaryFactsModel?.safety || []),
     ].map((fact: { key?: string; fieldName?: string; value?: unknown; sourceFile?: string }) => ({ key: fact.key, label: fact.fieldName, value: fact.value, sourceFile: fact.sourceFile }));
+    const truthSources = [
+      ...(session.understanding.allEvidence || []).map((item: DocumentEvidence) => ({ text: String(item.content || ''), source: `${item.filePath || ''} ${item.sectionTitle || ''}` })),
+      ...truthFacts.map((fact: { value?: unknown; sourceFile?: string }) => ({ text: String(fact.value ?? ''), source: String(fact.sourceFile || '') })),
+    ];
     const truthAudit = buildAuthoritativeValues({
       facts: truthFacts,
-      overrides: collapseOverrideChains(extractValueOverrides([
-        ...(session.understanding.allEvidence || []).map((item: DocumentEvidence) => ({ text: String(item.content || ''), source: `${item.filePath || ''} ${item.sectionTitle || ''}` })),
-        ...truthFacts.map((fact: { value?: unknown; sourceFile?: string }) => ({ text: String(fact.value ?? ''), source: String(fact.sourceFile || '') })),
-      ])),
+      overrides: collapseOverrideChains(extractValueOverrides(truthSources)),
+      // 带口径标签的权威值（答疑「最高投标限价现调整为:172460314.52元」→ 写作前即定死生效金额）
+      labeledValues: extractLabeledAuthorityValues(truthSources),
     });
     session.planning.caliberLedger = renderCaliberLedger(truthAudit);
     session.planning.truthConstraint = renderTruthConstraintBlock(truthAudit);

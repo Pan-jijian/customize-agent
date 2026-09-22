@@ -284,7 +284,16 @@ export function extractContractFromFacts(
   const pricingFile = pricingMatch ? pricingMatch[1] : '';
   // 合同估算价（万元）：金额禁区提取（渲染仅限基本信息表例外，参数桶不渲染）
   const amountMatch = /(?:合同估算价|招标控制价|最高投标限价|项目总投资|投资估算|工程概算)[^。；;\n]{0,20}?([\d,]+(?:\.\d+)?)\s*万/u.exec(basicFacts);
-  const truthAmount = resolved?.合同金额 ? Number(/([\d,]+(?:\.\d+)?)\s*万元/u.exec(resolved.合同金额)?.[1]?.replace(/,/g, '') ?? NaN) : NaN;
+  // 金额单位归一（4.55.20 实测：答疑澄清金额以「元」表述——172460314.52元，而 contract 口径是万元；
+  // 原实现只认「万元」→ 元级值被静默忽略，回退到招标旧值）
+  const truthAmount = (() => {
+    const text = String(resolved?.合同金额 || '');
+    const wan = /([\d,]+(?:\.\d+)?)\s*万元/u.exec(text)?.[1];
+    if (wan) return Number(wan.replace(/,/g, ''));
+    const yuan = /([\d,]+(?:\.\d+)?)\s*元/u.exec(text)?.[1];
+    if (yuan) return Number((Number(yuan.replace(/,/g, '')) / 10000).toFixed(2));
+    return NaN;
+  })();
   const estimatedAmount = Number.isFinite(truthAmount) ? truthAmount : (amountMatch ? Number(amountMatch[1].replace(/,/g, '')) : 0);
   void boq;
   return { totalDays, qualityStandard, pricingFile, estimatedAmount };

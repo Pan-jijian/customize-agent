@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { isMaterialResidueLine, stripSentenceLevelResidue } from './materialResidue';
+import { isMaterialResidueLine, stripClarificationNarrative, stripSentenceLevelResidue } from './materialResidue';
 import type {
   DocumentEvidence,
   DocumentGenerationDiagnostics,
@@ -1894,7 +1894,9 @@ export function fixTenderMetaLanguage(markdown: string): { markdown: string; fix
 export function fixFormalSourceResidue(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
   // 4.55.19 句中形态残片先行（行级判据看不见句内澄清表残片；两链共用本函数）
   const sentenceLevel = stripSentenceLevelResidue(markdown);
-  const baseMarkdown = sentenceLevel.text;
+  // 4.55.20 变更过程叙述清理（正文只陈述现行值，不得描述澄清过程）
+  const narrative = stripClarificationNarrative(sentenceLevel.text);
+  const baseMarkdown = narrative.text;
   markdown = baseMarkdown;
   const lines = markdown.split(/\r?\n/u);
   const out: string[] = [];
@@ -1911,7 +1913,7 @@ export function fixFormalSourceResidue(markdown: string): { markdown: string; fi
     // 整行删除：前后均空行时吞掉尾随空行，防双空行残留（与 fixTenderMetaLanguage 同形态）
     if (index + 1 < lines.length && !lines[index + 1].trim() && out.length > 0 && !out[out.length - 1].trim()) index += 1;
   }
-  const sentenceLevelCount = sentenceLevel.removed;
+  const sentenceLevelCount = sentenceLevel.removed + narrative.removed;
   return {
     markdown: out.join('\n'),
     fixedCount: fixedCount + sentenceLevelCount,

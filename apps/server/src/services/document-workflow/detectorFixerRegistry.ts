@@ -325,13 +325,13 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   // 源头已修（resolveEffectiveTotalDays 取答疑变更后口径）；本检测兜底，交 LLM 按生效工期重排天序
   { id: 'schedule-duration-overrun', scope: 'full-document', category: 'fact_consistency', fixerDisposition: 'manual', fixerDispositionReason: '按生效工期重排进度计划与节点天序（源头解析已取变更后口径，残留为写作期漂移）' },
   // 4.55.19 口径一致性（真值层 vs 正文声明口径）：修复路径为 LLM 按现行口径统一表述
-  { id: 'caliber-consistency', scope: 'full-document', category: 'fact_consistency', fixerDisposition: 'manual', fixerDispositionReason: '写作硬约束（真值层）未遵循时在此暴露；交 LLM 按现行口径统一正文表述' },
+  { id: 'caliber-consistency', scope: 'full-document', category: 'fact_consistency', fixerDisposition: 'manual', fixerDispositionReason: '被取代值由链尾 delivery-structure-closure 按真值层覆盖表**确定性替换**（不依赖本检测器锚定）；本检测器报出的是「生效值整体未落位」类残留，进人工复核清单' },
   // 4.55.19 危大工程参数—判定绑定（写本项目实参 + 阈值对照 + 结论）
-  { id: 'hazard-parameter-binding', scope: 'full-document', category: 'fact_consistency', fixerDisposition: 'manual', fixerDispositionReason: '交 LLM 在危大判定处补本项目实际参数并给出阈值对照结论' },
+  { id: 'hazard-parameter-binding', scope: 'full-document', category: 'fact_consistency', fixerDisposition: 'fixed', fixerDispositionReason: 'content-depth-repair 定向补写：在危大判定处补本项目实际参数 + 阈值对照 + 结论' },
   // 4.55.20 蓝图权威值落位（劳动力峰值/机械台数：正文须写具体数值，不得只写控制原则）
-  { id: 'blueprint-value-placement', scope: 'full-document', category: 'professional_chain', fixerDisposition: 'manual', fixerDispositionReason: '交 LLM 按蓝图权威值补写资源配置具体数值（不得自行推算）' },
+  { id: 'blueprint-value-placement', scope: 'full-document', category: 'professional_chain', fixerDisposition: 'fixed', fixerDispositionReason: 'content-depth-repair 定向补写：按蓝图权威值写资源配置具体数值' },
   // 4.55.20 悬空连接词截断（半截句）：交 LLM 补全成分或删悬空连接词
-  { id: 'dangling-conjunction', scope: 'full-document', category: 'structure', fixerDisposition: 'manual', fixerDispositionReason: '语义截断需补宾语成分，交 LLM 定向补全（标点类残片另有 fixTruncatedSentenceArtifacts）' },
+  { id: 'dangling-conjunction', scope: 'full-document', category: 'structure', fixerDisposition: 'fixed', fixerDispositionReason: 'content-depth-repair 定向补全被截断的句子成分（标点类残片另有 fixTruncatedSentenceArtifacts）' },
   { id: 'precise-fact-usage', scope: 'full-document', category: 'fact_consistency' },
   // C3-4 可靠参数义务落位验收（chapterParameterFacts.parameterObligationUsageIssues）：参数池净化后
   // 义务满足率 <90% 即 error（兑现报告出口 parameterUsageAudit / 修复出口 assignMissingParameterChapters
@@ -637,7 +637,7 @@ export const LLM_PATCH_REPAIR_ROUNDS: readonly FixerEntry[] = [
   // 重算 → 责任章映射 → 逐章载荷定向补写）。历史挂靠缺口：17 轮修复无一消费直坠终门禁。
   // C3-6-4 扩展锚定：drawing-reference（图纸事实引用率 <90%，warning 级独立通道；未引用份按事实行
   // 相关性分章 → 逐章载荷定向补写图纸名与规格/做法事实）。历史缺口：96/118 份从未获注入（s28l 实测）。
-  { id: 'content-depth-repair', kind: 'llm-patch', anchoredTo: 'critical-section-depth', alsoAnchoredTo: ['emergency-section-depth', 'construction-org-major-content', 'construction-org-division-section', 'precise-fact-usage', 'parameter-obligation-usage', 'overview-recap', 'professional-score', 'boq-placement', 'drawing-reference'], patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
+  { id: 'content-depth-repair', kind: 'llm-patch', anchoredTo: 'critical-section-depth', alsoAnchoredTo: ['emergency-section-depth', 'construction-org-major-content', 'construction-org-division-section', 'precise-fact-usage', 'parameter-obligation-usage', 'overview-recap', 'professional-score', 'boq-placement', 'drawing-reference', 'hazard-parameter-binding', 'blueprint-value-placement', 'dangling-conjunction'], patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
   // D-T2 评审关注闭环链补写轮（r28f B8 前半归因）：质量三检/进度纠偏/工资代发链「主责章全要素」
   // 判定（construction-org-control-loop warning）此前无修复轮消费——本轮章级实时重算定位 +
   // LLM 定向补写缺失环节（标准词面落位）+ 复检缺失数（变差回滚），与 content-depth-repair 同族链尾补写轮

@@ -86,3 +86,26 @@ export function stripSentenceLevelResidue(text: string): { text: string; removed
   result = result.replace(/[：:，,；;]\s*(?=[。；;])/gu, '');
   return { text: result, removed };
 }
+
+/**
+ * 变更过程叙述清理（4.55.20 用户口径）：正式投标正文**只陈述现行值**，
+ * 不得出现「招标澄清文件明确原365日历天现变更修改为330日历天」类**变更过程叙述**——
+ * 评标人只看现行口径；旧值出现在正文里即失分点（无论是否加"原/现"修饰）。
+ * 判据：含「澄清/答疑/补遗 + 明确/载明/规定」导语或「原X…（现）变更为Y」句式的**小句**整段移除，
+ * 保留同句其余内容（现行值由口径约束/链尾替换落地）。幂等。
+ */
+const CLARIFICATION_NARRATIVE_RE = /[^。；\n]{0,30}(?:澄清|答疑|补遗)(?:文件)?[^。；\n]{0,10}(?:明确|载明|规定|说明)[^。；\n]{0,60}/gu;
+const ORIGINAL_TO_NOW_RE = /[^。；\n]{0,20}原[^。；\n]{0,24}?(?:现|变更为|调整为|修改为)[^。；\n]{0,24}/gu;
+
+export function stripClarificationNarrative(text: string): { text: string; removed: number } {
+  if (!text) return { text, removed: 0 };
+  let removed = 0;
+  let result = String(text).replace(CLARIFICATION_NARRATIVE_RE, () => { removed += 1; return ''; });
+  result = result.replace(ORIGINAL_TO_NOW_RE, (match) => {
+    // 只删「原…现/变更…」变更过程叙述；含「原因/原则/原始」等词的正常语句不误伤
+    if (/原因|原则|原始|原本|原状|原地|原材料/.test(match)) return match;
+    removed += 1;
+    return '';
+  });
+  return { text: result.replace(/[，,；;]\s*(?=[。；])/gu, ''), removed };
+}

@@ -140,7 +140,7 @@ describe('detectorFixerRegistry 结构一致性（P23）', () => {
     // 此前参数义务缺口挂靠 precise-fact-usage blocker 消费（关键池达标即零消费，s28l 94 条义务零消费实锤）
     // C3-5 扩展：boq-placement（清单落位不足 blocker）加入扩展锚定——此前 17 轮修复无一消费直坠终门禁
     // C3-6-4 扩展：drawing-reference（图纸事实引用率 <90% warning）加入扩展锚定——96/118 份从未获注入（s28l 实测）
-    expect(round?.alsoAnchoredTo).toEqual(['emergency-section-depth', 'construction-org-major-content', 'construction-org-division-section', 'precise-fact-usage', 'parameter-obligation-usage', 'overview-recap', 'professional-score', 'boq-placement', 'drawing-reference']);
+    expect(round?.alsoAnchoredTo).toEqual(['emergency-section-depth', 'construction-org-major-content', 'construction-org-division-section', 'precise-fact-usage', 'parameter-obligation-usage', 'overview-recap', 'professional-score', 'boq-placement', 'drawing-reference', 'hazard-parameter-binding', 'blueprint-value-placement', 'dangling-conjunction']);
     for (const anchorId of round?.alsoAnchoredTo ?? []) {
       expect(detectorEntry(anchorId)).toBeDefined();
     }

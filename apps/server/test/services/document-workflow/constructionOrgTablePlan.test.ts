@@ -902,7 +902,7 @@ describe('4.55.12 图类替代表（图位必须带内容承载）', () => {
     expect(result).toContain('| 工序 |');
   });
 
-  it('幂等：重复重放不再补（图题后 8 行内已有表格行）', () => {
+  it('幂等：图片已插入后重放不再补（表格不构成"图已承载"——4.55.20 口径收紧）', () => {
     const src = ['## 第一章 主要施工方法与技术措施', '', '图1-2 施工进度计划横道图', '', '正文内容。'].join('\n');
     const once = ensureFigurePlaceholders(src, specs, callback).markdown;
     expect(ensureFigurePlaceholders(once, specs, callback).markdown).toBe(once);

@@ -1295,17 +1295,30 @@ export function ensureFigurePlaceholders(markdown: string, specs: FigurePlacehol
   // （巢湖实测：模型只输出裸图题，图位被判已承载、W5 替代表从未生成；此处按已有图题与新增图题两路补）
   const captionBackfill = new Map<number, string[]>();
   const captionImage = new Map<number, string>();
+  // 4.55.20 全文同图去重：同一张图件（同文件名）只出一次图；后续同图图题改为指向说明
+  //（实测缺陷：第 1 章「图1-5 项目管理机构图」与第 2 章「图2-1 项目管理机构图」重复插入同一张图）
+  const emittedFigureFiles = new Set<string>();
   // 4.55.19 同章同源替代表去重（两条路径共用同一签名表）：实测缺陷——回填路径未去重，
   // 「横道图」「网络图」两个既有图题各补一张**完全相同**的进度表（相邻两表重复；
   // 模型自己写的表 + 补的表也会撞车）
   const tableSignatureByChapter = new Map<string, string>();
   for (const caption of existingCaptionLines) {
-    // 幂等：图题邻域（前后 8 行）已有图片引用或表格行则视为已承载（重放零改动）
+    // 幂等：承载判定**随可用载体而定**——有图件可用时，只有**图片引用**才算承载（表格是数据形态，
+    // 不能替代「图」；实测缺陷：邻域里的进度数据表让「图 1-1 横道图」被判已承载 → 裸图题无图）；
+    // 无图件可用时（暗标/无蓝图数据），替代表即承载 ✓ 两条路径各自幂等
     const neighborhood = lines.slice(Math.max(0, caption.index - 8), caption.index + 9);
-    const alreadyCarried = neighborhood.some(line => /!\[[^\]]*\]\([^)]*\)/u.test(line) || /^\s*\|.+\|\s*$/u.test(line));
+    const hasImage = neighborhood.some(line => /!\[[^\]]*\]\([^)]*\)/u.test(line));
+    const hasTable = neighborhood.some(line => /^\s*\|.+\|\s*$/u.test(line));
+    const figureAvailable = options.figureImage?.(caption.name) !== undefined;
+    const alreadyCarried = figureAvailable ? hasImage : (hasImage || hasTable);
     if (alreadyCarried) continue;
     const image = options.figureImage?.(caption.name);
     if (image) {
+      if (emittedFigureFiles.has(image.fileName)) {
+        captionImage.set(caption.index, `> 说明：本图与前述同名图件一致，见前图（不重复列出）。`);
+        continue;
+      }
+      emittedFigureFiles.add(image.fileName);
       captionImage.set(caption.index, `![${caption.name}](generatedDocuments/assets/${image.fileName})`);
       continue;
     }
