@@ -3521,11 +3521,17 @@ function supersededResidueRe(superseded: string): RegExp | undefined {
  */
 const CALIBER_VERBATIM_SHAPES: ReadonlySet<string> = new Set(['measure', 'money', 'date', 'standard', 'spec']);
 
-export function caliberConsistencyIssues(markdown: string, ledger: Array<{ attribute: string; value: string; rule: string; evidence: Array<{ source: string }>; superseded?: string[] }> = []): ValidationIssue[] {
+export function caliberConsistencyIssues(markdown: string, ledger: Array<{ attribute: string; value: string; rule: string; evidence: Array<{ source: string }>; superseded?: string[]; caliber?: boolean }> = []): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   if (!markdown || ledger.length === 0) return issues;
   const normalized = markdown.replace(/\s+/gu, '');
   for (const item of ledger) {
+    // 4.55.29 只判**项目级口径**（`caliber !== false`）：本判据要求正文逐字复现该值，这只有在
+    // 写手**被告知过**这个口径时才是正当的。真值层里绝大多数属性是**章节内容型**（底坑垫层做法/
+    // 钢筋连接/主要材料包括/机械设备计划…），其值是写作素材而非口径；对它们要求逐字落位，
+    // 等于用一个写手从未收到、也永不消解的约束产 blocker（巢湖最新实测 9 条中的 5 条）。
+    // 口径集由原文口径标签抽取单源划定（`buildAuthoritativeValues` 的 labeledValues），读写同源。
+    if (item.caliber === false) continue;
     const token = String(item.value || '').replace(/\s+/gu, '');
     if (token.length >= 3 && CALIBER_VERBATIM_SHAPES.has(classifyValueShape(String(item.value || ''))) && !normalized.includes(token)) {
       issues.push({

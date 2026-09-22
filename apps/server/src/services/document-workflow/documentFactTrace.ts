@@ -735,6 +735,10 @@ const SECTION_NUMBERING_SHAPE_RE = /^(?:\d{1,2})\.\d{2}$/u;
 /** 语境内的同形邻号（前后带数字边界，防从 251.941 里抠出无关小数）。 */
 const SECTION_NUMBERING_SIBLING_RE = /(?<![\d.])(\d{1,2})\.(\d{2})(?![\d])/gu;
 
+/** 被截断的同层邻号形态：小数点前无数字（前置数字边界断言不成立）、小数段 2 位——「1.23」被语境窗口
+ * 从中间截成「.23」后的残余。语境提供方（审计窗口/调用方窗口）若仍截断数字，本形态是最后一道防线。 */
+const SECTION_NUMBERING_TRUNCATED_SIBLING_RE = /(?<![\d.])\.(\d{2})(?![\d])/gu;
+
 /**
  * 章节编号误报单源判定（L0-7；无主数值审计与 C-T2 溯源链共用——两处各写一套必漂移）：
  * 目录/标题里的编号被提取器连同标题首字吞成「数值 token」——真实成稿
@@ -743,6 +747,8 @@ const SECTION_NUMBERING_SIBLING_RE = /(?<![\d.])(\d{1,2})\.(\d{2})(?![\d])/gu;
  * 判据（机制，不写死具体值）：token 数值核为编号形态 `\d{1,2}.\d{2}`，且语境中出现**同形邻号**
  * ——整数段相同且小数段相差 1（1.22 ↔ 1.23），或小数段相同且整数段相差 1（1.22 ↔ 2.22）。
  * 连续邻号是目录/标题编号的机制特征：正文量值不会以这种「同层 +1」序列成串出现。
+ * 邻号被语境窗口截断（「1.23」→「.23」）时按截断残余形态同判（doc-1790115927170 实机：
+ * 截断使前置数字边界断言不成立，真编号落未登记桶直通硬门禁）。
  * 反例（仍按未溯源处理）：无同形邻号的「1.22 周」类时量表述——不得因本族被静默放过。
  */
 export function isSectionNumberingToken(input: { token: string; context: string }): boolean {
@@ -759,6 +765,11 @@ export function isSectionNumberingToken(input: { token: string; context: string 
     const siblingDecimal = Number(match[2]);
     if (siblingInteger === integerPart && Math.abs(siblingDecimal - decimalPart) === 1) return true;
     if (siblingDecimal === decimalPart && Math.abs(siblingInteger - integerPart) === 1) return true;
+  }
+  // 截断邻号（实机 doc-1790115927170）：「1.23」被语境窗口从中间截成「.23」，整数段缺失使上面的
+  // 前置数字边界断言不成立——小数点前无数字的 2 位小数段即同整数段邻号的截断残余，仍算同层邻号。
+  for (const match of context.matchAll(SECTION_NUMBERING_TRUNCATED_SIBLING_RE)) {
+    if (Math.abs(Number(match[1]) - decimalPart) === 1) return true;
   }
   return false;
 }

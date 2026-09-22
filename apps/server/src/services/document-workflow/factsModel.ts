@@ -4,6 +4,7 @@ import * as XLSX from 'xlsx';
 import type { AutoDocumentSpecPackage } from '../document-core/autoDocumentSpecTypes';
 import { getProjectKbRoot, getProjectRoot } from '../knowledge/kbService';
 import { DEFAULT_DOCUMENT_DOMAIN_PROFILE, factFieldForLabel, isDiagnosticFactValue, isForbiddenFactValue, isLowConfidenceFactValue, type DocumentDomainProfile, type FactFieldProfile } from '../document-core/documentDomainProfileService';
+import { CHANGE_CONNECTORS } from './valueOverride';
 import { detectSmartTableHeader, locateTableColumns } from '@customize-agent/knowledge';
 import type { ChapterFactNeed, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, ResolvedFactNeed, SpecAuthorityMap, StructuredTableFact } from './types';
 import { evidenceSatisfiesSpecField, specFactTargets } from './factMatching';
@@ -425,10 +426,29 @@ const PROCEDURAL_VALUE_PROTOTYPES = [
 const PROCEDURAL_LEXICAL_HINTS_RE = /签章|盖章|联系人|联系电话|电话|邮箱|解密方式|开标时间|开标地点|评标办法|评标委员会|投标保证金|保证金账户|电子交易系统|空白|填写|上传|下载|递交方式|递交截止|公共资源交易监督管理|监管部门|开评标程序|采购范围|是否|符合/u;
 const PROCEDURAL_VALUE_THRESHOLD = 0.6;
 
+/**
+ * 变更叙述取值（4.55.29）：值含变更连接语时，**生效值在连接语之后**（连接语之前是旧值）。
+ * 历史缺陷（最新真实生成实测 6 条「事实一致性冲突」blocker）：`计划工期` 的
+ * 「365日历天，现变更修改为:330日历天」与另一来源的「330日历天」被判成多值冲突——
+ * 冲突检测取 `\d+日历天` 的**首个**匹配（=连接语之前的旧值 365），而真值层裁决的正是连接语之后的 330。
+ * 判据单源：连接语取自 `valueOverride.CHANGE_CONNECTORS`（值级覆盖与真值层共用同一份）。
+ */
+function valueAfterChangeConnector(raw: string): string {
+  const match = new RegExp(`${CHANGE_CONNECTORS}\\s*[:：]?\\s*`, 'u').exec(raw);
+  if (!match) return raw;
+  return raw.slice((match.index ?? 0) + match[0].length).trim();
+}
+
 function conflictComparableFactValue(value: unknown, profile: DocumentDomainProfile, isProcedural?: (raw: string) => boolean) {
   // C-T7 #4 兜底：名称+编号连读值以拆分后形态参与多源对账（净化门未覆盖的通道脏值在此归一，
   // 防「名称 vs 名称+编号」被误报为多值冲突）
-  const raw = stripTrailingNameCodeBinding(stringifyFactValue(value).trim());
+  const bound = stripTrailingNameCodeBinding(stringifyFactValue(value).trim());
+  // 4.55.29 值形态闸（与真值层单源）：缺席声明/占位/图签串格/段落/截断值不是可比值——
+  // 实测「工期关键节点 = 【资料未体现】」被判成与真值并列的"另一个值"（信息缺席不是信息）
+  if (rejectValueNoise(bound)) return '';
+  // 4.55.29 变更叙述：取连接语之后的生效值（连接语之前是旧值）
+  const raw = valueAfterChangeConnector(bound);
+  if (!raw || rejectValueNoise(raw)) return '';
   if (isDiagnosticFactValue(profile, raw) || isForbiddenFactValue(profile, raw)) return '';
   if (hasCorruptTextMarkers(raw)) return '';
   // 纯结构过滤（表格行分隔/标题标记/引用跳转/内部摘要标记）保留正则：属结构判定而非语义判断

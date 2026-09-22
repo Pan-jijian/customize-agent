@@ -20,6 +20,8 @@ export interface BillFactLockEntry {
   description: string;
   quantity: number;
   unit: string;
+  /** 源表单位原值（仅当单位格混写数量前缀、被 stripUnitCountPrefix 剥离时保留；否则缺省） */
+  unitRaw?: string;
   section: string;
   subsection: string;
   villageGroup: string;
@@ -45,23 +47,42 @@ export function extractSpecTokens(text: string): string[] {
   return [...new Set((text.match(SPEC_TOKEN_RE) || []).map(item => item.replace(/\s+/gu, '').trim()))].filter(Boolean).slice(0, 8);
 }
 
+/**
+ * 清单单位单元格的数量前缀剥离（L0-7 收尾；实机 doc-1790115927170 的「427.000个」缺口根治）。
+ * 源表「计量单位」格混写数量是招标清单的真实脏数据（实测：某项目 1850 条清单中 9 条单位写作
+ * 「1个口」——数量 427.000 在工程量列，单位列自带一个 `1`）。`${quantity}${unit}` 直接拼接会把
+ * 两段数字粘成假数「4271个口」：权威核变 4271（真实工程量 427 永不入核 → 正文照抄 427.000 反被
+ * 判无主）、清单行直读提示词与检索 query 同步失真。
+ * 机制：单位是独立计量单位，不含数量——单位段以数字开头且其后**紧跟汉字量词**（数量与汉字量词混写的
+ * 形态）时剥离该数字段。边界（防误剥）：ASCII 量纲/倍率写法（`m2`/`10m`/`100m3`）是单位本体，一律
+ * 不动；无数字前缀的单位天然不动。源数据不删除——原值保留在 unitRaw（可观测）。
+ */
+export function stripUnitCountPrefix(unit: string): string {
+  return unit.replace(/^\d+(?:\.\d+)?(?=[\p{Script=Han}])/u, '');
+}
+
 /** 构建清单事实锁：清单解析结果 → 行级确定性锁；无清单/解析为空返回 undefined */
 export function buildBillFactLock(input: { boq?: BillOfQuantitiesResult | null }): BillFactLock | undefined {
   const boq = input.boq;
   if (!boq || boq.totalEntries === 0) return undefined;
   return {
-    entries: boq.entries.map(entry => ({
-      seq: entry.seq,
-      name: String(entry.name || '').trim(),
-      description: String(entry.description || '').trim(),
-      quantity: entry.quantity,
-      unit: String(entry.unit || '').trim(),
-      section: String(entry.section || '').trim(),
-      subsection: String(entry.subsection || '').trim(),
-      villageGroup: String(entry.villageGroup || '').trim(),
-      sourceFile: entry.sourceFile,
-      specQuantityPairs: extractSpecTokens(entry.description).map(spec => ({ spec, quantity: `${entry.quantity}${entry.unit}` })),
-    })),
+    entries: boq.entries.map(entry => {
+      const unitRaw = String(entry.unit || '').trim();
+      const unit = stripUnitCountPrefix(unitRaw);
+      return {
+        seq: entry.seq,
+        name: String(entry.name || '').trim(),
+        description: String(entry.description || '').trim(),
+        quantity: entry.quantity,
+        unit,
+        ...(unit === unitRaw ? {} : { unitRaw }),
+        section: String(entry.section || '').trim(),
+        subsection: String(entry.subsection || '').trim(),
+        villageGroup: String(entry.villageGroup || '').trim(),
+        sourceFile: entry.sourceFile,
+        specQuantityPairs: extractSpecTokens(entry.description).map(spec => ({ spec, quantity: `${entry.quantity}${unit}` })),
+      };
+    }),
     totalEntries: boq.totalEntries,
     sourceFile: boq.sourceFile,
     complete: boq.complete,

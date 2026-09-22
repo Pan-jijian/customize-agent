@@ -53,3 +53,18 @@ export function repairOutcomeReason(input: RepairOutcomeInput): string {
   if (!input.repaired) return '（未产生有效修改，需排查）';
   return '';
 }
+
+/**
+ * 4.55.30 章级显式降级（块失守、章照常成稿）的状态三档口径：复用修复轮同一套词汇，
+ * 不再新增状态枚举——屏幕与交付记录里「降级」与「修复」是同一类语义（有损失但非零进展）。
+ *
+ * `plannedBlocks` 块里有 `droppedBlocks` 块失守（无正文）：
+ * - 0 块失守 → success（全部成稿）；
+ * - 0 < 失守 < 规划 → **partial**（黄灯：有净损失但章已产出，收敛性由后续补写/复核消费）；
+ * - 失守 = 规划（无一块成稿）→ failed——该分支实际不可达（全失败在章生成层已章阻断，
+ *   见 assessChapterBlockDegradation），保留定义只为「状态与事实一致」：真出现即红，
+ *   不会把「无正文成章」伪装成黄灯。
+ */
+export function blockDeliveryOutcomeStatus(input: { plannedBlocks: number; droppedBlocks: number }): RepairOutcomeStatus {
+  return repairOutcomeStatus({ before: input.plannedBlocks, after: input.droppedBlocks });
+}

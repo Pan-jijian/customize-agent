@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { caliberConsistencyIssues, crossChapterConsistencyIssues } from '@/services/document-workflow/qualityValidation';
 import { attributeValueShapeMismatch, rejectValueNoise } from '@/services/document-workflow/authoritativeValues';
+import { detectFactConflicts } from '@/services/document-workflow/factsModel';
 import { splitScoringBlocks } from '@/services/document-workflow/tenderBidScoring';
 import { classifyValueShape } from '@/services/document-workflow/valueOverride';
 import type { DocumentFactsModel } from '@/services/document-workflow/types';
@@ -63,6 +64,32 @@ describe('L0 口径落位判据·值形态闸', () => {
 
   it('规格型值已落位 → 零 issue', () => {
     expect(caliberConsistencyIssues('本工程总工期330日历天。', [ledgerItem('计划工期', '330日历天')])).toHaveLength(0);
+  });
+
+  it('非口径属性（章节内容型）不得要求逐字落位（caliber=false 直接跳过）', () => {
+    // 实测（巢湖 doc-f00280f9）：真值层 40 项属性中绝大多数是章节内容型——
+    // 「底坑垫层做法 = C20」「钢筋连接 = Φ16」「主要材料包括 = 2.5mm」「混凝土强度等级 = C40」
+    // 写手从未被告知这些是"口径"，要求正文逐字复现「主要材料包括 = 2.5mm」在语义上不成立。
+    const issues = caliberConsistencyIssues('第一章 编制说明。', [
+      { ...ledgerItem('底坑垫层做法', 'C20'), caliber: false },
+      { ...ledgerItem('钢筋连接', 'Φ16'), caliber: false },
+      { ...ledgerItem('主要材料包括', '2.5mm'), caliber: false },
+      { ...ledgerItem('混凝土强度等级', 'C40'), caliber: false },
+    ]);
+    expect(issues).toHaveLength(0);
+  });
+
+  it('商务口径（暂列金额）不入「须逐字落位」集', () => {
+    const issues = caliberConsistencyIssues('技术标正文。', [{ ...ledgerItem('暂列金额', '7000000.00元'), caliber: false }]);
+    expect(issues).toHaveLength(0);
+  });
+
+  it('项目级口径（计划工期/开工日期/合同金额）仍须逐字落位', () => {
+    const issues = caliberConsistencyIssues('技术标正文。', [
+      { ...ledgerItem('计划工期', '330日历天'), caliber: true },
+      { ...ledgerItem('开工日期', '2026年10月10日'), caliber: true },
+    ]);
+    expect(issues).toHaveLength(2);
   });
 
   it('形态判定边界：段落/规格各自归类正确', () => {
@@ -136,3 +163,24 @@ async function caliberScopeProbe(markdown: string) {
   const issues = await crossChapterConsistencyIssues(markdown, factsModel, undefined, undefined, embedder.embedDocuments.bind(embedder));
   return issues.filter(issue => /挖沟槽土方/.test(issue.message));
 }
+describe('L0 事实冲突可比值（变更叙述取生效值 / 缺席声明不入比对）', () => {
+  const zeroEmbedding = async (texts: string[]) => texts.map(() => [0, 0, 0]);
+  const fact = (value: string, sourceFile: string) => ({ key: '计划工期', fieldName: '计划工期', value, sourceFile } as never);
+
+  it('变更叙述取连接语之后的生效值 → 与另一来源的现行值一致，不报冲突', async () => {
+    // 实测（巢湖 doc-f00280f9）：「365日历天，现变更修改为:330日历天」与「330日历天」被判多值冲突
+    const conflicts = await detectFactConflicts([
+      fact('365日历天，现变更修改为:330日历天', '7招标答疑文件.pdf'),
+      fact('330日历天', '招标文件.pdf'),
+    ], undefined, undefined, zeroEmbedding);
+    expect(conflicts.filter(item => item.includes('计划工期'))).toHaveLength(0);
+  });
+
+  it('同槽位真冲突仍必须报出（防判据放宽成不设防）', async () => {
+    const conflicts = await detectFactConflicts([
+      fact('330日历天', '招标文件.pdf'),
+      fact('365日历天', '答疑文件/6招标澄清文件.pdf'),
+    ], undefined, undefined, zeroEmbedding);
+    expect(conflicts.filter(item => item.includes('计划工期'))).toHaveLength(1);
+  });
+});

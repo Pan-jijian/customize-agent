@@ -36,9 +36,10 @@ import { renderDrawingFactLockText } from '../drawingFactLock';
 import { renderChapterParameterLines } from '../chapterParameterFacts';
 import { extractBoqDivisionCoverage, formatBoqDivisionCoverage } from '../documentFactTrace';
 import { retrievePlannedMaterialEvidence, sampleProjectMaterialEvidence } from '../projectMaterialProfile';
-import { buildChapterFactCoverageContext, buildPlannedChapterContent, capFactCoverageContext, evidenceForSection, salvageChapterByOverProduceAcceptance } from '../chapterGeneration';
+import { assessChapterBlockDegradation, attachChapterBlockDegradation, buildChapterFactCoverageContext, buildPlannedChapterContent, capFactCoverageContext, chapterDegradationStageText, evidenceForSection, salvageChapterByOverProduceAcceptance } from '../chapterGeneration';
 import { isBodyFigureForbidden, isBodyTableForbidden } from '../bidComposition';
-import type { PlannedChapterContentInput, PlannedChapterContentResult } from '../chapterGeneration';
+import type { ChapterBlockDegradation, PlannedChapterContentInput, PlannedChapterContentResult } from '../chapterGeneration';
+import { blockDeliveryOutcomeStatus } from '../finalize/repairRounds/repairOutcome';
 import { chapterCompletionStatus, chapterGenerationTargets, compactChapterQueries, finalizeChapterContentQuality, optimizeChapterEvidence, preselectSemanticCandidates, resolveChapterPromptExecution, retrieveSectionEvidence, semanticEvidenceText, stripBidDisciplineSentencesSemantic } from '../documentGeneratorHelpers';
 import { alignChapterContentToBlueprint, blueprintDataForChapterInjection, fillAuthorityPlaceholders, buildChapterStructureFromBlueprint, chapterBlueprintAuthoritiesNeeded, chapterBlueprintAuthorityGaps, findBlueprintChapter, renderBlueprintMustCiteValues } from '../integratedBlueprint';
 import type { BlueprintAuthorityId, PlannedChapterStructure } from '../integratedBlueprint';
@@ -669,6 +670,9 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     let content: string;
     // C7 章级超产对冲接纳审计记录（章 stage details 追加；全分支可见——接纳仅发生在计划块管线分支）
     let overProduceAcceptanceNote: string | undefined;
+    // 4.55.30 章级显式降级记录（块失守 → 章照常成稿）：挂在草稿章节上，finalize 据此产出
+    // structure/blocker（导出门禁 + 交付复核清单）；同时驱动本 stage 的三档状态（partial）
+    let blockDegradation: ChapterBlockDegradation | undefined;
     if (resumedContent) {
       content = finalizeChapterContentQuality(resumedContent, chapter);
       content = await stripBidDisciplineSentencesSemantic(content, session.understanding.bidProcedureJudge);
@@ -699,11 +703,12 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       //（成功块不动，不整章降级重写）。整章降级是历史缺陷「整章备用=整章失败重写」与全文字数雪崩的根因——
       // 单块质检未达标即全章重写，已成功的 2/3 内容全部作废；隔离重写只补失败块，成功块内容与 token 零浪费
       // 达标契约：重写不降标（历史 0.75/0.55 紧缩预算已删除），仍失败即章阻断、文档显式失败
-      const retryFailedBlocks = async (buildInput: PlannedChapterContentInput, failedBlocks: PlannedChapterContentResult['failedBlocks'], sections: Array<string | undefined>): Promise<{ merged: Array<string | undefined>; exhausted: Array<{ index: number; lastAttempt?: string; failureKinds?: string[] }> }> => {
+      const retryFailedBlocks = async (buildInput: PlannedChapterContentInput, failedBlocks: PlannedChapterContentResult['failedBlocks'], sections: Array<string | undefined>): Promise<{ merged: Array<string | undefined>; exhausted: Array<{ index: number; title?: string; lastAttempt?: string; failureKinds?: string[]; retryFeedback?: string }> }> => {
         const retried = await Promise.all(failedBlocks.map(({ block, retryFeedback }) =>
           // 定向反馈携带（initialFeedback）：失败块单块重写 attempt=0 即注入上一轮缺陷原文（缺失要点点名等）——
           // 历史缺陷：无反馈的隔离重写从零生成，极易复现同一漏点（4.44 丰乐镇工期章 2 块全失败于气候要点）
-          buildPlannedChapterContent({ ...buildInput, targetWords: block.targetWords, initialFeedback: retryFeedback }, { blocks: [block], coveredSections: [], fallbackSections: [] })
+          // isolatedRetry：单块重写失败不得被表述为「规划块全部失败」（blocks 只含 1 块，长度比较恒等）
+          buildPlannedChapterContent({ ...buildInput, targetWords: block.targetWords, initialFeedback: retryFeedback, isolatedRetry: true }, { blocks: [block], coveredSections: [], fallbackSections: [] })
             .catch((error: unknown) => {
               // 降级治理：原实现丢弃异常对象 ⇒ 章阻断可见但**失败原因不可定位**（LLM 异常/超时/解析失败无差别）
               session.planning.generationDiagnostics.llm.lastError = `失败块定向重写异常（${chapter.title}）：${error instanceof Error ? error.message : String(error)}`;
@@ -714,7 +719,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
         const merged = [...sections];
         // C7 对冲接纳痕迹回退链：重写轮仍失败时收集失守块（重写轮末轮痕迹优先——更接近收敛的尝试；
         // 重写轮无痕迹（如异常早退）回退首轮痕迹），供章收口判定「章级超产对冲接纳」
-        const exhausted: Array<{ index: number; lastAttempt?: string; failureKinds?: string[] }> = [];
+        const exhausted: Array<{ index: number; title?: string; lastAttempt?: string; failureKinds?: string[]; retryFeedback?: string }> = [];
         failedBlocks.forEach((original, position) => {
           // 剥壳后必须仍有正文才算重写成功：单块重写失败时 markdown 仅剩章标题壳（"## 标题"），
           // 若把空串写回 merged 会在后续 every 判定中暴露为未定义缺口块（此处保持原 undefined 语义）
@@ -724,7 +729,15 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
             return;
           }
           const retriedFailure = retried[position]?.failedBlocks?.[0];
-          exhausted.push({ index: original.index, lastAttempt: retriedFailure?.lastAttempt || original.lastAttempt, failureKinds: retriedFailure?.failureKinds || original.failureKinds });
+          // title/retryFeedback 随失守块一路带到章收口（4.55.30）：显式降级记录与终门禁 blocker 需要
+          // 「丢弃了哪一块、为什么」的原文定位依据，不能只剩 index
+          exhausted.push({
+            index: original.index,
+            title: original.block?.title,
+            lastAttempt: retriedFailure?.lastAttempt || original.lastAttempt,
+            failureKinds: retriedFailure?.failureKinds || original.failureKinds,
+            retryFeedback: retriedFailure?.retryFeedback || original.retryFeedback,
+          });
         });
         return { merged, exhausted };
       };
@@ -807,6 +820,26 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
               overProduceAcceptanceNote = acceptance.detail;
               console.error(`[gen][chapter-audit] ${acceptance.detail}：${displayChapterTitle(chapter.title)}`);
               session.planning.generationDiagnostics.llm.lastInfo = acceptance.detail;
+            } else {
+              // 4.55.30 章级显式降级（C7 不适用后的第二级，判据只有「成功块 > 0」）：
+              // 隔离重写耗尽、超产对冲不适用（非篇幅类失守）时，**保留全部成功块**成章，失守块不产出正文
+              //（不填兜底内容——与 buildPlannedChapterContent 的达标契约同口径），缺失由记录显式承载。
+              // 动机（doc-1790115927170-f00280f9）：34 块仅 1 块失守，其余 33 块已完成却被整章丢弃 →
+              // 目标 5.0 万字成 3.36 万字、清单落位 52.8%、总分 85→83。全失败仍照旧章阻断（零放松）。
+              const degradation = assessChapterBlockDegradation({
+                sections: retryOutcome.merged,
+                blockTitles: plannedStructure.blocks.map(block => block.title),
+                exhaustedBlocks: retryOutcome.exhausted,
+              });
+              if (degradation) {
+                llmContent = `## ${chapter.title}\n\n${retryOutcome.merged.filter((section): section is string => Boolean(section && section.trim())).join('\n\n')}`;
+                blockDegradation = degradation;
+                const { head, details } = chapterDegradationStageText(degradation);
+                const audit = `${displayChapterTitle(chapter.title)} 章级显式降级：${head}（失败原因：${degradation.droppedBlocks.map(block => block.reason).join('；')}）——已保留其余块正文，失守块不产出正文，已登记 structure/blocker 进导出门禁与交付复核清单`;
+                console.error(`[gen][chapter-audit] ${audit}`);
+                console.error(`[gen][chapter-audit] 降级明细：${details.slice(1).join(' | ')}`);
+                session.planning.generationDiagnostics.llm.lastInfo = audit;
+              }
             }
           }
         }
@@ -913,15 +946,21 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     const expandedSectionIssues = sectionContentIntegrityIssues(content, [{ title: chapter.title, content, sections }]).map(issue => issue.message);
     const factUsageWarnings = factUsageIssues.slice(0, 6).map(issue => `小节事实密度需优化：${issue}`);
     const chapterIssues = [...expandedSectionIssues, ...factUsageWarnings];
-    const chapterStatus = chapterCompletionStatus(chapterChars, targetWords, chapterIssues);
+    // 4.55.30 降级章状态：块失守章不再走 chapterCompletionStatus 的 failed（失守块使「缺少规划小节」
+    // 成立，但那只是「少一块」而非「章未产出」），改用三档词汇的 partial（黄灯：有净损失、章已产出，
+    // 缺口由 blocker + 复核清单消费）；判据与修复轮同源（plannedBlocks → droppedBlocks）。
+    const degradedStage = blockDegradation ? chapterDegradationStageText(blockDegradation) : undefined;
+    const chapterStatus = blockDegradation
+      ? blockDeliveryOutcomeStatus({ plannedBlocks: blockDegradation.plannedBlocks, droppedBlocks: blockDegradation.plannedBlocks - blockDegradation.deliveredBlocks })
+      : chapterCompletionStatus(chapterChars, targetWords, chapterIssues);
     latestChapterStageForProgress = displayStage({
       type: 'chapter_generation',
       roleId: 'chapter_generation',
       promptId: chapterPromptExecution.primaryPromptId,
       status: chapterStatus,
-      message: elapsedMessage(`${displayChapterTitle(chapter.title)} 已由大模型成稿：当前 ${chapterChars} 字；章节预算约 ${targetPlan.budgetTarget} 字，本轮目标约 ${targetPlan.roundTarget} 字${chapterIssues.length ? `；待优化：${chapterIssues.slice(0, 8).join('、')}` : ''}`, chapterStartedAt),
-      details: [`本轮完成率：${chapterOverProducePercent}%`, `结构目标约 ${targetPlan.structureTarget} 字`, ...chapterPromptDetails, ...chapterBudgetDetails, `二级小节：${sections.length} 个`, ...(chapterOverProduce ? [`篇幅审计：章超产（${chapterChars} 字 vs 本轮目标 ${targetPlan.roundTarget} 字，终稿篇幅阻断线为目标总额 +20%）`] : []), ...(overProduceAcceptanceNote ? [overProduceAcceptanceNote] : [])],
-      progress: { current: chapterOrder + 1, total: session.planning.effectiveChapters.length, label: chapterIssues.length ? '章节已生成' : '章节达标' },
+      message: elapsedMessage(`${displayChapterTitle(chapter.title)} 已由大模型成稿：当前 ${chapterChars} 字${degradedStage ? `；${degradedStage.head}` : ''}；章节预算约 ${targetPlan.budgetTarget} 字，本轮目标约 ${targetPlan.roundTarget} 字${chapterIssues.length ? `；待优化：${chapterIssues.slice(0, 8).join('、')}` : ''}`, chapterStartedAt),
+      details: [`本轮完成率：${chapterOverProducePercent}%`, `结构目标约 ${targetPlan.structureTarget} 字`, ...chapterPromptDetails, ...chapterBudgetDetails, `二级小节：${sections.length} 个`, ...(degradedStage ? degradedStage.details : []), ...(chapterOverProduce ? [`篇幅审计：章超产（${chapterChars} 字 vs 本轮目标 ${targetPlan.roundTarget} 字，终稿篇幅阻断线为目标总额 +20%）`] : []), ...(overProduceAcceptanceNote ? [overProduceAcceptanceNote] : [])],
+      progress: { current: chapterOrder + 1, total: session.planning.effectiveChapters.length, label: blockDegradation ? '章节降级成稿' : (chapterIssues.length ? '章节已生成' : '章节达标') },
     }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
     session.understanding.chapterGenerationStagesByOrder[chapterOrder] = latestChapterStageForProgress;
     // P2：生成阶段结束，章节收口作为延迟任务返回，由审查池调度（与后续批次章节生成流水线重叠）
@@ -931,7 +970,11 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       // 补写落位锚点随成稿变化全部失效）。跨章一致性/数据一致性问题统一在
       // 初稿完成后的全局一致性审查阶段冻结问题清单并定向修复
       //（4.41 起章级确定性补写已删除：评分项响应责任前移至写作侧，缺口由检测器报出后走 LLM 修复/导出门禁）
-      const draftChapter = { id: chapter.id, title: chapter.title, content, evidence, missingFacts, sections, tablePlans: chapter.tablePlans || [] };
+      const draftChapter = blockDegradation
+        // 4.55.30：降级记录随草稿章节入 finalize（buildValidationIssues 按同一对象引用读取并产出
+        // structure/blocker 进导出门禁与交付复核清单）——降级必须显式，绝不静默
+        ? attachChapterBlockDegradation({ id: chapter.id, title: chapter.title, content, evidence, missingFacts, sections, tablePlans: chapter.tablePlans || [] }, blockDegradation)
+        : { id: chapter.id, title: chapter.title, content, evidence, missingFacts, sections, tablePlans: chapter.tablePlans || [] };
       session.understanding.chapterDraftsByOrder[chapterOrder] = draftChapter;
       session.global.chapterDrafts = session.understanding.chapterDraftsByOrder.filter((item): item is DocumentDraftChapter => Boolean(item));
       session.global.emitProgress(session.global.chapterDrafts);

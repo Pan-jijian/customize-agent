@@ -15,6 +15,11 @@ import type { BlueprintData, BlueprintQuantity } from './types';
  * 结构定位（collectBlueprintCitationCandidates，零词表豁免）：工期/村数/劳动力峰值/工程量数值与
  * 蓝图权威比对，不一致即候选（值 == 权威的引用不入候选）；规格/频次/分区/村名/单体/分部/子集和
  * 等一切语义豁免均不在此层判断。
+ * 唯一例外是「口径分层放行」（4.55.30，数据判定·非词表）：引用值命中该条目在蓝图权威中已登记的
+ * 分层值（规格-数量拆分小计 = R20 合法值；分工程/单体明细值且被上位标题限定到该对象）时不入候选
+ * ——明细口径引用不是「以项目级汇总口径陈述的错值」，且其唯一可执行的修复动作（改写成条目合计）
+ * 恰是 R20 明令禁止方向 / 跨单体合计写入单体范围句的对象错位。未登记值（不在任何分层值内）照常入
+ * 候选，判定层裁决与锚点修复链不变。
  * 语义判定（semanticAdjudication 判定层）：该句是否以该项目级数据口径陈述该数值——consistent 放行、
  * conflict 报 error 并产修复锚点（判定层直连修复器，修复侧无平行豁免）、uncertain 报 warning 显式暴露
  * （判定不可用不降级、不回退词表猜测）。
@@ -87,7 +92,32 @@ function nearlyEqualValue(a: number, b: number): boolean {
   return Math.abs(a - b) <= 0.01 + 1e-6 * Math.max(Math.abs(a), Math.abs(b));
 }
 
-/** 结构定位（零语义豁免）：不一致引用入候选；判定辅助事实只携带结构化数据投影（分工程明细/村名单） */
+/** 对象维度（结构层）：引用位置的上位标题链是否限定到「分工程明细」所属对象。
+ *  标题「#### 1.25.1 1#厂房」下的「金属栏杆316.630m」是单体内合法口径；无单体限定的项目级标题链
+ *  （如正文「本标段金属栏杆316.630m」）不在此列，仍入候选交判定层（防跨单体合计写进单体范围句）。
+ *  标题链按层级收敛判定：向上仅接受层级更浅的标题（#### 1.25.1 的兄弟小节 #### 1.25.4 不构成
+ *  上位作用域），防止同文档他处单体标题把兄弟小节内的引用误判为单体内口径。 */
+function scopedToGroup(masked: string, position: number, groupLabel: string): boolean {
+  // 明细行标签去尾缀取对象名：「1#厂房土建工程」→「1#厂房」、「室外附属工程」→「室外附属」
+  const token = groupLabel.replace(/(?:土建|安装|装饰|市政)?工程$/u, '').trim();
+  if (token.length < 2) return false;
+  let enclosingLevel = 7;
+  let lineEnd = masked.indexOf('\n', position);
+  let lineStart = masked.lastIndexOf('\n', position) + 1;
+  for (;;) {
+    const line = masked.slice(lineStart, lineEnd < 0 ? masked.length : lineEnd);
+    const heading = /^\s*(#{1,6})\s/u.exec(line);
+    if (heading && heading[1]!.length < enclosingLevel) {
+      enclosingLevel = heading[1]!.length;
+      if (line.includes(token) || line.includes(groupLabel)) return true;
+    }
+    if (lineStart === 0) return false;
+    lineEnd = lineStart - 1;
+    lineStart = masked.lastIndexOf('\n', lineEnd - 1) + 1;
+  }
+}
+
+/** 结构定位（零语义豁免·唯一例外为口径分层放行）：不一致引用入候选；判定辅助事实只携带结构化数据投影（分工程明细/村名单） */
 export function collectBlueprintCitationCandidates(markdown: string, data: BlueprintData): BlueprintCitationCollection {
   const candidates: CitationAdjudicationCandidate[] = [];
   const entries = new Map<string, BlueprintCitationEntry>();
@@ -219,20 +249,24 @@ export function collectBlueprintCitationCandidates(markdown: string, data: Bluep
     if (!Number.isFinite(value) || value <= 0) continue;
     if (value === quantity.value) continue;
     const start = ne + (match.index ?? 0) + match[0].indexOf(match[1]);
-    // 规格小计结构豁免（与数值对账「规格-数值绑定」同源·通用）：名称命中邻域（名前 16 字至数值
-    // 起点之间）出现该名称 specBreakdown 某规格 token，且数值命中该规格小计（干净切分门：小计和≈
-    // 名称合计）→「规格+名称+数值」三元组是规格小计的列举（如「100W LED灯具109套」「120W
-    // LED灯具9套」），不属以名称合计口径陈述的引用，不入候选——防判定层把正确小计误判 conflict
-    // 后由 citation-numeric-replay 改回名称合计值，与规格-数值绑定确定性修复形成往返拉扯（小计
-    // 被改写回合计即规格错位缺陷复活）。无规格限定的同名数值仍照常入候选（保守，交判定层裁决）
-    const specBreakdown = quantity.specBreakdown ?? [];
-    if (specBreakdown.length >= 2) {
-      const splitSum = specBreakdown.reduce((sum, item) => sum + item.value, 0);
-      if (nearlyEqualValue(splitSum, quantity.value)) {
-        const specWindow = masked.slice(Math.max(0, ns - 16), start).toLowerCase().replace(/\s+/gu, '');
-        if (specBreakdown.some(item => nearlyEqualValue(item.value, value) && specWindow.includes(item.spec.toLowerCase().replace(/\s+/gu, '')))) continue;
-      }
-    }
+    // 口径分层放行（结构层·数据判定，非词表豁免；4.55.30 实机归因）——引用值命中该条目在蓝图权威中
+    // 已登记的分层值时属同一份清单权威的明细口径引用，不是「以项目级汇总口径陈述的错值」：
+    // ① 规格层（specBreakdown，R20）：此类候选唯一可执行的修复动作是被改写成条目合计，而 R20 明令
+    //    「禁将规格小计写为名称合计」（巢湖实测「直形墙100mm规格2.520m³、150mm规格128.870m³」判
+    //    conflict → 锚点改写为合计 147.66 即规格错位缺陷复活）；与 numericVerification「规格拆分值
+    //    入池（防反向误报）」同源。原「规格 token 邻接 + 小计和≈合计 干净切分」双门只在「列举句」
+    //    形态下放行，规格 token 缺失（「金属栏杆247.990m」「防火涂料26494.190m²」）或蓝图自身口径
+    //    不自洽（金属栏杆规格小计 820.58 vs 合计 410.29）时误放行出锚点——本层以「值 ∈ 已登记分层
+    //    值集」直接判定，不再要求 token 邻接与干净切分。
+    // ② 单体层（groups）：明细值只在所属对象作用域内合法（金属栏杆 1#厂房316.63 / 2#门卫78.7 /
+    //    3#门卫14.96 → 合计410.29）——上位标题限定到该单体的范围句内引用明细值不该被改写成跨单体
+    //    合计（对象错位）；无单体限定的项目级语境不在此列，仍入候选。
+    // 分层值必须与该条目权威合计异值（同值项不承载分层信息，且上方 value === quantity.value 已放行）；
+    // 未登记值（单条清单行的规格量等）照常入候选 → 判定层裁决 → 锚点修复链收敛（真冲突仍报出）。
+    const splitValues = (quantity.specBreakdown ?? []).filter(item => !nearlyEqualValue(item.value, quantity.value)).map(item => item.value);
+    if (splitValues.some(splitValue => nearlyEqualValue(splitValue, value))) continue;
+    const groupValues = (quantity.groups ?? []).filter(group => !nearlyEqualValue(group.value, quantity.value));
+    if (groupValues.some(group => nearlyEqualValue(group.value, value) && scopedToGroup(masked, ns, group.group))) continue;
     // 判定辅助事实：清单分工程明细（分工程口径/跨工程同值复制的判定依据，结构化数据投影）
     const groups = quantity.groups ?? [];
     const facts = groups.length > 0

@@ -40,6 +40,14 @@ export interface ResolvedValue {
   evidence: Array<{ source: string; snippet: string }>;
   /** 被取代值（历史口径；正文不得再作为现行表述） */
   superseded: string[];
+  /** 是否**项目级口径**（单值型：原文带口径标签抽取，如「最高投标限价…」「计划工期…」「开工日期…」）。
+   *
+   * 4.55.29：口径终检的「正文须逐字落位」判据只对**口径**成立——它要求正文复现该值，
+   * 这只有在写手**被告知过**这个口径时才是正当的。写作侧（stageUnderstanding/stageOutlinePlanning/
+   * derive）一直以 `labeledValues` 划定口径集（`caliberAttributes`），finalize 读侧现与之同源；
+   * 非口径属性（「底坑垫层做法」「钢筋连接」「主要材料包括」这类**章节内容型**属性）的值是写作素材，
+   * 不得要求逐字落位——否则产出写手从未被告知、也永不消解的 blocker。 */
+  caliber: boolean;
   /** 同属性全部候选（审计用） */
   candidates: TruthCandidate[];
 }
@@ -95,13 +103,17 @@ const PLACEHOLDER_VALUE_RE = /^(?:【[^】]{0,16}】|—+|待定|暂无?|未提�
  */
 const ABSENCE_DECLARATION_RE = /^(?:【[^】]{0,24}】|—+|[待暂](?:定|补充|确认|核实|无|缺)|不详|未知|不适用|未在资料(?:中|里)?(?:明确)?(?:体现|给出|提供|说明|标注|载明|列明|查到|查得)|(?:资料|文件|图纸|清单)(?:中|里)?(?:均|也)?未(?:明确|体现|给出|提供|说明|标注|载明|列明|涉及|提及|查到)|未(?:明确|体现|提供|涉及|提及|给出|标注|说明|描述|予明确|查到)|系统暂未(?:从知识库确认)?|无法确认|无相关(?:资料|信息|内容|记录)|无此(?:项|内容|信息)|以(?:图纸|清单|资料|招标文件)为准|详见|如上|同前|同上)$/u
 
-/** 缺席声明判定（剥括号与尾部标点后整值匹配；长度上界防长段落借首词命中） */
-function isAbsenceDeclaration(text: string): boolean {
+/** 缺席声明判定（剥括号与尾部标点后整值匹配；长度上界防长段落借首词命中）
+ * 导出供事实冲突检测同源复用（缺席声明不是可比值，不得参与多源对账）。 */
+export function isAbsenceDeclaration(text: string): boolean {
   const bare = text.replace(/^【/u, '').replace(/】$/u, '').replace(/[\s。；;，,、.．]+$/u, '').trim();
   return bare.length > 0 && bare.length <= 24 && ABSENCE_DECLARATION_RE.test(bare);
 }
 /** 指向值（非值本身） */
 const POINTER_VALUE_RE = /^(?:见|详见|参见|按|依据)\s*(?:招标文件|招标公告|投标须知|图纸|设计|清单|规范|合同)/u;
+/** 商务口径（技术标不承载）：与参数池商务红线同族，用于把「须逐字落位」限制在工程口径上 */
+const COMMERCIAL_CALIBER_RE = /暂列金额|暂估价|预留金|投标报价|报价明细|综合单价|单价|合价|税率|增值税|利润|结算/u;
+
 /** 内部口径词（清单计价表专用词，非工程内容） */
 const INTERNAL_CALIBER_RE = /^(?:分部小计|本页小计|小计|合计|总计|综合单价|措施项目费|规费|税金|按实|暂估|暂列金额)$/u;
 
@@ -665,6 +677,10 @@ export function buildAuthoritativeValues(input: {
       rule: result.rule,
       evidence: [{ source: result.winner.source, snippet: result.winner.value.slice(0, 120) }],
       superseded: [...new Set([...chainedLosers.filter(value => value !== result.winner.value), ...losers])],
+      // 项目级口径 = 原文带口径标签抽取出的属性（caliberAttributes）；其余为章节内容型属性。
+      // 商务口径（暂列金额/暂估价/预留金…）**不入**「正文须逐字落位」集——技术标不承载金额类数据，
+      // 变更追踪仍由 superseded 承担（`caliberAttributes` 未变），两者职责分离。
+      caliber: caliberAttributes.has(attribute) && !COMMERCIAL_CALIBER_RE.test(attribute),
       candidates,
     });
   }

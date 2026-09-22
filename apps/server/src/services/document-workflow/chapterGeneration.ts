@@ -6,7 +6,7 @@ import { buildChapterEvidencePool, buildEvidenceBundle, cleanEvidenceText, evide
 import { reconcileContentNumbers, renderNumericFeedback } from './numericalConsistency';
 import { FORMAL_WRITING_RULES, SECTION_GENERATION_SAFETY_RULES, docSystemPrefix, removeUnwantedDrawingImages, sanitizeFormalMarkdown, writerSystemPrefix } from './markdownComposer';
 import { callDocumentLlm, callDocumentLlmJson, contextLayerChars, getDocumentLlmMaxConcurrency } from './llmClient';
-import { alignSimilarHeadingsToPlan, dedupeRepeatedSubsections, findDuplicateH4Titles, findExtraneousBlockTitles, normalizeSubsectionTitleForDedup, stringifyFactValue, stripExtraneousBlockHeadings, throwIfAborted } from './utils';
+import { alignSimilarHeadingsToPlan, dedupeRepeatedSubsections, findDuplicateH4Titles, findExtraneousBlockTitles, normalizeSubsectionTitleForDedup, stableHash, stringifyFactValue, stripExtraneousBlockHeadings, throwIfAborted } from './utils';
 import { measureGenerationStep } from './rolePipeline';
 import { normalizePlannedSections, sectionTitleEquivalent } from './promptRuleExtraction';
 import { diagramRequirementsPrompt, tablePlansPrompt, unassignedSectionTablePlans } from './constructionOrgTablePlan';
@@ -38,6 +38,30 @@ export function buildValidationIssues(validation: { warnings: string[]; errors: 
     ...validation.warnings.map(message => ({ level: 'warning' as const, message, suggestion: '建议人工确认或补充对应资料。' })),
   ];
   if (draftChapters.some(chapter => /资料未提供|系统暂未从知识库确认/u.test(chapter.content))) issues.push({ level: 'warning', message: '存在系统暂未从知识库确认的章节内容', suggestion: '请检查项目角色配置、文件绑定顺序和事实抽取落位结果。' });
+  // 4.55.30 章级显式降级（块失守 → 章照常成稿、失守块无正文）的唯一上报口：降级记录由
+  // stageChapterLoop 挂在草稿章节上，本函数在 finalize 打包校验组时按同一对象引用读取——
+  // 降级必须进导出门禁与交付复核清单（structure/blocker/manual_review），绝不静默。
+  // 措辞为「生成阶段损失记录」：即使后续修复轮把该小节补回，本条仍真实（当时确已丢弃），
+  // 与「修复后旧快照仍硬阻断导出」的历史缺陷不同族（见 rebuildAndRecompute 快照剔除口径）。
+  for (const chapter of draftChapters) {
+    const degradation = readChapterBlockDegradation(chapter);
+    if (!degradation) continue;
+    const { head, details } = chapterDegradationStageText(degradation);
+    const droppedTitles = degradation.droppedBlocks.map(block => block.title).join('、');
+    const reasons = [...new Set(degradation.droppedBlocks.map(block => block.reason))].join('；');
+    issues.push({
+      level: 'error' as const,
+      severity: 'blocker' as const,
+      category: 'structure' as const,
+      owner: 'llm' as const,
+      repairability: 'manual_review' as const,
+      chapterId: chapter.id,
+      sectionTitle: degradation.droppedBlocks[0]?.title,
+      message: `${chapter.title} 章级显式降级：${head}（失败原因：${reasons}）`,
+      suggestion: `本章已保留其余块正文，失守块无正文（不填充兜底内容）。请针对「${droppedTitles}」在「${chapter.title}」对应位置定向补写或重生成后重新导出：${reasons}`,
+      provenance: { detectorId: 'chapter-block-degradation', fingerprint: stableHash(details.join('|')) },
+    });
+  }
   if (factsModel.conflicts.length > 0) issues.push(...factsModel.conflicts.map(message => ({ level: 'warning' as const, message, suggestion: '请根据当前模板绑定的角色、文件证据和用户要求复核取值口径。' })));
   return issues;
 }
@@ -795,6 +819,10 @@ export interface PlannedChapterContentInput {
   /** C3 隔离重写定向反馈（可选）：上一轮该块失败原因原文——单块重写 attempt=0 即注入，
    * 避免从零重写复现同一漏点（默认轮仅在 attempt≥1 注入缺陷反馈） */
   initialFeedback?: string;
+  /** C3 单块定向重写标记：blocks 只含 1 块且是失败块重写（非整章规划）——诊断消息据此区分
+   *  「本块重写仍失败」与「全章规划块全部失败」（历史缺陷：单块重写失败被表述为「规划块全部失败」，
+   *  进而把「1 块失守」误导成「整章失败」，是 doc-1790115927170-f00280f9 阻断消息的错因文本） */
+  isolatedRetry?: boolean;
 }
 
 /** C3 块级失败隔离结果：部分块失败时返回已成功块 + 失败块清单，由上层只重试失败块，
@@ -860,6 +888,129 @@ export function salvageChapterByOverProduceAcceptance(input: ChapterOverProduceA
     sections: filled as string[],
     detail: `章级超产对冲接纳 ${acceptedIndexes.length} 块（块序号 ${acceptedIndexes.join('、')}，末轮仅篇幅超产）：章总量 ${total} 字 vs 块预算合计 ${budget} 字（接纳区间 ${minAcceptance}~${maxAcceptance} 字，累计放大由章/文档级观测兜底）`,
   };
+}
+
+/** 块失败类别 → 人话原因（单源）：键与 buildPlannedChapterContent 写入的 blockFailureKinds 取值一一对应，
+ *  供章收口降级记录、屏幕阶段消息与终门禁 blocker 共用同一套措辞（两处各写一套必然漂移） */
+export const BLOCK_FAILURE_KIND_LABELS: Readonly<Record<string, string>> = {
+  'over-produce': '篇幅超产',
+  'under-produce': '篇幅欠产',
+  'structure-titles': '小节标题结构缺陷（缺标题/重复 H4/清单外标题）',
+  'structure-integrity': '正文结构缺陷（截断/空节/同标题重复）',
+  numeric: '数值一致性缺陷',
+  'flow-form': '行文形态缺陷（模板化结构标签）',
+  templating: '模板化套话超标',
+  density: '量化参数密度不足',
+  attribution: '归因量化不足',
+  format: '后台话术/格式缺陷',
+};
+
+/** 失败类别清单 → 原因短句；类别缺失（纯异常早退等）时回退缺陷反馈首句/通用话术，保证原因字段永不为空 */
+export function blockFailureReasonText(kinds?: string[], feedback?: string): string {
+  const labels = (kinds || []).map(kind => BLOCK_FAILURE_KIND_LABELS[kind] || kind).filter(Boolean);
+  if (labels.length > 0) return labels.join('、');
+  const excerpt = (feedback || '').replace(/\s+/gu, ' ').trim().slice(0, 80);
+  return excerpt || '块质检未达标（无类别与反馈记录）';
+}
+
+/**
+ * 4.55.30 章级**显式降级**记录（块失守 → 章不再整体丢弃）。
+ *
+ * ## 问题（本机最高频的整篇损失源）
+ *
+ * 规划块章成稿后，单块块级质检失守（如密度缺口）→ C3 隔离重写仍失守 → C7 超产对冲不适用 →
+ * `llmContent` 保持 undefined → 整章 throw。实测 `doc-1790115927170-f00280f9`：34 个规划块中
+ * 仅 1 块（「主要施工内容」）失守，另外 33 块已完成且正文全部丢弃——目标 5.0 万字只成 3.36 万字、
+ * 清单落位 732/1387（52.8%）、3 条篇幅 blocker、总分 85→83。`.dbg/final-acceptance-record.md`
+ * 记录同类历史事故 8 次。**「1 块失守 = 33 块作废」的不对称损失是纯损失，没有任何质量收益。**
+ *
+ * ## 口径（零静默降级不变）
+ *
+ * 失守块**不产出任何正文**（绝不用 `lastAttempt`/骨架/紧凑备用填充——该契约见 buildPlannedChapterContent
+ * 尾部注释），章以**全部成功块**成稿；缺失事实由本记录显式承载，finalize 的 buildValidationIssues
+ * 据此产出 structure/blocker 级 issue 进导出门禁与交付复核清单。
+ *
+ * ## 边界（零放松）
+ *
+ * ① 无失守块（exhaustedBlocks 为空）不构成降级；
+ * ② **成功块数为 0（全失败）不降级**——照旧整章阻断（「全失败 → 章阻断」既有口径不变，
+ *   缺章由 missingChapterCount blocker 显式呈现）；
+ * ③ 失守块数 ≥ 规划块数（无一块成稿）不降级。
+ * 未设比例上限：降级损失已由 blocker + partial 状态 + 复核清单三重显性化，且章级篇幅审计
+ * （>1.2× 告警）、文档级篇幅阻断线、缺节检测器（planned-section-placement / 小节完整性）独立复核，
+ * 无静默空间；再加一个人为比例常数只会制造新的「按比例丢弃」口径（与零静默降级同族缺陷）。
+ */
+export interface ChapterBlockDegradation {
+  /** 规划主题块总数（本章 attempts 的分母） */
+  plannedBlocks: number;
+  /** 实际成稿块数（正文非空的块；正常 = plannedBlocks − droppedBlocks.length，独立取值使呈现不依赖两者的推算） */
+  deliveredBlocks: number;
+  /** 失守（本章正文中无对应正文）的主题块：标题 + 失败原因（类别） + 缺陷反馈摘录 */
+  droppedBlocks: Array<{ index: number; title: string; reason: string; feedback?: string }>;
+}
+
+/** 携带降级记录的草稿章节（`DocumentDraftChapter` 无 notes 字段且 core 类型不属本次改动范围，
+ *  故以附加属性承载；修复轮的 `{ ...chapter }` 展开复制会保留该属性，JSON 序列化亦保留）。 */
+export type DocumentDraftChapterWithDegradation = DocumentDraftChapter & { blockDegradation?: ChapterBlockDegradation };
+
+/** 降级记录读写（单源）：stageChapterLoop 写、buildValidationIssues 读——避免两处各写字段名 */
+export function attachChapterBlockDegradation(chapter: DocumentDraftChapter, degradation: ChapterBlockDegradation): DocumentDraftChapterWithDegradation {
+  return { ...chapter, blockDegradation: degradation };
+}
+
+export function readChapterBlockDegradation(chapter: DocumentDraftChapter): ChapterBlockDegradation | undefined {
+  const degradation = (chapter as DocumentDraftChapterWithDegradation).blockDegradation;
+  if (!degradation || !Array.isArray(degradation.droppedBlocks) || degradation.droppedBlocks.length === 0) return undefined;
+  return degradation;
+}
+
+export interface ChapterBlockDegradationInput {
+  /** 隔离重写后的块正文（失守块为 undefined/空白） */
+  sections: Array<string | undefined>;
+  /** 规划块标题（按 sections 同序） */
+  blockTitles: string[];
+  /** 隔离重写耗尽后仍失守的块（含失败类别与缺陷反馈） */
+  exhaustedBlocks: Array<{ index: number; title?: string; failureKinds?: string[]; retryFeedback?: string }>;
+}
+
+/** 章级显式降级判定（纯函数，单测锚点）：失守块 ≥1 且**成功块 > 0** 时返回降级记录（章照常成稿、
+ *  失守块无正文），否则返回 undefined（上层照旧章阻断）。判据只有「成功块是否 > 0」——
+ *  与「全失败 → 章阻断」的既有边界同一口径，不引入新的项目常数。 */
+export function assessChapterBlockDegradation(input: ChapterBlockDegradationInput): ChapterBlockDegradation | undefined {
+  const { sections, blockTitles, exhaustedBlocks } = input;
+  if (sections.length === 0 || exhaustedBlocks.length === 0) return undefined;
+  const hasBody = (section?: string): boolean => Boolean(section && section.trim());
+  const succeeded = sections.filter(hasBody).length;
+  // 全失败（无任何一块成稿）→ 不降级：无正文可组装，照旧章阻断（零放松）
+  if (succeeded === 0) return undefined;
+  const droppedBlocks: ChapterBlockDegradation['droppedBlocks'] = [];
+  for (const item of exhaustedBlocks) {
+    if (item.index < 0 || item.index >= sections.length) continue;
+    if (hasBody(sections[item.index])) continue; // 痕迹与正文不一致（重写补回）→ 该块未失守
+    const feedback = (item.retryFeedback || '').replace(/\s+/gu, ' ').trim().slice(0, 160) || undefined;
+    droppedBlocks.push({
+      index: item.index,
+      title: item.title || blockTitles[item.index] || `第 ${item.index + 1} 个主题块`,
+      reason: blockFailureReasonText(item.failureKinds, item.retryFeedback),
+      feedback,
+    });
+  }
+  // 失守块数 ≥ 规划块数（无一块成稿）→ 不降级（防御性与上方 succeeded===0 同口径）
+  if (droppedBlocks.length === 0 || droppedBlocks.length >= sections.length) return undefined;
+  return { plannedBlocks: sections.length, deliveredBlocks: succeeded, droppedBlocks };
+}
+
+/** 降级阶段呈现文本（单源，纯函数）：头句 `N/M 块成稿、丢弃 X 块：<标题清单>` + 逐块定位明细，
+ *  供章收口 stage 消息/详情与 console 审计共用（屏幕可见性由单一措辞来源保证） */
+export function chapterDegradationStageText(degradation: ChapterBlockDegradation): { head: string; details: string[] } {
+  const delivered = degradation.deliveredBlocks;
+  const head = `${delivered}/${degradation.plannedBlocks} 块成稿、丢弃 ${degradation.droppedBlocks.length} 块：${degradation.droppedBlocks.map(block => block.title).join('、')}`;
+  const details = [
+    head,
+    ...degradation.droppedBlocks.map(block => `失守块「${block.title}」（第 ${block.index + 1}/${degradation.plannedBlocks} 块）：${block.reason}${block.feedback ? `；缺陷反馈：${block.feedback}` : ''}`),
+    `已保留 ${delivered} 块正文；失守块不产出正文（不填充兜底内容）；已登记 structure/blocker 进导出门禁与交付复核清单，请按上方标题定向补写。`,
+  ];
+  return { head, details };
 }
 
 /** 4.19.5 分部章容器块总述提示词（丰乐镇第二轮验收）：分部章容器块（「主要分部分项工程施工方案」在
@@ -1662,7 +1813,10 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
   if (failedBlocks.length === 0) return { sections: results, failedBlocks, allSucceeded: true, markdown };
   // C3 块级失败隔离：部分块失败时返回已成功块与失败块清单，由上层只重试失败块，不再整章降级
   if (input.diagnostics && failedBlocks.length > 0) {
-    input.diagnostics.llm.lastError = `规划块${failedBlocks.length === blocks.length ? '全部' : '部分'}失败：${failedBlocks.map(({ block }) => block.title).join('、')}`;
+    const scope = input.isolatedRetry
+      ? '定向重写仍失败'
+      : (failedBlocks.length === blocks.length ? '全部失败' : '部分失败');
+    input.diagnostics.llm.lastError = `规划块${scope}：${failedBlocks.map(({ block }) => block.title).join('、')}`;
   }
   return { sections: results, failedBlocks, allSucceeded: false, markdown };
 }

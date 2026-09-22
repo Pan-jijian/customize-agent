@@ -114,6 +114,19 @@ const PROCESS_GAP_CONTEXT_RE = /(?:混凝土|砼|砂浆|强度|等级|标号|配
 
 const AUDIT_CONTEXT_WINDOW = 16;
 
+/** 语境窗口边界吸附（L0-7 收尾；doc-1790115927170 实机 blocker 根治）：按字符数截窗会把数字切半——
+ * 目录行「…1.23 工伤保险与劳动保障\n 1.24 项目管理机构与岗位职责…」的 token「1.24 项」窗口左界落在
+ * 「1.23」中间（截成「.23」），R17 同形邻号判据的前置数字边界断言因缺整数段不成立 → 真编号被判无主、
+ * 进未登记桶直通硬门禁（假编造）。截断污染所有以 context 为输入的判据（分流桶 / R16 / R17 / C-T2 各族），
+ * 故在构造处根治：左右边界各自向外吸附，直到不再紧邻数字/小数点——数字不得被切半。 */
+function auditContextWindow(markdown: string, index: number, tokenLength: number): string {
+  let from = Math.max(0, index - AUDIT_CONTEXT_WINDOW);
+  let to = Math.min(markdown.length, index + tokenLength + AUDIT_CONTEXT_WINDOW);
+  while (from > 0 && /[\d.]/u.test(markdown[from - 1] ?? '')) from -= 1;
+  while (to < markdown.length && /[\d.]/u.test(markdown[to] ?? '')) to += 1;
+  return markdown.slice(from, to);
+}
+
 /** 补全提取（审计口径 = 扫描全部数值，必须比修复轮「宁漏勿错」更全）：
  * 共享提取器的 PRECISE_TOKEN_RE 以 \b 收尾，% / ℃ 等非词形单位后接标点时边界不成立而漏提
  * （「压实度 93%，」）；座/辆/根/处/盏/株/道/孔 等常用计量单位不在任何词表（「检查井 555 座」）；
@@ -238,7 +251,7 @@ export function auditAuthorityCoverage(markdown: string, data?: BlueprintData, e
       continue;
     }
     const value = normalizeQuantityZeros(numericCore(token));
-    const context = markdown.slice(Math.max(0, index - AUDIT_CONTEXT_WINDOW), index + token.length + AUDIT_CONTEXT_WINDOW).replace(/\s+/gu, ' ').trim();
+    const context = auditContextWindow(markdown, index, token.length).replace(/\s+/gu, ' ').trim();
     const finding: AuthorityAuditFinding = { token, value, context, occurrences: countStrictOccurrences(markdown, token) };
     if (cores.has(value)) {
       matched += 1;

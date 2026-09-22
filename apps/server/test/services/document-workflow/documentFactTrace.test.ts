@@ -746,6 +746,16 @@ describe('C-T2 classifyNumericTraceToken 三分类（r28f 实测合法数字全�
     expect(isSectionNumberingToken({ token: '1.22 周', context: '养护历时 1.22 周' })).toBe(false);
     expect(isSectionNumberingToken({ token: '427.000个', context: '接口427.000个' })).toBe(false);
   });
+
+  it('L0-7 收尾：邻号被语境窗口截半（1.23 → .23）仍算同层邻号；小数段不相差 1 或点在数字内则不成立', () => {
+    // 实机 doc-1790115927170：目录行 token「1.24 项」的窗口左界落在「1.23」中间
+    expect(isSectionNumberingToken({ token: '1.24 项', context: '.23 工伤保险与劳动保障 1.24 项目管理机构与岗位职责 1.2' })).toBe(true);
+    expect(isSectionNumberingToken({ token: '1.24 项', context: '… .23 … 1.24 项目管理' })).toBe(true);
+    // 反例：截断残余的小数段不相差 1；点号落在数字/小数内部（Φ25.23）不构成邻号；无任何邻号
+    expect(isSectionNumberingToken({ token: '1.24 项', context: '.56 与 1.24 项目管理' })).toBe(false);
+    expect(isSectionNumberingToken({ token: '1.24 项', context: '钢筋Φ25.23、1.24 项目管理' })).toBe(false);
+    expect(isSectionNumberingToken({ token: '1.24 项', context: '1.24 项目管理机构与岗位职责' })).toBe(false);
+  });
 });
 
 describe('C-T2 scanNumericTrace 扫描口径（表格行/章节号/裸数过滤）', () => {

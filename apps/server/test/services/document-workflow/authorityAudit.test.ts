@@ -8,6 +8,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { auditAuthorityCoverage, authorityAuditDetails, authorityAuditIssues, authorityAuditSummary } from '@/services/document-workflow/authorityAudit';
+import { buildBillFactLock, stripUnitCountPrefix } from '@/services/document-workflow/billFactLock';
 import { buildNumericAuthority } from '@/services/document-workflow/finalize/repairRounds/numericVerification';
 import type { FinalizeSession } from '@/services/document-workflow/finalize/finalizeSession';
 import type { BlueprintData } from '@/services/document-workflow/integratedBlueprint';
@@ -430,5 +431,60 @@ describe('V5 P5 无主数值审计（M6）', () => {
     const report = auditAuthorityCoverage('钢筋HRB400，Φ16共364个。');
     expect(report.conventionExempt).toBe(0);
     expect(reportedTokens(report)).toEqual(expect.arrayContaining(['HRB400']));
+  });
+
+  // ═══ L0-7 收尾（doc-1790115927170 实测）：窗口截断 + 清单单位格数量污染 ═══
+
+  it('L0-7 窗口截断根治：目录邻号被 ±16 字窗口从中间截半（1.23 → .23）时编号仍豁免，不进未登记桶', () => {
+    // 逐行目录：token「1.24 项」「1.25 项」的窗口左界落在上一行编号「1.23」中间（截成「.23」）——
+    // R17 同形邻号判据因缺整数段不成立 → 实机曾直落未登记桶（假编造 blocker）
+    const markdown = '1.22 施工进度计划编制\n1.23 工伤保险与劳动保障\n1.24 项目管理机构与岗位职责\n1.25 项目主要施工内容';
+    const report = auditAuthorityCoverage(markdown);
+    expect(reportedTokens(report)).not.toContain('1.24 项');
+    expect(reportedTokens(report)).not.toContain('1.25 项');
+    expect(report.conventionExempt).toBeGreaterThanOrEqual(2);
+    expect(report.unattributed).toEqual([]);
+  });
+
+  it('L0-7 单源防线：语境窗口仍被截断时（调用方自截），截断邻号「.23」同样成立', () => {
+    // 审计侧已吸附边界，此处守的是「其他调用方传入被截断语境」的通道（判定在 C-T2 单源内）
+    const report = auditAuthorityCoverage('总进度计划 1.24 项目管理机构与岗位职责');
+    expect(report.unattributed).toEqual([]);
+  });
+
+  it('L0-7 清单单位格混写数量（实机「1个口」）：剥离数量前缀后工程量入权威核，正文 427.000个 不落缺口', () => {
+    const boq = {
+      entries: [{
+        seq: 77, name: '混凝土管道接口', description: '1．管道类型、管道材质：采用钢筋混凝土承插口管(Ⅱ级) 3．管径：DN300',
+        quantity: 427, unit: '1个口', section: '室外附属工程', subsection: '', villageGroup: '', sourceFile: '室外附属工程.xls',
+      }],
+      totalEntries: 1, sourceFile: '室外附属工程.xls', complete: true,
+    } as unknown as Parameters<typeof buildBillFactLock>[0]['boq'];
+    const lock = buildBillFactLock({ boq })!;
+    expect(lock.entries[0].unit).toBe('个口');
+    expect(lock.entries[0].unitRaw).toBe('1个口');
+    expect(lock.entries[0].specQuantityPairs.map(pair => pair.quantity)).toContain('427个口');
+    const session = {
+      allEvidence: [], structuredFacts: [],
+      input: { billFactLock: lock },
+      factsModel: { tables: [] },
+    } as unknown as FinalizeSession;
+    const authority = buildNumericAuthority(session);
+    expect(authority.has('427个')).toBe(true);
+    const report = auditAuthorityCoverage('配套混凝土管道接口427.000个口。', undefined, authority);
+    expect(report.matched).toBe(1);
+    expect(reportedTokens(report)).toEqual([]);
+    // 反向守护：剥离不清空闸门——清单里没有的同类数值照报
+    const fabricated = auditAuthorityCoverage('配套混凝土管道接口999.000个口。', undefined, authority);
+    expect(reportedTokens(fabricated)).toContain('999.000个');
+  });
+
+  it('L0-7 单位剥离边界：汉字量词混写才剥，ASCII 量纲/倍率单位（m2 / 10m / 100m3）一律不动', () => {
+    expect(stripUnitCountPrefix('1个口')).toBe('个口');
+    expect(stripUnitCountPrefix('2台班')).toBe('台班');
+    expect(stripUnitCountPrefix('1.5个')).toBe('个');
+    for (const unit of ['m2', '10m', '100m3', '个', '座', 'm', '棵', '㎡', 't', '项目']) {
+      expect(stripUnitCountPrefix(unit)).toBe(unit);
+    }
   });
 });
