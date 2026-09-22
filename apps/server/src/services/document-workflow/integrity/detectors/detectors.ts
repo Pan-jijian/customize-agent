@@ -887,11 +887,24 @@ export async function sixHundredPercentCoverageIssues(markdown: string, options:
   // 语义判定句集：按扬尘治理词面预筛全量句，不使用 bodySentencesForSemantic 均匀采样——
   // 采样 stride 会跳过中后部扬尘句（4.19.3 真实回归：6.2.2 小节「物料堆放100%覆盖」句不在
   // 400 句采样内 → 5/6 误报缺失）。预筛句数量级小，bge 全量判定无性能压力。
-  // 注：表格行与标题行**不**入语义池（Z6 边界决策，有锁定用例）——表格逐项呈现六个百分百
-  // 时不满足本门禁，属既有口径；如需变更须先验证其真实影响，不在本次范围内。
+  /**
+   * 4.55.22 口径变更（**推翻原 Z6 决策**，理由记录在此）：**表格行计入判定语料**。
+   *
+   * 原口径把 `|` 行整体排除，理由是"表格行不入语义池"。但本门禁要的是**措施内容是否落实**，
+   * 不是承载形式：以表格逐项列出六个百分百（`| 现场周边100%围挡 | 落实 |`）是措施清单的常规形态，
+   * 排除后六项全判缺失 → 对**正确文档**误报 blocker，且该修复轮（六百分百补写）已在 4.41 删除、
+   * 无自动修复路径，只会在终门禁反复空转。
+   * 现按单元格取值入池（表头/分隔线除外）——单元格本身即短语级措施陈述，与其对应的散文句等价；
+   * 判定强度不变（仍需命中该项词面且≥4 项才过词面兜底）。
+   */
   const dustSentences = [...new Set(markdown.split(/\r?\n/u).flatMap(line => {
     const trimmed = line.trim();
-    if (!trimmed || /^#{1,6}\s/u.test(trimmed) || /^\s*\|/u.test(trimmed)) return [];
+    if (!trimmed || /^#{1,6}\s/u.test(trimmed)) return [];
+    if (/^\s*\|/u.test(trimmed)) {
+      const cells = trimmed.replace(/^\|/u, '').replace(/\|$/u, '').split(/(?<!\\)\|/u).map(cell => cell.trim());
+      if (cells.every(cell => /^:?-{2,}:?$/u.test(cell))) return [];
+      return cells.filter(cell => cell.length >= 4 && cell.length <= 120 && /围挡|覆盖|堆放|冲洗|硬化|湿法|密闭|渣土|扬尘|降尘/u.test(cell));
+    }
     if (!/围挡|覆盖|堆放|冲洗|硬化|湿法|密闭|渣土|扬尘|降尘/u.test(trimmed)) return [];
     return trimmed.split(/(?<=[。！？!?；;])/u).map(part => part.trim()).filter(sentence => sentence.length >= 8 && sentence.length <= 120);
   }))];

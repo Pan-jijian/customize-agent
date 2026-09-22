@@ -187,6 +187,22 @@ export function buildDeliveryReviewReport(input: DeliveryReviewReportInput): str
       if (issue.suggestion) lines.push(`  - 建议：${truncate(issue.suggestion, 260)}`);
     }
   }
+  // 4.55.22：人工复核清单（检测器声明 fixerDisposition='manual'：无自动修复路径）。
+  // 注册表承诺「转人工复核」，但这类发现多为 warning 级、阻断明细只收 error —— 声明与可见性脱节。
+  // 此节即该承诺的**实际载体**（不阻断导出，供人工跟进）。
+  const manualReview = gate.manualReviewIssues || [];
+  if (manualReview.length > 0) {
+    lines.push('');
+    lines.push(`### 1.4 人工复核清单（${manualReview.length} 项，不阻断导出）`);
+    lines.push('');
+    lines.push('> 下列发现由声明「无自动修复路径」的检测器产出，需人工判断后处理；系统不会自动改写。');
+    for (const issue of manualReview.slice(0, 30)) {
+      const detectorId = issue.provenance?.detectorId ? `[${issue.provenance.detectorId}]` : '';
+      lines.push(`- ${detectorId} ${truncate(issue.message, 320)}`);
+      if (issue.suggestion) lines.push(`  - 建议：${truncate(issue.suggestion, 260)}`);
+    }
+    if (manualReview.length > 30) lines.push(`- …另有 ${manualReview.length - 30} 项未展开`);
+  }
   if (gate.checklist.length > 0) {
     const failed = gate.checklist.filter(item => !item.passed);
     lines.push('');

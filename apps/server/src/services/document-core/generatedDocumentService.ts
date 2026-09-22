@@ -810,8 +810,13 @@ function launchTask(job: {
       .filter(message => !/资料页码|文件页码|页码引用/u.test(message) || hasPageRefs)
       .filter(message => !/禁止内容|施工方/u.test(message) || hasForbiddenParty)
       .filter(message => result.exportGate.passed ? !/目录与正文不一致|表格分隔线位置不规范/u.test(message) : true);
-    const sectionGaps = collectSectionContentGaps(result.markdown, result.chapters).filter(gap => gap.reason === 'empty');
-    if (sectionGaps.length > 0) warningIssues.unshift(`小节内容补写未完成：仍有 ${sectionGaps.length} 个空洞小节，请继续生成或补充资料后重试`);
+    // 4.55.22：`too_short`（正文 1–179 字且非表正文稀薄）一并浮出——三个消费点原只收 empty，
+    // 该 reason 是"生产者有、消费方全不收"的死值，交付物里"标题下只有一两句"完全不可见。
+    const sectionGaps = collectSectionContentGaps(result.markdown, result.chapters);
+    const emptyGaps = sectionGaps.filter(gap => gap.reason === 'empty');
+    const shortGaps = sectionGaps.filter(gap => gap.reason === 'too_short');
+    if (emptyGaps.length > 0) warningIssues.unshift(`小节内容补写未完成：仍有 ${emptyGaps.length} 个空洞小节，请继续生成或补充资料后重试`);
+    if (shortGaps.length > 0) warningIssues.unshift(`小节内容偏薄：${shortGaps.length} 个小节正文过短（如「${shortGaps.slice(0, 3).map(gap => gap.sectionTitle).join('」「')}」），建议扩写至实质篇幅后重试`);
     if (!result.exportGate.passed) {
       // 4.50 交付解耦 + 批1 C1 复核清单：未收敛阻断不再挂起交付（failed），转结构化精准人工清单
       //（分类/定位/问题/建议/修复路径/检测器身份）置顶——优先复用流水线归档清单

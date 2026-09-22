@@ -8,6 +8,7 @@ import {
   isBodyFigureForbidden,
   isBodyTableForbidden,
   unplannedBodyTableIssue,
+  applyFormatRulesToExportSettings,
 } from '@/services/document-workflow/bidComposition';
 
 /**
@@ -372,5 +373,50 @@ describe('F-T1 标书类型判定加固（双通道 + 显性告警）', () => {
     expect(summary.message).toContain('重跑');
     expect(summary.details.some(item => item.includes('核查指引'))).toBe(true);
     expect(summary.details.some(item => item.includes('标记字符变体'))).toBe(true);
+  });
+});
+
+/**
+ * 招标规定排版 → 导出设置（4.55.22）。
+ * 此前 formatRules 只用于进度展示，招标强制的字体/字号/行距/装订线**从未落到导出物**上。
+ * 关键风险在此：抽取值是中文排版惯用写法（号数名/带括注字体名/「固定值28磅」），
+ * 直接赋值会产出**非法 CSS**（如 `font-size: 小四`）——故必须换算。
+ */
+describe('applyFormatRulesToExportSettings（招标排版落到导出物）', () => {
+  it('中文号数名换算为磅值（小四→12pt、三号→16pt），不产出非法 CSS 字号', () => {
+    const { settings, applied } = applyFormatRulesToExportSettings(undefined, { bodySize: '小四', headingSize: '三号' });
+    expect(settings?.typography?.bodySize).toBe('12pt');
+    expect(settings?.typography?.titleSize).toBe('16pt');
+    expect(applied.join('、')).toContain('正文字号=12pt');
+  });
+
+  it('带括注字体名取正名并给出回退族', () => {
+    const { settings } = applyFormatRulesToExportSettings(undefined, { bodyFont: '仿宋_GB2312（GB2312）' });
+    expect(settings?.typography?.bodyFont).toContain('仿宋_GB2312');
+    expect(settings?.typography?.bodyFont).toContain('serif');
+    expect(settings?.typography?.bodyFont).not.toContain('（');
+  });
+
+  it('行距「固定值28磅」归一为 28pt；装订线与页数上限直通', () => {
+    const { settings, applied } = applyFormatRulesToExportSettings(undefined, { lineHeight: '固定值28磅', gutter: '0.5cm', pageLimit: 60 });
+    expect(settings?.typography?.lineHeight).toBe('28pt');
+    expect(settings?.page?.gutter).toBe('0.5cm');
+    expect(settings?.targetPages?.max).toBe(60);
+    expect(applied).toHaveLength(3);
+  });
+
+  it('招标优先于模板：模板已有排版被招标值覆盖，未规定的项保留模板值', () => {
+    const template = { typography: { bodyFont: 'SimSun', lineHeight: '18pt' }, page: { paper: 'A4' } };
+    const { settings } = applyFormatRulesToExportSettings(template, { lineHeight: '固定值28磅' });
+    expect(settings?.typography?.lineHeight).toBe('28pt');   // 招标覆盖
+    expect(settings?.typography?.bodyFont).toBe('SimSun');   // 招标未规定 → 保留模板
+    expect(settings?.page?.paper).toBe('A4');
+  });
+
+  it('无格式要求时不改动任何设置（零副作用）', () => {
+    const template = { typography: { bodyFont: 'SimSun' } };
+    const { settings, applied } = applyFormatRulesToExportSettings(template, {});
+    expect(applied).toEqual([]);
+    expect(settings?.typography?.bodyFont).toBe('SimSun');
   });
 });

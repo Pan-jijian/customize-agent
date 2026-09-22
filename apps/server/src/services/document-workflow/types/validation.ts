@@ -195,6 +195,12 @@ export interface ExportGateResult {
   passed: boolean;
   blockingIssues: ValidationIssue[];
   checklist: Array<{ key: string; label: string; passed: boolean; message?: string }>;
+  /**
+   * 人工复核项（4.55.22）：检测器注册表声明 `fixerDisposition: 'manual'`（无自动修复路径）的发现。
+   * 这些发现**不阻断导出**，但注册表承诺「转人工复核」——此前它们多为 warning 级，
+   * 而阻断明细只收 error，于是**声明转人工、实际无人可见**。现由门禁承载并进入交付报告。
+   */
+  manualReviewIssues?: ValidationIssue[];
 }
 
 export interface RepairStrategy {

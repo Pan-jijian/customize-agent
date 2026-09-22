@@ -55,20 +55,38 @@ export interface ChapterIntentClassifier {
 }
 
 /** 构建章标题意图分类器：预嵌入全部原型与全部章标题（一次批量，语义模型失败直接抛出） */
-export async function buildChapterIntentClassifier(chapterTitles: readonly string[]): Promise<ChapterIntentClassifier> {
+/**
+ * 章意图查询键：`key` 参与嵌入，`aliases` 复用同一向量（同一章的另一种查询写法，无需重复嵌入）。
+ *
+ * 4.55.22 根修「查询键静默落空」：调用方除章标题外还会传 `标题+用途`（见 stageChapterLoop 的
+ * 扬尘判定），而向量表原先只以**标题**为键 → 该次查询必然落空、`semanticHit` 静默返回 false，
+ * 语义通道形同不存在（只剩正则兜底），且与模块自述「构建失败直接抛出，无不可用降级路径」相悖。
+ * 现由调用方声明其实际使用的全部键，构建期一次登记；未登记键的查询会被显性记录（见 semanticHit）。
+ */
+export type ChapterIntentKey = string | { key: string; aliases?: readonly string[] };
+
+export async function buildChapterIntentClassifier(chapterKeys: readonly ChapterIntentKey[]): Promise<ChapterIntentClassifier> {
   const provider = getLocalSemanticProvider();
+  const entries = chapterKeys.map(item => (typeof item === 'string' ? { key: item, aliases: [] as readonly string[] } : item));
+  const primaryKeys = entries.map(entry => entry.key);
   const allAnchors: string[] = [
     ...BLUEPRINT_ANCHOR_GROUPS.flatMap(group => group.anchors),
     ...BASIC_FACTS_ANCHORS,
     ...DUST_CONTROL_ANCHORS,
   ];
-  const vectors = await provider.embedDocuments([...allAnchors, ...chapterTitles]);
-  if (vectors.length !== allAnchors.length + chapterTitles.length) {
-    throw new Error(`本地语义模型锚点嵌入数量不一致：预期 ${allAnchors.length + chapterTitles.length}，实际 ${vectors.length}`);
+  const vectors = await provider.embedDocuments([...allAnchors, ...primaryKeys]);
+  if (vectors.length !== allAnchors.length + primaryKeys.length) {
+    throw new Error(`本地语义模型锚点嵌入数量不一致：预期 ${allAnchors.length + primaryKeys.length}，实际 ${vectors.length}`);
   }
   const anchorVectors = vectors.slice(0, allAnchors.length);
   const titleVectors = new Map<string, number[]>();
-  chapterTitles.forEach((title, index) => titleVectors.set(title, vectors[allAnchors.length + index] ?? []));
+  entries.forEach((entry, index) => {
+    const vector = vectors[allAnchors.length + index] ?? [];
+    titleVectors.set(entry.key, vector);
+    for (const alias of entry.aliases || []) titleVectors.set(alias, vector);
+  });
+  /** 未登记键（构建期未声明却在运行期被查询）：显性记录一次，避免"查询永远落空"再次隐形 */
+  const unknownKeys = new Set<string>();
   let offset = 0;
   const groupVectors = BLUEPRINT_ANCHOR_GROUPS.map(group => {
     const groupSlice = anchorVectors.slice(offset, offset + group.anchors.length);
@@ -81,7 +99,15 @@ export async function buildChapterIntentClassifier(chapterTitles: readonly strin
 
   const semanticHit = (title: string, anchorVecs: number[][]): boolean => {
     const vector = titleVectors.get(title);
-    return Boolean(vector && vector.length > 0 && maxSimilarity(vector, anchorVecs) >= SEMANTIC_COVERAGE_THRESHOLD);
+    if (!vector) {
+      // 4.55.22：未知键不再静默 false——显性告警（每键一次），暴露"查询键未在构建期声明"的接线缺口
+      if (!unknownKeys.has(title)) {
+        unknownKeys.add(title);
+        console.warn(`[gen] chapterIntentClassifier 未登记查询键（该次语义判定必然落空，请检查构建期 keys/aliases 声明）：${title}`);
+      }
+      return false;
+    }
+    return vector.length > 0 && maxSimilarity(vector, anchorVecs) >= SEMANTIC_COVERAGE_THRESHOLD;
   };
 
   return {

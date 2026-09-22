@@ -337,7 +337,12 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
   // P17 章标题意图语义分类器（第 4 期）：蓝图数值密集章阻断/概况章基础事实注入/扬尘六项百分百注入
   // 三处标题判定统一迁移到语义优先、正则兜底（与正则并存一版本，对比命中差异后下线正则）；
   // 本地语义模型恒可用，构建失败直接抛出，无不可用降级路径
-  session.planning.chapterIntentClassifier = await buildChapterIntentClassifier(session.planning.effectiveChapters.map(chapter => chapter.title));
+  // 4.55.22：声明**全部**查询键——章写作链除章标题外还会传「标题+用途」（扬尘六项判定），
+  // 原先只登记标题 → 该次查询静默落空、语义通道形同不存在（详见 buildChapterIntentClassifier 注释）
+  session.planning.chapterIntentClassifier = await buildChapterIntentClassifier(session.planning.effectiveChapters.map(chapter => ({
+    key: chapter.title,
+    aliases: chapter.purpose ? [`${chapter.title}${chapter.purpose}`] : [],
+  })));
   // 专业深度语义分类器（round-14）：章节专业深度/缺项/套话/闭环/依赖的语义判定（根治关键词正则模拟语义打分）；
   // 本地语义模型恒可用，构建失败直接抛出，无不可用降级路径
   session.planning.professionalDepthClassifier = await buildProfessionalDepthClassifier();

@@ -2,6 +2,7 @@ import type { AutoDocumentSpecGateRule, AutoDocumentSpecPackage, GateRuleEvaluat
 import { readEngineeringDocumentConfig } from '../document-validation/engineeringDocumentConfigService';
 import { CHAPTER_HEADING_RE, EXPORT_BLOCKING_ISSUE_RE, EXPORT_GATE_PRECISION_ISSUE_RE, EXPORT_GATE_PROJECT_CONTAMINATION_RE, FALLBACK_GATE_EVALUATORS, FORMAL_PLACEHOLDER_PATTERNS, LINE_SPLIT_RE, MARKDOWN_IMAGE_RE, MARKDOWN_SECTION_HEADING_RE, MARKDOWN_TABLE_DIVIDER_RE, MARKDOWN_TABLE_ROW_RE, MARKDOWN_TOP_HEADING_RE, NON_BLANK_RE, PRECISE_FACT_MIN_TOKEN_COUNT, PRECISE_FACT_MIN_USAGE_RATE, PRECISE_FACT_SOURCE_RE, PRECISE_FACT_TOKEN_RE, DOCUMENT_BASIC_INFO_BLOCK_RE, DOCUMENT_BASIC_INFO_FIELDS, DOCUMENT_BASIC_INFO_TABLE_RE, PROMPT_EXAMPLE_BLOCK_RE, QUALITY_SEVERITY_RULES, SPEC_GATE_RULE_HANDLERS, SPECIFICATION_CONTENT_RE, STRUCTURED_DATA_CONTENT_RE, TABLE_PLACEHOLDER_APPROX_RE, TABLE_PLACEHOLDER_CELL_FORMS_RE, TOC_BLOCK_RE, TOC_INDENTED_SECTION_LINE_RE, TOC_SECTION_LINE_RE, WHITESPACE_RE } from '../constants';
 import type { QualitySeverity, QualitySeveritySummary, SpecGateRuleContext } from '../types';
+import { manualDispositionIssues } from './detectorFixerRegistry';
 import type { BoqRowTrace, DocumentDraftChapter, DocumentFact, DocumentFactsModel, DocumentTemplate, ExportGateResult, NumericScopeConflict, ProjectBinding, PromptBinding, ValidationIssue } from './types';
 import type { FactTokenScopeClassifier } from './factTokenClassifier';
 import type { SemanticSimilarityFn } from './semanticSimilarity';
@@ -368,7 +369,10 @@ export function buildExportGate(issues: ValidationIssue[], factsModel: DocumentF
       suggestion: '该项由资料完备度决定，非正文改写可解：请补齐知识库对应资料并重新生成。',
     }));
   const allBlockingIssues = [...blockingIssues, ...checklistBlockers];
-  return { passed: allBlockingIssues.length === 0, blockingIssues: allBlockingIssues, checklist };
+  // 4.55.22：人工复核项随门禁一并产出（声明 'manual' 的检测器发现），供交付报告「人工复核清单」展示
+  const manualReviewIssues = manualDispositionIssues(governedIssues)
+    .filter(issue => !allBlockingIssues.includes(issue));
+  return { passed: allBlockingIssues.length === 0, blockingIssues: allBlockingIssues, checklist, manualReviewIssues };
 }
 
 export function fallbackEvaluatorForRule(rule: AutoDocumentSpecGateRule): GateRuleEvaluator {

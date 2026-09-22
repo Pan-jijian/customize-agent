@@ -14,6 +14,7 @@
  * 冲突时收敛（能对应附表清单的收敛入附表，其余取消表格形式转文字表述），全部记录在
  * conflicts 并显性展示，不静默丢弃。
  */
+import type { DocumentExportSettings } from './types';
 import { extractAppendixTables } from './promptRuleExtraction';
 
 /** 勾选标记字符集（PDF 提取常见：「☑暗标」「√暗标」「■暗标」等；含填充方块变体 ▣） */
@@ -77,6 +78,96 @@ export interface BidCompositionConflict {
   rule: string;
   source: string;
   resolution: string;
+}
+
+/**
+ * 招标规定排版 → 导出设置（4.55.22）。
+ *
+ * ## 为什么必须做
+ *
+ * `formatRules` 从招标文件确定性抽取（正文字体/字号/行距/装订线/页数上限…），但此前**只用于进度展示**，
+ * 导出走的是模板自己的 `exportSettings.typography`——**招标强制的排版没有落到交付物上，且无任何提示**。
+ * 暗标/格式分项项目里，字体或行距不符即直接失分。
+ *
+ * ## 为什么不能直接赋值
+ *
+ * 抽取值是**中文排版惯用写法**，直接塞进 CSS/导出参数会产出非法样式：
+ * - 字号是「小四/三号」这类号数名，而导出端按 CSS 字号消费（`12pt`）→ 必须换算为磅值；
+ * - 字体名带括注（`仿宋_GB2312（GB2312）`）→ 必须取正名并给出回退族；
+ * - 行距是「固定值28磅」→ 导出端按 pt 解析，需归一为 `28pt`。
+ * 故此处做**显式换算**，而不是照抄字符串。
+ */
+const CN_FONT_SIZE_PT: Record<string, number> = {
+  初号: 42, 小初: 36, 一号: 26, 小一: 24, 二号: 22, 小二: 18,
+  三号: 16, 小三: 15, 四号: 14, 小四: 12, 五号: 10.5, 小五: 9, 六号: 7.5, 小六: 6.5,
+};
+
+/** 字体正名 + 常见中文印刷字体的回退族（导出端按 CSS font-family 消费） */
+function exportFontFamily(raw: string | undefined): string | undefined {
+  const name = String(raw || '').replace(/[（(][^）)]*[）)]/gu, '').trim();
+  if (!name) return undefined;
+  const fallbacks: Record<string, string> = {
+    仿宋_GB2312: '"仿宋_GB2312", "FangSong_GB2312", "仿宋", FangSong, serif',
+    仿宋: '"仿宋", FangSong, serif',
+    楷体_GB2312: '"楷体_GB2312", "KaiTi_GB2312", "楷体", KaiTi, serif',
+    楷体: '"楷体", KaiTi, serif',
+    宋体: '"宋体", SimSun, serif',
+    黑体: '"黑体", SimHei, sans-serif',
+  };
+  return fallbacks[name] || `"${name}", serif`;
+}
+
+/** 「小四」→ `12pt`；已是磅值写法（`12pt`/`12磅`）则归一为 `Npt` */
+function exportFontSizePt(raw: string | undefined): string | undefined {
+  const text = String(raw || '').replace(/\s+/gu, '');
+  if (!text) return undefined;
+  const named = CN_FONT_SIZE_PT[text];
+  if (named !== undefined) return `${named}pt`;
+  const numeric = /([\d.]+)\s*(?:pt|磅)?/iu.exec(text);
+  return numeric && Number.isFinite(Number(numeric[1])) ? `${Number(numeric[1])}pt` : undefined;
+}
+
+/** 「固定值28磅」/「28磅」/「28pt」→ `28pt` */
+function exportLineHeight(raw: string | undefined): string | undefined {
+  const numeric = /([\d.]+)/u.exec(String(raw || ''));
+  return numeric && Number.isFinite(Number(numeric[1])) ? `${Number(numeric[1])}pt` : undefined;
+}
+
+/**
+ * 把招标规定的排版并入导出设置（**招标优先于模板**：前者是强制要求，后者是默认值）。
+ * @returns 生效项描述（供进度/报告显性展示「招标排版已应用」），无生效项时为空数组
+ */
+export function applyFormatRulesToExportSettings(
+  settings: DocumentExportSettings | undefined,
+  rules: BidCompositionFormatRules | undefined,
+): { settings: DocumentExportSettings | undefined; applied: string[] } {
+  if (!rules) return { settings, applied: [] };
+  const applied: string[] = [];
+  const next: DocumentExportSettings = { ...(settings || {}) };
+  const page = { ...(next.page || {}) };
+  const typography = { ...(next.typography || {}) };
+  const targetPages = { ...(next.targetPages || {}) };
+
+  const bodyFont = exportFontFamily(rules.bodyFont);
+  if (bodyFont) { typography.bodyFont = bodyFont; applied.push(`正文字体=${bodyFont}`); }
+  const headingFont = exportFontFamily(rules.headingFont);
+  if (headingFont) { typography.headingFont = headingFont; applied.push(`标题字体=${headingFont}`); }
+  const bodySize = exportFontSizePt(rules.bodySize);
+  if (bodySize) { typography.bodySize = bodySize; applied.push(`正文字号=${bodySize}`); }
+  const headingSize = exportFontSizePt(rules.headingSize);
+  if (headingSize) { typography.titleSize = headingSize; applied.push(`标题字号=${headingSize}`); }
+  const lineHeight = exportLineHeight(rules.lineHeight);
+  if (lineHeight) { typography.lineHeight = lineHeight; applied.push(`行距=${lineHeight}`); }
+  if (rules.gutter) { page.gutter = rules.gutter; applied.push(`装订线=${rules.gutter}`); }
+  if (typeof rules.pageLimit === 'number' && rules.pageLimit > 0) {
+    targetPages.max = rules.pageLimit;
+    applied.push(`页数上限=${rules.pageLimit}`);
+  }
+
+  next.page = page;
+  next.typography = typography;
+  if (Object.keys(targetPages).length > 0) next.targetPages = targetPages;
+  return { settings: next, applied };
 }
 
 export interface BidCompositionFormatRules {

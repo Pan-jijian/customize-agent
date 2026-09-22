@@ -2,6 +2,7 @@ import type { DocumentDraftChapter, DocumentExecutionStage, GeneratedDocumentDra
 import { selectEvidenceByBudget } from './evidence';
 import { documentTextLength } from './budget';
 import { displayStage, upsertProgressStage } from './progress';
+import { applyFormatRulesToExportSettings } from './bidComposition';
 import { buildDocumentProfileReport } from './documentProfiles';
 import { buildSuspensionChecklist } from './suspensionChecklist';
 import { DOCUMENT_WORKFLOW_VERSION } from './documentWorkflowVersion';
@@ -258,6 +259,22 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   const compactFinalChapterDrafts = session.finalChapterDrafts.map(chapter => ({ ...chapter, evidence: selectEvidenceByBudget(chapter.evidence || [], { preservePinned: true }) }));
   session.finalChapterDrafts = compactFinalChapterDrafts;
 
+  // 4.55.22：招标规定的排版并入导出设置（招标优先于模板）——formatRules 此前只用于进度展示，
+  // 招标强制的字体/字号/行距/装订线/页数上限**从未落到导出物**上（暗标格式分项直接失分）。
+  const exportSettingsMerged = applyFormatRulesToExportSettings(session.template.exportSettings, session.bidComposition?.formatRules);
+  if (exportSettingsMerged.applied.length > 0) {
+    upsertProgressStage(session.executionStages, displayStage({
+      type: 'reference',
+      roleId: 'tender-format-applied',
+      status: 'success',
+      message: `招标规定排版已应用（${exportSettingsMerged.applied.length} 项）：${exportSettingsMerged.applied.slice(0, 5).join('、')}`,
+      details: [
+        '来源：招标文件「格式要求」条款（正文/标题字体、字号、行距、装订线、页数上限）',
+        '优先级：招标规定 > 模板导出设置（前者为强制要求）',
+        ...exportSettingsMerged.applied,
+      ],
+    }, { subtitle: '招标排版应用' }));
+  }
   return {
     templateId: session.template.id,
     templateName: session.template.name,
@@ -265,7 +282,7 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
     requirement: requirement || '',
     projectRoot: session.projectRoot,
     projectId: session.projectId,
-    exportSettings: session.template.exportSettings,
+    exportSettings: exportSettingsMerged.settings,
     generationSettings: session.template.generationSettings,
     facts: session.facts,
     structuredFacts: session.structuredFacts,

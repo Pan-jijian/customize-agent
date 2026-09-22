@@ -555,13 +555,6 @@ export function stripMarkdownTableBlocks(content: string): string {
   return out.join('\n');
 }
 
-/** 关键小节内容串位检测：重难点表/节点计划表等表头形态出现在「项目主要施工内容/分部分项」小节正文中即串位 */
-export function workPackageCrossSectionIssue(content: string): string {
-  if (/^\s*\|\s*重难点\s*\|/mu.test(content)) return '重难点识别表串入本小节（应属于重点难点分析小节）';
-  if (/^\s*\|\s*关键节点\s*\|/mu.test(content)) return '关键施工节点控制计划表串入本小节（应属于进度计划小节）';
-  if (/^\s*\|\s*危险源\s*\|/mu.test(content)) return '危险源辨识清单表串入本小节（应属于安全管理小节）';
-  return '';
-}
 
 /** 小节级表格确定性剥离：只剥指定小节块内的表格，其他小节的合法表格不动（供修复链稳定版兑底）；
  * skeletonNames 传入骨架工作包清单时可精确区分 H4 目标小节的工作包与兄弟小节（工作包内表格属污染照剥，兄弟小节表格保留）；

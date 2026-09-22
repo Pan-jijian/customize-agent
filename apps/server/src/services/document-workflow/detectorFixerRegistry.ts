@@ -850,6 +850,20 @@ export async function detSafe(id: string, run: () => ValidationIssue[] | Promise
   }
 }
 
+/**
+ * 人工复核项（4.55.22）：从问题流中挑出**检测器声明为 manual**（无自动修复路径）的发现。
+ * 用途：给「转人工复核」这句声明提供**实际载体**——此前这类发现多为 warning 级，
+ * 而阻断明细只收 error，声明与可见性脱节（审计 S12：四个以上 manual 检测器的产出无人看见）。
+ * 无 provenance.detectorId 的（如 checklist 合成项）不在此列，按原路径处理。
+ */
+export function manualDispositionIssues(issues: ValidationIssue[]): ValidationIssue[] {
+  return issues.filter(issue => {
+    const detectorId = issue.provenance?.detectorId;
+    if (!detectorId) return false;
+    return detectorEntry(detectorId)?.fixerDisposition === 'manual';
+  });
+}
+
 /** 本次生成中因异常降级（=未执行）的检测器 id；交付前执行情况节点与验收脚本据此判断覆盖完整度 */
 const degradedDetectorIds = new Set<string>();
 

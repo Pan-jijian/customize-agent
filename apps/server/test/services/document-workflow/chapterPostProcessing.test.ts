@@ -23,7 +23,6 @@ import {
   stripEmptyWorkPackageHeadings,
   stripMarkdownTableBlocks,
   stripTablesInSection,
-  workPackageCrossSectionIssue,
   workPackageSkeletonPrompt,
   workPackageSkeletonTitles,
 } from '@/services/document-workflow/chapterPostProcessing';
@@ -335,17 +334,6 @@ describe('stripMarkdownTableBlocks（表格确定性剥离）', () => {
   });
 });
 
-describe('workPackageCrossSectionIssue（关键小节串位检测）', () => {
-  it('重难点表/关键节点表/危险源表头命中', () => {
-    expect(workPackageCrossSectionIssue('| 重难点 | 描述 |\n| --- | --- |')).toBe('重难点识别表串入本小节（应属于重点难点分析小节）');
-    expect(workPackageCrossSectionIssue('| 关键节点 | 时间 |')).toBe('关键施工节点控制计划表串入本小节（应属于进度计划小节）');
-    expect(workPackageCrossSectionIssue('| 危险源 | 措施 |')).toBe('危险源辨识清单表串入本小节（应属于安全管理小节）');
-  });
-
-  it('无串位返回空', () => {
-    expect(workPackageCrossSectionIssue('#### 2.1.1 屋面维修工程\n施工概况：范围。')).toBe('');
-  });
-});
 
 describe('stripTablesInSection（小节级表格剥离）', () => {
   it('只剥目标小节内的表格，其他小节合法表格不动', () => {

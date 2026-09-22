@@ -1,7 +1,7 @@
 /**
  * t2-cq XX 组第二批（XX2）：chapterPostProcessing 骨架锁定/表格/门禁/提示词族边界枚举。
  * 覆盖：workPackageSkeletonPrompt / workPackageSkeletonTitles（骨架锁定提示词与标题清单）、
- * matchBlockSkeletonNames（块级骨架名过滤）、stripMarkdownTableBlocks / workPackageCrossSectionIssue /
+ * matchBlockSkeletonNames（块级骨架名过滤）、stripMarkdownTableBlocks /
  * stripTablesInSection（表格剥离与串位检测）、missingWorkPackageSkeletonTitles /
  * stripEmptyWorkPackageHeadings（骨架齐全性复核与空包剥离）、majorContentPollutionIssue（脏事实污染）、
  * sectionStructureIssue（结构门禁）、
@@ -28,7 +28,6 @@ import {
   stripEmptyWorkPackageHeadings,
   stripMarkdownTableBlocks,
   stripTablesInSection,
-  workPackageCrossSectionIssue,
   workPackageSkeletonPrompt,
   workPackageSkeletonTitles,
 } from '@/services/document-workflow/chapterPostProcessing';
@@ -109,24 +108,6 @@ describe('X11 stripMarkdownTableBlocks', () => {
   it('非表格竖线行保留', () => {
     const md = ['正文包含 | 分隔符', '普通行'].join('\n');
     expect(stripMarkdownTableBlocks(md)).toBe(md);
-  });
-});
-
-describe('X12 workPackageCrossSectionIssue', () => {
-  it('重难点表头串位 → 报重难点识别表', () => {
-    expect(workPackageCrossSectionIssue('| 重难点 | 描述 |\n|---|---|')).toContain('重难点识别表串入本小节');
-  });
-
-  it('关键节点表头串位 → 报节点计划表', () => {
-    expect(workPackageCrossSectionIssue('| 关键节点 | 时间 |\n|---|---|')).toContain('关键施工节点控制计划表串入本小节');
-  });
-
-  it('危险源表头串位 → 报危险源清单表', () => {
-    expect(workPackageCrossSectionIssue('| 危险源 | 措施 |\n|---|---|')).toContain('危险源辨识清单表串入本小节');
-  });
-
-  it('无串位 → 空串', () => {
-    expect(workPackageCrossSectionIssue('正常正文')).toBe('');
   });
 });
 

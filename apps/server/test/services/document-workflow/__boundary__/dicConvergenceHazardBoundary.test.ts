@@ -465,10 +465,15 @@ describe('Z6 sixHundredPercentCoverageIssues 词面全谱系矩阵', () => {
     const issues = await sixHundredPercentCoverageIssues(md);
     expect(issues[0].message).toContain('施工工地周边100%围挡');
   });
-  it('Z6 表格行不入语义池（词面兑底同池失效）→ 报缺失', async () => {
+  // 4.55.22 **口径变更（推翻原 Z6 决策）**：表格行**计入**判定语料。
+  // 原口径排除 `|` 行 → 以表格逐项列出六个百分百的正确文档被判六项全缺，且该修复轮已删除、
+  // 无自动修复路径，只在终门禁空转。本门禁要的是措施**内容是否落实**，不是承载形式。
+  it('Z6 表格行计入语义池（4.55.22 口径变更）→ 围挡项被表格行满足', async () => {
     const md = '扬尘治理措施。\n| 现场周边100%围挡 | 落实 |';
     const issues = await sixHundredPercentCoverageIssues(md);
-    expect(issues[0].message).toContain('施工工地周边100%围挡');
+    // 表格单元格「现场周边100%围挡」命中该项词面 → 该项不再判缺失（其余项仍照常判）
+    const message = issues.map(issue => issue.message).join('|');
+    expect(message).not.toContain('施工工地周边100%围挡');
   });
   it('Z6 行无预筛词面不入池（反向语义模拟器锁定）', async () => {
     // 喷淋句无预筛词面（围挡/覆盖/…/降尘）→ 不入池；若预筛失效喷淋句入池则反向 mock 高分全命中
