@@ -209,6 +209,9 @@ export interface GenerationSessionPlanning {
   writingTaskBrief: ReturnType<typeof buildWritingTaskBrief>;
   /** 4.55.17 答疑澄清生效口径（未变更项目为空数组） */
   clarificationOverrides?: ReturnType<typeof extractClarificationOverrides>;
+  /** 4.55.19 真值层出口：写作硬约束块与口径账本（切写侧消费） */
+  truthConstraint?: string;
+  caliberLedger?: string[];
   tenderWritingRulesText: string;
   chapterScopedProjectContext: (chapter: DocumentTemplateChapter) => string;
   documentBudget: DocumentBudget;

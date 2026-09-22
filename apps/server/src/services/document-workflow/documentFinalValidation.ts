@@ -1,4 +1,4 @@
-import { closedLoopDensityIssues, plannedAutoSpecGateIssues, basisRegulationsCoverageIssues, resourceBreakdownConsistencyIssues, punctuationArtifactIssues, boqPlacementIssues, crossChapterConsistencyIssues, degenerateContentIssues, drawingReferenceIssues, duplicateBasicInfoIssues, evaluationCriteriaCoverageIssues, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, formalStyleIssues, generatedFactVerificationIssuesAsync, genericProfessionalContentIssues, headingDuplicateIssues, innovationTechCoverageIssues, instructionLikeHeadingIssues, managementMeasureNumberIssues, markdownTableQualityIssues, minChapterSectionIssues, preciseFactUsageIssues, processSpecConflictIssues, professionalContentIssues, professionalScoreIssues, promptExampleLeakIssues, sectionContentIntegrityIssues, sectionCountOverflowIssues, sectionNumberingIssues, tableSpamIssues, tocBodyConsistencyIssues, tocHierarchyIssues, plannedSectionPlacementIssues, hollowTableCellIssues, scheduleDurationOverrunIssues} from './qualityValidation';
+import { closedLoopDensityIssues, plannedAutoSpecGateIssues, basisRegulationsCoverageIssues, resourceBreakdownConsistencyIssues, punctuationArtifactIssues, boqPlacementIssues, crossChapterConsistencyIssues, degenerateContentIssues, drawingReferenceIssues, duplicateBasicInfoIssues, evaluationCriteriaCoverageIssues, formalContentIntegrityIssues, formalHeadingHierarchyIssues, formalPlaceholderIssues, formalStyleIssues, generatedFactVerificationIssuesAsync, genericProfessionalContentIssues, headingDuplicateIssues, innovationTechCoverageIssues, instructionLikeHeadingIssues, managementMeasureNumberIssues, markdownTableQualityIssues, minChapterSectionIssues, preciseFactUsageIssues, processSpecConflictIssues, professionalContentIssues, professionalScoreIssues, promptExampleLeakIssues, sectionContentIntegrityIssues, sectionCountOverflowIssues, sectionNumberingIssues, tableSpamIssues, tocBodyConsistencyIssues, tocHierarchyIssues, plannedSectionPlacementIssues, hollowTableCellIssues, scheduleDurationOverrunIssues, caliberConsistencyIssues, hazardParameterBindingIssues} from './qualityValidation';
 import { majorContentGovernanceIssues } from './constructionOrgQualityRules';
 import type { FactTokenScopeClassifier } from './factTokenClassifier';
 import type { ProfessionalDepthAnalysis, ProfessionalDepthClassifier } from './professionalDepthClassifier';
@@ -106,6 +106,8 @@ export function crossChapterDuplicateSectionIssues(chapters: DocumentDraftChapte
 
 export async function buildStandardFinalValidationIssues(input: {
   markdown: string;
+  /** 4.55.19 真值层裁决结果（口径一致性自检锚点） */
+  truthValues?: Array<{ subject?: string; attribute: string; value: string; rule: string; evidence: Array<{ source: string; snippet?: string }>; superseded?: string[] }>;
   chapters: DocumentDraftChapter[];
   factsModel: DocumentFactsModel;
   template: DocumentTemplate;
@@ -328,6 +330,10 @@ export async function buildStandardFinalValidationIssues(input: {
     ...det('hollow-table-cell', () => hollowTableCellIssues(input.markdown)),
     // 4.55.17 进度计划超声明工期（巢湖实测：声明 330、进度表排到 348——招标 365/答疑 330 双口径残留）
     ...det('schedule-duration-overrun', () => scheduleDurationOverrunIssues(input.markdown)),
+    // 4.55.19 口径一致性（真值层 vs 正文声明口径；方案 §4 判定唯一性自检）
+    ...det('caliber-consistency', () => caliberConsistencyIssues(input.markdown, input.truthValues || [])),
+    // 4.55.19 危险源参数—判定绑定（危大工程须写本项目实参 + 阈值对照 + 结论）
+    ...det('hazard-parameter-binding', () => hazardParameterBindingIssues(input.markdown, input.truthValues || [])),
     // 4.55.14 规划小节未落位（巢湖实测：用户 OUTLINE 固定小节被整节漏写且无检测器覆盖）
     ...det('planned-section-placement', () => plannedSectionPlacementIssues(input.markdown, input.chapters)),
     // Q11 事实落位（关键参数抽查）：字面匹配 + 本地 bge 语义兜底

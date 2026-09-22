@@ -83,8 +83,9 @@ const POINTER_VALUE_RE = /^(?:见|详见|参见|按|依据)\s*(?:招标文件|�
 /** 内部口径词（清单计价表专用词，非工程内容） */
 const INTERNAL_CALIBER_RE = /^(?:分部小计|本页小计|小计|合计|总计|综合单价|措施项目费|规费|税金|按实|暂估|暂列金额)$/u;
 
-/** 噪声判定（返回原因；undefined = 可用值） */
-export function rejectValueNoise(value: string): string | undefined {
+/** 噪声判定（返回原因；undefined = 可用值）
+ * @param options.allowProse 事实池入口使用：允许长句值（段落判定只在真值层做值语义判定时启用） */
+export function rejectValueNoise(value: string, options: { allowProse?: boolean; includePoolNoise?: boolean } = {}): string | undefined {
   const text = String(value || '').trim();
   if (!text) return '空值';
   if (text.length > 260) return '超长（疑为段落而非值）';
@@ -93,7 +94,7 @@ export function rejectValueNoise(value: string): string | undefined {
   if ((text.match(/([\u4e00-\u9fa5])\1/gu) || []).length >= 2) return 'OCR 复写噪声';
   // 段落冒充值（实测：质量标准取到整句「本工程的质量及操作须符合《…》DGJ08-118-2005的要求。」）：
   // 值必须是短语级；长句以句末标点收尾 → 段落，不是值
-  if (text.length > 40 && /[。；!？]$/u.test(text)) return '段落而非值';
+  if (!options.allowProse && text.length > 40 && /[。；!？]$/u.test(text)) return '段落而非值';
   if (DRAWING_SIGNATURE_VALUE_RE.test(text) && text.length <= 14) return '图签/图名串格';
   if (DRAWING_SIGNATURE_BARE_RE.test(text)) return '图签/图名串格';
   if (PLACEHOLDER_VALUE_RE.test(text)) return '占位/未提供值';
@@ -101,9 +102,11 @@ export function rejectValueNoise(value: string): string | undefined {
   // 指向句不是值；其内嵌字段由内嵌展开步骤归属到正确属性，此处整句剔除）
   if (POINTER_VALUE_RE.test(text)) return '指向值（非值本身）';
   if (INTERNAL_CALIBER_RE.test(text)) return '清单内部口径词';
-  // 表格串格：一格内串进多个「标签：值」对（实测「安徽省巢湖市 ，建筑面积：72062.84 ，层数：层，高度：23.950」）
-  if ((text.match(/[\u4e00-\u9fa5]{2,8}\s*[:：]/gu) || []).length >= 2) return '表格串格（多字段粘连）';
-  if (classifyPoolNoiseText(text)) return '池噪声（图签/坐标/残片/粘连）';
+  // 表格串格：一格内串进 **≥3** 个「标签：值」对（实测「安徽省巢湖市 ，建筑面积：72062.84 ，层数：层，
+  // 高度：23.950」）；阈值 3 是刻意的——「联系人：张三，电话：138…」是两个标签的**单条事实**，
+  // 由程序性值语义复核处理，不能在此整条剔除（边界测试固化）
+  if ((text.match(/[\u4e00-\u9fa5]{2,8}\s*[:：]/gu) || []).length >= 3) return '表格串格（多字段粘连）';
+  if (options.includePoolNoise !== false && classifyPoolNoiseText(text)) return '池噪声（图签/坐标/残片/粘连）';
   // 截断值：以连接词/虚词结尾且无句末标点（「…位于巢湖市居巢」「…以及」）
   if (text.length >= 12 && /(?:以及|和|与|或|的|了|在|为|按|由|及)$/u.test(text)) return '截断值';
   return undefined;
@@ -138,9 +141,14 @@ export function unpackEmbeddedFields(key: string, label: string | undefined, val
   const results: Array<{ attribute: string; value: string }> = [];
   const outerAttribute = normalizeAttributeName(key, label);
   const segments = text.split(/[：:]/u);
+  // 标签停用词（**关键**）：变更连接语/连接词不是字段标签——
+  // 实测缺陷：「365日历天，现变更修改为:330日历天」把「现变更修改为」当标签，330 被归到该伪属性，
+  // 且主候选被"内嵌归属"守卫跳过 → 工期只剩 365 一个候选（R1 无从收敛）
+  const LABEL_STOPWORD_RE = /(?:变更|澄清|修改|调整|更正|修正|如下|其中|例如|即|注|说明)$|为$/u;
   for (let index = 0; index + 1 < segments.length; index += 1) {
     const labelRun = /([\u4e00-\u9fa5]{2,10})$/u.exec(segments[index] || '')?.[1];
     if (!labelRun) continue;
+    if (LABEL_STOPWORD_RE.test(labelRun)) continue;
     const embeddedValue = (segments[index + 1] || '').trim().slice(0, 40);
     if (!/\d/u.test(embeddedValue)) continue;
     const attribute = normalizeAttributeName(labelRun, labelRun);
@@ -411,10 +419,49 @@ export function buildAuthoritativeValues(input: {
   return { resolved, noiseRejected };
 }
 
+/**
+ * 写作硬约束块（真值层出口，取代 4.55.17 的窄口径约束）：
+ * 凡有被取代值的属性 → 「现行为 X；被取代值 Y 不得再作为现行口径」。
+ * 与窄口径版（clarificationOverrides）相比：不限于工期/开工日期，覆盖**全部发生变更的属性**
+ *（含金额、规格、做法等任意数据类型——变更由值级覆盖识别，与字段无关）。
+ */
+export function renderTruthConstraintBlock(audit: AuthoritativeValueAudit): string {
+  const rows = audit.resolved.filter(item => item.superseded.length > 0);
+  if (rows.length === 0) return '';
+  return [
+    '【现行口径（真值层裁决，硬约束）】下列属性已按资料优先级与变更链裁决出**唯一现行值**；全文（正文、表格、信息表、进度计划、节点）必须一致使用，被取代值仅在引用变更过程时可出现（如「招标文件原为 X，经答疑澄清变更为 Y」），不得单独陈述现状：',
+    ...rows.map(item => `- ${item.attribute}：现行为「${item.value}」；被取代（不得作为现行口径）：${item.superseded.join('、')}`),
+  ].join('\n');
+}
+
 /** 口径账本（交付报告可展开：属性/生效值/裁决规则/依据/被取代值） */
 export function renderCaliberLedger(audit: AuthoritativeValueAudit): string[] {
   return audit.resolved.map(item => {
     const base = `${item.attribute} = ${item.value}（裁决 ${item.rule}；依据 ${item.evidence[0]?.source || '—'}）`;
     return item.superseded.length > 0 ? `${base}；被取代：${item.superseded.join('、')}` : base;
   });
+}
+
+/**
+ * 判定唯一性自检（方案 v3 §4）：真值层的生效值必须与**正文声明口径**一致。
+ * 现状缺陷（实测）：同一事实被四类消费者各自取值各自判——蓝图按 365 推导进度表、正文按 330 写、
+ * 检测器按第三种口径判。本函数把「真值层 ↔ 正文」的比对显性化，作为构建期一致性断言的一部分。
+ */
+export function caliberConsistencyIssues(markdown: string, audit: AuthoritativeValueAudit): Array<{ attribute: string; expected: string; message: string }> {
+  const issues: Array<{ attribute: string; expected: string; message: string }> = [];
+  if (!markdown || audit.resolved.length === 0) return issues;
+  const normalized = markdown.replace(/\s+/gu, '');
+  for (const item of audit.resolved) {
+    const shape = classifyValueShape(item.value);
+    if (!['measure', 'money', 'date', 'standard'].includes(shape)) continue;
+    const token = item.value.replace(/\s+/gu, '');
+    if (!token || token.length < 2) continue;
+    if (normalized.includes(token)) continue;
+    issues.push({
+      attribute: item.attribute,
+      expected: item.value,
+      message: `口径不一致：真值层「${item.attribute}」生效值为「${item.value}」（裁决 ${item.rule}，依据 ${item.evidence[0]?.source || '—'}），但正文未按该口径落位`,
+    });
+  }
+  return issues;
 }

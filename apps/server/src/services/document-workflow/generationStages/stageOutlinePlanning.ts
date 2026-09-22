@@ -20,6 +20,8 @@ import { buildChapterIntentClassifier } from '../chapterIntentClassifier';
 import { buildProfessionalDepthClassifier } from '../professionalDepthClassifier';
 import { buildWritingTaskBrief } from '../documentWritingTaskBrief';
 import { extractClarificationOverrides, renderClarificationConstraintBlock } from '../clarificationOverrides';
+import { buildAuthoritativeValues, renderCaliberLedger, renderTruthConstraintBlock } from '../authoritativeValues';
+import { collapseOverrideChains, extractValueOverrides } from '../valueOverride';
 import { buildPlannedTablePlans, attachDiagramArtifacts, extractDiagramArtifacts, mergeStructureDiagramArtifacts } from '../constructionOrgTablePlan';
 import { auditPlannedTableScope, type PlannedTableScopeEntry } from '../tableScopeAudit';
 import { isBodyTableForbidden } from '../bidComposition';
@@ -345,7 +347,26 @@ export async function stageOutlinePlanning(session: GenerationSession): Promise<
   session.planning.clarificationOverrides = extractClarificationOverrides(
     (session.understanding.allEvidence || []).map((item: DocumentEvidence) => ({ text: String(item.content || ''), source: `${item.filePath || ''} ${item.sectionTitle || ''}` })),
   );
-  session.planning.writingTaskBrief = buildWritingTaskBrief({ chapters: session.planning.effectiveChapters, factsModel: session.understanding.preliminaryFactsModel, projectGraph: session.understanding.projectGraph || undefined, requirement: session.global.input.requirement, templateName: session.prepare.template.name, clarificationConstraint: renderClarificationConstraintBlock(session.planning.clarificationOverrides || []) });
+  // 4.55.19 切写侧：写作约束由**真值层**出口（覆盖全部发生变更的属性，不限工期/开工日期）
+  {
+    const truthFacts = [
+      ...(session.understanding.preliminaryFactsModel?.preciseFacts || []),
+      ...(session.understanding.preliminaryFactsModel?.project || []),
+      ...(session.understanding.preliminaryFactsModel?.schedule || []),
+      ...(session.understanding.preliminaryFactsModel?.quality || []),
+      ...(session.understanding.preliminaryFactsModel?.safety || []),
+    ].map((fact: { key?: string; fieldName?: string; value?: unknown; sourceFile?: string }) => ({ key: fact.key, label: fact.fieldName, value: fact.value, sourceFile: fact.sourceFile }));
+    const truthAudit = buildAuthoritativeValues({
+      facts: truthFacts,
+      overrides: collapseOverrideChains(extractValueOverrides([
+        ...(session.understanding.allEvidence || []).map((item: DocumentEvidence) => ({ text: String(item.content || ''), source: `${item.filePath || ''} ${item.sectionTitle || ''}` })),
+        ...truthFacts.map((fact: { value?: unknown; sourceFile?: string }) => ({ text: String(fact.value ?? ''), source: String(fact.sourceFile || '') })),
+      ])),
+    });
+    session.planning.caliberLedger = renderCaliberLedger(truthAudit);
+    session.planning.truthConstraint = renderTruthConstraintBlock(truthAudit);
+  }
+  session.planning.writingTaskBrief = buildWritingTaskBrief({ chapters: session.planning.effectiveChapters, factsModel: session.understanding.preliminaryFactsModel, projectGraph: session.understanding.projectGraph || undefined, requirement: session.global.input.requirement, templateName: session.prepare.template.name, clarificationConstraint: [session.planning.truthConstraint, renderClarificationConstraintBlock(session.planning.clarificationOverrides || [])].filter(Boolean).join('\n\n') });
   // 评分项要求写作规则注入：生成时显性响应招标要求（零响应即评标失分），与零响应检测共用同一份提取模型；
   // 全文级篇幅语句同样消解（规则文本随章级 scoped 上下文直通块写作提示词）
   session.planning.tenderWritingRulesText = dissolveLength('tenderWritingRulesText', tenderRequirementsWritingRules(session.planning.tenderRequirements));

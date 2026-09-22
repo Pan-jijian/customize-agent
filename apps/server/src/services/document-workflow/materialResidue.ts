@@ -62,3 +62,27 @@ export function stripMaterialResidueLines(text: string): string {
     .join('\n')
     .replace(/\n{3,}/gu, '\n\n');
 }
+
+/** 句中形态资料残片（4.55.19 实测漏网形态）：
+ * 「现澄清为如下：条款号条款号条款名称条款名称编列内容编列内容1.3.2计划工期…」——
+ * 以**句子成分**出现（不在独立行），行级判据（isMaterialResidueLine）看不见。
+ * 判据：澄清表导语 + 表头字段复写（条款号/条款名称/编列内容任一连续复写 ≥2 次）→ 该小句为
+ * 澄清表残片，整句移除（保留其后的正常正文）。 */
+const CLARIFICATION_TABLE_DUMP_RE = /(?:现澄清为如下|澄清为如下|澄清如下)[：:][^。；\n]*/gu;
+
+export function stripSentenceLevelResidue(text: string): { text: string; removed: number } {
+  if (!text) return { text, removed: 0 };
+  let removed = 0;
+  let result = text.replace(CLARIFICATION_TABLE_DUMP_RE, () => {
+    removed += 1;
+    return '';
+  });
+  // 表头字段复写（条款号条款号…）：单处复写即判残片（正常行文不会连续复写字段名）
+  result = result.replace(/(?:条款号条款号|条款名称条款名称|编列内容编列内容)/gu, () => {
+    removed += 1;
+    return '';
+  });
+  // 清理空壳标点（「：。」「，。」等）
+  result = result.replace(/[：:，,；;]\s*(?=[。；;])/gu, '');
+  return { text: result, removed };
+}

@@ -192,6 +192,8 @@ export interface FinalizeSession {
   clarificationOverrides?: ClarificationOverride[];
   /** 4.55.19 口径账本（真值层读侧产出：属性/生效值/裁决规则/依据/被取代值） */
   caliberLedger?: string[];
+  /** 4.55.19 真值层结构化裁决结果（终检口径一致性自检消费） */
+  truthValues?: Array<{ subject: string; attribute: string; value: string; rule: string; evidence: Array<{ source: string; snippet: string }>; superseded: string[] }>;
   globalConsistencyIssues?: string[];
   agentWorkflow: AgentWorkflowContext;
   factExtractionPromptTexts: string;

@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { isMaterialResidueLine } from './materialResidue';
+import { isMaterialResidueLine, stripSentenceLevelResidue } from './materialResidue';
 import type {
   DocumentEvidence,
   DocumentGenerationDiagnostics,
@@ -1892,6 +1892,10 @@ export function fixTenderMetaLanguage(markdown: string): { markdown: string; fix
  * 配管21034.6m…」类合规数据罗列最高 0.21），阈值留一倍余量；行级整行删除并登记，标题行/表格行豁免。
  */
 export function fixFormalSourceResidue(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+  // 4.55.19 句中形态残片先行（行级判据看不见句内澄清表残片；两链共用本函数）
+  const sentenceLevel = stripSentenceLevelResidue(markdown);
+  const baseMarkdown = sentenceLevel.text;
+  markdown = baseMarkdown;
   const lines = markdown.split(/\r?\n/u);
   const out: string[] = [];
   let fixedCount = 0;
@@ -1907,7 +1911,12 @@ export function fixFormalSourceResidue(markdown: string): { markdown: string; fi
     // 整行删除：前后均空行时吞掉尾随空行，防双空行残留（与 fixTenderMetaLanguage 同形态）
     if (index + 1 < lines.length && !lines[index + 1].trim() && out.length > 0 && !out[out.length - 1].trim()) index += 1;
   }
-  return { markdown: out.join('\n'), fixedCount, details };
+  const sentenceLevelCount = sentenceLevel.removed;
+  return {
+    markdown: out.join('\n'),
+    fixedCount: fixedCount + sentenceLevelCount,
+    details: sentenceLevelCount > 0 ? [...details, `句中资料残片 ${sentenceLevelCount} 处`].slice(0, 6) : details,
+  };
 }
 
 /**

@@ -134,3 +134,28 @@ describe('决定性裁决（巢湖关键属性，端到端）', () => {
     }
   });
 });
+
+describe('判定唯一性自检（真值层 ↔ 正文声明口径）', () => {
+  const audit = buildAuthoritativeValues({
+    facts: [
+      { key: '计划工期', value: '365日历天', sourceFile: 招标 },
+      { key: '计划工期', value: '365日历天，现变更修改为:330日历天', sourceFile: 答疑 },
+    ],
+    overrides: collapseOverrideChains(extractValueOverrides([
+      { text: '365日历天，现变更修改为:330日历天', source: 答疑 },
+      { text: '365日历天', source: 招标 },
+    ])),
+  });
+
+  it('正文按生效值落位 → 零不一致', async () => {
+    const { caliberConsistencyIssues } = await import('@/services/document-workflow/authoritativeValues');
+    expect(caliberConsistencyIssues('本工程总工期330日历天，按此组织施工。', audit)).toEqual([]);
+  });
+
+  it('正文未按生效值落位（只写被取代值）→ 报不一致', async () => {
+    const { caliberConsistencyIssues } = await import('@/services/document-workflow/authoritativeValues');
+    const issues = caliberConsistencyIssues('本工程总工期365日历天，按此组织施工。', audit);
+    expect(issues.length).toBeGreaterThanOrEqual(1);
+    expect(issues[0]!.message).toContain('330日历天');
+  });
+});

@@ -13,6 +13,7 @@ import { HAS_QUANTIFIED_VALUE_RE, PRECISE_TOKEN_RE } from './parameterPatterns';
 import { stringifyFactValue, throwIfAborted } from './utils';
 import { buildSemanticSimilarity } from './semanticSimilarity';
 import { evidenceSafetyKey } from './evidenceContentSafety';
+import { rejectValueNoise } from './authoritativeValues';
 import { tuningProfile } from './tuningProfile';
 
 export function extractFacts(template: DocumentTemplate, evidence: DocumentEvidence[], spec?: AutoDocumentSpecPackage): Record<string, string> {
@@ -1081,7 +1082,12 @@ export function sanitizeFactPool(facts: DocumentFact[]): DocumentFact[] {
   const cleaned = facts
     .filter(fact => !isMojibakeFactValue(fact))
     .map(sanitizeIdentityFact)
-    .filter(fact => stringifyFactValue(fact.value).trim().length > 0);
+    .filter(fact => stringifyFactValue(fact.value).trim().length > 0)
+    // 4.55.19 噪声闸前移（方案 v3 §3）：图签/占位（【清单未体现】）/指向（见招标公告…）/表格串格/
+    // OCR 复写/清单内部口径词 在**事实池入口**即拦——此前这些与真值同层竞争，实测进入 canonical
+    // 与真值并列成"冲突"、并在写作层被当成事实引用。判据与真值层同源（单点），仅放宽"段落"一项
+    // （事实池允许长值，段落判定只在真值层的值语义判定中启用）
+    .filter(fact => !rejectValueNoise(stringifyFactValue(fact.value), { allowProse: true, includePoolNoise: false }));
   const projectNameFact = cleaned.find(fact =>
     (fact.key === '项目名称' || fact.fieldId === 'project_name')
     && stringifyFactValue(fact.value).trim().length >= 6);

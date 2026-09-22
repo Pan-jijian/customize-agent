@@ -3086,3 +3086,74 @@ export function scheduleDurationOverrunIssues(markdown: string, options: { toler
     suggestion: `请统一工期口径：以答疑/澄清后的生效工期（${effective} 日历天）为唯一基准，重排进度计划表与各阶段节点的起止天序，使最大天序不超过 ${effective} 天（可留 ${tolerance} 天收尾余量）；正文任何位置的工期表述必须与此一致。`,
   }];
 }
+
+/**
+ * 口径一致性终检（4.55.19 方案 §4）：真值层生效值 vs 正文声明口径。
+ * 与写作硬约束（renderTruthConstraintBlock）同源——约束未被遵循时在此暴露，直进修复轮与人工清单。
+ */
+export function caliberConsistencyIssues(markdown: string, ledger: Array<{ attribute: string; value: string; rule: string; evidence: Array<{ source: string }> }> = []): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  if (!markdown || ledger.length === 0) return issues;
+  const normalized = markdown.replace(/\s+/gu, '');
+  for (const item of ledger) {
+    const token = String(item.value || '').replace(/\s+/gu, '');
+    if (token.length < 3) continue;
+    if (normalized.includes(token)) continue;
+    issues.push({
+      level: 'error',
+      severity: 'blocker',
+      category: 'fact_consistency',
+      owner: 'llm',
+      repairability: 'llm_repairable',
+      provenance: { detectorId: 'caliber-consistency', fingerprint: stableHash(markdown) },
+      message: `口径不一致：「${item.attribute}」真值层生效值为「${item.value}」（裁决 ${item.rule}），正文未按该口径落位`,
+      suggestion: `请将「${item.attribute}」统一为现行口径「${item.value}」（裁决依据：${item.evidence[0]?.source || '资料'}）；不得使用被取代的旧口径，也不得改用其他数值。`,
+    });
+  }
+  return issues;
+}
+
+/**
+ * 危大工程「参数—判定绑定」检测（4.55.19 方案 §5）：危大分级结论必须挂**本项目实际参数**，
+ * 不得只写规范阈值。实测缺陷：正文写「开挖深度超过 3m 的室外排水管道沟槽土方开挖工程」——
+ * 3m 是判定阈值，而真值层里本项目基坑开挖深度 = 1.75m，正文 0 次。
+ * 判据：含危大判定阈值（3m/5m/24m 等规范阈值表述）的句子，须同时出现真值层的**工程测量值**
+ *（measure 形态、且非阈值本身），否则判为"只抄规范、未落项目实参"。
+ */
+export function hazardParameterBindingIssues(markdown: string, truthValues: Array<{ attribute: string; value: string }> = []): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  if (!markdown) return issues;
+  const measureValues = truthValues
+    .map(item => ({ attribute: item.attribute, token: String(item.value || '').replace(/\s+/gu, '') }))
+    .filter(item => /\d/u.test(item.token) && item.token.length >= 3);
+  // 只绑定**工程测量类**参数（深度/高度/跨度/重量/支护/层高）：无此类参数时不判（不误伤无参数项目）
+  const relatedAttributes = measureValues.filter(item => /深度|高度|跨度|重量|支护|层高/u.test(item.attribute));
+  if (relatedAttributes.length === 0) return issues;
+  const samples: string[] = [];
+  // 危大判定阈值句式（规范阈值，非项目实参）
+  const thresholdRe = /(?:开挖深度|搭设高度|支撑高度|吊装重量|跨度|基坑深度)[^。；]{0,14}?(?:超过|达到|不小于|大于)\s*\d+(?:\.\d+)?\s*(?:m|米|t|吨|kg)/gu;
+  for (const match of markdown.matchAll(thresholdRe)) {
+    const sentenceStart = Math.max(0, markdown.lastIndexOf('。', match.index ?? 0) + 1);
+    const sentenceEnd = markdown.indexOf('。', (match.index ?? 0) + match[0].length);
+    const sentence = markdown.slice(sentenceStart, sentenceEnd === -1 ? markdown.length : sentenceEnd + 1);
+    // 同句须出现任一真值层工程实参（除被引用的阈值本身）
+    const hasActual = relatedAttributes.some(item => sentence.replace(/\s+/gu, '').includes(item.token));
+    if (hasActual) continue;
+    const threshold = match[0].replace(/\s+/gu, '');
+    samples.push(threshold);
+  }
+  if (samples.length === 0) return issues;
+  // 全文层面兜底：正文若从未落位任何"危大相关实参"（开挖深度/支护/高度类属性），同样判缺口
+  const relatedPresent = relatedAttributes.some(item => markdown.replace(/\s+/gu, '').includes(item.token));
+  issues.push({
+    level: 'error',
+    severity: 'blocker',
+    category: 'fact_consistency',
+    owner: 'llm',
+    repairability: 'llm_repairable',
+    provenance: { detectorId: 'hazard-parameter-binding', fingerprint: stableHash(markdown) },
+    message: `危大工程只写规范阈值、未落本项目实参：${samples.slice(0, 3).join('、')}${relatedPresent ? '' : '（全文亦未出现本项目开挖深度/支护/高度类实参）'}——危大分级必须写「本项目实际参数 + 判定阈值对照 + 结论」，不得只抄规范阈值`,
+    suggestion: `请在危大工程判定处写明本项目实际参数并给出对照结论（如「本项目基坑开挖深度 ${relatedAttributes[0]?.token || '1.75m'}，对照《危险性较大的分部分项工程安全管理规定》3m 阈值判定为/不属于危大工程」）；参数取自资料原文，不得编造。`,
+  });
+  return issues;
+}

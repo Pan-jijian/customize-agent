@@ -7,6 +7,8 @@ import { climateForZone, DEFAULT_INSTRUMENT_TABLE, DEFAULT_SITE_FACILITY_TABLE, 
 import type { BillOfQuantitiesResult, BoqEntry } from '../billOfQuantitiesParser';
 import type { DocumentEvidence, DocumentFact } from '../types';
 import { buildBlueprintDecisionLock } from './decisionLock';
+import { buildAuthoritativeValues } from '../authoritativeValues';
+import { collapseOverrideChains, extractValueOverrides } from '../valueOverride';
 import { deriveQuantitiesFromBoq, deriveSpecAuthoritiesFromBoq, extractBasisRegulations, extractContractFromFacts, extractLocationFromFacts, extractRedLineFacts, extractVillageCount } from './parse';
 import { BLUEPRINT_AMOUNT_RULE } from './types';
 import type { BlueprintBuildDiagnostics, BlueprintData, BlueprintDeployment, BlueprintDifficulty, BlueprintEarthworkBalance, BlueprintEquipmentItem, BlueprintInspectionBatch, BlueprintInstrumentItem, BlueprintLabor, BlueprintMaterialPlanItem, BlueprintMilestone, BlueprintScheduleItem, BlueprintTempLandItem, BlueprintTempUtilities } from './types';
@@ -424,7 +426,22 @@ export function buildBlueprintData(input: {
     redLineFacts.push({ key: '自然村数量', value: `${villageCount} 个自然村`, source: '招标文件项目名称（清单自然村分组兜底）' });
   }
   const specAuthorities = deriveSpecAuthoritiesFromBoq(boq);
-  const contract = extractContractFromFacts(input.basicFacts || '', boq);
+  // 4.55.19 真值层（读侧单点真值）：蓝图 contract 不再自行解析文本口径——先裁决再消费。
+  // 实测缺陷：招标 365 / 答疑澄清 330 时，蓝图按 365 推导里程碑与进度计划（起止天序排到第 348 天），
+  // 而正文按 330 写 → 同文档两套工期。
+  const truthAudit = buildAuthoritativeValues({
+    facts: (input.facts || []).map(fact => ({ key: fact.key, label: fact.fieldName, value: fact.value, sourceFile: fact.sourceFile })),
+    overrides: collapseOverrideChains(extractValueOverrides([
+      ...(input.evidence || []).map(item => ({ text: String(item.content || ''), source: `${item.filePath || ''} ${item.sectionTitle || ''}` })),
+      ...(input.facts || []).map(fact => ({ text: String(fact.value ?? ''), source: String(fact.sourceFile || '') })),
+    ])),
+  });
+  const truth = new Map(truthAudit.resolved.map(item => [item.attribute, item.value]));
+  const contract = extractContractFromFacts(input.basicFacts || '', boq, {
+    计划工期: truth.get('计划工期'),
+    质量标准: truth.get('质量标准'),
+    合同金额: truth.get('合同金额'),
+  });
   const milestones = deriveMilestonesFromBoq(boq, contract.totalDays, strategy);
   const labor = deriveLaborFromBoq(boq, contract.totalDays, milestones, strategy);
   const equipment = deriveEquipmentFromBoq(boq, strategy);

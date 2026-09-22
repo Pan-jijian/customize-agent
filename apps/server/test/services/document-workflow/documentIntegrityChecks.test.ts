@@ -5,7 +5,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { missingPlannedSections, promotePlannedSectionHeadings } from '@/services/document-workflow/chapterPostProcessing';
-import { hollowTableCellIssues, scheduleDurationOverrunIssues } from '@/services/document-workflow/qualityValidation';
+import { hazardParameterBindingIssues, hollowTableCellIssues, scheduleDurationOverrunIssues } from '@/services/document-workflow/qualityValidation';
 import { resolveEffectiveTotalDays } from '@/services/document-workflow/integratedBlueprint';
 import { cleanInlineFactValue } from '@/services/document-workflow/helpers/projectBasicInfo';
 import { ambiguousEitherOrIssues, scanSpecLocationMismatchHits, applyNumericConsistencyDeterministicFixes, basicInfoScheduleFieldIssues, bidderQualificationSectionIssues, bodySentencesForSemantic, crossSectionNumericConflictIssues, duplicateParagraphIssues, duplicateTableIssues, excavationDepthLockIssues, invertedDateRangeIssues, paragraphTailRepeatIssues, scanParagraphTailRepeats, collisionNumberedHeadingIssues, extractAssemblyRateAuthority, extractGreeningMaintenanceAuthority, extractProjectScaleSummary, extractScheduleAuthority, extractStreetLightAuthority, fabricatedAwardIssues, fixAdjacentPhraseDuplication, fixInvertedDateRanges, fixZeroLengthDayRanges, fixParagraphOpeningRepeats, fixParagraphTailRepeats, fixCollisionNumberedHeadings, fixEmbeddedHeadingLines, fixPlaceholderTableCells, fixTruncatedSentenceArtifacts, foundationFormResidueIssues, greeningMaintenanceMismatchIssues, localAdaptationKeywordIssues, nodeScheduleConsistencyIssues, resourceConsistencyIssues, resourceTriadSectionHierarchyIssues, selfUnderminingCandidateIssues, sixHundredPercentCoverageIssues, specLocationMismatchIssues, streetLightCountMismatchIssues, stripDuplicateParagraphs, stripDuplicateTables, fixQuantityAuthorityConflicts } from '@/services/document-workflow/documentIntegrityChecks';
@@ -2654,5 +2654,31 @@ describe('scheduleDurationOverrunIssues(进度计划超声明工期)', () => {
   it('无声明工期或无天序 → 静默（不误伤无进度章文档）', () => {
     expect(scheduleDurationOverrunIssues('| 工序 | 起止天序 |\n| --- | --- |\n| 收尾 | 第302～348天 |')).toEqual([]);
     expect(scheduleDurationOverrunIssues('本工程总工期330日历天。')).toEqual([]);
+  });
+});
+
+// ═══ 4.55.19 危大工程参数—判定绑定（实测：只写规范阈值 3m，本项目 1.75m 未落位） ═══
+
+describe('hazardParameterBindingIssues（危大须写本项目实参 + 阈值对照 + 结论）', () => {
+  const truth = [
+    { attribute: '基坑开挖深度', value: '1.75m' },
+    { attribute: '合同金额', value: '22303.66万元' },
+  ];
+
+  it('只抄规范阈值、未写本项目实参 → 报缺口', () => {
+    const md = '本项目涉及的危险性较大的分部分项工程包括：开挖深度超过3m的室外排水管道沟槽土方开挖工程。';
+    const issues = hazardParameterBindingIssues(md, truth);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toContain('3m');
+    expect(issues[0]!.message).toContain('不得只抄规范阈值');
+  });
+
+  it('写了本项目实参 + 阈值对照 → 不报', () => {
+    const md = '本项目基坑开挖深度1.75m，对照开挖深度超过3m的危大阈值，判定本工程基坑不属于危大工程。';
+    expect(hazardParameterBindingIssues(md, truth)).toEqual([]);
+  });
+
+  it('真值层无工程测量值 → 静默（不误伤无参数项目）', () => {
+    expect(hazardParameterBindingIssues('开挖深度超过3m的沟槽土方开挖工程。', [{ attribute: '合同金额', value: '100万元' }])).toEqual([]);
   });
 });

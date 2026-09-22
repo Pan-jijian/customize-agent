@@ -266,16 +266,26 @@ export function resolveEffectiveTotalDays(text: string): number {
   return plain ? Number(plain[1]) : 0;
 }
 
-export function extractContractFromFacts(basicFacts: string, boq: BillOfQuantitiesResult): { totalDays: number; qualityStandard: string; pricingFile: string; estimatedAmount: number } {
-  const totalDays = resolveEffectiveTotalDays(basicFacts);
+export function extractContractFromFacts(
+  basicFacts: string,
+  boq: BillOfQuantitiesResult,
+  /** 4.55.19 真值层生效值（单点真值：招标/答疑不一致时以裁决结果为准，不再各消费者各自解析文本） */
+  resolved?: { 计划工期?: string; 质量标准?: string; 合同金额?: string },
+): { totalDays: number; qualityStandard: string; pricingFile: string; estimatedAmount: number } {
+  // 真值层优先：计划工期取裁决后的生效值（实测：招标 365/答疑澄清 330 → 生效 330，进度计划表按 330 编排）
+  const truthDays = resolved?.计划工期 ? Number(/(\d{1,4})\s*个?\s*日历天/u.exec(resolved.计划工期)?.[1] ?? NaN) : NaN;
+  const totalDays = Number.isFinite(truthDays) ? truthDays : resolveEffectiveTotalDays(basicFacts);
   const qualityMatch = /质量(?:标准|要求)[^。；;\n]{0,20}?[：:]\s*([^。；;\n]{1,20})/u.exec(basicFacts) || /合格/u.exec(basicFacts);
-  const qualityStandard = qualityMatch ? (qualityMatch[1] || '合格').trim() : '';
+  // 真值层优先（值须为短语级，避免把整句要求当质量标准）
+  const truthQuality = resolved?.质量标准 && resolved.质量标准.length <= 20 ? resolved.质量标准.trim() : '';
+  const qualityStandard = truthQuality || (qualityMatch ? (qualityMatch[1] || '合格').trim() : '');
   // 造价文号形态通用化：{机构简称}价〔YYYY〕N号（如「合造价」「皖价」「皖建价」）——不绑定单一城市文号前缀
   const pricingMatch = /([\u4e00-\u9fa5]{1,6}?价〔\d{4}〕\d+号)/u.exec(basicFacts);
   const pricingFile = pricingMatch ? pricingMatch[1] : '';
   // 合同估算价（万元）：金额禁区提取（渲染仅限基本信息表例外，参数桶不渲染）
   const amountMatch = /(?:合同估算价|招标控制价|最高投标限价|项目总投资|投资估算|工程概算)[^。；;\n]{0,20}?([\d,]+(?:\.\d+)?)\s*万/u.exec(basicFacts);
-  const estimatedAmount = amountMatch ? Number(amountMatch[1].replace(/,/g, '')) : 0;
+  const truthAmount = resolved?.合同金额 ? Number(/([\d,]+(?:\.\d+)?)\s*万元/u.exec(resolved.合同金额)?.[1]?.replace(/,/g, '') ?? NaN) : NaN;
+  const estimatedAmount = Number.isFinite(truthAmount) ? truthAmount : (amountMatch ? Number(amountMatch[1].replace(/,/g, '')) : 0);
   void boq;
   return { totalDays, qualityStandard, pricingFile, estimatedAmount };
 }

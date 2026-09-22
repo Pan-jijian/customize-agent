@@ -1481,3 +1481,20 @@ describe('4.55.12 残片判据防误伤（CAD 标注行 = 图纸真实事实载�
     expect(isMaterialResidueLine('本工程关键工程参数还包括：80kPa、55kPa、22天、28天、56天、15万元、1.5%、1.0%、1.1%、0.8%、6000万元、100万元、10天、60天、12个、4份、6个、18个、24个。')).toBe(true);
   });
 });
+
+describe('4.55.19 句中资料残片（澄清表残片以句子出现）', () => {
+  it('「现澄清为如下：条款号条款号…编列内容编列内容…」整句移除', () => {
+    const md = '本工程总工期为365日历天，现澄清为如下：条款号条款号条款名称条款名称编列内容编列内容1.3.2计划工期计划开工日期：2026年10月10日。项目部按上述要求组织施工。';
+    const result = fixFormalSourceResidue(md);
+    expect(result.markdown).not.toContain('编列内容');
+    expect(result.markdown).not.toContain('条款号');
+    expect(result.markdown).toContain('项目部按上述要求组织施工');
+  });
+
+  it('正常正文不受影响（无残片零改动）', () => {
+    const md = '项目部按施工组织设计组织流水施工，各工序衔接紧密。';
+    const result = fixFormalSourceResidue(md);
+    expect(result.fixedCount).toBe(0);
+    expect(result.markdown).toBe(md);
+  });
+});

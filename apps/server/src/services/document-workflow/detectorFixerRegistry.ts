@@ -324,6 +324,10 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   // 4.55.17 进度计划超声明工期（巢湖实测：声明 330、进度表排到 348）：
   // 源头已修（resolveEffectiveTotalDays 取答疑变更后口径）；本检测兜底，交 LLM 按生效工期重排天序
   { id: 'schedule-duration-overrun', scope: 'full-document', category: 'fact_consistency', fixerDisposition: 'manual', fixerDispositionReason: '按生效工期重排进度计划与节点天序（源头解析已取变更后口径，残留为写作期漂移）' },
+  // 4.55.19 口径一致性（真值层 vs 正文声明口径）：修复路径为 LLM 按现行口径统一表述
+  { id: 'caliber-consistency', scope: 'full-document', category: 'fact_consistency', fixerDisposition: 'manual', fixerDispositionReason: '写作硬约束（真值层）未遵循时在此暴露；交 LLM 按现行口径统一正文表述' },
+  // 4.55.19 危大工程参数—判定绑定（写本项目实参 + 阈值对照 + 结论）
+  { id: 'hazard-parameter-binding', scope: 'full-document', category: 'fact_consistency', fixerDisposition: 'manual', fixerDispositionReason: '交 LLM 在危大判定处补本项目实际参数并给出阈值对照结论' },
   { id: 'precise-fact-usage', scope: 'full-document', category: 'fact_consistency' },
   // C3-4 可靠参数义务落位验收（chapterParameterFacts.parameterObligationUsageIssues）：参数池净化后
   // 义务满足率 <90% 即 error（兑现报告出口 parameterUsageAudit / 修复出口 assignMissingParameterChapters
