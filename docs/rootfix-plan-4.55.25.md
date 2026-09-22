@@ -207,3 +207,21 @@ BoundFact = { object, attribute, value, unit, shape, source{file,原文片段,of
 | 3 | **删除范围**：图件代码 + 上述兜底分支**直接删除**（不留开关/兼容），测试同步改写为守卫 —— 确认？ | 按此执行 |
 
 确认后我按 P1→P7 顺序实施，每阶段跑全量测试并向你汇报。
+
+---
+
+## 附录：4.55.25 实施记录（2026-09-23）
+
+| 阶段 | 状态 | 落点 |
+|---|---|---|
+| **P6 正文零图 + 删旧代码** | ✅ 已实施 | `documentFigures.ts` 整文件删除；`ensureFigureAsTables`；`normalizeFigureNumbering`/`figureImageResolver`/`rasterizeSvgImages`/开关常量全删；检测器改零图守卫 |
+| **P1 对象绑定** | ✅ 已实施 | `DocumentFact.objectName`；`extractObjectAnchor`（原文共现锚点，**不做值反查**）；清单「部位：X」对象优先 |
+| **P3 对象化注入** | ✅ 已实施 | `renderChapterParameterLines` 输出「对象｜属性=值」+「逐对象写实铁律」 |
+| **P5 表格实值化（生成侧）** | ✅ 已实施 | 空/占位单元格 → 整行丢弃；有效行 0 → 不出表；删 `appendixGapSkeleton`／劳动力骨架表／附表四·五图件说明块；`quantityText` 不再出「—」 |
+| **空小节** | ✅ 已实施 | `mergeShadowedPlannedHeadings`（顶替归位）+ `emptySectionSpans`（链尾空壳一律移除，缺口单一报出） |
+| **阶段用时自洽（120 天类）** | ✅ 已实施 | 新增检测器 `stage-schedule-consistency`（合计超总工期／自称合计≠逐项相加／里程碑逆序） |
+| **P4 绑定度量** | ✅ 已实施（首版） | `buildBoundFactAudit` → 口径账本阶段输出绑定率与未绑定样例；**"有锚点必须抽到"的全量校验仍待补**（需在抽取侧记录锚点存在性） |
+| **P7 报告口径** | ⏳ 部分 | A 组形态闸 + F 组链尾清理已消掉主要"无法自证却报出"的项（25 条错配口径）；"报告条目必须携带来源"的渲染未做 |
+| **B2 图纸双写** | ⚠️ 代码已改，**存量库需重抽 CAD 才对既有项目生效** | 重抽范围（仅 CAD / 整库 / 仅新项目）待定 |
+
+**验证**：typecheck ✓ / eslint ✓ / 全量 **14,534** 测试通过（341 文件）；已发布 npm 4.55.25。
