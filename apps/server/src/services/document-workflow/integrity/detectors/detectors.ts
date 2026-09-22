@@ -10,6 +10,7 @@ import { buildSemanticGate } from '../../semanticGate';
 import { isQualificationSectionTitle } from '../../evidenceContentSafety';
 import { LABOR_STAGE_LIMIT_WORDS, PEAK_LABOR_RE, PILE_SUPPORT_LITERAL_RE, TRADE_WORKER_WORD_RE, cnNumberToArabic, collectLaborTableBlocks, excavationDepthFromFacts, extractGreeningMaintenanceAuthority, extractStreetLightAuthority, flexNamePattern, laborPeakStageOf, quantityUnitVariants } from '../authorities/authorities';
 import { matchDecisionCategory } from '../../integratedBlueprint';
+import { authorityRewriteVerdict } from '../../authorityRewriteGuard';
 import { isLegalConcreteGradeToken } from '../../factsModel';
 import { buildCitationSentenceContext, defaultCitationAdjudicator } from '../../semanticAdjudication';
 import type { CitationAdjudicationCandidate, CitationAdjudicator } from '../../semanticAdjudication';
@@ -2480,6 +2481,8 @@ export function scanSpecLocationMismatchHits(markdown: string, specAuthorityMap?
       // V5 P6 宽松 token 抽取（run1 重建实测）：特征串携尾文（「C20商品砼\n2、厚度：15cm…」——
       // 白鸥观澜人行道混凝土垫层 WB040204009001 原文 C20/15cm/424.6m²）只取前缀 token——
       // 整串精确匹配会把合规规格整条排除出权威集致误报（白鸥 C20 正文被公共广场 C25 权威判错位）
+      // 权威条目标识：命中部位词对应的清单条目名（可能比部位词更长，如「基础垫层」）
+      const authorityOwnerName = placements.find(item => item.location === location && specTokenPattern(item.spec))?.location ?? location;
       const authoritySpecs = new Set(placements
         .filter(item => item.location === location)
         .map(item => {
@@ -2570,6 +2573,16 @@ export function scanSpecLocationMismatchHits(markdown: string, specAuthorityMap?
       const qualifiedAuthority = uniqueAuthority
         ?? resolveQualifiedSpecTarget(markdown, location, match.index || 0, authoritySpecs, pattern);
       const valueStart = locationStart + foundAt;
+      // 4.55.26 统一闸门（单源 authorityRewriteGuard）：对象限定 / 同量级 / 异义语境 / 形态合法 /
+      // 权威标识充分性——不通过则**不改写**（仍照常报出交修复轮/人工），与其余 B 类路径同源
+      const rewriteVerdict = authorityRewriteVerdict({
+        authorityOwner: qualifiedAuthority ? authorityOwnerName : undefined,
+        bodyLocation: location,
+        bodyWindow: markdown.slice(Math.max(0, valueStart - 24), valueStart + found.length + 16),
+        found,
+        authority: qualifiedAuthority || '',
+      });
+      const replacementAllowed: string | undefined = qualifiedAuthority && rewriteVerdict.allowed ? qualifiedAuthority : undefined;
       hits.push({
         issue: {
           level: 'error',
@@ -2581,11 +2594,11 @@ export function scanSpecLocationMismatchHits(markdown: string, specAuthorityMap?
           suggestion: `按工程量清单将“${location}”的规格统一为 ${[...authoritySpecs].join('/')}；同一材料不同部位允许不同规格，但同一部位不得混用其他部位的规格。`,
         },
         location,
-        replacement: qualifiedAuthority
+        replacement: replacementAllowed
           ? {
               start: valueStart,
               end: valueStart + found.length,
-              replacement: qualifiedAuthority,
+              replacement: replacementAllowed,
               detail: `规格错位“${location}” ${found}→${qualifiedAuthority}（以工程量清单锁定口径为准）`,
             }
           : undefined,

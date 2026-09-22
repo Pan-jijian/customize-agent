@@ -413,13 +413,15 @@ describe('collectLayerNumbers 层厚度物理边界（4.19.5 真实回归：面�
     expect(fixed.markdown).toContain('1:2');
   });
 
-  it('正常厚度（找平层 20mm vs 正文 15mm）仍报冲突并确定性替换', async () => {
+  it('4.55.26 通用层名（找平层）→ 报冲突但**不改写**（裸层名无法定位对象，统一闸门拦截）', async () => {
     const issues = await processSpecConflictIssues('找平层厚度15mm，随浇随抹。', specFactsModel('找平层厚20mm'), embedDocuments);
     expect(issues.length).toBe(1);
     expect(issues[0].message).toContain('20mm');
+    // 4.55.26：报出冲突，但**不改写**——「找平层」是通用层名，不同对象的找平层厚度本就不同，
+    // 机器不得拿资料里某一处的值去统一全文（统一闸门 authorityRewriteGuard）
     const fixed = await applyDeterministicConsistencyFixesToMarkdown('找平层厚度15mm，随浇随抹。', specFactsModel('找平层厚20mm'), undefined, embedDocuments);
-    expect(fixed.markdown).toContain('20mm');
-    expect(fixed.markdown).not.toContain('15mm');
+    expect(fixed.fixedCount).toBe(0);
+    expect(fixed.markdown).toContain('15mm');
   });
 
   it('边界内大厚度（垫层 800mm，<1000）仍参与一致性判定', async () => {

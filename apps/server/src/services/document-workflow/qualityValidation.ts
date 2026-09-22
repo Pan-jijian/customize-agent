@@ -22,6 +22,7 @@ import { assignBillRowChapter, scanBillExplicitDispositions } from './billFactLo
 import { buildResourceBreakdownAuthority, normalizeEquipmentClaimName, scanEquipmentCountClaims, scanEquipmentNamesIn, scanResourceBreakdownClaims } from './resourceBreakdownNumbers';
 import { evidenceSatisfiesSpecField } from './factMatching';
 import { readPromptContents } from './templateStore';
+import { authorityRewriteVerdict } from './authorityRewriteGuard';
 import { extractSection, nearSubsectionTitleMatch, normalizeSubsectionTitleForDedup, stableHash, stringifyFactValue, WORK_PACKAGE_SECTION_RE } from './utils';
 import { isStructuralLabelTitle } from './templatingGovernance';
 import { DIVISION_SECTION_RE } from './writingSpec';
@@ -2039,6 +2040,15 @@ async function fixChapterDeterministic(text: string, targets: Awaited<ReturnType
   for (const claim of await collectLayerNumbers(text, targets.actionGate)) {
     const target = targets.specTargets.get(claim.layer);
     if (!target) continue;
+    // 4.55.26 统一闸门：层名多为通用部位词（垫层/防水层/结合层…）→ 不作权威（保留检测）
+    const layerVerdict = authorityRewriteVerdict({
+      authorityOwner: claim.layer,
+      bodyLocation: claim.layer,
+      bodyWindow: text.slice(Math.max(0, claim.span[0] - 24), claim.span[1] + 16),
+      found: claim.raw,
+      authority: target.thickness !== undefined ? String(target.thickness) : (target.ratio || ''),
+    });
+    if (!layerVerdict.allowed) continue;
     if (claim.kind === 'ratio' && target.ratio) {
       const ratio = claim.raw.match(/(\d+:\d+(?:\.\d+)?)/u)?.[1];
       if (ratio && ratio !== target.ratio) replacements.push({ start: claim.span[0], end: claim.span[1], replacement: claim.raw.replace(/(\d+:\d+(?:\.\d+)?)/u, target.ratio), detail: `${claim.layer}配比 ${ratio}→${target.ratio}` });

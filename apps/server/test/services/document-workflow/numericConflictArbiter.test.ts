@@ -24,6 +24,7 @@ vi.mock('@/services/document-workflow/parameterConceptConflicts', async (importO
   return { ...actual, conceptConflictGroups: scanMock };
 });
 
+import { authorityRewriteVerdict } from '@/services/document-workflow/authorityRewriteGuard';
 import { arbitrateNumericConflicts } from '@/services/document-workflow/numericConflictArbiter';
 
 let realGroups: typeof ParameterConceptConflictsModule.conceptConflictGroups;
@@ -109,7 +110,8 @@ describe('arbitrateNumericConflicts（A1 三分支）', () => {
 });
 
 describe('arbitrateNumericConflicts（A2 规格错位）', () => {
-  it('权威规则唯一 → 确定性硬替换（同部位同型规格集 size=1），复检清零后保留', async () => {
+  it('4.55.26 通用部位词权威（条目名就是「垫层」）→ 不改写（裸部位词无法定位对象）', async () => {
+    // 实测：清单条目名「垫层」权威 100mm（基础垫层），正文里地坪/管道处的垫层也被统一成 100mm
     const markdown = '垫层采用C30混凝土浇筑。';
     const specAuthorityMap: SpecAuthorityMap = {
       混凝土强度等级: [
@@ -118,10 +120,34 @@ describe('arbitrateNumericConflicts（A2 规格错位）', () => {
       ],
     };
     const result = await arbitrateNumericConflicts(markdown, { specAuthorityMap });
-    expect(result.replacements).toHaveLength(1);
-    expect(result.replacements[0]).toMatchObject({ start: 4, end: 7, replacement: 'C20' });
-    expect(result.details[0]).toContain('垫层');
-    expect(result.noAnchorGroups).toEqual([]);
+    expect(result.replacements).toHaveLength(0);   // 通用部位词不作权威 → 不改写
+  });
+
+  it('4.55.26 统一闸门直测：具体对象 + 同量级 + 无异义语境 → 放行', () => {
+    expect(authorityRewriteVerdict({ authorityOwner: '预制钢筋混凝土管桩', bodyLocation: '预制钢筋混凝土管桩', bodyWindow: '预制钢筋混凝土管桩采用C40混凝土', found: 'C40', authority: 'C80' }).allowed).toBe(true);
+    expect(authorityRewriteVerdict({ authorityOwner: '钢吊车梁', bodyLocation: '钢吊车梁', bodyWindow: '钢吊车梁用量623.564t', found: '1228.24t', authority: '623.564t' }).allowed).toBe(true);
+  });
+
+  it('4.55.26 统一闸门直测：五类拦截（通用部位词/跨量级/异义语境/非法形态/未出现条目名）', () => {
+    // ① 通用部位词作权威（实测 垫层 180mm→100mm）
+    expect(authorityRewriteVerdict({ authorityOwner: '垫层', bodyLocation: '垫层', bodyWindow: '垫层厚度180mm', found: '180mm', authority: '100mm' }).allowed).toBe(false);
+    // ② 跨量级（实测 铝合金幕墙窗 26mm vs 2.2mm）
+    expect(authorityRewriteVerdict({ authorityOwner: '铝合金幕墙窗', bodyLocation: '铝合金幕墙窗', bodyWindow: '铝合金幕墙窗26mm', found: '26mm', authority: '2.2mm' }).allowed).toBe(false);
+    // ③ 异义语境（隔热条宽度）
+    expect(authorityRewriteVerdict({ authorityOwner: '铝合金幕墙窗', bodyLocation: '铝合金幕墙窗', bodyWindow: '暖边隔热条2.2mm宽', found: '2.2mm', authority: '26mm' }).allowed).toBe(false);
+    // ④ 形态非法（桩型号里抠出的 C400）
+    expect(authorityRewriteVerdict({ authorityOwner: '预制钢筋混凝土管桩', bodyLocation: '预制钢筋混凝土管桩', bodyWindow: 'PHC400-AB95', found: 'C80', authority: 'C400' }).allowed).toBe(false);
+    // ⑤ 正文命中处未出现权威条目名（条目名比部位词更长）
+    expect(authorityRewriteVerdict({ authorityOwner: '基础垫层', bodyLocation: '垫层', bodyWindow: '垫层厚度100mm', found: '120mm', authority: '100mm' }).allowed).toBe(false);
+  });
+
+  it('4.55.26 跨量级差异不改写（实测 铝合金幕墙窗 26mm vs 暖边隔热条 2.2mm）', async () => {
+    const markdown = '铝合金幕墙窗采用70系列，暖边隔热条2.2mm宽。';
+    const specAuthorityMap: SpecAuthorityMap = {
+      厚度规格: [{ location: '铝合金幕墙窗', spec: '2.2mm', sourceFile: 'boq.csv' }],
+    };
+    const result = await arbitrateNumericConflicts(markdown, { specAuthorityMap });
+    expect(result.replacements).toHaveLength(0);   // 邻近「隔热条/宽」+ 跨量级 → 不改写
   });
 
   it('权威规则多义（同部位同型多规格）→ 不裁决（无替换，留 LLM 定点修复）', async () => {
