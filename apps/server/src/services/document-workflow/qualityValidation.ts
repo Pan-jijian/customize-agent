@@ -3088,27 +3088,78 @@ export function scheduleDurationOverrunIssues(markdown: string, options: { toler
 }
 
 /**
+ * 单位族（形态驱动）：被取代值的**同族残留**检测用——正文写「365天」时，
+ * 精确串「365日历天」比对不到，但同族单位（日历天/天）暴露它仍是工期口径。
+ */
+const UNIT_FAMILIES: string[][] = [
+  ['日历天', '天'],
+  ['万元', '亿元', '元'],
+];
+
+/** 被取代值的同族残留模式（数值边界 + 同族单位；用于「全文不应再有 365」类硬要求） */
+function supersededResidueRe(superseded: string): RegExp | undefined {
+  const text = String(superseded || '').replace(/\s+/gu, '');
+  const family = UNIT_FAMILIES.find(units => units.some(unit => text.endsWith(unit)));
+  if (!family) return undefined;
+  const unit = family.find(candidate => text.endsWith(candidate))!;
+  const core = text.slice(0, text.length - unit.length).replace(/,/gu, '');
+  if (!/^\d+(?:\.\d+)?$/u.test(core)) return undefined;
+  const units = family.map(candidate => escapeRegExpLiteral(candidate)).join('|');
+  return new RegExp(`(?<![\\d.])${escapeRegExpLiteral(core)}\\s*(?:${units})`, 'u');
+}
+
+/**
  * 口径一致性终检（4.55.19 方案 §4）：真值层生效值 vs 正文声明口径。
  * 与写作硬约束（renderTruthConstraintBlock）同源——约束未被遵循时在此暴露，直进修复轮与人工清单。
+ * 4.55.22 增加**被取代值残留**判据：只判「生效值是否落位」时，正文同时出现生效值与旧值
+ * （如「总工期330日历天」+ 别处「365天」）会被判通过，而旧值仍是最显眼的口径冲突。
  */
-export function caliberConsistencyIssues(markdown: string, ledger: Array<{ attribute: string; value: string; rule: string; evidence: Array<{ source: string }> }> = []): ValidationIssue[] {
+export function caliberConsistencyIssues(markdown: string, ledger: Array<{ attribute: string; value: string; rule: string; evidence: Array<{ source: string }>; superseded?: string[] }> = []): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   if (!markdown || ledger.length === 0) return issues;
   const normalized = markdown.replace(/\s+/gu, '');
   for (const item of ledger) {
     const token = String(item.value || '').replace(/\s+/gu, '');
-    if (token.length < 3) continue;
-    if (normalized.includes(token)) continue;
-    issues.push({
-      level: 'error',
-      severity: 'blocker',
-      category: 'fact_consistency',
-      owner: 'llm',
-      repairability: 'llm_repairable',
-      provenance: { detectorId: 'caliber-consistency', fingerprint: stableHash(markdown) },
-      message: `口径不一致：「${item.attribute}」真值层生效值为「${item.value}」（裁决 ${item.rule}），正文未按该口径落位`,
-      suggestion: `请将「${item.attribute}」统一为现行口径「${item.value}」（裁决依据：${item.evidence[0]?.source || '资料'}）；不得使用被取代的旧口径，也不得改用其他数值。`,
-    });
+    if (token.length >= 3 && !normalized.includes(token)) {
+      issues.push({
+        level: 'error',
+        severity: 'blocker',
+        category: 'fact_consistency',
+        owner: 'llm',
+        repairability: 'llm_repairable',
+        provenance: { detectorId: 'caliber-consistency', fingerprint: stableHash(markdown) },
+        message: `口径不一致：「${item.attribute}」真值层生效值为「${item.value}」（裁决 ${item.rule}），正文未按该口径落位`,
+        suggestion: `请将「${item.attribute}」统一为现行口径「${item.value}」（裁决依据：${item.evidence[0]?.source || '资料'}）；不得使用被取代的旧口径，也不得改用其他数值。`,
+      });
+    }
+    // 被取代值残留：同族单位下的旧值（含去单位后的裸数字形态，如「365天」）不得作为现行口径出现
+    const residues = (item.superseded || [])
+      .map(superseded => ({ superseded, re: supersededResidueRe(superseded) }))
+      .filter((entry): entry is { superseded: string; re: RegExp } => Boolean(entry.re));
+    // 变更过程陈述豁免（与链尾确定性替换同口径）：「原为365日历天，经答疑澄清变更为330日历天」
+    // 里出现旧值是**合法的**，不判残留——否则每次如实说明变更过程都会被判 blocker。
+    const hasResidue = (re: RegExp) => {
+      for (const match of normalized.matchAll(new RegExp(re.source, 'gu'))) {
+        const offset = match.index ?? 0;
+        const context = normalized.slice(Math.max(0, offset - 12), offset + match[0].length + 12);
+        if (/变更|澄清|调整为|修改为|更正|原为|原值|此前|由/u.test(context)) continue;
+        return true;
+      }
+      return false;
+    };
+    const found = residues.filter(entry => hasResidue(entry.re));
+    if (found.length > 0) {
+      issues.push({
+        level: 'error',
+        severity: 'blocker',
+        category: 'fact_consistency',
+        owner: 'llm',
+        repairability: 'llm_repairable',
+        provenance: { detectorId: 'caliber-consistency', fingerprint: stableHash(markdown) },
+        message: `被取代口径残留：「${item.attribute}」现行值为「${item.value}」，正文仍出现被取代值 ${found.map(entry => `「${entry.superseded}」`).join('、')}（被取代值仅可在陈述变更过程时引用）`,
+        suggestion: `请将正文中所有被取代值（${found.map(entry => entry.superseded).join('、')}）改为现行口径「${item.value}」；确需说明变更过程的，写成「原为 X，经答疑澄清变更为 Y」的形式，不得单独陈述旧值。`,
+      });
+    }
   }
   return issues;
 }

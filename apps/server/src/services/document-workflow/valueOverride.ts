@@ -185,8 +185,11 @@ export function applyOverridesToText(text: string, overrides: ValueOverride[]): 
     if (!override.superseded || !result.includes(override.superseded)) continue;
     // 引用形态豁免：「原 X，现 Y」「由 X 变更为 Y」类句中保留原值（那是变更过程说明）
     const next = result.replace(new RegExp(override.superseded.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'gu'), (match, offset: number) => {
+      // 边界守卫：被取代值不得是更长数字串的一部分（「1365日历天」里的 365、
+      // 「4000000.00元」里的 000000.00 类同形切片）——误替换会造出非法的第三个数
+      if (offset > 0 && /[\d.,]/u.test(result[offset - 1]!)) return match;
       const context = result.slice(Math.max(0, offset - 12), offset + match.length + 12);
-      if (new RegExp(`${CHANGE_CONNECTORS}|原(?:为|值)|此前|由`, 'u').test(context)) return match;
+      if (new RegExp(`(?:${CHANGE_CONNECTORS})|原(?:为|值)|此前|由`, 'u').test(context)) return match;
       applied.push({ from: match, to: override.effective });
       return override.effective;
     });
@@ -203,16 +206,47 @@ export interface LabeledAuthorityValue {
   source: string;
   /** 该值所在句含「作废/以本次答疑附件为准」类**资料作废声明**时标记（被作废来源的旧值应让位） */
   supersedesPriorMaterials: boolean;
+  /** 该值处于**澄清/变更语境**（本段或上文段落含澄清标记）——后口径的确定性信号，
+   * 供真值层 R2.5/R7 在同源同期候选里择出生效值 */
+  clarified: boolean;
 }
 
 const LABELED_VALUE_RULES: Array<{ attribute: LabeledAuthorityValue['attribute']; re: RegExp }> = [
-  // 口径标签（最高投标限价/招标控制价/合同估算价…）后 16 字内的金额即该口径的权威值
-  { attribute: '合同金额', re: /(?:最高投标限价|招标控制价|合同估算价(?:格)?|工程估算价|投标限价)[^。；\n]{0,16}?(?:现)?(?:调整)?为?\s*[:：]?\s*([\d,]+(?:\.\d+)?)\s*(亿元|万元|元)/u },
-  { attribute: '计划工期', re: /(?:计划工期|合同工期|总工期)[^。；\n]{0,16}?([\d,]+(?:\.\d+)?)\s*个?\s*日历天/u },
-  { attribute: '开工日期', re: /(?:计划)?开工日期[^。；\n]{0,8}?[:：]?\s*(20\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日)/u },
+  // 口径标签（最高投标限价/招标控制价/合同估算价…）后 16 字内、且中间无**组成性标签**的金额即该口径的权威值
+  { attribute: '合同金额', re: /(?:最高投标限价|招标控制价|合同估算价(?:格)?|工程估算价|投标限价)(?<gap>[^。；\n]{0,16}?)(?:现)?(?:调整)?为?\s*[:：]?\s*(?<num>[\d,]+(?:\.\d+)?)\s*(?<unit>亿元|万元|元)/u },
+  { attribute: '计划工期', re: /(?:计划工期|合同工期|总工期)(?<gap>[^。；\n]{0,16}?)(?<num>[\d,]+(?:\.\d+)?)\s*个?\s*日历天/u },
+  { attribute: '开工日期', re: /(?:计划)?开工日期(?<gap>[^。；\n]{0,8}?)[:：]?\s*(?<num>20\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日)/u },
 ];
-/** 变更连接语（带标签值抽取复用）：命中时取连接语后的值为生效值（同句其余数值为旧口径） */
-const LABELED_CHANGE_RE = new RegExp(`${CHANGE_CONNECTORS}\\s*[:：]?\\s*(\\d{1,4})\\s*个?\\s*日历天`, 'u');
+/**
+ * 变更连接语（带标签值抽取复用）：命中时取连接语后的值为生效值（同句其余数值为旧口径）。
+ *
+ * **必须用非捕获组包住连接语**：`|` 的优先级最低，`A|B|C\s*[:：]?\s*(\d+)` 里的后缀只作用于
+ * **最后一个**分支 C，其余分支会以「裸连接语」成功匹配且捕获组为 null。
+ * 实测缺陷：`现变更修改为:330日历天` 命中「变更修改为」而 match[1]=null →
+ * 「取变更后值」分支永不生效 → 工期 330 丢失、365 胜出（且时序裁决无从收敛）。
+ */
+const LABELED_CHANGE_RE = new RegExp(`(?:${CHANGE_CONNECTORS})\\s*[:：]?\\s*(\\d{1,4})\\s*个?\\s*日历天`, 'u');
+
+/** 工期类口径标签（与距离无关的变更值兜底识别用） */
+const DURATION_LABEL_RE = /(?:计划工期|合同工期|总工期|工期)/u;
+
+/**
+ * 组成性标签：口径标签与数值之间出现这类标签时，该数值是**组成部分**而非该口径的总额。
+ * 实测缺陷：「本次最高投标限价暂列金额由4000000.00元调整为7000000.00元」被抽成
+ * 合同金额 = 4000000.00元（暂列金额），并在时序裁决中压过真正的总额 157166591.34元。
+ */
+const COMPONENT_LABEL_RE = /(?:暂列|暂估|分部分项|单项工程|单位工程|措施项目|其他项目|规费|税金|人工费|材料费|机械费|管理费|利润|单价|合价)/u;
+
+/**
+ * 澄清语境标记（**段落级**）：答疑文件先复述提问（含原值）再给出澄清表——值本身的文本不含
+ * 澄清词，语境落在段落上。实测缺陷：7号答疑「现澄清为如下：」下一段的
+ * 「1.3.2计划工期计划开工日期：2026年10月10日」自身无任何标记，与提问段里被复述的旧值
+ * 「2026年8月31日」在同源同优先级下无法区分 → R7 取数组靠前者 = 旧值。
+ */
+const CLARIFY_CONTEXT_RE = /现澄清为|现变更为|澄清为如下|澄清修改为|变更修改为|现调整为|全部作废|以本次[^。；\n]{0,10}为准|以澄清[^。；\n]{0,6}为准/u;
+
+/** 提问重置：新提问段落（编号/「问：」且含问号）起，前文澄清语境失效（其后是被复述的**原值**） */
+const QUESTION_RESET_RE = /^\s*(?:\d{1,2}\s*[、.．]|问\s*[:：])/u;
 
 /** 从资料文本抽取「带口径标签的权威值」（金额/工期/开工日期），供真值层作为候选并入裁决 */
 export function extractLabeledAuthorityValues(sources: Array<{ text: string; source: string }>): LabeledAuthorityValue[] {
@@ -221,26 +255,40 @@ export function extractLabeledAuthorityValues(sources: Array<{ text: string; sou
   for (const item of sources) {
     const text = String(item.text || '');
     if (!text) continue;
-    for (const sentence of text.split(/[。；;\n]/u)) {
-      if (sentence.length < 6) continue;
-      const supersedesPriorMaterials = MATERIAL_VOID_RE.test(sentence);
-      for (const rule of LABELED_VALUE_RULES) {
-        const match = rule.re.exec(sentence);
-        if (!match) continue;
-        const raw = match[1]?.replace(/,/gu, '') || '';
-        if (!raw) continue;
-        // 变更连接语优先：同句含「现变更修改为:330日历天」时取**变更后**值（实测：原实现取首个数值=365）
-        if (rule.attribute === '计划工期') {
-          const changed = LABELED_CHANGE_RE.exec(sentence)?.[1];
-          if (changed) {
-            out.push({ attribute: '计划工期', value: `${changed}日历天`, source: item.source, supersedesPriorMaterials });
-            continue;
-          }
-          out.push({ attribute: '计划工期', value: `${raw}日历天`, source: item.source, supersedesPriorMaterials });
-          continue;
+    // 澄清语境**按段落推进**：新提问段落重置（其后是复述的原值），澄清标记段落点亮（其后是生效值）
+    let clarifyContext = false;
+    for (const paragraph of text.split(/\n\s*\n/u)) {
+      if (QUESTION_RESET_RE.test(paragraph) && /[？?]/u.test(paragraph)) clarifyContext = false;
+      if (CLARIFY_CONTEXT_RE.test(paragraph)) clarifyContext = true;
+      for (const sentence of paragraph.split(/[。；;\n]/u)) {
+        if (sentence.length < 6) continue;
+        const supersedesPriorMaterials = MATERIAL_VOID_RE.test(sentence);
+        const clarified = clarifyContext || CLARIFY_CONTEXT_RE.test(sentence);
+        // 工期变更值兜底：口径标签与变更值之间可能隔着澄清发生日等信息
+        //（实测：「本次招标项目计划工期于2026年08月05日变更修改为330日历天」——
+        //  标签后 16 字窗口够不到 330，规则正则整体失配 → 候选为空）。
+        // 只要同句出现工期口径标签 + 变更连接语，就以**连接语之后**的值为准。
+        const durationChange = DURATION_LABEL_RE.test(sentence) ? LABELED_CHANGE_RE.exec(sentence)?.[1] : undefined;
+        if (durationChange) {
+          out.push({ attribute: '计划工期', value: `${durationChange}日历天`, source: item.source, supersedesPriorMaterials, clarified });
         }
-        const value = rule.attribute === '合同金额' ? `${raw}${match[2] || ''}` : (match[1] || '').trim();
-        out.push({ attribute: rule.attribute, value, source: item.source, supersedesPriorMaterials });
+        for (const rule of LABELED_VALUE_RULES) {
+          // 工期变更值已由上一步取「连接语之后」的值，同一句不再按规则正则重复抽工期
+          if (rule.attribute === '计划工期' && durationChange) continue;
+          const match = rule.re.exec(sentence);
+          if (!match?.groups) continue;
+          const raw = match.groups.num?.replace(/,/gu, '') || '';
+          if (!raw) continue;
+          // 组成性标签拦截：口径标签与数值之间夹着「暂列金额/暂估价/单价…」时，该数值是组成部分不是总额
+          if (COMPONENT_LABEL_RE.test(match.groups.gap || '')) continue;
+          // 值必须带单位的**完整形态**：裸数字「365」会成为全局误替换的种子
+          //（实测回归：工期值退化成「365」后，覆盖表变成 365 → 330日历天，
+          //  正文里任意位置的 365 都会被替换，包括「1365」「365日历天」本身）
+          const value = rule.attribute === '合同金额' ? `${raw}${match.groups.unit || ''}`
+            : rule.attribute === '计划工期' ? `${raw}日历天`
+            : raw.trim();
+          out.push({ attribute: rule.attribute, value, source: item.source, supersedesPriorMaterials, clarified });
+        }
       }
     }
   }

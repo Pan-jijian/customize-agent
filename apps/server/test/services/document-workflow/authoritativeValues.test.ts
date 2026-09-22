@@ -5,10 +5,153 @@
  */
 import { describe, expect, it } from 'vitest';
 import { buildAuthoritativeValues, cleanValueForm, extractValueAndShape, normalizeAttributeName, rejectValueNoise, stripTrailingOcrGarbage, sourcePriority } from '@/services/document-workflow/authoritativeValues';
-import { collapseOverrideChains, extractValueOverrides } from '@/services/document-workflow/valueOverride';
+import { applyOverridesToText, collapseOverrideChains, extractLabeledAuthorityValues, extractValueOverrides } from '@/services/document-workflow/valueOverride';
 
 const 答疑 = '巢湖项目/答疑文件/7招标答疑文件（电子签章版）.pdf';
 const 招标 = '巢湖项目/招标文件.pdf';
+
+/**
+ * 带口径标签权威值抽取（真实答疑原文 → 真值层候选）。
+ * 4.55.22 根治的三个独立缺陷（均出自巢湖真实自测，逐字固化）：
+ *   ① 连接语正则缺少非捕获组 → `现变更修改为:330日历天` 的 330 静默丢失；
+ *   ② 口径标签与变更值距离超过 16 字（「计划工期**于2026年08月05日**变更修改为330日历天」）→ 规则正则整体失配；
+ *   ③ 口径标签与数值之间夹组成性标签（「最高投标限价**暂列金额由**4000000.00元…」）→ 组成部分被当成合同总额。
+ */
+describe('带口径标签权威值抽取（4.55.22 根治）', () => {
+  const labeled = (texts: Array<[string, string]>) => extractLabeledAuthorityValues(texts.map(([text, source]) => ({ text, source })));
+
+  it('变更连接语后的值为生效值（正则优先级缺陷回归：330 不再丢失）', () => {
+    const result = labeled([[`1、本次招标项目原计划工期:365日历天，现变更修改为:330日历天。`, 答疑]]);
+    expect(result.filter(item => item.attribute === '计划工期').map(item => item.value)).toEqual(['330日历天']);
+  });
+
+  it('口径标签与变更值相隔澄清发生日（距离无关：仍取连接语后的 330）', () => {
+    const result = labeled([['本次招标项目计划工期于2026年08月05日变更修改为330日历天。', 答疑]]);
+    expect(result.filter(item => item.attribute === '计划工期').map(item => item.value)).toEqual(['330日历天']);
+  });
+
+  it('值携带完整单位（裸数字会成为全局误替换的种子）', () => {
+    const result = labeled([['2.8计划工期：365日历天', 招标]]);
+    expect(result.map(item => item.value)).toEqual(['365日历天']);
+  });
+
+  it('组成性标签拦截：暂列金额不是合同总额', () => {
+    const result = labeled([['（2）本次最高投标限价暂列金额由4000000.00元调整为7000000.00元，请说明该项调整的主要考虑。', 答疑]]);
+    expect(result.filter(item => item.attribute === '合同金额')).toEqual([]);
+  });
+
+  it('总额仍正常抽取（括号内提及暂列金额不影响）', () => {
+    const result = labeled([['2、本次招标项目最高投标限价现调整为: 157166591.34元（其中含暂列金额7000000.00元），详细内容见本次招标答疑附件。', 答疑]]);
+    expect(result.filter(item => item.attribute === '合同金额').map(item => item.value)).toEqual(['157166591.34元']);
+  });
+
+  it('澄清语境按段落判定：提问段复述的原值不算澄清值', () => {
+    const page = [
+      '2、原招标文件计划开工日期是2026年8月31日（具体开工日期以招标人出具的书面开工通知为准），',
+      '现在开标日期改为2026年9月24日，计划开工日期是否调整？',
+      '答：本次招标项目因部分内容完善调整，于2026年09月07日发布招标答疑重新启动招标，故投标人须知前附表第1.3.2条原内容：',
+      '现澄清为如下：',
+      '1.3.2计划工期计划开工日期：2026年10月10日（具体开工日期以招标人出具的书面开工通知为准）',
+    ].join('\n\n');
+    const byValue = new Map(labeled([[page, 答疑]]).map(item => [item.value, item]));
+    expect(byValue.get('2026年8月31日')?.clarified).toBe(false);
+    expect(byValue.get('2026年10月10日')?.clarified).toBe(true);
+  });
+});
+
+/**
+ * 巢湖端到端（多份补疑 + 建库实况）：真值层必须收敛到**现行口径**。
+ * 实测缺陷（4.55.21 发布前拦截）：金额取到 7号答疑里作废的暂列金额 4000000.00元、
+ * 工期取到 365、开工日期取到被澄清掉的 2026年8月31日——三条同时错。
+ */
+describe('巢湖端到端：多份补疑的现行口径裁决（4.55.22 根治）', () => {
+  const 答疑1 = '巢湖项目/答疑文件/1招标答疑文件（电子签章版）.pdf';
+  const 答疑5 = '巢湖项目/答疑文件/5招标答疑文件（电子签章版）.pdf';
+  const sources = [
+    { text: '2.7合同估算价：22303.66万元\n2.8计划工期：365日历天', source: 招标 },
+    { text: '1、本次招标项目原计划工期:365日历天，现变更修改为:330日历天。\n3、本次招标项目最高投标限价现调整为:172460314.52元（其中含暂列金额4000000.00元），详细内容见本次招标答疑附件。', source: 答疑1 },
+    { text: '2、本次招标项目最高投标限价现调整为: 157166591.34元（其中含暂列金额7000000.00元），详细内容见本次招标答疑附件。', source: 答疑5 },
+    { text: '2、原招标文件计划开工日期是2026年8月31日（具体开工日期以招标人出具的书面开工通知为准），\n\n现在开标日期改为2026年9月24日，计划开工日期是否调整？\n\n答：本次招标项目因部分内容完善调整，故投标人须知前附表第1.3.2条原内容：\n\n现澄清为如下：\n\n1.3.2计划工期计划开工日期：2026年10月10日（具体开工日期以招标人出具的书面开工通知为准）', source: 答疑 },
+  ];
+  const overrides = collapseOverrideChains(extractValueOverrides(sources));
+  const audit = buildAuthoritativeValues({
+    facts: [
+      // 事实池实况：招标原文旧值 + 蓝图进度表推导出的天数（既不是 365 也不是 330）
+      { key: '计划工期', value: '365日历天', sourceFile: 招标 },
+      { key: '计划工期', value: '348天', sourceFile: '巢湖项目/4-工程量清单各项分类表/进度计划表.xls' },
+      { key: '合同金额', value: '22303.66万元', sourceFile: 招标 },
+    ],
+    overrides,
+    labeledValues: extractLabeledAuthorityValues(sources),
+  });
+  const pick = (attribute: string) => audit.resolved.find(item => item.attribute === attribute);
+
+  it('合同金额 = 157166591.34元（最新补疑胜出；暂列金额与作废限价均不得当总额）', () => {
+    expect(pick('合同金额')?.value).toBe('157166591.34元');
+    expect(pick('合同金额')?.rule).toBe('R3');
+  });
+
+  it('计划工期 = 330日历天（R1 变更链；365 出局）', () => {
+    expect(pick('计划工期')?.value).toBe('330日历天');
+    expect(pick('计划工期')?.superseded).toContain('365日历天');
+  });
+
+  it('开工日期 = 2026年10月10日（澄清表生效值胜出）', () => {
+    expect(pick('开工日期')?.value).toBe('2026年10月10日');
+  });
+
+  it('写作前置覆盖表：被取代值均指向现行值，且不含组成部分', () => {
+    const table = audit.resolved.flatMap(item => item.superseded.map(value => `${value}→${item.value}`));
+    expect(table).toContain('365日历天→330日历天');
+    expect(table).toContain('172460314.52元→157166591.34元');
+    expect(table).toContain('22303.66万元→157166591.34元');
+    expect(table.join('|')).not.toContain('4000000.00元');
+  });
+});
+
+describe('R1 生效值升格 + 确定性终止（4.55.22）', () => {
+  it('生效值未进候选时由覆盖链升格并胜出（原实现回退全量=放弃覆盖）', () => {
+    const audit = buildAuthoritativeValues({
+      facts: [{ key: '计划工期', value: '365日历天', sourceFile: 招标 }],
+      overrides: collapseOverrideChains(extractValueOverrides([{ text: '原计划工期:365日历天，现变更修改为:330日历天', source: 答疑 }])),
+    });
+    expect(audit.resolved.find(item => item.attribute === '计划工期')?.value).toBe('330日历天');
+  });
+
+  it('裁决与候选输入顺序无关（R7 终止比较器全序）', () => {
+    const sources = [
+      { key: '开工日期', value: '2026年8月31日', sourceFile: 答疑 },
+      { key: '开工日期', value: '2026年10月10日', sourceFile: '巢湖项目/答疑文件/6招标澄清文件.pdf' },
+    ];
+    const forward = buildAuthoritativeValues({ facts: sources });
+    const backward = buildAuthoritativeValues({ facts: [...sources].reverse() });
+    expect(forward.resolved.find(item => item.attribute === '开工日期')?.value)
+      .toBe(backward.resolved.find(item => item.attribute === '开工日期')?.value);
+  });
+
+  it('跨资料包不串值：少数资料包的候选被判为非本项目（不参与裁决）', () => {
+    const audit = buildAuthoritativeValues({
+      facts: [
+        { key: '计划工期', value: '330日历天', sourceFile: '巢湖项目/答疑文件/1招标答疑文件.pdf' },
+        { key: '计划工期', value: '330日历天', sourceFile: '巢湖项目/招标文件.pdf' },
+        { key: '计划工期', value: '90日历天', sourceFile: '丰乐镇项目/招标文件.pdf' },
+      ],
+    });
+    expect(audit.resolved.find(item => item.attribute === '计划工期')?.value).toBe('330日历天');
+    expect(audit.noiseRejected.some(item => item.reason.includes('跨资料包') && item.value === '90日历天')).toBe(true);
+  });
+
+  it('跨资料包隔离保守边界：存在裸文件名来源时不启用（不误删合法事实）', () => {
+    const audit = buildAuthoritativeValues({
+      facts: [
+        { key: '计划工期', value: '330日历天', sourceFile: '巢湖项目/答疑文件/1招标答疑文件.pdf' },
+        { key: '计划工期', value: '330日历天', sourceFile: '巢湖项目/招标文件.pdf' },
+        { key: '计划工期', value: '90日历天', sourceFile: '招标文件.pdf' },
+      ],
+    });
+    expect(audit.noiseRejected.some(item => item.reason.includes('跨资料包'))).toBe(false);
+  });
+});
 
 describe('值级覆盖 VLO（巢湖真值）', () => {
   it('变更连接语：365日历天 → 330日历天（半角/全角冒号均可）', () => {
@@ -157,5 +300,49 @@ describe('判定唯一性自检（真值层 ↔ 正文声明口径）', () => {
     const issues = caliberConsistencyIssues('本工程总工期365日历天，按此组织施工。', audit);
     expect(issues.length).toBeGreaterThanOrEqual(1);
     expect(issues[0]!.message).toContain('330日历天');
+  });
+});
+
+describe('口径残留终检（被取代值不得作为现行口径）', () => {
+  const ledger = [{ attribute: '计划工期', value: '330日历天', rule: 'R1', evidence: [{ source: 答疑 }], superseded: ['365日历天'] }];
+
+  it('正文同时含生效值与旧值 → 报被取代口径残留', async () => {
+    const { caliberConsistencyIssues } = await import('@/services/document-workflow/qualityValidation');
+    const issues = caliberConsistencyIssues('本工程总工期330日历天。其中主体结构施工365天。', ledger);
+    expect(issues.map(issue => issue.message).join('|')).toContain('被取代口径残留');
+  });
+
+  it('同族裸数字残留（365天）同样报出', async () => {
+    const { caliberConsistencyIssues } = await import('@/services/document-workflow/qualityValidation');
+    const issues = caliberConsistencyIssues('本工程总工期330日历天，总历时365天。', ledger);
+    expect(issues.some(issue => issue.message.includes('被取代口径残留'))).toBe(true);
+  });
+
+  it('变更过程陈述豁免（「原为365日历天…现变更为330日历天」不报）', async () => {
+    const { caliberConsistencyIssues } = await import('@/services/document-workflow/qualityValidation');
+    const issues = caliberConsistencyIssues('本工程总工期330日历天（原为365日历天，经答疑澄清变更为330日历天）。', ledger);
+    expect(issues).toEqual([]);
+  });
+
+  it('数值边界：不得把 1365 当成 365 的残留', async () => {
+    const { caliberConsistencyIssues } = await import('@/services/document-workflow/qualityValidation');
+    const issues = caliberConsistencyIssues('本工程总工期330日历天，另含1365日历天的保修期。', ledger);
+    expect(issues).toEqual([]);
+  });
+});
+
+describe('覆盖表文本应用（写作输入就地替换）', () => {
+  const overrides = collapseOverrideChains(extractValueOverrides([{ text: '原计划工期:365日历天，现变更修改为:330日历天', source: 答疑 }]));
+
+  it('被取代值就地替换为生效值，变更过程句保留原值', () => {
+    expect(applyOverridesToText('本工程总工期365日历天。', overrides).text).toBe('本工程总工期330日历天。');
+    expect(applyOverridesToText('原计划工期为365日历天，现变更为330日历天。', overrides).text)
+      .toBe('原计划工期为365日历天，现变更为330日历天。');
+  });
+
+  it('边界守卫：不得替换更长数字串里的同形片段（1365日历天 / 2365）', () => {
+    const result = applyOverridesToText('1#厂房工期1365日历天，2#厂房2365日历天。', overrides);
+    expect(result.text).toBe('1#厂房工期1365日历天，2#厂房2365日历天。');
+    expect(result.applied).toEqual([]);
   });
 });

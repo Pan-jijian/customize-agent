@@ -263,6 +263,22 @@ export function normalizeAttributeName(key: string, label?: string): string {
 }
 
 /**
+ * 值等价键（R6 计数与候选去重用）：日期去前导零、金额单位归一到元——
+ * 否则同一口径被拆成多个候选，证据计数失真。
+ * 实测：「2026年8月31日」与「2026年08月31日」是同一日期却各计一次票。
+ */
+function valueEquivalenceKey(value: string): string {
+  let key = String(value || '').trim();
+  key = key.replace(/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/gu, (_match, year: string, month: string, day: string) => `${year}年${Number(month)}月${Number(day)}日`);
+  const money = /^([\d,]+(?:\.\d+)?)\s*(亿元|万元|元)$/u.exec(key);
+  if (money) {
+    const amount = Number(money[1]!.replace(/,/gu, '')) * (money[2] === '亿元' ? 1e8 : money[2] === '万元' ? 1e4 : 1);
+    if (Number.isFinite(amount)) key = `${amount.toFixed(2)}元`;
+  }
+  return key;
+}
+
+/**
  * 决定性裁决链（R1..R7，全序）：
  * 候选集 → R1 变更链（被取代值出局）→ R2 载体优先级 → R3 时序 → R4 同源条款序
  * → R5 形态类型专属权威 → R6 证据计数 → R7 兜底（按形态定义）→ 唯一值
@@ -270,12 +286,29 @@ export function normalizeAttributeName(key: string, label?: string): string {
 function arbitrate(candidates: TruthCandidate[], overrides: ValueOverride[]): { winner: TruthCandidate; rule: string; superseded: string[] } | undefined {
   if (candidates.length === 0) return undefined;
   const supersededSet = new Set<string>();
+  const promoted: TruthCandidate[] = [];
   for (const override of overrides) {
     if (override.kind !== 'override') continue;
-    if (candidates.some(candidate => candidate.value.includes(override.superseded))) supersededSet.add(override.superseded);
+    if (!candidates.some(candidate => candidate.value.includes(override.superseded))) continue;
+    supersededSet.add(override.superseded);
+    // 生效值**升格为候选**：值级覆盖的生效值取自原文（「现变更修改为:330日历天」的 330），
+    // 若它未被带标签抽取或事实池捕获，R1 过滤掉旧值后候选集为空 → 原实现回退「全部候选」，
+    // 等于**放弃覆盖**（实测：工期 365→330 的覆盖被吞，365 仍胜出）。
+    if (candidates.some(candidate => candidate.value === override.effective)) continue;
+    if (promoted.some(candidate => candidate.value === override.effective)) continue;
+    const evidenceSource = override.evidence[0]?.source || '';
+    promoted.push({
+      subject: candidates[0]!.subject,
+      attribute: candidates[0]!.attribute,
+      value: override.effective,
+      source: evidenceSource,
+      priority: sourcePriority(evidenceSource),
+      order: sourceOrder(evidenceSource) * 1000 + 900,
+      clarified: true,
+    });
   }
-  // R1 变更链：被取代值出局（全被取代时保留最后一个，遵循"恒有值"）
-  let pool = candidates.filter(candidate => ![...supersededSet].some(value => candidate.value.includes(value)));
+  // R1 变更链：被取代值出局（生效值升格候选后仍为空时，才退回全量以遵循"恒有值"）
+  let pool = [...candidates.filter(candidate => ![...supersededSet].some(value => candidate.value.includes(value))), ...promoted];
   if (pool.length === 0) pool = [...candidates];
   const ruleOf = (name: string, narrowed: TruthCandidate[]) => ({ winner: narrowed[0]!, rule: name, superseded: [...supersededSet] });
   if (pool.length === 1) return { winner: pool[0]!, rule: 'R1', superseded: [...supersededSet] };
@@ -335,23 +368,75 @@ function arbitrate(candidates: TruthCandidate[], overrides: ValueOverride[]): { 
     if (tenderFirst.length === 1) return { winner: tenderFirst[0]!, rule: 'R5', superseded: [...supersededSet] };
     if (tenderFirst.length > 1) narrowed = tenderFirst;
   }
-  // R6 证据计数（同一值出现次数多者胜）
+  // R6 证据计数（同一值出现次数多者胜；同义形态归一后计数——日期前导零、金额单位）
   const counts = new Map<string, number>();
-  for (const candidate of narrowed) counts.set(candidate.value, (counts.get(candidate.value) || 0) + 1);
+  for (const candidate of narrowed) {
+    const key = valueEquivalenceKey(candidate.value);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
   const maxCount = Math.max(...counts.values());
-  const byCount = narrowed.filter(candidate => counts.get(candidate.value) === maxCount);
+  const byCount = narrowed.filter(candidate => counts.get(valueEquivalenceKey(candidate.value)) === maxCount);
   if (byCount.length === 1) return { winner: byCount[0]!, rule: 'R6', superseded: [...supersededSet] };
   narrowed = byCount;
-  // R7 兜底（按形态；不含任何"自行取舍"的方向选择）
-  if (shape === 'standard') return { winner: narrowed[0]!, rule: 'R7', superseded: [...supersededSet] }; // 规范引用：并存合并
-  if (shape === 'measure' || shape === 'spec' || shape === 'money') {
-    // 工程实体/造价：取来源优先级最高者（R2 已过滤同层）中资料出现最晚者
-    const latest = narrowed.reduce((best, candidate) => (candidate.order > best.order ? candidate : best), narrowed[0]!);
-    return { winner: latest, rule: 'R7', superseded: [...supersededSet] };
+  // R7 兜底（按形态；不含任何"自行取舍"的方向选择，且**必须确定性**——
+  // 原实现取 narrowed[0]，数组序=事实池拼接顺序，与资料时序无关：
+  // 实测开工日期在同源同优先级的两候选间取到靠前者=已被澄清掉的旧值 2026年8月31日）
+  return { winner: deterministicTerminal(narrowed, shape), rule: 'R7', superseded: [...supersededSet] };
+}
+
+/**
+ * R7 终止比较器（全序，与输入顺序无关）：
+ * ① 澄清后值 > 招标原值（方案 §2 R7：时间类取招标方要求的生效值）
+ * ② 后发布资料 > 先发布资料
+ * ③ 载体优先级高者 > 低者
+ * ④ 更具体者（更长）> 更泛者
+ * ⑤ 稳定字典序（末级 tie-break，保证同一候选集恒得同一结果）
+ */
+function deterministicTerminal(pool: TruthCandidate[], shape: string): TruthCandidate {
+  return [...pool].sort((left, right) => {
+    if (left.clarified !== right.clarified) return left.clarified ? -1 : 1;
+    if (sourceOrder(left.source) !== sourceOrder(right.source)) return sourceOrder(right.source) - sourceOrder(left.source);
+    if (left.priority !== right.priority) return right.priority - left.priority;
+    if (/standard/u.test(shape)) return left.value.localeCompare(right.value, 'zh-Hans-CN');
+    if (left.value.length !== right.value.length) return right.value.length - left.value.length;
+    return left.value.localeCompare(right.value, 'zh-Hans-CN');
+  })[0]!;
+}
+
+/** 资料包根（relative_path 首段） */
+function materialRootOf(source: string): string {
+  const text = String(source || '').replace(/^\/+/u, '');
+  const slash = text.indexOf('/');
+  return slash > 0 ? text.slice(0, slash) : text;
+}
+
+/**
+ * 跨资料包隔离：真值层的裁决域必须是**一个项目的一个资料包**——不同资料包里的
+ * 同名属性（工期/合同金额/开工日期…）是不同项目的事实，混在一起裁决必然串值。
+ * 实测：知识库同库并存 3 个项目（丰乐镇 90日历天 / 舒城 360日历天 / 巢湖 330日历天）时，
+ * 无主体约束的裁决把 90日历天 判成"巢湖工期"、把丰乐镇的 1100万元 判成"巢湖合同金额"。
+ * 上游按资料范围检索已收窄，此处做**独立于调用方**的兜底，并把越界候选写进 noiseRejected
+ * （可审计：证明不是丢了，是判定为非本项目）。
+ * 保守边界：仅当**全部候选**都带目录前缀时才启用（存在裸文件名来源时无法可靠比较资料包，
+ * 宁可不动也不能误删合法事实）。
+ */
+function isolateMaterialPackages(byAttribute: Map<string, TruthCandidate[]>, noiseRejected: AuthoritativeValueAudit['noiseRejected']): void {
+  for (const [attribute, candidates] of byAttribute) {
+    if (candidates.length < 2) continue;
+    if (candidates.some(candidate => !candidate.source.includes('/'))) continue;
+    const rootCount = new Map<string, number>();
+    for (const candidate of candidates) {
+      const root = materialRootOf(candidate.source);
+      rootCount.set(root, (rootCount.get(root) || 0) + 1);
+    }
+    if (rootCount.size <= 1) continue;
+    const dominant = [...rootCount.entries()].sort((left, right) => (right[1] - left[1]) || left[0].localeCompare(right[0], 'zh-Hans-CN'))[0]![0];
+    for (const candidate of candidates) {
+      if (materialRootOf(candidate.source) === dominant) continue;
+      noiseRejected.push({ attribute, value: candidate.value.slice(0, 60), source: candidate.source, reason: `跨资料包（本项目资料包：${dominant}）` });
+    }
+    byAttribute.set(attribute, candidates.filter(candidate => materialRootOf(candidate.source) === dominant));
   }
-  // 文本类：取更具体者（含数字/规格者优先于泛化表述）
-  const specific = narrowed.filter(candidate => /\d/u.test(candidate.value));
-  return { winner: (specific.length > 0 ? specific : narrowed)[0]!, rule: 'R7', superseded: [...supersededSet] };
 }
 
 /** 构建真值层（读侧：只产出裁决结果与审计，不改写作） */
@@ -359,7 +444,7 @@ export function buildAuthoritativeValues(input: {
   facts: Array<{ key?: string; label?: string; value?: unknown; sourceFile?: string; source?: string }>;
   overrides?: ValueOverride[];
   /** 带口径标签的权威值（原文句式抽取：最高投标限价/计划工期/开工日期；作废声明者优先） */
-  labeledValues?: Array<{ attribute: string; value: string; source: string; supersedesPriorMaterials?: boolean }>;
+  labeledValues?: Array<{ attribute: string; value: string; source: string; supersedesPriorMaterials?: boolean; clarified?: boolean }>;
   /** 主体推导（默认按来源文件归属，未知时 ''） */
   subjectOf?: (fact: { key?: string; label?: string; sourceFile?: string }) => string;
 }): AuthoritativeValueAudit {
@@ -433,10 +518,12 @@ export function buildAuthoritativeValues(input: {
       source: labeled.source,
       priority: labeled.supersedesPriorMaterials ? 99 : sourcePriority(labeled.source),
       order: sourceOrder(labeled.source) * 1000 + 500,
-      clarified: true,
+      // 澄清标记取**段落级语境**判定值；调用方未提供时按"带口径标签 ⇒ 出自澄清语境"沿用旧口径
+      clarified: labeled.clarified ?? true,
     });
     byAttribute.set(attribute, list);
   }
+  isolateMaterialPackages(byAttribute, noiseRejected);
   const resolved: ResolvedValue[] = [];
   for (const [attribute, candidates] of byAttribute) {
     const result = arbitrate(candidates, overrides);

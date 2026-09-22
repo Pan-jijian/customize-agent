@@ -922,6 +922,44 @@ describe('4.55.12 图类替代表（图位必须带内容承载）', () => {
   });
 });
 
+/**
+ * 4.55.20 图件优先（出真图）与全文同图去重。
+ * 巢湖实测缺陷①：「图 1-1 施工进度计划横道图」是裸图题——邻域里的进度数据表让它被判「已承载」，
+ * 有图件也不出图；缺陷②：第 1 章「图1-5 项目管理机构图」与第 2 章「图2-1 项目管理机构图」
+ * 插入的是同一张图（同文件名），正文重复出现同一张机构图。
+ */
+describe('4.55.20 图件优先与全文同图去重', () => {
+  const imageOptions = {
+    figureImage: (name: string) => ({ fileName: `${name}.svg`, svg: '<svg></svg>' }),
+    substituteTable: () => ['| 工序 | 持续天数 |', '| --- | --- |', '| 施工准备 | 10 |'],
+  };
+  const scheduleSpecs = [{ chapterTitle: '第一章 主要施工方法与技术措施', name: '施工进度计划横道图' }];
+
+  it('裸图题（邻域只有表格）→ 仍补图片引用（表格不算"图已承载"）', () => {
+    const src = ['## 第一章 主要施工方法与技术措施', '', '图1-1 施工进度计划横道图', '', '| 工序 | 持续天数 |', '| --- | --- |', '| 施工准备 | 10 |'].join('\n');
+    const result = ensureFigurePlaceholders(src, scheduleSpecs, imageOptions).markdown;
+    expect(result).toContain('![施工进度计划横道图](generatedDocuments/assets/施工进度计划横道图.svg)');
+    expect(result).toContain('图1-1 施工进度计划横道图');
+  });
+
+  it('全文同一张图件只出一次图，后续同图图题改为指向说明', () => {
+    const src = [
+      '## 第一章 主要施工方法与技术措施', '',
+      '图1-5 项目管理机构图', '',
+      '## 第二章 施工总体部署', '',
+      '图2-1 项目管理机构图', '',
+    ].join('\n');
+    const specs = [
+      { chapterTitle: '第一章 主要施工方法与技术措施', name: '项目管理机构图' },
+      { chapterTitle: '第二章 施工总体部署', name: '项目管理机构图' },
+    ];
+    const result = ensureFigurePlaceholders(src, specs, imageOptions).markdown;
+    const imageLines = result.split('\n').filter(line => /!\[[^\]]*\]\([^)]*\)/u.test(line));
+    expect(imageLines).toHaveLength(1);
+    expect(result).toContain('本图与前述同名图件一致，见前图');
+  });
+});
+
 describe('4.55.12 图类承载检测（裸图题不再判成立）', () => {
   const specs = [{ chapterTitle: '第一章 主要施工方法与技术措施', name: '施工进度计划横道图' }];
 
