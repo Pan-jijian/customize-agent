@@ -688,12 +688,52 @@ function objectCores(object: string): string[] {
   return clean.length >= 4 ? [clean] : [];
 }
 
-function oppositeStatement(amendment: ClarificationAmendment, doc: string): string | undefined {
+/** 对立判据的邻近闸：否定词与修正对象核心的距离上界（同一小句内才算"对该对象的否定"） */
+const OPPOSITION_PROXIMITY = 30;
+/** 对立小句长度上界：真句子级否定表述不会超过此长度（防表格行/整段被当成一句话） */
+const OPPOSITION_SENTENCE_MAX = 200;
+
+/**
+ * 明确对立判定（4.56.5 根治）。
+ *
+ * ## 原实现（严重误报：一轮 8 条 blocker 全部出自此处）
+ *
+ * ```ts
+ * for (const sentence of doc.split(/[。；;]/u)) { … }
+ * ```
+ * `doc` 是 `normalizeEngineeringTextForFactMatch(markdown)` 的产物——它 `.replace(/\s+/gu,'')`
+ * 且**归一掉全部标点**，所以这个字符串里**根本不存在 `。；;`**。实测
+ * `doc-1790163579960-6bbab0c2`：58924 字的全文被切成 **1 块**，即「整篇文档是一句话」。
+ * 于是判据退化成：**文档里只要出现过任何一个否定词，就把每一条答疑修正都判成"明确对立"**
+ * （实测触发词是承诺段的「不进行转包及违法分包」，与 8 条修正毫无关系）。
+ * 报出的证据也因此全是目录行——`sentence.slice(0, 60)` 就是文档开头 60 字。
+ *
+ * ## 现口径
+ *
+ * ① 句子边界取自**原文 markdown**（保留标点与换行），只对**小句**做归一后匹配；
+ * ② 否定词与修正对象核心必须**邻近**（同小句且距离 ≤ {@link OPPOSITION_PROXIMITY}）——
+ *    这才是「正文以否定表述处理该对象」；
+ * ③ 小句长度上界 {@link OPPOSITION_SENTENCE_MAX}，防表格行/长段冒充句子。
+ * 三项任一不满足即不判对立（宁可漏报由修复链兜底，不可把承诺段的一句"不进行转包"
+ * 放大成 8 条"答疑修正未落实"）。
+ */
+function oppositeStatement(amendment: ClarificationAmendment, rawMarkdown: string): string | undefined {
   const cores = objectCores(amendment.object);
   if (cores.length === 0) return undefined;
-  for (const sentence of doc.split(/[。；;]/u)) {
-    if (sentence.length < 6 || !OPPOSITION_RE.test(sentence)) continue;
-    if (cores.some(core => sentence.includes(core))) return sentence.slice(0, 60);
+  const normalizedCores = cores.map(core => normalizeEngineeringTextForFactMatch(core)).filter(Boolean);
+  if (normalizedCores.length === 0) return undefined;
+  for (const rawSentence of rawMarkdown.split(/[。；;！？\n]+/u)) {
+    const sentence = rawSentence.trim();
+    if (sentence.length < 6 || sentence.length > OPPOSITION_SENTENCE_MAX) continue;
+    const normalizedSentence = normalizeEngineeringTextForFactMatch(sentence);
+    if (!normalizedSentence) continue;
+    for (const core of normalizedCores) {
+      const coreAt = normalizedSentence.indexOf(core);
+      if (coreAt < 0) continue;
+      for (const match of normalizedSentence.matchAll(new RegExp(OPPOSITION_RE.source, 'gu'))) {
+        if (Math.abs((match.index ?? 0) - coreAt) <= OPPOSITION_PROXIMITY) return sentence.slice(0, 60);
+      }
+    }
   }
   return undefined;
 }
@@ -735,7 +775,9 @@ export function clarificationAmendmentIssues(
     if (after.length < 2) continue;
     // ③ 明确对立独立于落位判据：正文以否定表述处理修正对象即对立（即使别处已写修正后内容，
     // 同文档两套口径也必须暴露）——二元组覆盖对否定句仍会判「已落位」，故不能挂在落位判据之下
-    const opposition = oppositeStatement(amendment, doc);
+    // 传**原文 markdown**（不是归一后的 doc）：句界必须取自保留标点与换行的原文，
+    // 归一文本已无句界（见 oppositeStatement 注释）
+    const opposition = oppositeStatement(amendment, markdown);
     if (opposition) {
       issues.push({
         level: 'error',

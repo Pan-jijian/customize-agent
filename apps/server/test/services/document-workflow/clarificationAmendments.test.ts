@@ -189,6 +189,46 @@ describe('反例：不得误判', () => {
   });
 });
 
+/**
+ * 4.56.5「明确对立」判据的句界与邻近闸（实测 8 条 blocker 根治）。
+ *
+ * 原实现 `doc.split(/[。；;]/u)` 里的 `doc` 是 `normalizeEngineeringTextForFactMatch(markdown)`——
+ * 它去空白且归一掉全部标点，**归一文本里根本不存在句界**。实测 `doc-1790163579960-6bbab0c2`：
+ * 58924 字全文切成 **1 块**，判据退化成「文档里出现过任何否定词 ⇒ 每条修正都判明确对立」，
+ * 触发词是承诺段的「不进行转包及违法分包」，与 8 条修正毫无关系，报出的证据全是目录行。
+ */
+describe('4.56.5 明确对立：句界取自原文 + 否定与对象邻近', () => {
+  const amendments = extractClarificationAmendments({ texts: [{ text: 补疑文本, source: 补疑 }] });
+
+  it('无关句里的否定词不得把每条修正都判成「明确对立」（实测形态回放）', () => {
+    const markdown = [
+      '## 目录',
+      '第一章 主要施工方法与技术措施',
+      '1.20 给排水管道闭水与沟槽回填',
+      '',
+      '## 第一章 主要施工方法与技术措施',
+      '我方承诺按照法律规定及合同约定组织完成工程施工，确保工程质量和安全，不进行转包及违法分包。',
+      '雨水口连接管全部采用混凝土满包处理，检查井周围同步实施。',
+    ].join('\n');
+    const issues = clarificationAmendmentIssues(markdown, amendments);
+    expect(issues.filter(issue => issue.message.includes('明确对立'))).toEqual([]);
+  });
+
+  it('**真对立仍报**：同一小句内对象与否定邻近', () => {
+    const markdown = '本工程雨水口连接管不采用混凝土满包处理，改为砂垫层。';
+    const issues = clarificationAmendmentIssues(markdown, amendments);
+    const opposition = issues.find(issue => issue.message.includes('明确对立'));
+    expect(opposition?.severity).toBe('blocker');
+    expect(opposition?.message).toContain('雨水口连接管');
+  });
+
+  it('远处否定不判对立（同句但距离超邻近闸）', () => {
+    const markdown = '雨水口连接管全部采用混凝土满包处理，管周回填采用中粗砂分层夯实并洒水养护，回填期间现场不进行机械碾压以避免管道位移与接口损伤。';
+    const issues = clarificationAmendmentIssues(markdown, amendments);
+    expect(issues.filter(issue => issue.message.includes('明确对立'))).toEqual([]);
+  });
+});
+
 describe('clarificationAmendmentIssues（2-3 义务与检测）', () => {
   it('修正前形态作为现行做法 → blocker（provenance 单源）', () => {
     const amendments = extractClarificationAmendments({ texts: [{ text: 补疑文本, source: 补疑 }] });
