@@ -1353,7 +1353,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
      * → 全部块失败 → 整章阻断。关键小节的绝对门槛保持**仅首轮**生效（其定向补足反馈见
      * `lastDepthFeedback`），终态由终检 `critical-section-depth` + `content-depth-repair` 兜底。
      */
-    const underProduceLine = Math.floor(block.targetWords * 0.85);
+    const underProduceLine = Math.floor(block.targetWords * 0.7);
     // 4.55.22 工作包节结构与要素门禁（生成侧）：复用 sectionStructureIssue 单源（与终检
     // construction-org-major-content / construction-org-division-section 及 utils 三要素判定同源），
     // 把「工作包三要素不全 / 方法段过弱 / 工序顺序表达缺失 / 脏事实与流程污染 / 表格承载正文」
@@ -1754,12 +1754,30 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         //    由 stageChapterLoop 章级对冲接纳（salvageChapterByOverProduceAcceptance）——块容差吸收
         //    末轮抖动、章级接纳吸收累计抖动、文档级观测兜底，三层链闭合。
         const overProduceLine = Math.ceil(block.targetWords * 1.15);
-        // 4.51 末轮容差线：仅最后一轮生效（前轮仍 1.15× 全阻断，压缩收敛方向不变）
-        const overProduceToleranceLine = Math.ceil(block.targetWords * 1.2);
+        /**
+         * 末轮容差线（4.51 起为 1.2×；4.56 **放宽到 1.4×**）：
+         * 与欠产侧同理——末轮仍按 1.2× 判死会**丢弃已生成内容**（实测 8 处，
+         * 如 `1729 字 vs 目标 927`＝1.87× 与 `1139 vs 927`＝1.23× 双双判死）。
+         * 超产是**章/文档级**问题（章预算账 + 篇幅压缩轮 + 章级审计已覆盖），
+         * 不该在块级以丢弃正文的方式处理；1.4× 之外仍判定失败（严重超产是真实信号）。
+         */
+        const overProduceToleranceLine = Math.ceil(block.targetWords * 1.4);
         const effectiveOverLine = attempt === blockMaxAttempts - 1 ? overProduceToleranceLine : overProduceLine;
         // 欠产硬门线 = 比例线（0.7×块目标）与关键小节绝对深度门槛的严格者（4.55.22：绝对门槛并行追加）
-        // R0-a：末轮同样保留欠产门（原 `attempt === 0 && …` 使末轮任何欠产都被放行）
-    const underProduceBlocking = chars < underProduceLine;
+        /**
+     * 欠产门（4.56 R0-a **再修正**）：**仅首轮**阻断，末轮一律放行。
+     *
+     * 一次实测把门线从 0.7 提到 0.85 并让末轮也设门，结果是**块失败与丢弃激增**
+     *（第一章 27/33 块成稿、第二章 3/6 块成稿，共丢弃 9 块）——因为模型对任意块目标的产出
+     * 天然在 ±50% 波动（同一轮里既有 `1729 字 vs 目标 927`＝1.87× 也有 `697 字 vs 927`＝0.75×），
+     * **硬性篇幅合同在本模型上根本执行不了**：判定越严，丢弃越多，章节越短，修复链补得越多。
+     *
+     * 现口径：篇幅**不再是块级失败理由**（丢内容严格劣于块偏短），欠产由
+     * **R0-b/R0-c 续写**在写作期就地补足到目标；仍不足时**接受该块**，
+     * 由章预算账（改造 2-b）与篇幅压缩轮在章/文档级处理。
+     * 首轮仍给定向补足反馈（`charFloor` 缺口数字），保留"先让它自己写够"的机会。
+     */
+    const underProduceBlocking = attempt === 0 && chars < underProduceLine;
         const overProduceBlocking = chars > effectiveOverLine;
         // 关键小节绝对深度门槛阻断（仅首轮）：比例线内但未达绝对门槛（如块目标 2600 的关键小节
         // 首轮 1500 字）——与欠产线同族，仅触发二轮定向补足反馈，不改变末轮验收口径
