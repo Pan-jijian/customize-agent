@@ -19,6 +19,10 @@ import type { SuspensionChecklist } from '@/services/document-workflow/suspensio
 import { buildSuspensionChecklist } from '@/services/document-workflow/suspensionChecklist';
 import { NON_DELIVERABLE_HEADER, markNonDeliverableFilename } from '@/services/document-workflow/exportNaming';
 import { sanitizeFormalMarkdown } from '@/services/document-workflow/markdownComposer';
+// 4.56 L4-8 交付层剥离：判据**单源复用**生成链同名剥离器（materialResidue.*、documentIntegrityChecks.fixTocFromBody），
+// 不在导出层复制任何一份判据（复制即口径分叉：链上收紧/放宽后导出层不再同步）
+import { isMaterialResidueLine, stripClarificationNarrative, stripDrawingPointerPhrases, stripMaterialResidueLines } from '@/services/document-workflow/materialResidue';
+import { fixTocFromBody } from '@/services/document-workflow/documentIntegrityChecks';
 import { recordErrorLog } from '@/services/common/errorLogService';
 import { withApiErrorBoundary } from '@/services/common/apiErrorBoundary';
 
@@ -42,9 +46,9 @@ type ExportPureRenderMode = 'off' | 'observe' | 'enforce';
 interface ExportRenderAudit {
   mode: ExportPureRenderMode;
   /** 源层结构性缺陷：enforce 阻断导出；observe 照常记录（误报采样，两种模式同词文案保证可比） */
-  blockers: Array<{ code: 'bare-table' | 'orphan-separator' | 'content-not-conserved'; line: number; message: string }>;
-  /** 非阻断提示（如单位书写残留——治理在源层/写时链，不在导出层改写） */
-  notices: Array<{ code: 'unit-notation'; message: string }>;
+  blockers: Array<{ code: 'bare-table' | 'orphan-separator' | 'content-not-conserved' | 'declared-rewrite-unregistered' | 'declared-rewrite-overreach'; line: number; message: string }>;
+  /** 非阻断提示（如单位书写残留——治理在源层/写时链，不在导出层改写；声明改写与目录对账的证据链同列） */
+  notices: Array<{ code: 'unit-notation' | 'declared-rewrite' | 'fabricated-header' | 'headerless-table' | 'docx-stage' | 'toc-reconcile'; message: string }>;
   /** 渲染层结构操作计数（不改变文字内容，供守恒断言与事实审计） */
   ops: {
     tableSeparatorAdded: number;
@@ -53,6 +57,14 @@ interface ExportRenderAudit {
     inlineSeparatorStripped: number;
     paragraphBreakInserted: number;
     unitRewrite: number;
+    /** 4.56 L4-8 导出链声明剥离计数（与生成链剥离器同源判据，逐处登记） */
+    declaredStrip: number;
+    /** 4.56 L4-7 静态目录按正文重建次数（生成链 fixTocFromBody 同一判据） */
+    tocRebuilt: number;
+    /** 4.56 L4-4 docx 阶段按数据行渲染的无表头表格数（不冒充表头） */
+    headerlessTableRendered: number;
+    /** 4.56 L4-5 docx 阶段按表题样式渲染的行数 */
+    captionStyled: number;
   };
 }
 
@@ -68,7 +80,10 @@ function createExportRenderAudit(mode: ExportPureRenderMode = exportPureRenderMo
     mode,
     blockers: [],
     notices: [],
-    ops: { tableSeparatorAdded: 0, tableCellAligned: 0, tableBoundarySplit: 0, inlineSeparatorStripped: 0, paragraphBreakInserted: 0, unitRewrite: 0 },
+    ops: {
+      tableSeparatorAdded: 0, tableCellAligned: 0, tableBoundarySplit: 0, inlineSeparatorStripped: 0, paragraphBreakInserted: 0, unitRewrite: 0,
+      declaredStrip: 0, tocRebuilt: 0, headerlessTableRendered: 0, captionStyled: 0,
+    },
   };
 }
 
@@ -204,6 +219,43 @@ function defaultTableHeaders(columns: number) {
   return Array.from({ length: columns }, (_item, index) => headers[index] || `补充说明${index + 1}`);
 }
 
+/**
+ * 4.56 L4-3 **补造表头的可辨识记号**。
+ *
+ * 原缺陷：`defaultTableHeaders` 补的「信息项 | 内容」与写时链口径**逐字一致**——`chapterGeneration` 的
+ * 写作规则规定项目基本信息表必须使用固定表头「| 信息项 | 内容 |」，`qualityValidation`（基础信息表识别）
+ * 与 `fixers.fixDuplicateBasicInfoTables` 也以该表头为判据（grep 证据：`信息项` 命中链上 3 处）——
+ * 故交付物里的一行「| 信息项 | 内容 |」**无法判断是作者写的还是导出层造的**，审计只能整份存疑。
+ *
+ * 现口径：公式化补造的表头行所在表格**必须自带导出层记号**——分隔线取 GFM 左对齐形态 `| :--- | :--- |`。
+ * 该形态是合法分隔线（`isMarkdownTableSeparator` 命中、marked 正常渲染成表），且视觉零回归：
+ * docx 渲染层不输出分隔线；HTML 侧 `th{text-align:center}`/`td{text-align:left}` 由样式表决定，
+ * 与 `:---` 的左对齐声明一致。作者表格（本文件重排体）恒为 `| --- | --- |`，故记号即「造假位点」的
+ * 机器可读定位；补造的**表头原文**同时登记进审计（notices.fabricated-header + blocker 文案逐字给出），
+ * 与 L4-1 模板告警同一「不得静默」口径。
+ */
+const FABRICATED_TABLE_SEPARATOR_CELL = ':---';
+
+/** 补造表格分隔线（与记号常量同一来源，勿私造第二份） */
+function fabricatedTableSeparatorRow(columns: number) {
+  return `| ${Array.from({ length: columns }, () => FABRICATED_TABLE_SEPARATOR_CELL).join(' | ')} |`;
+}
+
+/** 补造记号判定：全单元格为左对齐形态（作者表格重排体恒为 `---`，故仅补造表格命中） */
+function isFabricatedTableSeparator(line: string) {
+  const cells = splitMarkdownTableRow(line);
+  return cells.length > 0 && cells.every(cell => cell === FABRICATED_TABLE_SEPARATOR_CELL);
+}
+
+/** 补造表头登记（审计证据：补造了什么、补在哪一行、所在列数）——observe/off 补造时必须调用 */
+function recordFabricatedHeader(tableLine: number, headers: string[], columns: number, mode: ExportPureRenderMode, audit?: ExportRenderAudit) {
+  if (!audit || audit.mode === 'off') return;
+  audit.notices.push({
+    code: 'fabricated-header',
+    message: `导出层补造表头（非作者原文，仅 ${mode} 模式补造）：第 ${tableLine} 行「${headers.join(' | ')}」（${columns} 列）——原表无表头，回源补齐后该补造行即消失`,
+  });
+}
+
 function collectBareTableRows(lines: string[], start: number) {
   const rows: string[] = [];
   let index = start;
@@ -264,7 +316,8 @@ function normalizeLooseMarkdownTables(input: string, audit?: ExportRenderAudit) 
       const columns = Math.max(2, header.length, separatorColumns, ...dataRows.map(row => row.length));
       if (output.length > 0 && output[output.length - 1]?.trim()) output.push('');
       output.push(normalizeTableRowAligned(header, columns, audit));
-      output.push(`| ${Array.from({ length: columns }, () => '---').join(' | ')} |`);
+      // L4-3 幂等：已有补造记号的表格再归一后记号仍在（否则第二次归一即丢掉「导出层造」的证据）
+      output.push(isFabricatedTableSeparator(separator) ? fabricatedTableSeparatorRow(columns) : `| ${Array.from({ length: columns }, () => '---').join(' | ')} |`);
       index = nextIndex + 1;
       while (index < lines.length) {
         const row = lines[index] || '';
@@ -283,15 +336,24 @@ function normalizeLooseMarkdownTables(input: string, audit?: ExportRenderAudit) 
     const bare = looksLikeMarkdownTableRow(line) ? collectBareTableRows(lines, index) : null;
     if (bare) {
       // 无表头裸表格=源层结构性缺陷：observe 采样记录并沿用历史补表头（产物零回归）；enforce 不造内容改阻断
-      blockers?.push({ code: 'bare-table', line: index + 1, message: `第 ${index + 1} 行起为无表头裸表格（${bare.rows.length} 行 × ${bare.columns} 列）：导出层不补造表头，需回源补齐表头后导出` });
+      const bareHeaders = defaultTableHeaders(bare.columns);
+      blockers?.push({
+        code: 'bare-table',
+        line: index + 1,
+        message: enforce
+          ? `第 ${index + 1} 行起为无表头裸表格（${bare.rows.length} 行 × ${bare.columns} 列）：导出层不补造表头，需回源补齐表头后导出`
+          // L4-3：observe/off 实际会补造表头——文案必须与实际行为一致，并逐字给出补造原文
+          : `第 ${index + 1} 行起为无表头裸表格（${bare.rows.length} 行 × ${bare.columns} 列）：环境为 ${audit?.mode ?? exportPureRenderMode()}，导出层补造表头「${bareHeaders.join(' | ')}」并以 ${FABRICATED_TABLE_SEPARATOR_CELL} 左对齐分隔线标注（非作者原文），需回源补齐表头后导出`,
+      });
       if (enforce) {
         for (const row of bare.rows) output.push(row);
         index = bare.next;
         continue;
       }
       if (output.length > 0 && output[output.length - 1]?.trim()) output.push('');
-      output.push(normalizeMarkdownTableRow(defaultTableHeaders(bare.columns), bare.columns));
-      output.push(`| ${Array.from({ length: bare.columns }, () => '---').join(' | ')} |`);
+      output.push(normalizeMarkdownTableRow(bareHeaders, bare.columns));
+      output.push(fabricatedTableSeparatorRow(bare.columns));
+      recordFabricatedHeader(index + 1, bareHeaders, bare.columns, audit?.mode ?? exportPureRenderMode(), audit);
       if (ops) ops.tableSeparatorAdded += 1;
       for (const row of bare.rows) output.push(normalizeTableRowAligned(splitMarkdownTableRow(row), bare.columns, audit));
       index = bare.next;
@@ -303,7 +365,14 @@ function normalizeLooseMarkdownTables(input: string, audit?: ExportRenderAudit) 
       if (loose.rows.length > 0) {
         const columns = Math.max(2, splitMarkdownTableRow(line).length, ...loose.rows.map(row => splitMarkdownTableRow(row).length));
         // 孤立分隔线（无表头）=源层结构性缺陷：与裸表同口径处置
-        blockers?.push({ code: 'orphan-separator', line: index + 1, message: `第 ${index + 1} 行为无表头的孤立分隔线（后续 ${loose.rows.length} 行表格数据）：导出层不补造表头，需回源补齐表头后导出` });
+        const looseHeaders = defaultTableHeaders(columns);
+        blockers?.push({
+          code: 'orphan-separator',
+          line: index + 1,
+          message: enforce
+            ? `第 ${index + 1} 行为无表头的孤立分隔线（后续 ${loose.rows.length} 行表格数据）：导出层不补造表头，需回源补齐表头后导出`
+            : `第 ${index + 1} 行为无表头的孤立分隔线（后续 ${loose.rows.length} 行表格数据）：环境为 ${audit?.mode ?? exportPureRenderMode()}，导出层补造表头「${looseHeaders.join(' | ')}」并以 ${FABRICATED_TABLE_SEPARATOR_CELL} 左对齐分隔线标注（非作者原文），需回源补齐表头后导出`,
+        });
         if (enforce) {
           output.push(line);
           for (const row of loose.rows) output.push(row);
@@ -311,8 +380,9 @@ function normalizeLooseMarkdownTables(input: string, audit?: ExportRenderAudit) 
           continue;
         }
         if (output.length > 0 && output[output.length - 1]?.trim()) output.push('');
-        output.push(normalizeMarkdownTableRow(defaultTableHeaders(columns), columns));
-        output.push(`| ${Array.from({ length: columns }, () => '---').join(' | ')} |`);
+        output.push(normalizeMarkdownTableRow(looseHeaders, columns));
+        output.push(fabricatedTableSeparatorRow(columns));
+        recordFabricatedHeader(index + 1, looseHeaders, columns, audit?.mode ?? exportPureRenderMode(), audit);
         if (ops) ops.tableSeparatorAdded += 1;
         for (const row of loose.rows) output.push(normalizeTableRowAligned(splitMarkdownTableRow(row), columns, audit));
         index = loose.next;
@@ -326,6 +396,13 @@ function normalizeLooseMarkdownTables(input: string, audit?: ExportRenderAudit) 
   return output.join('\n').replace(/\n{3,}/gu, '\n\n');
 }
 
+/**
+ * 结构性行形态（标题 / 表格行 / 列表项 / 代码围栏 / HTML 块 / 分页标记）：
+ * 段落规范化（本层结构操作）与导出链声明剥离（L4-8 散文区作用域）**共用同一判据**——
+ * 结构行是编号化/定位化的信息载体，不得被段落拆分，也不得被剥离改写。
+ */
+const STRUCTURAL_LINE_RE = /^(?:#{1,6}\s|\||[-*+]\s|\d+[.、]\s|```|<div|\[\[PAGE)/u;
+
 /** 智能段落规范化（渲染层结构操作）：单换行分隔的连续文本行转双换行段落防粘连，插入数计入审计 */
 function normalizeParagraphs(input: string, audit?: ExportRenderAudit): string {
   const lines = input.split('\n');
@@ -338,7 +415,7 @@ function normalizeParagraphs(input: string, audit?: ExportRenderAudit): string {
     const trimmed = line.trim();
 
     // 空行、标题、表格、列表、代码块 → 保持原样，重置连续文本计数
-    if (!trimmed || /^(#{1,6}\s|\||[-*+]\s|\d+[.、]\s|```|<div|\[\[PAGE)/u.test(trimmed)) {
+    if (!trimmed || STRUCTURAL_LINE_RE.test(trimmed)) {
       if (consecutiveText > 1) {
         if (ops) ops.paragraphBreakInserted += 1;
         out.push(''); // 在连续文本块后补一个空行
@@ -412,8 +489,19 @@ function normalizeExportUnits(input: string, audit?: ExportRenderAudit) {
   return normalizeParagraphs(normalizeLooseMarkdownTables(text, audit), audit);
 }
 
+/**
+ * 行内标记剥离（**纯渲染**：只去标记，不做任何归一/改写）。
+ *
+ * 4.56 L4-2 原缺陷：这里曾先跑一遍 `normalizeExportUnits(input)`（**未携带 audit**）——
+ * 该函数的职责是「单位改写 + 裸表补造 + 段落归一」（写时链/归一阶段的口径），放在逐行渲染的
+ * 取值函数里意味着：① 归一被 docx/html 阶段**重跑**（`prepareExportMarkdown` 已做过）；
+ * ② 这一遍的改写与补造**不计审计**（ops 缺失 → 计数漏记），A2 守恒也只覆盖前一段；
+ * ③ 单个单元格/标题文本被当成整篇文档跑段落归一，语义越界（行内文本没有段落结构）。
+ * 现口径：本函数只去行内标记；归一由 `prepareExportMarkdown` 唯一入口完成，docx 阶段只渲染不改写
+ * （越界改动由 `docxStageConservationDiff` 捕获为 blocker）。
+ */
 function stripInlineMarkdown(input: string) {
-  return normalizeExportUnits(input)
+  return input
     .replace(/!\[[^\]]*\]\([^)]*\)/gu, '')
     .replace(/\[([^\]]+)\]\([^)]*\)/gu, '$1')
     .replace(/[*_`]/gu, '')
@@ -600,6 +688,23 @@ function docxImageFromMarkdown(line: string, context: DocxBuildContext) {
   return image;
 }
 
+/**
+ * 4.56 L4-4 **表头行形态判据**（机制化，无内容白名单）：全单元格为**短标签**——非空、≤12 字、
+ * 不含数字（表头不会用数字承载数据）、不以句读收尾。「表头行」与「数据行」的区分据此：
+ * markdown 语法（分隔线上一行）只说明「哪一行被渲染成表头」，不说明该行**是不是**表头；
+ * 首行本是数据行（含数值/单位/长句）时不得无条件套灰底加粗居中。
+ */
+const HEADER_CELL_MAX_CHARS = 12;
+function looksLikeHeaderRow(cells: string[]) {
+  if (cells.length === 0) return false;
+  return cells.every(cell => {
+    const trimmed = cell.trim();
+    if (!trimmed || trimmed.length > HEADER_CELL_MAX_CHARS) return false;
+    if (/\d/u.test(trimmed)) return false;
+    return !/[。；;，,、.]$/u.test(trimmed);
+  });
+}
+
 function parseMarkdownTable(lines: string[], start: number) {
   const separatorIndex = lines[start + 1]?.trim() === '' ? start + 2 : start + 1;
   if (separatorIndex >= lines.length || !looksLikeMarkdownTableRow(lines[start] || '') || !isMarkdownTableSeparator(lines[separatorIndex] || '')) return null;
@@ -618,10 +723,12 @@ function parseMarkdownTable(lines: string[], start: number) {
     while (normalized.length < columns) normalized.push('');
     return normalized;
   };
-  return { rows: [normalize(header), ...dataRows.map(normalize)], next: index };
+  // L4-4：首行是否按表头渲染由形态判据裁决（原实现 rowIndex===0 无条件当表头）
+  return { rows: [normalize(header), ...dataRows.map(normalize)], next: index, headerRow: looksLikeHeaderRow(header) };
 }
 
-function docxTable(rows: string[][], style: ReturnType<typeof resolveExportStyle>) {
+/** docx 表格渲染：`headerRow` 显式传入（不再由行下标隐式决定是否表头） */
+function docxTable(rows: string[][], style: ReturnType<typeof resolveExportStyle>, headerRow: boolean) {
   const maxColumns = Math.max(1, ...rows.map(row => row.length));
   const tableWidth = 9638;
   const baseColumnWidth = Math.floor(tableWidth / maxColumns);
@@ -629,22 +736,57 @@ function docxTable(rows: string[][], style: ReturnType<typeof resolveExportStyle
   const grid = `<w:tblGrid>${columnWidths.map(width => `<w:gridCol w:w="${width}"/>`).join('')}</w:tblGrid>`;
   const cells = (row: string[], rowIndex: number) => columnWidths.map((width, columnIndex) => {
     const cell = row[columnIndex] || '';
-    return `<w:tc><w:tcPr><w:tcW w:w="${width}" w:type="dxa"/><w:tcMar><w:top w:w="80" w:type="dxa"/><w:left w:w="120" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/><w:right w:w="120" w:type="dxa"/></w:tcMar>${rowIndex === 0 ? '<w:shd w:val="clear" w:fill="F3F4F6"/>' : ''}</w:tcPr>${docxParagraph(cell, { bold: rowIndex === 0, size: style.bodyHalfPoints, line: style.lineTwips, fontEastAsia: style.fontBody, fontAscii: style.fontBodyAscii, spacingAfter: 0, align: rowIndex === 0 ? 'center' : 'left' })}</w:tc>`;
+    const asHeader = headerRow && rowIndex === 0;
+    return `<w:tc><w:tcPr><w:tcW w:w="${width}" w:type="dxa"/><w:tcMar><w:top w:w="80" w:type="dxa"/><w:left w:w="120" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/><w:right w:w="120" w:type="dxa"/></w:tcMar>${asHeader ? '<w:shd w:val="clear" w:fill="F3F4F6"/>' : ''}</w:tcPr>${docxParagraph(cell, { bold: asHeader, size: style.bodyHalfPoints, line: style.lineTwips, fontEastAsia: style.fontBody, fontAscii: style.fontBodyAscii, spacingAfter: 0, align: asHeader ? 'center' : 'left' })}</w:tc>`;
   }).join('');
-  return `<w:tbl><w:tblPr><w:tblW w:w="${tableWidth}" w:type="dxa"/><w:tblLook w:firstRow="1" w:noHBand="0"/><w:tblBorders><w:top w:val="single" w:sz="6" w:color="666666"/><w:left w:val="single" w:sz="6" w:color="666666"/><w:bottom w:val="single" w:sz="6" w:color="666666"/><w:right w:val="single" w:sz="6" w:color="666666"/><w:insideH w:val="single" w:sz="4" w:color="666666"/><w:insideV w:val="single" w:sz="4" w:color="666666"/></w:tblBorders></w:tblPr>${grid}${rows.map((row, rowIndex) => `<w:tr>${cells(row, rowIndex)}</w:tr>`).join('')}</w:tbl>`;
+  return `<w:tbl><w:tblPr><w:tblW w:w="${tableWidth}" w:type="dxa"/><w:tblLook w:firstRow="${headerRow ? 1 : 0}" w:noHBand="0"/><w:tblBorders><w:top w:val="single" w:sz="6" w:color="666666"/><w:left w:val="single" w:sz="6" w:color="666666"/><w:bottom w:val="single" w:sz="6" w:color="666666"/><w:right w:val="single" w:sz="6" w:color="666666"/><w:insideH w:val="single" w:sz="4" w:color="666666"/><w:insideV w:val="single" w:sz="4" w:color="666666"/></w:tblBorders></w:tblPr>${grid}${rows.map((row, rowIndex) => `<w:tr>${cells(row, rowIndex)}</w:tr>`).join('')}</w:tbl>`;
+}
+
+/**
+ * 4.56 L4-5 **表题行样式判据**（机制化）：`表` + 编号（阿拉伯/中文序号，允许 `3-1`/`3.1` 形态）+ 标题文字，
+ * 且**紧邻表格**（下一非空行即表格行，或上一块刚渲染完表格）——表题只在表格上下文成立，
+ * 正文里出现的「表…」句不命中（编号形态 + 邻接双闸）。
+ */
+const TABLE_CAPTION_RE = /^表\s*(?:[\d一二三四五六七八九十百]+(?:[.．\-—–]\d+)*)\s*[、.．:：]?\s*\S/u;
+const TABLE_CAPTION_MAX_CHARS = 60;
+function isTableCaptionLine(line: string) {
+  const trimmed = line.trim();
+  return trimmed.length > 1 && trimmed.length <= TABLE_CAPTION_MAX_CHARS
+    && TABLE_CAPTION_RE.test(trimmed)
+    && !trimmed.startsWith('|') && !/^#/u.test(trimmed);
 }
 
 function isTocSectionLine(line: string) {
   return /^\s*\d+\.\d+\s+\S/u.test(line);
 }
 
-function docxTocFieldParagraph(style: ReturnType<typeof resolveExportStyle>) {
-  return `<w:p><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="120"/></w:pPr><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve">TOC \\o &quot;1-3&quot; \\h \\z \\u</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>请在 Word 中右键更新目录</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>`;
+/** 目录域占位文案（域结果为空时的可见提示；TOC 域缓存非空时由静态条目充当域结果，见 L4-6） */
+const DOCX_TOC_FIELD_PLACEHOLDER = '请在 Word 中右键更新目录';
+
+/** 目录域起始段（begin + 域指令 + separate）：域结果的后续段落即「缓存目录」 */
+function docxTocFieldOpen(style: ReturnType<typeof resolveExportStyle>) {
+  return `<w:p><w:pPr><w:spacing w:line="${style.lineTwips}" w:lineRule="exact" w:after="120"/></w:pPr><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve">TOC \\o &quot;1-3&quot; \\h \\z \\u</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>`;
+}
+
+/** 无静态条目（或目录区只有标题）时的单段域：占位文案即域结果 */
+function docxTocFieldPlaceholderParagraph(style: ReturnType<typeof resolveExportStyle>) {
+  return docxTocFieldOpen(style).replace('</w:p>', `<w:r><w:t>${DOCX_TOC_FIELD_PLACEHOLDER}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>`);
+}
+
+/** 目录域收口：域结束标记落在最后一个缓存条目段内（Word 更新域时整段域结果被重算覆盖） */
+function docxTocFieldClose(paragraphXml: string) {
+  return paragraphXml.replace(/<\/w:p>$/u, '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>');
 }
 
 function docxTocParagraph(line: string, style: ReturnType<typeof resolveExportStyle>) {
   const sectionLine = isTocSectionLine(line);
   return docxParagraph(stripInlineMarkdown(line), { bold: !sectionLine, size: style.bodyHalfPoints, line: style.lineTwips, fontEastAsia: style.fontBody, fontAscii: style.fontBodyAscii, spacingAfter: sectionLine ? 30 : 80, indentLeft: sectionLine ? 420 : 0, align: 'left' });
+}
+
+/** 表题段（L4-5）：加粗 + 居中 + 零首行缩进 + keepNext（与随后表格同页）；
+ *  不设 outline level——章节目录只收标题，表题不进目录（图表目录是另一条独立域） */
+function docxTableCaptionParagraph(text: string, style: ReturnType<typeof resolveExportStyle>) {
+  return docxParagraph(text, { bold: true, size: style.bodyHalfPoints, line: style.lineTwips, fontEastAsia: style.fontHeading, fontAscii: style.fontHeadingAscii, align: 'center', firstLine: 0, spacingBefore: 120, spacingAfter: 60, keepNext: true });
 }
 
 function docxHeadingParagraph(level: number, text: string, style: ReturnType<typeof resolveExportStyle>) {
@@ -665,22 +807,68 @@ function unorderedListMatch(line: string) {
   return match ? stripInlineMarkdown(match[1]) : null;
 }
 
-function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings, context?: DocxBuildContext) {
+/**
+ * docx 渲染（**纯渲染阶段**：只做结构 → OOXML 的映射，不再改写正文）。
+ *
+ * 4.56 L4-2 原缺陷：本函数与 `stripInlineMarkdown` 在**未携带 audit** 的情况下又跑了一遍
+ * `normalizeExportUnits` —— 于是 `prepareExportMarkdown` 完成的归一被**重跑一次**（单位改写、
+ * 假表头补造/detect 全部再执行），且这一遍**不计审计**：响应头与导出报告的 ops/blockers 只反映
+ * 第一遍；A2 守恒断言也只覆盖 `prepareExportMarkdown` 一段，docx 阶段改了什么看不到。
+ * 现口径：docx 阶段**只渲染不改写**——
+ * ① 不再二次归一（入口文本即 `prepareExportMarkdown` 产物），归一不动点与产物文本守恒双重复核：
+ *    · 收支复核：入口若非归一不动点（绕过 API 直调 buildDocx）→ notice（按原样渲染，不改写）；
+ *    · **产物守恒复核**：渲染产物 XML 的可见文本（`<w:t>`）去标记后必须与入口文本逐字一致
+ *      —— 任何在 docx 阶段发生的正文改动（改写/注入/丢失）都在此被捕获为 blocker。
+ * ② 审计贯通：docx 阶段的计数（无表头表格/表题/目录）与违规写入同一 audit（响应头 + 导出报告归档）。
+ */
+function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings, context?: DocxBuildContext, audit?: ExportRenderAudit) {
   const style = resolveExportStyle(settings);
   const h1Size = style.h1HalfPoints;
   const bodySize = style.bodyHalfPoints;
-  const normalizedMarkdown = normalizeExportUnits(markdown);
+  // L4-2：入口文本原样使用（纯渲染）；不动点仅做**检测**（不采用归一结果，避免二次改写与双重计数）
+  const normalizedMarkdown = markdown;
+  if (audit && audit.mode !== 'off') {
+    // 探针恒用 observe：探针问的是「归一阶段会不会改动这段文本」，与当前模式无关（enforce 不改写，
+    // 拿 enforce 探不出入口是否已归一）。探针 audit 是丢弃对象，计数不进真实 audit（无双计）。
+    const probeAudit = createExportRenderAudit('observe');
+    const probe = normalizeExportUnits(markdown, probeAudit);
+    const probeDiff = probe === markdown ? null : exportConservationDiff(markdown, probe);
+    // 只报**内容级**差异：纯结构差异（空行/表格对齐/目录重建后的行距）对渲染文本无影响，
+    // 报出来只是噪声（目录经 fixTocFromBody 重建后本就不是 normalizeExportUnits 的不动点）。
+    if (probeDiff && !probeDiff.conserved) {
+      audit.notices.push({
+        code: 'docx-stage',
+        message: `docx 阶段入口存在未归一的内容差异（第 ${probeDiff.position} 字符附近「${probeDiff.sourceContext}」→「${probeDiff.productContext}」）：本阶段不再二次归一，按入口文本原样渲染；归一入口应为 prepareExportMarkdown 产物`,
+      });
+    }
+  }
   const lines = normalizedMarkdown.replace(/<div class="page-break"><\/div>/gu, '\n[[PAGE_BREAK]]\n').split('\n');
   const blocks: string[] = [];
   let inToc = false;
   let inCover = false;
-  let tocFieldInserted = false;
+  // L4-6 目录区收口：目录静态条目作为 TOC 域**缓存结果**（begin/separate … 条目 … end）整体产出，
+  // 使「在 Word 中更新目录」重算域结果时把条目一并替换，不再新旧两份目录并存
+  let tocRegionStart = -1;
+  const closeTocRegion = () => {
+    if (tocRegionStart < 0) return;
+    const entries = blocks.splice(tocRegionStart);
+    tocRegionStart = -1;
+    if (entries.length === 0) {
+      blocks.push(docxTocFieldPlaceholderParagraph(style));
+      return;
+    }
+    blocks.push(docxTocFieldOpen(style));
+    entries.forEach((entry, entryIndex) => blocks.push(entryIndex === entries.length - 1 ? docxTocFieldClose(entry) : entry));
+  };
+  let lastBlockWasTable = false;
   for (let index = 0; index < lines.length;) {
     const line = lines[index].trim();
     if (!line) { index += 1; continue; }
+    // 目录区遇到标题/分页即为目录区结束：先收口（域结果闭合），再按新区块处理
+    if (inToc && (line === '[[PAGE_BREAK]]' || /^#{1,4}\s+/u.test(line))) { closeTocRegion(); inToc = false; }
     if (/<div\s+class=["']document-cover["']\s*>/iu.test(line)) { inCover = true; index += 1; continue; }
     if (inCover && /^<\/div>$/iu.test(line)) { inCover = false; index += 1; continue; }
-    if (line === '[[PAGE_BREAK]]') { inToc = false; inCover = false; blocks.push(docxParagraph('', { pageBreak: true })); index += 1; continue; }
+    if (line === '[[PAGE_BREAK]]') { inToc = false; inCover = false; closeTocRegion(); blocks.push(docxParagraph('', { pageBreak: true })); index += 1; continue; }
     if (inCover) {
       const coverText = stripInlineMarkdown(line.replace(/^#\s+/u, ''));
       if (coverText) blocks.push(docxParagraph(coverText, { bold: true, size: Math.max(h1Size + 8, 44), line: Math.round(style.lineTwips * 1.15), fontEastAsia: style.fontHeading, fontAscii: style.fontHeadingAscii, align: 'center', spacingBefore: 360, spacingAfter: 220 }));
@@ -690,17 +878,37 @@ function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings, 
     const image = context ? docxImageFromMarkdown(line, context) : null;
     if (image) { blocks.push(docxImageParagraph(image)); index += 1; continue; }
     const table = parseMarkdownTable(lines, index);
-    if (table) { blocks.push(docxTable(table.rows, style), docxParagraph('', { spacingAfter: 80, line: style.lineTwips })); index = table.next; continue; }
+    if (table) {
+      // L4-4：是否按表头渲染由形态判据（looksLikeHeaderRow）裁决，不再由行下标无条件决定
+      blocks.push(docxTable(table.rows, style, table.headerRow), docxParagraph('', { spacingAfter: 80, line: style.lineTwips }));
+      lastBlockWasTable = true;
+      index = table.next;
+      continue;
+    }
+    // L4-4：无表头裸表格（无分隔线）按**数据行**渲染——判据与表格归一器共用 collectBareTableRows
+    //（凡裸表都已在 prepareExportMarkdown 记为结构性缺陷）；首行不得冒充表头（灰底加粗居中）
+    const bare = !inToc && looksLikeMarkdownTableRow(line) ? collectBareTableRows(lines, index) : null;
+    if (bare) {
+      blocks.push(docxTable(bare.rows.map(row => splitMarkdownTableRow(row).map(cell => stripInlineMarkdown(cell))), style, false), docxParagraph('', { spacingAfter: 80, line: style.lineTwips }));
+      if (audit && audit.mode !== 'off') {
+        audit.ops.headerlessTableRendered += 1;
+        audit.notices.push({ code: 'headerless-table', message: `docx 阶段按数据行渲染无表头表格 ${bare.rows.length} 行 × ${bare.columns} 列（首行不冒充表头）：该表在源文档缺表头，需回源补齐` });
+      }
+      lastBlockWasTable = true;
+      index = bare.next;
+      continue;
+    }
     if (isMarkdownTableSeparator(line)) { index += 1; continue; }
     const heading = /^(#{1,4})\s+(.+)$/u.exec(line);
     if (heading) {
       const headingText = stripInlineMarkdown(heading[2]);
-      inToc = headingText === '目录';
       blocks.push(docxHeadingParagraph(heading[1].length, headingText, style));
-      if (inToc && !tocFieldInserted) {
-        blocks.push(docxTocFieldParagraph(style));
-        tocFieldInserted = true;
+      if (headingText === '目录') {
+        // L4-6：目录标题后的静态条目统一收进 TOC 域缓存（区起点=标题之后）
+        inToc = true;
+        tocRegionStart = blocks.length;
       }
+      lastBlockWasTable = false;
       index += 1;
       continue;
     }
@@ -723,6 +931,16 @@ function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings, 
       index += 1;
       continue;
     }
+    // L4-5：表题行走表题样式（加粗/居中/零缩进/与表同页），不再作为普通正文段落渲染；
+    // 邻接闸：表题只在「下一非空行是表格行」或「上一块刚渲染完表格」时成立
+    const nextNonEmpty = lines.slice(index + 1).find(candidate => candidate.trim() !== '');
+    if (!inToc && isTableCaptionLine(line) && (lastBlockWasTable || Boolean(nextNonEmpty && looksLikeMarkdownTableRow(nextNonEmpty.trim())))) {
+      blocks.push(docxTableCaptionParagraph(plainLine, style));
+      if (audit && audit.mode !== 'off') audit.ops.captionStyled += 1;
+      lastBlockWasTable = false;
+      index += 1;
+      continue;
+    }
     // 识别伪标题（如 **项目基本信息表**、**施工范围及项目特征**），在导出中提升字号
     const pseudoHeading = /^\*\*[^*]+\*\*\s*$/u.test(line) && plainLine.length <= 40;
     const boldLine = /^\*\*[^*]+\*\*\s*[:：]?\s*$/u.test(line) || /^（[一二三四五六七八九十]+）/u.test(plainLine) || /^[一二三四五六七八九十]+、/u.test(plainLine);
@@ -739,9 +957,23 @@ function markdownToDocxXml(markdown: string, settings?: DocumentExportSettings, 
           spacingBefore: pseudoHeading ? 120 : (boldLine ? 80 : 0),
           spacingAfter: pseudoHeading ? 60 : undefined,
         }));
+    lastBlockWasTable = false;
     index += 1;
   }
-  return blocks.join('');
+  closeTocRegion(); // 目录区在文末结束的情形同样收口（域结果闭合，防双轨）
+  const documentXml = blocks.join('');
+  // L4-2 产物守恒复核：渲染产物可见文本必须与入口文本逐字一致（docx 阶段零正文改动）
+  if (audit && audit.mode !== 'off') {
+    const conservation = docxStageConservationDiff(normalizedMarkdown, documentXml);
+    if (!conservation.conserved) {
+      audit.blockers.push({
+        code: 'content-not-conserved',
+        line: 0,
+        message: `docx 渲染阶段存在未声明的正文改动（产物文本去标记比对）：第 ${conservation.position} 字符附近分歧（入口「${conservation.sourceContext}」→ 产物「${conservation.productContext}」）`,
+      });
+    }
+  }
+  return documentXml;
 }
 
 function docxStylesXml(settings?: DocumentExportSettings) {
@@ -827,10 +1059,11 @@ async function ensureDocxPackageParts(zip: JSZip, title: string, settings?: Docu
  * 多候选启动（与 renderPdfBuffer 同源：bundled chromium → 系统 chrome/edge → 常见路径）；
  * 任一图失败仅跳过该图（不阻断导出）。
  */
-async function buildDocx(title: string, markdown: string, settings?: DocumentExportSettings, templatePath?: string, projectRoot = process.cwd()): Promise<{ buffer: Buffer; templateWarning?: string }> {
+async function buildDocx(title: string, markdown: string, settings?: DocumentExportSettings, templatePath?: string, projectRoot = process.cwd(), audit?: ExportRenderAudit): Promise<{ buffer: Buffer; templateWarning?: string }> {
   const context: DocxBuildContext = { projectRoot, images: [] };
   // 4.55.18：SVG 图件预光栅化（DOCX 不能内联 SVG；失败仅跳过该图）
-  const contentXml = markdownToDocxXml(markdown, settings, context);
+  // 4.56 L4-2：审计贯通到 docx 渲染阶段（结构操作计数 + 产物文本守恒复核进同一 audit）
+  const contentXml = markdownToDocxXml(markdown, settings, context, audit);
   let templateWarning: string | undefined;
   if (templatePath && fs.existsSync(templatePath)) {
     const zip = await JSZip.loadAsync(fs.readFileSync(templatePath));
@@ -1056,10 +1289,8 @@ function canonicalExportText(input: string) {
     .replace(/\s+/gu, '');
 }
 
-/** 守恒比对：返回去标记文本是否逐字一致；不一致时给出首个分歧位置与上下文（供审计回溯） */
-function exportConservationDiff(source: string, product: string) {
-  const a = canonicalExportText(source);
-  const b = canonicalExportText(product);
+/** 归一文本分歧定位（**单一实现**：导出链 A2 断言与 docx 阶段产物复核共用，禁止两处各写一份定位口径） */
+function diffCanonicalText(a: string, b: string) {
   if (a === b) return { conserved: true as const };
   let index = 0;
   const max = Math.min(a.length, b.length);
@@ -1072,13 +1303,235 @@ function exportConservationDiff(source: string, product: string) {
   };
 }
 
+/** 守恒比对：返回去标记文本是否逐字一致；不一致时给出首个分歧位置与上下文（供审计回溯） */
+function exportConservationDiff(source: string, product: string) {
+  return diffCanonicalText(canonicalExportText(source), canonicalExportText(product));
+}
+
+/** docx 产物可见文本提取：`<w:t>` 文本节点（`<w:tbl>`/`<w:tr>`/`<w:instrText>` 不匹配），XML 实体还原 */
+function docxVisibleText(documentXml: string) {
+  return [...documentXml.matchAll(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/gu)]
+    .map(match => (match[1] || '')
+      .replace(/&lt;/gu, '<')
+      .replace(/&gt;/gu, '>')
+      .replace(/&quot;/gu, '"')
+      .replace(/&amp;/gu, '&'))
+    .join('\n');
+}
+
+/**
+ * docx 产物归一（**两侧对称**剥离渲染层标记，故只可能掩盖「标记级」差异，不可能掩盖文字改动；
+ * 正文文字一字不动，任何文字差异都是内容改动）：
+ * 图片（图位无文本）、链接（只输出文字）、分页标记、列表符号（源 `-`/`*` → 产物 `•`）、
+ * TOC 域占位文案（无静态条目时的域结果）；其余标记（井号、星号、竖线、下划线等）与空白
+ * 由 canonicalExportText 统一剥离。
+ */
+function canonicalDocxText(input: string) {
+  return canonicalExportText(
+    input
+      .replace(/!\[[^\]]*\]\([^)]*\)/gu, '')
+      .replace(/\[([^\]]*)\]\([^)]*\)/gu, '$1')
+      .replace(/\[\[PAGE_BREAK\]\]/gu, '')
+      .replace(/[•·]/gu, '')
+      .replace(new RegExp(DOCX_TOC_FIELD_PLACEHOLDER, 'gu'), ''),
+  );
+}
+
+/**
+ * 4.56 L4-2 **docx 阶段产物守恒复核**（A2 覆盖 docx 阶段的扩展）：把渲染产物的可见文本与入口
+ * markdown 去标记比对——docx 阶段任何静默改写/注入/丢失都必然在此暴露（含历史缺陷形态：
+ * 单位二次改写 `m2→m²`、裸表假表头注入「信息项|内容」）。
+ */
+function docxStageConservationDiff(sourceMarkdown: string, documentXml: string) {
+  return diffCanonicalText(canonicalDocxText(sourceMarkdown), canonicalDocxText(docxVisibleText(documentXml)));
+}
+
+/**
+ * 4.56 L4-8 **导出链声明剥离**（素材残留行 / 澄清变更叙述 / 图纸图集指向语）。
+ *
+ * 原缺陷：三个剥离器**只挂在生成链上**（`stripMaterialResidueLines` 仅 `evidence.cleanEvidenceText`、
+ * `stripClarificationNarrative`/`stripDrawingPointerPhrases` 仅 `tenderRequirements.fixFormalSourceResidue`），
+ * 导出路径（`editedMarkdown` 用户改动、`useClientMarkdown` 前端草稿、链尾补写重新引入的段落）
+ * **一处都不剥离** → 交付物仍带答疑对答/澄清过程叙述/「详见《…》20S515/29」式指向替代。
+ *
+ * 现口径（三条硬约束）：
+ * ① **单源判据**：直接调用生成链同名函数（materialResidue.*），**不复制任何判据**——链上收紧/放宽后
+ *    导出层自动同步；不在导出层写第二套正则/白名单。
+ * ② **信息零丢失**：剥离**只作用于散文区**——结构性行（标题/表格行/列表项/代码围栏/HTML 块/分页标记，
+ *    判据与 normalizeParagraphs 共用 STRUCTURAL_LINE_RE）逐字保留。理由：链上同名函数若被整段套到
+ *    结构行上，行内「按设计图纸控制」这类小句会让**整行/整条**被删（表格记录与编号条目丢失）；
+ *    故导出层收窄作用域，只可能比链上**更保守**，绝不更激进。
+ * ③ **记账与守卫**：每次运行都做「登记计数 ⇔ 内容确有改动」对账（内容改动而无计数 = 未声明改写 → blocker）、
+ *    结构指纹前后比对（标题集合/表格行集合逐字不变，越界即回退并 blocker），并把计数与样本写进审计
+ *    （notices.declared-rewrite + ops.declaredStrip，随响应头 X-Export-Render-Audit 与导出报告归档）。
+ *    幂等：三个剥离器各自幂等（已剥离文本再剥离零命中、零改动），故重复导出产物一致。
+ */
+type DeclaredStripOutcome = { text: string; removed: number; samples: string[] };
+
+/** 散文区剥离（判据全部来自生成链同名函数；结构行不参与、逐字保留） */
+function stripDeclaredNonDeliverable(text: string): DeclaredStripOutcome {
+  if (!text) return { text, removed: 0, samples: [] };
+  const out: string[] = [];
+  const samples: string[] = [];
+  let removed = 0;
+  let prose: string[] = [];
+  const flushProse = () => {
+    if (prose.length === 0) return;
+    const chunk = prose.join('\n');
+    // 与生成链 fixFormalSourceResidue 的调用顺序一致（叙述 → 指向 → 行级残片），判据同源
+    const narrative = stripClarificationNarrative(chunk);
+    const pointer = stripDrawingPointerPhrases(narrative.text);
+    const lineStripped = stripMaterialResidueLines(pointer.text);
+    removed += narrative.removed + pointer.removed;
+    // 行级残片计数用同一判据 isMaterialResidueLine（stripMaterialResidueLines 内部即此判据，勿另立口径）
+    for (const line of pointer.text.split('\n')) {
+      if (!isMaterialResidueLine(line)) continue;
+      removed += 1;
+      if (samples.length < 6) samples.push(line.trim().slice(0, 40));
+    }
+    // 句级剥离样本（计数由函数自报，样本取「剥离后消失的行」前 6 处，供交付审计回溯）
+    const survived = new Set(lineStripped.split('\n'));
+    for (const line of chunk.split('\n')) {
+      if (!line.trim() || survived.has(line) || samples.length >= 6) continue;
+      samples.push(line.trim().slice(0, 40));
+    }
+    out.push(...lineStripped.split('\n'));
+    prose = [];
+  };
+  for (const line of text.replace(/\r?\n/gu, '\n').split('\n')) {
+    // 空行与结构行：先收口散文段（判据作用于连续散文），结构行原样保留
+    if (!line.trim() || STRUCTURAL_LINE_RE.test(line.trim())) {
+      flushProse();
+      out.push(line);
+      continue;
+    }
+    prose.push(line);
+  }
+  flushProse();
+  return { text: out.join('\n'), removed, samples };
+}
+
+/** 结构指纹（信息零丢失守卫的比对基准）：标题集合 + 表格行集合（顺序与文字逐字） */
+function exportStructureFingerprint(text: string) {
+  const lines = text.replace(/\r?\n/gu, '\n').split('\n').map(line => line.trim());
+  return {
+    headings: lines.filter(line => /^#{1,6}\s/u.test(line)),
+    tableRows: lines.filter(line => line.startsWith('|')),
+  };
+}
+
+/** 声明剥离守卫 + 记账：结构越界即回退（blocker）；内容层面有改动却零登记 = 未声明改写（blocker） */
+function applyDeclaredStrips(rawMarkdown: string, audit?: ExportRenderAudit): string {
+  const outcome = stripDeclaredNonDeliverable(rawMarkdown);
+  if (outcome.text === rawMarkdown) return rawMarkdown;
+  const before = exportStructureFingerprint(rawMarkdown);
+  const after = exportStructureFingerprint(outcome.text);
+  if (JSON.stringify(before) !== JSON.stringify(after)) {
+    audit?.blockers.push({
+      code: 'declared-rewrite-overreach',
+      line: 0,
+      message: '导出链声明剥离改动越界（标题行/表格行被改写或删除）：结构行是信息载体，剥离只允许作用于散文区，已回退原文',
+    });
+    return rawMarkdown;
+  }
+  if (audit && audit.mode !== 'off') {
+    // 记账守卫：内容层面（去标记/空白/标点）确有改动却没有登记计数 → 存在未声明的改写通道
+    const fold = (value: string) => canonicalExportText(value).replace(/[，,、；;：:]/gu, '');
+    if (fold(rawMarkdown) !== fold(outcome.text) && outcome.removed === 0) {
+      audit.blockers.push({
+        code: 'declared-rewrite-unregistered',
+        line: 0,
+        message: '导出链声明剥离存在未登记的内容改动（内容有改动但计数为零）：剥离器与实际改写不一致，需复核判据',
+      });
+    } else if (outcome.removed > 0) {
+      audit.ops.declaredStrip += outcome.removed;
+      audit.notices.push({
+        code: 'declared-rewrite',
+        message: `导出链声明剥离 ${outcome.removed} 处（素材残留行/澄清变更叙述/图纸图集指向语；判据与生成链 materialResidue 同名函数同源，结构行逐字保留）${outcome.samples.length > 0 ? `，样本：${outcome.samples.join('；')}` : ''}`,
+      });
+    }
+  }
+  return outcome.text;
+}
+
+/** 目录区存在性判定（锚「## 目录」段，与生成链 fixTocFromBody 的 TOC_BLOCK_LOCAL_RE 同锚点） */
+const EXPORT_TOC_HEADING_RE = /^##\s+目录\s*$/mu;
+
+/** 改动跨度（公共前后缀剥离后的差异区间）：用于证明「声明改动只落在允许区间内」 */
+function changedSpan(before: string, after: string) {
+  let start = 0;
+  const max = Math.min(before.length, after.length);
+  while (start < max && before[start] === after[start]) start += 1;
+  let endBefore = before.length;
+  let endAfter = after.length;
+  while (endBefore > start && endAfter > start && before[endBefore - 1] === after[endAfter - 1]) {
+    endBefore -= 1;
+    endAfter -= 1;
+  }
+  return { before: before.slice(start, endBefore), after: after.slice(start, endAfter) };
+}
+
+/**
+ * 4.56 L4-7 **静态目录按正文对账**（同源：直接调用生成链目录重建器 `fixTocFromBody`，不另造目录判据）。
+ *
+ * 原缺陷：`## 目录` 后续条目行由 markdown 原文提供，导出层**不与正文编号对账**——实测一份 87 条
+ * 目录里 86 条与正文章节号/标题不一致（用户改动正文后目录未同步，前端草稿更无重建环节）。
+ * 现口径：目录条目一律按正文实际 H2/H3 结构重建；重建**只能改目录区**（过界守卫：改动跨度不得含
+ * 章/节标题行或表格行，违者回退原文并 blocker）；重建结果再做一次同源判据复核（应当是不动点，
+ * 不收敛则显式告警）。
+ */
+function reconcileTocFromBody(text: string, audit?: ExportRenderAudit): string {
+  if (!EXPORT_TOC_HEADING_RE.test(text)) return text; // 无目录区：无从对账（同 fixTocFromBody 零成本返回）
+  const result = fixTocFromBody(text);
+  if (result.markdown === text) return text; // 已对账（或不含可重建结构：无 H2 章标题/H3 编号小节）
+  // 同源判据的「已一致」判定：`fixTocFromBody` 的返回体不含空行（章行后直接接两空格缩进的小节行），
+  // 而本链上游的段落归一会在目录条目之间插空行——若**条目文本本身**已与正文一致（去标记/空白后同形），
+  // 差异只是渲染格式，属已对账：不重建、不计数、不告警（否则每份带目录的文档都会报「已重建」）。
+  if (canonicalExportText(result.markdown) === canonicalExportText(text)) return text;
+  const span = changedSpan(text, result.markdown);
+  if (/^#{2,4}\s/mu.test(span.after) || /^\s*\|/mu.test(span.after)) {
+    audit?.blockers.push({
+      code: 'declared-rewrite-overreach',
+      line: 0,
+      message: '目录重建改动跨度越界（改动区间含正文章/节标题行或表格行），已回退原文目录：需回源核对目录与正文结构',
+    });
+    return text;
+  }
+  if (audit && audit.mode !== 'off') {
+    audit.ops.tocRebuilt += 1;
+    audit.notices.push({
+      code: 'toc-reconcile',
+      message: `静态目录与正文结构不一致，已按生成链 fixTocFromBody 同源口径重建（目录条目取正文章标题与小节编号原文）${result.details.length > 0 ? `：${result.details.join('；')}` : ''}`,
+    });
+    if (fixTocFromBody(result.markdown).markdown !== result.markdown) {
+      audit.notices.push({ code: 'toc-reconcile', message: '目录重建结果未收敛（二次重建仍有差异）：需回源核对目录与正文结构' });
+    }
+  }
+  return result.markdown;
+}
+
+/**
+ * 导出链阶段化（声明改写 → 结构/单位归一 → 目录对账）：
+ * 返回 `declared`（声明剥离后的源，A2 守恒基线）与 `product`（交付产物）。
+ * off 模式 = 显式回退历史行为（不做任何声明改写）。
+ */
+function exportPipelineStages(text: string, audit?: ExportRenderAudit) {
+  const mode = audit?.mode ?? exportPureRenderMode();
+  const declared = mode === 'off' ? text : applyDeclaredStrips(text, audit);
+  const normalized = normalizeExportMarkdownHeadings(normalizeExportUnits(sanitizeFormalMarkdown(declared), audit));
+  const product = mode === 'off' ? normalized : reconcileTocFromBody(normalized, audit);
+  return { declared, normalized, product };
+}
+
 function prepareExportMarkdown(rawMarkdown: string, baseline?: string) {
   const audit = createExportRenderAudit();
-  const markdown = normalizeExportMarkdownHeadings(normalizeExportUnits(sanitizeFormalMarkdown(rawMarkdown), audit));
-  const baselineMarkdown = normalizeExportMarkdownHeadings(normalizeExportUnits(sanitizeFormalMarkdown(baseline || '')));
-  // A2 守恒断言：导出链产出与导出源去标记比对必须逐字一致（结构操作/单位声明在审计单列）
+  const stages = exportPipelineStages(rawMarkdown, audit);
+  // 基线（服务端生成记录）走同一阶段链，保证 validateExportMarkdown 的字数/表格/小节比对两侧同口径
+  const baselineMarkdown = exportPipelineStages(baseline || '').product;
+  // A2 守恒断言：以**声明剥离后**的源为基线（声明改写已在审计逐处登记，见 notices.declared-rewrite）；
+  // 其余任何未声明的正文改写（含 docx 渲染阶段，见 markdownToDocxXml 的产物文本守恒复核）必须被捕获
   if (audit.mode !== 'off') {
-    const conservation = exportConservationDiff(rawMarkdown, markdown);
+    const conservation = exportConservationDiff(stages.declared, stages.normalized);
     if (!conservation.conserved) {
       audit.blockers.push({
         code: 'content-not-conserved',
@@ -1088,9 +1541,9 @@ function prepareExportMarkdown(rawMarkdown: string, baseline?: string) {
     }
   }
   return {
-    markdown,
+    markdown: stages.product,
     baselineMarkdown,
-    issues: validateExportMarkdown(markdown, baselineMarkdown),
+    issues: validateExportMarkdown(stages.product, baselineMarkdown),
     audit,
   };
 }
@@ -1333,14 +1786,28 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
     // DOCX 格式
     if (format === 'docx') {
-      const docxBuild = await buildDocx(title, markdown, exportSettings, body.wordTemplatePath, projectRoot);
+      const blockersBeforeDocx = audit.blockers.length;
+      const docxBuild = await buildDocx(title, markdown, exportSettings, body.wordTemplatePath, projectRoot, audit);
       const docx = docxBuild.buffer;
       // L4-1：模板占位符缺失时的回退必须**可见**（响应头 + 导出报告），不得静默
       if (docxBuild.templateWarning) {
         res.setHeader('X-Export-Template-Warning', encodeURIComponent(docxBuild.templateWarning));
         console.error(`[export] ${docxBuild.templateWarning}`);
       }
-      archiveExportReport(record, format, projectRoot, renderAuditReport, gateIssues);
+      // 4.56 L4-2：docx 阶段的审计必须与产物同批出闸——此前 docx 阶段的操作/违规**完全不进审计**
+      // （响应头与归档只反映 prepareExportMarkdown 那一段）。现以同一 audit 刷新响应头与归档。
+      const docxAuditReport = audit.mode === 'off' ? undefined : exportRenderAuditReport(audit);
+      if (docxAuditReport) res.setHeader('X-Export-Render-Audit', encodeURIComponent(JSON.stringify(docxAuditReport)));
+      // enforce：docx 渲染阶段**新增**的正文改动/丢字同样阻断（产物已生成但不得作为交付物出闸）
+      if (audit.mode === 'enforce' && audit.blockers.length > blockersBeforeDocx) {
+        const docxBlockers = audit.blockers.slice(blockersBeforeDocx);
+        return res.status(422).json({
+          error: 'EXPORT_RENDER_NOT_PURE',
+          message: `docx 渲染阶段存在未声明的正文改动，已按纯渲染模式阻断：${docxBlockers.slice(0, 3).map(item => item.message).join('；')}`,
+          issues: docxBlockers.slice(0, 20),
+        });
+      }
+      archiveExportReport(record, format, projectRoot, docxAuditReport || renderAuditReport, gateIssues);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.docx`)}`);
       return res.status(200).send(docx);
@@ -1370,6 +1837,6 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
 }
 
-export const __documentExportTest__ = { inlineLocalImages, resolveLocalImagePath, normalizeExportUnits, normalizeLooseMarkdownTables, normalizeParagraphs, createExportRenderAudit, exportPureRenderMode, exportRenderAuditReport, canonicalExportText, exportConservationDiff, prepareExportMarkdown, stripInlineMarkdown, enhanceTocHtml, buildExportHtml, buildDocx, validateExportMarkdown };
+export const __documentExportTest__ = { inlineLocalImages, resolveLocalImagePath, normalizeExportUnits, normalizeLooseMarkdownTables, normalizeParagraphs, createExportRenderAudit, exportPureRenderMode, exportRenderAuditReport, canonicalExportText, exportConservationDiff, diffCanonicalText, docxVisibleText, canonicalDocxText, docxStageConservationDiff, prepareExportMarkdown, stripInlineMarkdown, enhanceTocHtml, buildExportHtml, buildDocx, markdownToDocxXml, validateExportMarkdown, stripDeclaredNonDeliverable, applyDeclaredStrips, exportStructureFingerprint, reconcileTocFromBody, exportPipelineStages, changedSpan, isFabricatedTableSeparator, fabricatedTableSeparatorRow, looksLikeHeaderRow, isTableCaptionLine, DOCX_TOC_FIELD_PLACEHOLDER };
 
 export default withApiErrorBoundary('api/documents/export', handler);

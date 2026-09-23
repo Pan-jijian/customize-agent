@@ -28,6 +28,9 @@ import type { TenderRequirementAssignment } from '../../tenderRequirements';
 import { bodySentencesForSemantic, REQUIREMENTS_SEMANTIC_SENTENCE_LIMIT } from '../../documentIntegrityChecks';
 import { buildSemanticSimilarity } from '../../semanticSimilarity';
 import { stableHash } from '../../utils';
+import { documentTextLength } from '../../budget';
+import { buildChapterBudgetLedger, chapterBudgetEntryByTitle, chapterOverflowAfterRound, mergeLandedInserts, recordChapterBudgetMetric, renderChapterBudgetInstruction, renderChapterOverflowNote } from './chapterBudgetLedger';
+import type { ChapterBudgetEntry, ChapterBudgetLedger } from './chapterBudgetLedger';
 import type { TenderRequirementEntry, TenderRequirementModel } from '../../types';
 import type { FinalizeSession } from '../finalizeSession';
 
@@ -42,6 +45,21 @@ const MAX_RESPONSE_REPAIR_CYCLES = 2;
 
 /** 单条款补写素材字数上限（防御性截断；正常条款远小于该值） */
 const MAX_CLAUSE_MATERIAL_CHARS = 600;
+
+/**
+ * 4.56 2-b 章预算账查表（与 contentDepthRepair 同口径同源）：content 传「本章实时正文」，
+ * 修复轮内上一轮已改写过章正文时额度必须按实时字数结算，否则额度是过期分母。
+ */
+function chapterBudgetEntryFor(session: FinalizeSession, chapterIndex: number, content: string): ChapterBudgetEntry | undefined {
+  const chapters = session.finalChapterDrafts;
+  if (!chapters[chapterIndex]) return undefined;
+  const ledger = buildChapterBudgetLedger({
+    chapterTargets: session.documentBudget?.chapterTargets,
+    chapters: chapters.map((chapter, index) => (index === chapterIndex ? { ...chapter, content } : chapter)),
+    documentTargetChars: session.documentBudget?.targetChars,
+  });
+  return ledger.chapters[chapterIndex];
+}
 
 /** blocker 过滤单源（周期循环每轮以最新 validationIssues 为准；链尾终局收口复用） */
 export function requirementResponseBlockers(session: FinalizeSession) {
@@ -122,7 +140,7 @@ export async function stageRequirementResponseRepair(session: FinalizeSession, o
       break;
     }
     // 定向补写指令：条款原文 voice 素材（关键分句逐字保留）+ 缺失锚点反馈 + 反条幅/局部修改约束
-    const instructionFor = (pendingGaps: Array<{ entry: TenderRequirementEntry; missing: string[] }>, round: number): string => [
+    const instructionFor = (pendingGaps: Array<{ entry: TenderRequirementEntry; missing: string[] }>, round: number, budgetEntry?: ChapterBudgetEntry): string => [
       '【招标要求响应定向补写修复】',
       ...(round > 1 ? [`本轮为第 ${round} 轮（最多 ${MAX_RESPONSE_REPAIR_ROUNDS} 轮）：上一轮补写后复检仍有要求未完全响应，请针对下列缺口逐条严格补足。`] : []),
       '下列招标文件明确要求（评标实质性内容）经全文验收未完全响应。请在正文最合适的位置补写实质性响应内容：',
@@ -130,6 +148,8 @@ export async function stageRequirementResponseRepair(session: FinalizeSession, o
       '2. 下列「建议口径」是条款原文的投标人口吻转换：其关键分句与数字参数必须逐字保留（可自然衔接、调整语序，但专有名词/等级/数字/单位不得改字）；',
       '3. 禁止「按招标文件要求：」「按上述条款」类条幅前缀与任何元话语；',
       '4. 只做局部修改：优先并入既有相关段落，或在合适小节内插入补写段落；不得新增、删除或合并小节，不得改动无关内容。',
+      // 4.56 2-b：章预算账（补写额度约束；要求响应类补写同样是「修复链无预算追加」的来源之一）
+      ...(budgetEntry ? [renderChapterBudgetInstruction(budgetEntry)] : []),
       ...pendingGaps.flatMap(gap => {
         const material = bidderVoiceClauseText(gap.entry.text).replace(/\s+/gu, ' ').trim();
         const lines = [`- [${gap.entry.category}] 建议口径：${material.slice(0, MAX_CLAUSE_MATERIAL_CHARS)}`];
@@ -150,10 +170,13 @@ export async function stageRequirementResponseRepair(session: FinalizeSession, o
       let anyRollback = false;
       const residualTrajectory = [beforeCount];
       const roleId = `agent-requirement-response-repair-${draftChapter.id}`;
+      /** 4.56 2-b：本轮章级超额注记（累积进阶段 message/details，与 metrics 同源） */
+      const overflowNotes: string[] = [];
       while (pending.length > 0 && rounds < MAX_RESPONSE_REPAIR_ROUNDS) {
         rounds += 1;
         const pendingGaps = tenderRequirementResponseGaps(pending, chapterContent).filter(gap => !gap.satisfied);
         if (pendingGaps.length === 0) break;
+        const roundStartedAt = Date.now();
         const runningStage = displayStage({ type: 'llm_review', roleId, status: 'running', message: `招标要求响应补写中${cycleLabel}（第 ${rounds}/${MAX_RESPONSE_REPAIR_ROUNDS} 轮）：${draftChapter.title}（${pendingGaps.length} 条要求未完全响应）`, details: pendingGaps.map(gap => `未响应：${gap.entry.category}（缺：${gap.missing.join('、') || '全文零命中'}）`) }, { subtitle: '招标要求响应核验' });
         upsertProgressStage(session.progressStages, runningStage);
         upsertProgressStage(session.finalGateRepairStages, runningStage);
@@ -164,11 +187,13 @@ export async function stageRequirementResponseRepair(session: FinalizeSession, o
           diagnostics: session.generationDiagnostics,
           beforeMetrics: [pendingGaps.length],
           apply: async () => {
+            // 4.56 2-b：预算账按实时正文结算后注入指令（本轮额度约束）
+            const budgetEntry = chapterBudgetEntryFor(session, chapterIndex, chapterContent);
             const repaired = await session.withProgressHeartbeat(() => repairChapterByQuality({
               template: session.template,
               chapter: { id: draftChapter.id, title: draftChapter.title, content: chapterContent, evidence: draftChapter.evidence, missingFacts: draftChapter.missingFacts, sections: draftChapter.sections },
               issues: pendingGaps.map(gap => `招标要求未响应（${gap.entry.category}）：${gap.entry.text.slice(0, 60)}`),
-              promptTexts: instructionFor(pendingGaps, rounds),
+              promptTexts: instructionFor(pendingGaps, rounds, budgetEntry),
               requirement: session.requirement,
               forbidDrawingImages: false,
               // 标书编制规格（正文表格口径）：修复链 system 口径同步
@@ -183,9 +208,19 @@ export async function stageRequirementResponseRepair(session: FinalizeSession, o
         });
         if (outcome.rolledBack) anyRollback = true;
         if (outcome.rolledBack || outcome.content === chapterContent) break;
+        const contentBeforeRound = chapterContent;
         chapterContent = outcome.content;
         session.finalChapterDrafts[chapterIndex] = { ...draftChapter, content: chapterContent };
         chapterRepaired = true;
+        // 4.56 2-b 落地后章级超额检查（只观测不改写：本轮新增多少字 + 超出多少）
+        const roundBudgetEntry = chapterBudgetEntryFor(session, chapterIndex, contentBeforeRound);
+        const overflowReport = roundBudgetEntry
+          ? chapterOverflowAfterRound({ chapterId: draftChapter.id, title: draftChapter.title, target: roundBudgetEntry.target, beforeContent: contentBeforeRound, afterContent: chapterContent })
+          : undefined;
+        if (overflowReport) {
+          overflowNotes.push(renderChapterOverflowNote(overflowReport));
+          recordChapterBudgetMetric({ diagnostics: session.generationDiagnostics, round: 'requirement-response-repair', startedAt: roundStartedAt, report: overflowReport });
+        }
         const afterCount = tenderRequirementResponseGaps(pending, chapterContent).filter(gap => !gap.satisfied).length;
         residualTrajectory.push(afterCount);
         // 收敛判定：清零即通过；未下降（含回滚/空修复）即停止；下降且未达上限 → 再修一轮（残留数下降才继续）
@@ -202,7 +237,9 @@ export async function stageRequirementResponseRepair(session: FinalizeSession, o
       else if (chapterRepaired) message = `招标要求响应补写部分生效${cycleLabel}：${draftChapter.title}（残留轨迹 ${residualTrajectory.join('→')}，已执行 ${rounds} 轮；${residualNote}）`;
       else if (anyRollback) message = `招标要求响应补写已回滚${cycleLabel}：${draftChapter.title}（修复后未响应数未下降，保留修复前正文；${residualNote}）`;
       else message = `招标要求响应补写未生效${cycleLabel}：${draftChapter.title}（模型未产生有效修改；${residualNote}）`;
-      const completedStage = displayStage({ type: 'llm_review', roleId, status: residualGaps.length === 0 ? 'success' : 'failed', message, details: [...chapterEntries.map(entry => `要求：${entry.category}「${entry.text.slice(0, 60)}」`), ...(residualGaps.length > 0 ? [`残留未响应 ${residualGaps.length} 条：${residualGaps.map(gap => `「${gap.entry.text.slice(0, 40)}」缺 ${gap.missing.join('、') || '全文零命中'}`).join('；')}`] : [])] }, { subtitle: '招标要求响应核验' });
+      // 4.56 2-b：章级超额观测上屏（message 摘要 + details 逐条）
+      if (overflowNotes.length > 0) message = `${message}；${overflowNotes[overflowNotes.length - 1]}`;
+      const completedStage = displayStage({ type: 'llm_review', roleId, status: residualGaps.length === 0 ? 'success' : 'failed', message, details: [...chapterEntries.map(entry => `要求：${entry.category}「${entry.text.slice(0, 60)}」`), ...(residualGaps.length > 0 ? [`残留未响应 ${residualGaps.length} 条：${residualGaps.map(gap => `「${gap.entry.text.slice(0, 40)}」缺 ${gap.missing.join('、') || '全文零命中'}`).join('；')}`] : []), ...overflowNotes] }, { subtitle: '招标要求响应核验' });
       upsertProgressStage(session.progressStages, completedStage);
       upsertProgressStage(session.finalGateRepairStages, completedStage);
       session.emitProgress(session.finalChapterDrafts, session.progressStages);
@@ -248,7 +285,14 @@ export interface RequirementTailClosureResult {
   insertedCount: number;
   /** C8 S1：形态闸拒插素材条数（显性明细在 details；对应残留由终门禁照常复核，零静默降级） */
   rejectedCount: number;
+  /** 4.56 2-b ③：**章级总量预算**截断条数——额度不足未插入的素材（显性明细在 details；对应残留由
+   * 终门禁照常复核。不插必报，静默不插＝缺陷消失，比超产更严重） */
+  budgetSkippedCount: number;
   details: string[];
+  /** 4.56 2-b ③：本步已落位素材的**结构化**清单（章标题为空串＝未定位回退文末）。
+   * 收口为 markdown-only 插入不写章草稿，调用方跨轮重算额度时必须把它计入——否则每轮都从
+   * 章草稿重建账本，同一章额度被重复授予（收口轮数 × 额度）。 */
+  insertions: Array<{ chapterTitle: string; material: string }>;
 }
 
 /** 插入物签名归一化（C8 S1 ② 查重加固）：字符变体折叠——乘号族（×、✕、✖、✗、✘ 与星号）、
@@ -325,8 +369,18 @@ export async function applyRequirementTailClosure(input: {
   attemptedSignatures?: Set<string>;
   /** 单测注入的嵌入实现（替代本地模型），生产环境不传（与 buildSemanticSimilarity 同口径） */
   embedDocuments?: (texts: string[]) => Promise<number[][]>;
+  /**
+   * 4.56 2-b ③ 章级总量预算账（调用方以 session.documentBudget + session.finalChapterDrafts 构建；
+   * 不传＝不做预算约束，保持单测/旧调用点行为不变）。
+   *
+   * 本通道是**确定性批量插入**（原先无任何总量上限）：一次可插 MAX_TAIL_CLOSURE_INSERTS 条、
+   * 循环 MAX_TAIL_CLOSURE_ROUNDS 轮。加预算后：按章把素材分配到该章**剩余额度**内，额度不足的
+   * 条目不插 + 显性报出。**不插必报**：对应残留天然留在终检 requirements-coverage 阻断项里，
+   * 由终门禁照常复核（绝不静默丢弃——静默不插等于缺陷消失，比超产更严重）。
+   */
+  chapterBudget?: ChapterBudgetLedger;
 }): Promise<RequirementTailClosureResult> {
-  const noop: RequirementTailClosureResult = { markdown: input.markdown, insertedCount: 0, rejectedCount: 0, details: [] };
+  const noop: RequirementTailClosureResult = { markdown: input.markdown, insertedCount: 0, rejectedCount: 0, budgetSkippedCount: 0, details: [], insertions: [] };
   const entries = tenderRequirementCheckItems(input.tenderRequirements).map(({ item }) => item);
   if (entries.length === 0) return noop;
   // 检测端同源现场重跑（与 documentFinalValidation requirements-coverage 装配逐项一致）
@@ -356,6 +410,21 @@ export async function applyRequirementTailClosure(input: {
   const markdownSignature = insertionSignature(input.markdown);
   const attempted = input.attemptedSignatures ?? new Set<string>();
   const rejectedDetails: string[] = [];
+  const budgetSkippedDetails: string[] = [];
+  // 4.56 2-b ③ 章级总量预算：额度按「章」结算（章标题 → 剩余额度），未定位条目（回退文末）
+  // 计入文档级剩余额度。remaining 可变（同一次调用内多条素材插同一章须累计扣减）。
+  const chapterRemaining = new Map<string, number>();
+  const documentRemaining = { value: input.chapterBudget ? input.chapterBudget.document.remaining : Number.POSITIVE_INFINITY };
+  const remainingFor = (chapterTitle: string): { label: string; get: () => number; take: (cost: number) => void } | undefined => {
+    if (!input.chapterBudget) return undefined;
+    const entry = chapterBudgetEntryByTitle(input.chapterBudget, chapterTitle);
+    if (!entry) {
+      // 未定位素材（回退文末）：挂文档级额度，避免「无章归属即无约束」
+      return { label: '全文', get: () => documentRemaining.value, take: cost => { documentRemaining.value -= cost; } };
+    }
+    if (!chapterRemaining.has(entry.chapterId)) chapterRemaining.set(entry.chapterId, entry.remaining);
+    return { label: entry.title, get: () => chapterRemaining.get(entry.chapterId) ?? 0, take: cost => chapterRemaining.set(entry.chapterId, (chapterRemaining.get(entry.chapterId) ?? 0) - cost) };
+  };
   const records: Array<{ entry: TenderRequirementEntry; chapterTitle: string; material: string }> = [];
   for (const issue of blockers) {
     if (records.length >= MAX_TAIL_CLOSURE_INSERTS) break;
@@ -378,13 +447,28 @@ export async function applyRequirementTailClosure(input: {
       rejectedDetails.push(`【${entry.category}】形态闸拒插（${rejection}）：${material.slice(0, 40)}${material.length > 40 ? '…' : ''}`);
       continue;
     }
+    const assignment = input.requirementAssignments.find(item => item.entry.text === entry.text);
+    const chapterTitle = assignment?.chapterTitle || '';
+    // 4.56 2-b ③ 章级总量预算闸：额度不足即不插，并**显性报出**（不静默丢弃）。
+    // 成本口径与预算账同源（documentTextLength），保证「插入字数 = 账本扣减字数」逐笔对得上。
+    const quota = remainingFor(chapterTitle);
+    if (quota) {
+      const cost = documentTextLength(material);
+      const remaining = quota.get();
+      if (cost > remaining) {
+        // 幂等：记入 attempted，同一重放内不重复空转（下次由调用方在链尾重放时按新额度重算）
+        attempted.add(signature);
+        budgetSkippedDetails.push(`【${entry.category}】章预算额度不足未插入（${quota.label} 剩余额度 ${remaining} 字 < 需插入 ${cost} 字）：${material.slice(0, 40)}${material.length > 40 ? '…' : ''}（残留由终门禁照常复核）`);
+        continue;
+      }
+      quota.take(cost);
+    }
     seenTexts.add(entry.text);
     attempted.add(signature);
-    const assignment = input.requirementAssignments.find(item => item.entry.text === entry.text);
-    records.push({ entry, chapterTitle: assignment?.chapterTitle || '', material });
+    records.push({ entry, chapterTitle, material });
   }
   if (records.length === 0) {
-    return { markdown: input.markdown, insertedCount: 0, rejectedCount: rejectedDetails.length, details: rejectedDetails };
+    return { markdown: input.markdown, insertedCount: 0, rejectedCount: rejectedDetails.length, budgetSkippedCount: budgetSkippedDetails.length, details: [...budgetSkippedDetails, ...rejectedDetails], insertions: [] };
   }
   let markdown = input.markdown;
   const paragraphsByChapter = new Map<string, string[]>();
@@ -400,10 +484,19 @@ export async function applyRequirementTailClosure(input: {
   const verified = tenderRequirementResponseGaps(records.map(record => record.entry), markdown).filter(gap => gap.satisfied).length;
   const details = [
     ...records.map(record => `【${record.entry.category}】${record.chapterTitle || '文末'}：${record.material.slice(0, 48)}${record.material.length > 48 ? '…' : ''}`),
+    // 4.56 2-b ③：额度不足未插条目显性报出（先于形态闸记录，便于复盘时按「预算」而非「质量」归因）
+    ...budgetSkippedDetails,
     ...rejectedDetails,
     ...(verified < records.length ? [`未确认落位 ${records.length - verified} 条（由终门禁照常复核）`] : []),
   ];
-  return { markdown, insertedCount: records.length, rejectedCount: rejectedDetails.length, details };
+  return {
+    markdown,
+    insertedCount: records.length,
+    rejectedCount: rejectedDetails.length,
+    budgetSkippedCount: budgetSkippedDetails.length,
+    details,
+    insertions: records.map(record => ({ chapterTitle: record.chapterTitle, material: record.material })),
+  };
 }
 
 /** r11 链尾收口循环上限（r10 实机 #3 机制归因：单次收口插入补写文本后句集变化引发语义采样重洗，
@@ -432,11 +525,26 @@ export async function replayRequirementTailClosure(session: FinalizeSession): Pr
   if (!session.tenderRequirements?.extracted) return;
   let totalInserted = 0;
   let totalRejected = 0;
+  let totalBudgetSkipped = 0;
   // C8 S1 跨轮幂等：本重放内「已插入/已拒插」签名集合跨轮传递（插入过/拒插过的不重试）
   const attemptedSignatures = new Set<string>();
   const tailDetails: string[] = [];
+  // 4.56 2-b ③：本重放内已落位的收口素材——收口为 markdown-only 插入**不写章草稿**，故下一轮
+  // 重建账本时必须回灌（mergeLandedInserts），否则同一章额度会被每轮重复授予（收口轮数 × 额度）。
+  const landedInsertions: Array<{ chapterTitle: string; material: string }> = [];
   let residualCount = 0;
   for (let closureRound = 1; closureRound <= MAX_TAIL_CLOSURE_ROUNDS; closureRound += 1) {
+    // 4.56 2-b ③：章级总量预算账（每轮重算——上一轮插入后各章剩余额度已变，用新额度结算）
+    const merged = mergeLandedInserts(session.finalChapterDrafts, landedInsertions);
+    const baseLedger = buildChapterBudgetLedger({
+      chapterTargets: session.documentBudget?.chapterTargets,
+      chapters: merged.chapters,
+      documentTargetChars: session.documentBudget?.targetChars,
+    });
+    // 未定位素材落在文末（不属任何章）：计入文档级分子，保证文档级额度同样不被重复授予
+    const chapterBudget: ChapterBudgetLedger = merged.unlocatedChars > 0
+      ? { ...baseLedger, document: { ...baseLedger.document, current: baseLedger.document.current + merged.unlocatedChars, remaining: baseLedger.document.remaining - merged.unlocatedChars } }
+      : baseLedger;
     const tailClosure = await applyRequirementTailClosure({
       markdown: session.finalMarkdown,
       tenderRequirements: session.tenderRequirements,
@@ -444,8 +552,10 @@ export async function replayRequirementTailClosure(session: FinalizeSession): Pr
       signal: session.signal,
       diagnostics: session.generationDiagnostics,
       attemptedSignatures,
+      chapterBudget,
     });
     totalRejected += tailClosure.rejectedCount;
+    totalBudgetSkipped += tailClosure.budgetSkippedCount;
     tailDetails.push(...tailClosure.details);
     if (tailClosure.insertedCount === 0) {
       // C8 S1：零插入即断链前取当前终检残留数（拒插记录需正确的 stage 状态与残留注记）
@@ -455,12 +565,15 @@ export async function replayRequirementTailClosure(session: FinalizeSession): Pr
     session.finalMarkdown = tailClosure.markdown;
     await session.recomputeFinalValidationBundle();
     totalInserted += tailClosure.insertedCount;
+    landedInsertions.push(...tailClosure.insertions);
     residualCount = requirementResponseBlockers(session).length;
     if (residualCount === 0) break;
   }
-  if (totalInserted > 0 || totalRejected > 0) {
+  if (totalInserted > 0 || totalRejected > 0 || totalBudgetSkipped > 0) {
     const gateNote = totalRejected > 0 ? `，${totalRejected} 条素材未过质量闸（拒插，显性记录）` : '';
-    const tailClosureStage = displayStage({ type: 'validation', roleId: 'requirement-tail-closure', status: residualCount === 0 ? 'success' : 'failed', message: `招标要求响应链尾终局收口：${totalInserted} 条残留要求以投标人口吻确定性补写落位${gateNote}${residualCount > 0 ? `（残留 ${residualCount} 条由终门禁照常复核）` : ''}`, details: tailDetails }, { subtitle: '评审后兜底' });
+    // 4.56 2-b ③：额度不足未插条数上屏——「不插必报」，绝不以静默不插冒充「已收口」
+    const budgetNote = totalBudgetSkipped > 0 ? `，${totalBudgetSkipped} 条因章预算额度不足未插入（显性记录，残留由终门禁照常复核）` : '';
+    const tailClosureStage = displayStage({ type: 'validation', roleId: 'requirement-tail-closure', status: residualCount === 0 ? 'success' : 'failed', message: `招标要求响应链尾终局收口：${totalInserted} 条残留要求以投标人口吻确定性补写落位${gateNote}${budgetNote}${residualCount > 0 ? `（残留 ${residualCount} 条由终门禁照常复核）` : ''}`, details: tailDetails }, { subtitle: '评审后兜底' });
     upsertProgressStage(session.progressStages, tailClosureStage);
     upsertProgressStage(session.finalGateRepairStages, tailClosureStage);
   }

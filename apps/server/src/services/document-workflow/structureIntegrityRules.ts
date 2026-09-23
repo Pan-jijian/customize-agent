@@ -842,6 +842,155 @@ export function truncatedSentenceIssues(markdown: string): TruncatedSentenceIssu
   }));
 }
 
+// ── §L3-1 游离块（无归属正文块）──
+// 根因：`collectActualSections`（qualityValidation.ts）把标题之后的全部文本无条件归属到最近上方的
+// H3/H4，「无归属」在数据结构层面无法表达——表格之后、文档末端的裸块被静默算作所在小节正文，
+// 终检各检测器也就无从报告（真实终稿尾部 3 个裸块在 32 项阻断问题中零报出）。本模块提供
+// **独立于归属结果的无归属文本块枚举**：
+//   尾区 = 文档最后一个标题行之后、且最后一个表格行之后的正文区（该区没有任何小节标题管辖，
+//          「归属于最近上方 H3」在此处只剩形式意义）；
+//   块   = 尾区内连续非空正文行（排除标题行/表格行/数字或符号列表项），汉字数 ≥ TAIL_ORPHAN_MIN_HAN。
+// 判定再叠加两条机制化排他（缺一不报，防误伤「表格说明句/本章收尾正文」的正常写法）：
+//   ① 表格指代排除：块内含指代词（上表/下表/表中/上列/下列/如下/如上/据此/综上/前述/上页）→ 视为对表格的说明；
+//   ② 同批数值排除：块与末尾表格共享实质数值（≥2 位数字）→ 在复述表格内容，属正常叙述。
+// 实测（真实终稿，847 行）：命中 2 块全真（第 843 行「本项目重点难点：我方投标时补充完善危险性较大
+// 工程清单…」、第 845 行「本项目危险性较大的分部分项工程清单：…」）；第 847 行图纸原文残留因与末尾
+// 表格共享实质数值被排他②放过（**漏报**，判据保守性代价）。24 份真实稿语料上另有命中（doc06 38 处、
+// doc18 8 处、doc17 3 处…），其中「表格之后正常收尾正文」误报类尚存，
+// 故本判据**只保留实现与单测，不接入终检**（不产出阻断、不配 fixerDisposition）。
+export const TAIL_ORPHAN_MIN_HAN = 10;
+const TABLE_REFERENCE_RE = /上表|下表|表中|上列|下列|如下|如上|据此|综上|前述|上页/u;
+const TABLE_NUMBER_RE = /\d{2,}(?:\.\d+)?/gu;
+
+export interface TailOrphanBlock {
+  /** 块起始行（1 基） */
+  startLine: number;
+  /** 块结束行（1 基） */
+  endLine: number;
+  /** 块正文（各行 trim 后以空格连接） */
+  text: string;
+  /** 汉字数 */
+  hanCount: number;
+}
+
+/** 尾部游离块枚举：文档最后标题 + 最后表格之后的裸正文块（判定见 tailOrphanBlockIssues） */
+export function collectTailOrphanBlocks(markdown: string): TailOrphanBlock[] {
+  const lines = String(markdown || '').split(/\r?\n/u);
+  let lastHeading = -1;
+  let lastTable = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    const trimmed = lines[index].trim();
+    if (isHeading(trimmed)) lastHeading = index;
+    if (isTableRow(trimmed)) lastTable = index;
+  }
+  const tailStart = Math.max(lastHeading, lastTable) + 1;
+  if (tailStart <= 0 || tailStart >= lines.length) return [];
+  const blocks: TailOrphanBlock[] = [];
+  let current: TailOrphanBlock | null = null;
+  for (let index = tailStart; index < lines.length; index += 1) {
+    const trimmed = lines[index].trim();
+    const isProse = Boolean(trimmed) && !isStructuralLine(trimmed) && !isOrderedItem(trimmed) && !isBulletItem(trimmed);
+    if (!isProse) {
+      if (current) blocks.push(current);
+      current = null;
+      continue;
+    }
+    if (!current) current = { startLine: index + 1, endLine: index + 1, text: trimmed, hanCount: 0 };
+    else {
+      current.endLine = index + 1;
+      current.text = `${current.text} ${trimmed}`;
+    }
+    current.hanCount = hanCount(current.text);
+  }
+  if (current) blocks.push(current);
+  return blocks.filter(block => block.hanCount >= TAIL_ORPHAN_MIN_HAN);
+}
+
+export interface TailOrphanIssue {
+  level: 'error';
+  severity: 'blocker';
+  category: 'structure';
+  owner: 'llm';
+  repairability: 'llm_repairable';
+  message: string;
+  suggestion: string;
+}
+
+/** 尾部游离块判定（§L3-1）：见上方两条机化排他；**未接入终检**（命中真实、误报类尚存，见文件内实测说明）。
+ *  不产出替代内容——块是正文，确定性删除即信息丢失。 */
+export function tailOrphanBlockIssues(markdown: string): TailOrphanIssue[] {
+  const lines = String(markdown || '').split(/\r?\n/u);
+  const tableNumbers = new Set<string>();
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (!isTableRow(lines[index])) continue;
+    for (const number of (lines[index].match(TABLE_NUMBER_RE) || [])) tableNumbers.add(number);
+  }
+  return collectTailOrphanBlocks(markdown).filter(block => {
+    if (TABLE_REFERENCE_RE.test(block.text)) return false;
+    const blockNumbers = block.text.match(TABLE_NUMBER_RE) || [];
+    if (blockNumbers.some(number => tableNumbers.has(number))) return false;
+    return true;
+  }).map(block => ({
+    level: 'error' as const,
+    severity: 'blocker' as const,
+    category: 'structure' as const,
+    owner: 'llm' as const,
+    repairability: 'llm_repairable' as const,
+    message: `游离正文块（第 ${block.startLine}-${block.endLine} 行）：位于文末最后标题与最后表格之后，无任何小节标题管辖：“${block.text.slice(0, 40)}…”`,
+    suggestion: '确认该块归属：属答疑/招标原文粘贴或他节重复内容的，删除（保留正文归纳处）；确属本节结尾内容的，移入相应小节正文或改写为有归属的收尾段。',
+  }));
+}
+
+// ── §L3-4 句子粘连（多小句连写无句读）──
+// 既有标点类检测器（punctuationArtifactIssues / truncatedSentenceIssues）都以「先有标点」为前提：
+// 断裂/残缺判据看的是已有标点被破坏，句尾截断判据看的是**段末**无终止标点。实测漏网形态是
+// 「整行多小句连写、通篇无一处句末标点」的长行（段中行，非段末）：顿号枚举多个对象却一路逗号到底，
+// 小句边界丢失。判据（全部满足）：
+//   ① 正文行（非标题/表格行/列表项），汉字 ≥ GLUED_CLAUSE_MIN_HAN；
+//   ② 行内零句末标点（。；！？… 及冒号）；
+//   ③ 顿号 ≥2（枚举特征）且逗号切分小句 ≥ GLUED_CLAUSE_MIN_CLAUSES。
+// 实测（真实终稿，847 行）：**零命中**——初版曾命中第 125 行，但该行整行含「；」（非零句读），
+// 按②剔除（该行属 truncated-sentence 族，非本判据）。24 份语料仅 doc04 第 211 行（「…户线检查井
+// 我方按上述井型组织检查井施工，…」缺句界一路逗号到底）、doc23 第 100 行（超长枚举行以「，」收尾）
+// 命中，复核 2/2 为真缺陷但样本过小、且与 truncated-sentence（段末截断族）判定相邻，
+// 按「零命中不接入」口径**只保留实现与单测，不接入终检**。
+export const GLUED_CLAUSE_MIN_HAN = 40;
+export const GLUED_CLAUSE_MIN_CLAUSES = 3;
+
+export interface GluedClauseIssue {
+  level: 'error';
+  severity: 'blocker';
+  category: 'format';
+  owner: 'llm';
+  repairability: 'llm_repairable';
+  message: string;
+  suggestion: string;
+}
+
+export function gluedClauseIssues(markdown: string): GluedClauseIssue[] {
+  const issues: GluedClauseIssue[] = [];
+  const lines = String(markdown || '').split(/\r?\n/u);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (!line || isStructuralLine(line) || isOrderedItem(line) || isBulletItem(line)) continue;
+    if (hanCount(line) < GLUED_CLAUSE_MIN_HAN) continue;
+    if (/[。；！？…：]/u.test(line)) continue;
+    const enumerationCount = line.split('、').length - 1;
+    const clauses = line.split(/[，,]/u).filter(part => part.trim()).length;
+    if (enumerationCount < 2 || clauses < GLUED_CLAUSE_MIN_CLAUSES) continue;
+    issues.push({
+      level: 'error' as const,
+      severity: 'blocker' as const,
+      category: 'format' as const,
+      owner: 'llm' as const,
+      repairability: 'llm_repairable' as const,
+      message: `句子粘连：第 ${index + 1} 行整行 ${clauses} 个小句连写、零句末标点（顿号 ${enumerationCount} 处）：“${line.slice(0, 40)}…”`,
+      suggestion: '按语义在相邻小句之间补句读（。；），只补标点与必要的连接词，不得改写既有数值与工序事实。',
+    });
+  }
+  return issues;
+}
+
 /** 章号解析：阿拉伯数字直接返回；中文数字支持「一~九十九」形态；其他（含「零/〇」）返回 undefined 表示不可判定 */
 function parseChapterNumber(raw: string): number | undefined {
   if (/^\d+$/u.test(raw)) return Number(raw);

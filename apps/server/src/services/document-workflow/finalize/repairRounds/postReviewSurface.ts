@@ -137,7 +137,9 @@ export async function stagePostReviewSurface(session: FinalizeSession): Promise<
   // 终门禁。本块为本函数最后净变更点（toc-consistency / 蓝图数值重放之后、stageFinalGate 之前），
   // 以检测端完全同源口径现场重跑残留判定并循环收口（含防重复插入查重与 recompute 复验；机制与
   // 循环上限注释详见 replayRequirementTailClosure）。r24 起该函数同步由 documentPipeline 链尾重放
-  //（B1-B5 实机归因：stageFactDistribution 的 rebuild 会把本块 markdown-only 插入回退）
+  //（B1-B5 实机归因：stageFactDistribution 的 rebuild 会把本块 markdown-only 插入回退）。
+  // 4.56 2-b：本收口为确定性批插（原先无任何总量上限），现按章预算账结算额度——额度内照插、
+  // 额度不足不插但显性报出（budgetSkippedCount；残留由终门禁照常复核），账本在函数内每轮重建。
   await replayRequirementTailClosure(session);
 }
 

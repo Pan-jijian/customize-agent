@@ -22,6 +22,7 @@
  *   equipmentNameAtEndOf）：constructionOrgConsistency 机械数量型号规则（资料事实对账）与
  *   qualityValidation 跨章机械互斥（正文多值，进修复链）共用名称归一单源，避免检测口径漂移。
  */
+import { UNIT_ALIAS_GROUPS, unitsAreEquivalent } from './unitAliases';
 import type { BillFactLock } from './billFactLock';
 import type { BlueprintData, BlueprintEquipmentItem, BlueprintMaterialPlanItem } from './integratedBlueprint';
 
@@ -202,13 +203,8 @@ function buildScopedQuantities(lock?: BillFactLock): ResourceBreakdownAuthority[
 // ═══════ 4.55.32 口径层级对齐辅助（量词口径闸 / 语句层级判定，机制化无材料名与数值白名单） ═══════
 
 /** 量词等价组（同维度词面别名；**不含同族不同量词**——座/组/个/套是不同计数口径，不得互当） */
-const QUANTITY_UNIT_ALIAS_GROUPS: readonly (readonly string[])[] = [
-  ['m3', 'm³', '立方米', '方'],
-  ['m2', 'm²', '㎡', '平方米'],
-  ['m', '米', '延长米'],
-  ['t', '吨'],
-  ['kg', '千克', '公斤'],
-];
+// 4.56 改造 3-b：单位别名组统一走 `unitAliases` 单源（原先本文件自带一份）
+const QUANTITY_UNIT_ALIAS_GROUPS = UNIT_ALIAS_GROUPS;
 
 /** 权威单位串 → 量词 token 集：「组（个）」双记 组/个；空串视为不设闸 */
 function quantityUnitTokens(unit: string): string[] {
@@ -220,11 +216,7 @@ function quantityUnitTokens(unit: string): string[] {
 }
 
 function quantityUnitTokenEquivalent(left: string, right: string): boolean {
-  const a = left.trim().toLowerCase();
-  const b = right.trim().toLowerCase();
-  if (!a || !b) return true;
-  if (a === b) return true;
-  return QUANTITY_UNIT_ALIAS_GROUPS.some(group => group.includes(a) && group.includes(b));
+  return unitsAreEquivalent(left, right);
 }
 
 /** 量词口径闸（4.55.32，机制）：正文抽取到的量词必须属该材料的权威量词集

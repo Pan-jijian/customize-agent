@@ -5,7 +5,7 @@ import type { ProfessionalDepthAnalysis, ProfessionalDepthClassifier } from './p
 import { boqDivisionCoverageIssues, boqRowTraceIssues, buildBoqRowTraces, numericTraceabilityIssues } from './documentFactTrace';
 import { chapterDependencyIssues, documentDeliveryScoreIssues, evidenceUsageCoverageIssues, paragraphGenericIssues } from './documentDeliveryReport';
 import { bodyCompositionFigureIssues, bodyCompositionTableIssues, plannedStructureIssues, promptDocumentRuleIssues, sourcePhraseIssues, tableCaptionIssues, tertiaryHeadingIssues } from './markdownComposer';
-import { finishThicknessIssues, formulaResidueIssues, metaDiscourseDeclarationIssues } from './integrity/detectors/detectors';
+import { finishThicknessIssues, formulaResidueIssues, metaDiscourseDeclarationIssues, paragraphNearDuplicateIssues } from './integrity/detectors/detectors';
 import { atlasPointerPhraseHits } from './materialResidue';
 import { webEvidenceLeakageIssues } from './webResearchService';
 import { constructionOrgChapterDataCoverageIssues, constructionOrgConsistencyIssues } from './constructionOrgConsistency';
@@ -257,6 +257,10 @@ export async function buildStandardFinalValidationIssues(input: {
     // h15：表格/段落完全重复（青天高风险「重复表格 2 张、重复段落」；结构冗余删除兜底与生成闭环同源）
     ...det('duplicate-table', () => duplicateTableIssues(input.markdown)),
     ...det('duplicate-paragraph', () => duplicateParagraphIssues(input.markdown)),
+    // §L3-5 段落级近似重复（同批量工程量/同一工序被两处重复叙述）：完全相等口径（上一条）之外，
+    // 答疑原文粘贴 vs 正文归纳、同节详述 vs 汇总类重复逐字不同但骨架与数值指纹一致。
+    // 只报不删（无「原稿/副本」确定性判据，删除即信息丢失）——收敛=修复轮合并去重或人工复核
+    ...det('paragraph-near-duplicate', () => paragraphNearDuplicateIssues(input.markdown)),
     // 第十五版报告 A①：段落内句级复读（段尾复读剥离，跨位置整段重复的段内补充口径）
     ...det('paragraph-tail-repeat', () => paragraphTailRepeatIssues(input.markdown)),
     // 丰乐镇 doc-1788954795698 实测：主题块切分/拆半防撞名「公厕（1）」「公厕（1）（二）」泄漏目录，

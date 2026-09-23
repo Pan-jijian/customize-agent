@@ -16,6 +16,8 @@
  */
 import { repairOutcomeReason, repairOutcomeStatus } from './repairOutcome';
 import { displayStage, upsertProgressStage } from '../../progress';
+import { buildChapterBudgetLedger, chapterOverflowAfterRound, recordChapterBudgetMetric, renderChapterBudgetInstruction, renderChapterOverflowNote } from './chapterBudgetLedger';
+import type { ChapterBudgetEntry } from './chapterBudgetLedger';
 import { repairChapterByQuality, repairPatchGuard } from '../../rolePipeline';
 import { withPatchRollback } from '../../patchRollback';
 import { controlLoopChainScan, type ControlLoopChainDeficit } from '../../constructionOrgQualityRules';
@@ -33,7 +35,7 @@ function hanCount(text: string): number {
 }
 
 /** 定向补写指令：链语义 + 缺失环节清单 + 局部修改约束 + 标准词面落位要求（词面判定机制） */
-function instructionFor(draftChapter: DocumentDraftChapter, deficits: ControlLoopChainDeficit[]): string {
+function instructionFor(draftChapter: DocumentDraftChapter, deficits: ControlLoopChainDeficit[], budgetEntry?: ChapterBudgetEntry): string {
   const lines: string[] = [
     '【评审关注闭环链定向补写】',
     `《${draftChapter.title}》的下列评审关注闭环链未成链（链条要素缺失），请在对应小节内自然补写齐全：`,
@@ -47,8 +49,25 @@ function instructionFor(draftChapter: DocumentDraftChapter, deficits: ControlLoo
     '2. 补写须结合本章既有语境（本工程工序、责任岗位、检查频次、记录方式），写清每个缺失环节“谁执行、何时执行、留存什么记录”，与既有句子自然衔接；',
     '3. 缺失环节由评审按标准术语查找，补写文字必须出现缺失要素的标准词面（如“互检”“交接检”），不得以近义改述代替；',
     '4. 禁止「按招标文件要求：」类条幅前缀与任何元话语，必须为正式施工组织设计正文行文，不得编造参数。',
+    // 4.56 2-b：章预算账（本轮补写额度约束；链条补写同样属「修复链无预算追加」）
+    ...(budgetEntry ? [renderChapterBudgetInstruction(budgetEntry)] : []),
   );
   return lines.join('\n');
+}
+
+/**
+ * 4.56 2-b 章预算账查表（与 contentDepthRepair 同口径同源）：content 传「本章实时正文」，
+ * 修复轮内上一轮已改写过章正文时额度必须按实时字数结算，否则额度是过期分母。
+ */
+function chapterBudgetEntryFor(session: FinalizeSession, chapterIndex: number, content: string): ChapterBudgetEntry | undefined {
+  const chapters = session.finalChapterDrafts;
+  if (!chapters[chapterIndex]) return undefined;
+  const ledger = buildChapterBudgetLedger({
+    chapterTargets: session.documentBudget?.chapterTargets,
+    chapters: chapters.map((chapter, index) => (index === chapterIndex ? { ...chapter, content } : chapter)),
+    documentTargetChars: session.documentBudget?.targetChars,
+  });
+  return ledger.chapters[chapterIndex];
 }
 
 export async function stageControlLoopRepair(session: FinalizeSession): Promise<void> {
@@ -89,6 +108,8 @@ export async function stageControlLoopRepair(session: FinalizeSession): Promise<
     let chapterRepaired = false;
     let anyRollback = false;
     const roleId = `agent-control-loop-repair-${draftChapter.id}`;
+    /** 4.56 2-b：本章跨轮超额注记（累积进阶段 message/details，与 metrics 同源） */
+    const overflowNotes: string[] = [];
     const residualTrajectory = [beforeResidual];
     while (rounds < MAX_CHAIN_REPAIR_ROUNDS) {
       rounds += 1;
@@ -97,6 +118,7 @@ export async function stageControlLoopRepair(session: FinalizeSession): Promise<
         session.finalChapterDrafts.map((chapter, index) => (index === chapterIndex ? { ...chapter, content: chapterContent } : chapter)),
       ).filter(item => item.chapter.id === draftChapter.id).map(item => item.deficit);
       if (pendingDeficits.length === 0) break;
+      const roundStartedAt = Date.now();
       const runningStage = displayStage({ type: 'llm_review', roleId, status: 'running', message: `闭环链补写中（第 ${rounds}/${MAX_CHAIN_REPAIR_ROUNDS} 轮）：${draftChapter.title}（${pendingDeficits.map(deficit => `${deficit.label}缺${deficit.missing.length}项`).join('、')}）` }, { subtitle: '闭环链补写核验' });
       upsertProgressStage(session.progressStages, runningStage);
       upsertProgressStage(session.finalGateRepairStages, runningStage);
@@ -107,11 +129,13 @@ export async function stageControlLoopRepair(session: FinalizeSession): Promise<
         diagnostics: session.generationDiagnostics,
         beforeMetrics: [beforeResidual, -hanCount(chapterContent)],
         apply: async () => {
+          // 4.56 2-b：预算账按实时正文结算后注入指令（本轮额度约束）
+          const budgetEntry = chapterBudgetEntryFor(session, chapterIndex, chapterContent);
           const repaired = await session.withProgressHeartbeat(() => repairChapterByQuality({
             template: session.template,
             chapter: { id: draftChapter.id, title: draftChapter.title, content: chapterContent, evidence: draftChapter.evidence, missingFacts: draftChapter.missingFacts, sections: draftChapter.sections },
             issues: pendingDeficits.map(deficit => `${deficit.label}未成链，缺失环节：${deficit.missing.join('、')}`),
-            promptTexts: instructionFor(draftChapter, pendingDeficits),
+            promptTexts: instructionFor(draftChapter, pendingDeficits, budgetEntry),
             requirement: session.requirement,
             forbidDrawingImages: false,
             // 标书编制规格（正文表格口径）：修复链 system 口径同步
@@ -128,9 +152,19 @@ export async function stageControlLoopRepair(session: FinalizeSession): Promise<
       });
       if (outcome.rolledBack) anyRollback = true;
       if (outcome.rolledBack || outcome.content === chapterContent) break;
+      const contentBeforeRound = chapterContent;
       chapterContent = outcome.content;
       session.finalChapterDrafts[chapterIndex] = { ...draftChapter, content: chapterContent };
       chapterRepaired = true;
+      // 4.56 2-b 落地后章级超额检查（只观测不改写：本轮新增多少字 + 超出多少）
+      const roundBudgetEntry = chapterBudgetEntryFor(session, chapterIndex, contentBeforeRound);
+      const overflowReport = roundBudgetEntry
+        ? chapterOverflowAfterRound({ chapterId: draftChapter.id, title: draftChapter.title, target: roundBudgetEntry.target, beforeContent: contentBeforeRound, afterContent: chapterContent })
+        : undefined;
+      if (overflowReport) {
+        overflowNotes.push(renderChapterOverflowNote(overflowReport));
+        recordChapterBudgetMetric({ diagnostics: session.generationDiagnostics, round: 'control-loop-repair', startedAt: roundStartedAt, report: overflowReport });
+      }
       const afterResidual = outcome.afterMetrics[0] ?? residualOf(chapterContent);
       residualTrajectory.push(afterResidual);
       // 收敛判定：清零即通过；未下降（含回滚/空修复）即停止；下降且未达上限 → 再修一轮
@@ -146,7 +180,9 @@ export async function stageControlLoopRepair(session: FinalizeSession): Promise<
     else if (chapterRepaired) message = `闭环链补写部分生效：${draftChapter.title}（残留轨迹 ${residualTrajectory.join('→')}，已执行 ${rounds} 轮；${residualNote}）`;
     else if (anyRollback) message = `闭环链补写已回滚：${draftChapter.title}（修复后缺失数未下降或汉字大幅减少，保留修复前正文；${residualNote}）`;
     else message = `闭环链补写未生效：${draftChapter.title}（模型未产生有效修改；${residualNote}）`;
-    const completedStage = displayStage({ type: 'llm_review', roleId, status: repairOutcomeStatus({ before: residualTrajectory[0], after: finalResidual, repaired: chapterRepaired }), message, details: initialDeficits.map(deficit => `缺陷：${deficit.label}缺${deficit.missing.join('、')}`) }, { subtitle: '闭环链补写核验' });
+    // 4.56 2-b：章级超额观测上屏（message 摘要 + details 逐条）
+    if (overflowNotes.length > 0) message = `${message}；${overflowNotes[overflowNotes.length - 1]}`;
+    const completedStage = displayStage({ type: 'llm_review', roleId, status: repairOutcomeStatus({ before: residualTrajectory[0], after: finalResidual, repaired: chapterRepaired }), message, details: [...initialDeficits.map(deficit => `缺陷：${deficit.label}缺${deficit.missing.join('、')}`), ...overflowNotes] }, { subtitle: '闭环链补写核验' });
     upsertProgressStage(session.progressStages, completedStage);
     upsertProgressStage(session.finalGateRepairStages, completedStage);
     session.emitProgress(session.finalChapterDrafts, session.progressStages);

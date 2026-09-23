@@ -726,6 +726,157 @@ function normalizeCaptionKey(raw: string) {
   return raw.replace(/[—–－]/gu, '-');
 }
 
+// ── §L3-2 章内表号跳号 / §L3-3 表题残缺 ──
+// 两者共用「题注实体」口径（与 normalizeTableNumbering 同源：贴表题注 + 有效题名独立行，
+// 正文引用句/叙述句不入池），因此不会把「见表3-2 所示」这类行内引用误判成题注缺陷。
+// 注意 normalizeTableNumbering 只在**存在重复编号**时才重排编号，章内缺号（1,2,4…）不会触发它，
+// 终检此前也无对应判据——这两族是真实盲区。
+/** 题注实体：章号 + 表序 + 题名 */
+interface CaptionEntityRef { line: number; chapterNo: number; sequence: number; name: string }
+
+const CAPTION_ENTITY_RE = /^表\s*(\d+)\s*[-—–－.．]\s*(\d+)\s*[:：、.．]?\s*(.*)$/u;
+/** 树形/制表符残留（组织架构树被抄进题名：「表2-5 └── 材料员、机械员」） */
+const CAPTION_TREE_RESIDUE_RE = /[└├│─━┌┐┘┴┬┤]/u;
+
+function collectCaptionEntities(markdown: string): CaptionEntityRef[] {
+  const lines = String(markdown || '').replace(/\r/gu, '').split('\n');
+  const entities: CaptionEntityRef[] = [];
+  let chapterNo = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    const heading = /^##\s+(.+?)\s*$/u.exec(lines[index].trim());
+    if (heading && !/^(目录|附表)/u.test(heading[1])) {
+      const numbered = /^第\s*([一二三四五六七八九十百\d]+)\s*章/u.exec(heading[1]);
+      chapterNo = numbered ? chineseNumberToArabic(numbered[1]) : chapterNo + 1;
+    }
+    const match = CAPTION_ENTITY_RE.exec(lines[index].trim());
+    if (!match) continue;
+    const name = (match[3] || '').trim();
+    if (!captionFollowedByTable(lines, index) && !validCaptionTitle(name)) continue;
+    entities.push({ line: index + 1, chapterNo, sequence: Number(match[2]), name });
+  }
+  return entities;
+}
+
+export interface TableNumberingGap {
+  chapterNo: number;
+  /** 该章内已出现的表序（升序去重） */
+  sequences: number[];
+  /** 章内缺失的表序（1..max 中未出现者） */
+  missing: number[];
+  /** 缺号后的首张表所在行（1 基） */
+  line: number;
+}
+
+/** 章内表号跳号扫描（§L3-2）：章内 `表N-k` 的 k 应自 1 起连续；缺号即编号体系断裂 */
+export function scanTableNumberingGaps(markdown: string): TableNumberingGap[] {
+  const byChapter = new Map<number, CaptionEntityRef[]>();
+  for (const entity of collectCaptionEntities(markdown)) {
+    if (entity.chapterNo < 1) continue;
+    const list = byChapter.get(entity.chapterNo) || [];
+    list.push(entity);
+    byChapter.set(entity.chapterNo, list);
+  }
+  const gaps: TableNumberingGap[] = [];
+  for (const [chapterNo, list] of [...byChapter.entries()].sort((left, right) => left[0] - right[0])) {
+    const sequences = [...new Set(list.map(entity => entity.sequence))].sort((left, right) => left - right);
+    const max = sequences[sequences.length - 1] || 0;
+    const missing: number[] = [];
+    for (let sequence = 1; sequence <= max; sequence += 1) if (!sequences.includes(sequence)) missing.push(sequence);
+    if (missing.length === 0) continue;
+    const firstMissingAfter = list.find(entity => entity.sequence > (missing[0] ?? 0)) || list[0];
+    gaps.push({ chapterNo, sequences, missing, line: firstMissingAfter.line });
+  }
+  return gaps;
+}
+
+export interface TableNumberingGapIssue {
+  level: 'error';
+  severity: 'blocker';
+  category: 'table';
+  owner: 'llm';
+  repairability: 'llm_repairable';
+  message: string;
+  suggestion: string;
+}
+
+/** 章内表号跳号判定（§L3-2）：目标稿 0 命中（章内 1..16 / 1..5 / 1..3 连续）。
+ *  语料 5 处命中（doc01/doc15/doc18/doc23×2）中两类经复核：
+ *   ① 真形态——「裸表号（表1/表2/表3）与 表N-k 混用」（doc15 第 1 章：表1/表2/表3 与 表1-4 并存）；
+ *   ② **误报**——doc18 第 9 章实为 表9-1/9-2/9-3 连续，因 表9-2 题名是「项目经理 → 技术负责人 → …」
+ *      链式表达且不与表体紧邻，被题注实体纳入条件（贴表 || 有效题名）过滤掉，进而被算成缺号
+ *      ——即缺号清单受题注实体识别率制约，不可作为确定性修复输入。
+ *  按「零命中不接入」口径只保留实现与单测，不接入终检、不配 fixerDisposition。 */
+export function tableNumberingGapIssues(markdown: string): TableNumberingGapIssue[] {
+  return scanTableNumberingGaps(markdown).slice(0, 3).map(gap => ({
+    level: 'error' as const,
+    severity: 'blocker' as const,
+    category: 'table' as const,
+    owner: 'llm' as const,
+    repairability: 'llm_repairable' as const,
+    message: `第 ${gap.chapterNo} 章表号跳号：表序 ${gap.sequences.join('、')} 缺 ${gap.missing.join('、')}（首个缺号后首张表见第 ${gap.line} 行）`,
+    suggestion: '补齐或重排该章表号使其自 1 起连续（只改编号前缀，不改题名与表体；引用句中的表号同步改写）。',
+  }));
+}
+
+export interface TableCaptionDefect {
+  line: number;
+  chapterNo: number;
+  /** 题注原文（截断展示用） */
+  raw: string;
+  /** 残缺类型（机制化判据名，非项目词表） */
+  kind: 'empty-title' | 'tree-residue' | 'duplicated-prefix' | 'short-title';
+}
+
+/** 表题残缺扫描（§L3-3）：题注实体（贴表/有效题名行）中题名残缺的形态——
+ *  无题名 / 含结构树残留符 / 题名重复「表」字 / 题名核心 < 3 汉字（题名核心=去编号前缀与结尾「表」字）。 */
+export function scanTableCaptionDefects(markdown: string): TableCaptionDefect[] {
+  const defects: TableCaptionDefect[] = [];
+  for (const entity of collectCaptionEntities(markdown)) {
+    const raw = entity.name;
+    const stripped = stripTableNumberPrefix(raw);
+    const core = stripped.replace(/[^一-龥]/gu, '');
+    if (!stripped) defects.push({ line: entity.line, chapterNo: entity.chapterNo, raw, kind: 'empty-title' });
+    else if (CAPTION_TREE_RESIDUE_RE.test(stripped)) defects.push({ line: entity.line, chapterNo: entity.chapterNo, raw, kind: 'tree-residue' });
+    else if (/^表/u.test(stripped)) defects.push({ line: entity.line, chapterNo: entity.chapterNo, raw, kind: 'duplicated-prefix' });
+    else if (core.length > 0 && core.length < 3) defects.push({ line: entity.line, chapterNo: entity.chapterNo, raw, kind: 'short-title' });
+  }
+  return defects;
+}
+
+export interface TableCaptionDefectIssue {
+  level: 'error';
+  severity: 'blocker';
+  category: 'table';
+  owner: 'llm';
+  repairability: 'llm_repairable';
+  message: string;
+  suggestion: string;
+}
+
+/** 表题残缺判定（§L3-3）：目标稿 0 命中；全语料 5 命中（doc01，全真：题名重复「表」字
+ *  「表1-2 表施工部署关键节点及责任分工表」等 5 张连号表），精度 5/5。
+ *  已知漏报：doc01 第 586 行「表2-5 └── 材料员、机械员」（树残留真缺陷）未报——题名含顿号且不与表体
+ *  紧邻，被题注实体纳入条件过滤；该漏报是可接受的保守方向（宁漏报不误报）。
+ *  题名「句子化」分支（含句末标点/超长整句）实测为正文引用行误报（「表2-3 列要求执行，…。」），
+ *  已剔除不出现在本判据中。目标稿零命中，按「零命中不接入」口径只保留实现与单测，不接入终检。 */
+export function tableCaptionDefectIssues(markdown: string): TableCaptionDefectIssue[] {
+  const labels: Record<TableCaptionDefect['kind'], string> = {
+    'empty-title': '题注无题名',
+    'tree-residue': '题名混入组织架构树残留符',
+    'duplicated-prefix': '题名重复「表」字',
+    'short-title': '题名过短（核心不足 3 字）',
+  };
+  return scanTableCaptionDefects(markdown).slice(0, 5).map(defect => ({
+    level: 'error' as const,
+    severity: 'blocker' as const,
+    category: 'table' as const,
+    owner: 'llm' as const,
+    repairability: 'llm_repairable' as const,
+    message: `表题残缺（第 ${defect.line} 行，${labels[defect.kind]}）：“表${defect.chapterNo}-…”题名为“${defect.raw.slice(0, 40)}”`,
+    suggestion: '按表体内容补写题名（保留既有编号，不改表体与数据）；题名须为名词性短语，不含句读、树形符号与重复的「表」字前缀。',
+  }));
+}
+
 /**
  * r25 B1 表编号唯一化（实机归因：项目基本信息表由终链重建插入（晚于首轮题注注入），链尾重跑
  * 注入给它分配章内序号 1，与首轮已编「表1-1」的正文首表撞号——「表1-1」实体出现 2 次

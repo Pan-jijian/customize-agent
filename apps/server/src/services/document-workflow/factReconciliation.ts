@@ -22,6 +22,7 @@
  * - 跨节同锚数值冲突由 cross-section-numeric-conflict 承担；
  * - 权威数据缺失（无清单/无蓝图/无事实主表）时全部规则静默跳过（不误伤无数据项目）。
  */
+import { UNIT_ALIAS as UNIT_ALIAS_SOURCE, normalizeUnitAlias } from './unitAliases';
 import type { BlueprintData } from './integratedBlueprint';
 import type { BillFactLock } from './billFactLock';
 import type { DocumentFactsModel, ValidationIssue } from './types';
@@ -75,14 +76,8 @@ function poolHasApprox(sorted: number[], value: number): boolean {
 
 /** 单位归一：同口径单位族收敛到规范形（米→m、平方米→m2、立方米→m3、公里→km、吨→t） */
 function normalizeUnit(unit: string): string {
-  const u = (unit || '').trim().toLowerCase();
-  const map: Record<string, string> = {
-    '米': 'm', 'm': 'm', '公里': 'km', 'km': 'km', '千米': 'km',
-    '平方米': 'm2', '㎡': 'm2', 'm²': 'm2', 'm2': 'm2', '平方': 'm2',
-    '立方米': 'm3', 'm³': 'm3', 'm3': 'm3', '方': 'm3',
-    '吨': 't', 't': 't', '千克': 'kg', 'kg': 'kg',
-  };
-  return map[u] ?? u;
+  // 4.56 改造 3-b：本函数此前自带第三份单位别名表，现统一走单源
+  return normalizeUnitAlias(String(unit || ''));
 }
 
 /** 单位匹配正则片段（正文用字与清单单位字面差异同族收敛） */
@@ -1024,9 +1019,10 @@ export interface SpecQuantityBindingFixResult {
 
 /** 单位书写变体归一（C-T1 替换兼容判定）：同一量纲的不同书写形（米/m、㎡/m2/平方米、m³/m3/立方米、吨/t）
  * 不得因书写差异阻断合法替换；未映射单位原样比较（m2/m3/kg 等符号形直接相等） */
-const UNIT_ALIAS: Record<string, string> = { '米': 'm', '公里': 'km', '平方米': 'm2', '㎡': 'm2', 'm²': 'm2', '立方米': 'm3', 'm³': 'm3', '吨': 't' };
+// 4.56 改造 3-b：单位别名统一走 `unitAliases` 单源
+const UNIT_ALIAS: Readonly<Record<string, string>> = UNIT_ALIAS_SOURCE;
 function normalizeUnitText(unit: string): string {
-  return Object.prototype.hasOwnProperty.call(UNIT_ALIAS, unit) ? UNIT_ALIAS[unit] : unit;
+  return normalizeUnitAlias(unit);
 }
 
 /**

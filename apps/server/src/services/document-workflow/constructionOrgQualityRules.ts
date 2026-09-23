@@ -211,6 +211,97 @@ export function professionalChainScan(input: { chapters: DocumentDraftChapter[];
   return deficits;
 }
 
+// ── §L3-6 工序域混杂（放宽判据扫描：域词继承 + 子节域豁免 + 禁配词 ≥1）──
+// 既有 professionalChainScan 的节级 mixed 有两个收紧（r28f #30 误报归因所加）：域**只**由节标题词面
+// 判定（无域词的工序节整节豁免）、禁配词须命中 ≥2。计划（§L3-6）要求评估放开这两处限制。
+// 本函数按放宽口径实现并保留全部证据，供判定与回归对照：
+//   ① 域判定（放宽）：节标题命中域词 → 该域；节标题无域词时，用**本章标题**的域词继承（章名常带「市政道路
+//      工程」「装饰装修工程」类域词）；两者都无 → 整节豁免（不猜域）；
+//   ② 禁配词计数（放宽）：阈值降为 ≥1，但**排除落在其他域子节内的命中**——子节标题自身命中另一域时，
+//      该子节是独立单位工程（实测：1.25「3#门卫土建零星装饰工程」节内 1.25.5「沥青道路」子节合法含
+//      沥青摊铺，正是 r28f #30 误报形态），其正文不参与本节禁配计数。
+// 实测（真实终稿）：放宽后 0 命中（原收紧口径同样 0 命中）。24 份真实稿语料上放宽口径命中 7 处
+//（doc07/08/14/19 的「室外道路与围墙施工」「室外照明给水与沟槽施工」类节判为市政后出现「主体结构」——
+// 语境均为「非主体结构工作分包」「主体结构阶段」「公厕主体结构」等在房建市政混合项目里的正常写法；
+// doc18 判为房建的节出现「管道闭水试验」——语境为污水管网质量创优；doc21/doc23「公共广场提升改造室外
+// 市政工程」节出现「外脚手架/主体结构」——节内含配套用房）——7/7 逐条复核为误报或跨域混合写法，
+// 故本判据**只保留实现与单测，不接入终检**（不产出阻断、不配 fixerDisposition）。
+export interface SectionProcessChainMixingIssue {
+  level: 'error';
+  severity: 'blocker';
+  category: 'professional_chain';
+  owner: 'llm';
+  repairability: 'llm_repairable';
+  message: string;
+  suggestion: string;
+  /** 命中的节标题（定位） */
+  sectionTitle: string;
+  /** 判定的领域 */
+  domain: Exclude<ConstructionOrgProjectType, 'general'>;
+  /** 命中的禁配工序词 */
+  forbiddenHits: string[];
+}
+
+/** 节块切分：按 H3 起节，节文本含其下 H4 子节（与 professionalChainScan 同口径） */
+function sectionBlocksOf(content: string): Array<{ title: string; text: string }> {
+  return String(content || '').split(/(?=^#{3}\s)/mu).flatMap(block => {
+    if (!block.trim()) return [];
+    const heading = block.match(/^#{1,6}\s*(.+)$/mu);
+    if (!heading) return [];
+    const title = heading[1].trim().slice(0, 40);
+    return title ? [{ title, text: block }] : [];
+  });
+}
+
+/** 子节（H4）切分：返回子节标题与其正文；子节标题自身命中域词时，该子节正文从父节计数中剔除 */
+function subsectionSpans(sectionText: string): Array<{ title: string; text: string }> {
+  return String(sectionText || '').split(/(?=^#{4}\s)/mu).flatMap(block => {
+    const heading = block.match(/^#{4}\s*(.+)$/mu);
+    if (!heading) return [];
+    return [{ title: heading[1].trim().slice(0, 40), text: block }];
+  });
+}
+
+/** 节域判定：节标题域词 → 章标题域词继承 → undefined（整节豁免） */
+function resolveSectionDomain(sectionTitle: string, chapterTitle: string): Exclude<ConstructionOrgProjectType, 'general'> | undefined {
+  for (const { type, pattern } of CONSTRUCTION_ORG_PROJECT_TYPE_PATTERNS) if (pattern.test(sectionTitle)) return type;
+  for (const { type, pattern } of CONSTRUCTION_ORG_PROJECT_TYPE_PATTERNS) if (pattern.test(chapterTitle)) return type;
+  return undefined;
+}
+
+/** §L3-6 放宽判据扫描（证据与判定同源；不接入终检，见上方实测说明） */
+export function sectionProcessChainMixingIssues(chapters: DocumentDraftChapter[]): SectionProcessChainMixingIssue[] {
+  const issues: SectionProcessChainMixingIssue[] = [];
+  for (const chapter of chapters) {
+    for (const section of sectionBlocksOf(String(chapter.content || ''))) {
+      const domain = resolveSectionDomain(section.title, String(chapter.title || ''));
+      if (!domain) continue;
+      const rule = PROCESS_CHAINS[domain];
+      // 子节域豁免：子节标题命中其他域 → 该子节正文属独立单位工程，不参与本节禁配计数
+      const exemptText = subsectionSpans(section.text)
+        .filter(subsection => resolveSectionDomain(subsection.title, '') !== undefined && resolveSectionDomain(subsection.title, '') !== domain)
+        .map(subsection => subsection.text)
+        .join('\n');
+      const counted = normalize(section.text.replace(exemptText, ''));
+      const forbiddenHits = rule.forbidden.filter(token => counted.includes(normalize(token)));
+      if (forbiddenHits.length < 1) continue;
+      issues.push({
+        level: 'error' as const,
+        severity: 'blocker' as const,
+        category: 'professional_chain' as const,
+        owner: 'llm' as const,
+        repairability: 'llm_repairable' as const,
+        message: `工序域混杂（第 ${chapter.title} 章「${section.title}」节，判定领域=${rule.label}）：出现非本域工序词 ${forbiddenHits.join('、')}`,
+        suggestion: `该节应按「${rule.prompt}」组织；非本域工序属其他单位工程内容的，移入对应域小节或删除，不得在本域工序节内混写。`,
+        sectionTitle: section.title,
+        domain,
+        forbiddenHits,
+      });
+    }
+  }
+  return issues;
+}
+
 function isConstructionOrgContext(text: string) {
   return /施工组织设计|施工组织|施组|技术标|施工方案|质量|安全|文明施工/u.test(text);
 }

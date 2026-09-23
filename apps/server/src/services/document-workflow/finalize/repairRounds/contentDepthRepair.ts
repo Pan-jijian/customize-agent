@@ -35,6 +35,7 @@
  *（逐项在正文最相关专业小节写入条目名称与工程量），修历史挂靠缺口：17 轮修复无一消费直坠终门禁。
  */
 import { repairOutcomeReason, repairOutcomeStatus } from './repairOutcome';
+import { buildChapterBudgetLedger, chapterOverflowAfterRound, recordChapterBudgetMetric, renderChapterBudgetInstruction, renderChapterOverflowNote, renderDocumentBudgetSummary } from './chapterBudgetLedger';
 import { displayStage, upsertProgressStage } from '../../progress';
 import { recordRepairActions, repairChapterByQuality, repairPatchGuard } from '../../rolePipeline';
 import { withPatchRollback } from '../../patchRollback';
@@ -50,6 +51,7 @@ import { boqItemCarriedInText, buildBoqRowTraces, normalizeBoqMatchText } from '
 import { overviewRecapCandidates, overviewRecapHit } from '../../integrity/detectors/detectors';
 import { criticalSectionDeficitTotal } from '../rebuildAndRecompute';
 import type { BoqRowTrace, DocumentDraftChapter, ValidationIssue } from '../../types';
+import type { ChapterBudgetEntry } from './chapterBudgetLedger';
 import type { FinalizeSession } from '../finalizeSession';
 
 /** 本轮的消费集合（修复链覆盖缺口的六类内容深度检测器 + C3-4 参数义务独立门禁 + C3-5 清单落位门禁，
@@ -193,6 +195,24 @@ const normalizedFor = (text: string) => text.replace(/\s+/gu, '');
 /** blocker 过滤单源（周期循环每轮以最新 validationIssues 为准） */
 function contentDepthBlockers(session: FinalizeSession): ValidationIssue[] {
   return session.validationIssues.filter(issue => issue.severity === 'blocker' && issue.provenance && CONTENT_DEPTH_DETECTOR_IDS.has(issue.provenance.detectorId));
+}
+
+/**
+ * 4.56 2-b 章预算账查表：本轮补写的额度约束 + 落地后超额观测的同一分母来源。
+ *
+ * `content` 传「本章实时正文」——修复轮内上一轮已改写过章正文，账本必须按实时字数结算，
+ * 否则剩余额度是过期分母（额度虚高 → 指令失效）。预算表缺失时由账本内
+ * `resolveChapterBudgetTarget` 显式折算（不静默落硬编码），兜底说明不在此上屏（写作侧已上屏一次）。
+ */
+function chapterBudgetEntryFor(session: FinalizeSession, chapterIndex: number, content: string): ChapterBudgetEntry | undefined {
+  const chapters = session.finalChapterDrafts;
+  if (!chapters[chapterIndex]) return undefined;
+  const ledger = buildChapterBudgetLedger({
+    chapterTargets: session.documentBudget?.chapterTargets,
+    chapters: chapters.map((chapter, index) => (index === chapterIndex ? { ...chapter, content } : chapter)),
+    documentTargetChars: session.documentBudget?.targetChars,
+  });
+  return ledger.chapters[chapterIndex];
 }
 
 /**
@@ -341,7 +361,7 @@ async function chapterResidual(session: FinalizeSession, chapterIndex: number, t
 }
 
 /** 定向补写指令：逐条缺陷原文 + 类别定制补写要求 + 局部修改约束（反条幅、禁编造） */
-function instructionFor(draftChapter: DocumentDraftChapter, todos: ChapterTodo[], round: number, roundCap: number): string {
+function instructionFor(draftChapter: DocumentDraftChapter, todos: ChapterTodo[], round: number, roundCap: number, budgetEntry?: ChapterBudgetEntry): string {
   const lines: string[] = [
     '【内容深度定向补写修复】',
     ...(round > 1 ? [`本轮为第 ${round} 轮（最多 ${roundCap} 轮）：上一轮补写后复检仍有残留，请针对下列缺口严格补足。`] : []),
@@ -349,6 +369,9 @@ function instructionFor(draftChapter: DocumentDraftChapter, todos: ChapterTodo[]
     '1. 补写内容必须落到绑定资料/清单/图纸中的具体数值与工程事实，保持原始数值与单位，不得编造参数、不得空泛套话；',
     '2. 只做局部修改：优先在对应小节内扩写补实，或在最合适的位置并入补写段落；不得新增、删除或合并小节，不得改动无关内容；',
     '3. 禁止「按招标文件要求：」类条幅前缀与任何元话语，必须是正式施组正文行文。',
+    // 4.56 2-b：补写轮的章预算上下文（本轮新增内容的额度约束）。缺失预算条目时不渲染该段
+    //（宁可无约束，也不假造分母——resolveChapterBudgetTarget 已在账本内显式兜底并回传说明）。
+    ...(budgetEntry ? [renderChapterBudgetInstruction(budgetEntry)] : []),
   ];
   for (const todo of todos) {
     const head = `- [${todo.detectorId}] ${todo.issue.message}`;
@@ -686,6 +709,8 @@ export async function stageContentDepthRepair(session: FinalizeSession): Promise
       const roundCap = hasBlockerTodos ? MAX_CONTENT_DEPTH_REPAIR_ROUNDS : Math.max(MAX_PROFESSIONAL_SCORE_REPAIR_ROUNDS, MAX_DRAWING_REFERENCE_REPAIR_ROUNDS);
       const residualTrajectory = [beforeResidual];
       const roleId = `agent-content-depth-repair-${draftChapter.id}`;
+      /** 4.56 2-b：本轮章级超额注记（累积进阶段 message/details，与 metrics 同源） */
+      const overflowNotes: string[] = [];
       while (rounds < roundCap) {
         rounds += 1;
         // 活动待办刷新：逐类以实时残差过滤（已清零的类不再注入修复指令；参数类同步收缩待补列表）
@@ -719,6 +744,7 @@ export async function stageContentDepthRepair(session: FinalizeSession): Promise
           if (residual > 0) activeTodos.push(todo);
         }
         if (activeTodos.length === 0) break;
+        const roundStartedAt = Date.now();
         const runningStage = displayStage({ type: 'llm_review', roleId, status: 'running', message: `内容深度补写中${cycleLabel}（第 ${rounds}/${roundCap} 轮）：${draftChapter.title}（${activeTodos.length} 类缺口）`, details: activeTodos.map(todo => `缺口：${todo.issue.message.slice(0, 80)}`), }, { subtitle: '内容深度补写核验' });
         upsertProgressStage(session.progressStages, runningStage);
         upsertProgressStage(session.finalGateRepairStages, runningStage);
@@ -729,11 +755,13 @@ export async function stageContentDepthRepair(session: FinalizeSession): Promise
           diagnostics: session.generationDiagnostics,
           beforeMetrics: [beforeResidual],
           apply: async () => {
+            // 4.56 2-b：预算账按实时正文结算后注入指令（本轮额度约束）。缺预算条目时不渲染该段
+            const budgetEntry = chapterBudgetEntryFor(session, chapterIndex, chapterContent);
             const repaired = await session.withProgressHeartbeat(() => repairChapterByQuality({
               template: session.template,
               chapter: { id: draftChapter.id, title: draftChapter.title, content: chapterContent, evidence: draftChapter.evidence, missingFacts: draftChapter.missingFacts, sections: draftChapter.sections },
               issues: activeTodos.map(todo => `${todo.issue.message}｜${todo.issue.suggestion || ''}`),
-              promptTexts: instructionFor(draftChapter, activeTodos, rounds, roundCap),
+              promptTexts: instructionFor(draftChapter, activeTodos, rounds, roundCap, budgetEntry),
               requirement: session.requirement,
               forbidDrawingImages: false,
               // 标书编制规格（正文表格口径）：修复链 system 口径同步
@@ -748,9 +776,20 @@ export async function stageContentDepthRepair(session: FinalizeSession): Promise
         });
         if (outcome.rolledBack) anyRollback = true;
         if (outcome.rolledBack || outcome.content === chapterContent) break;
+        const contentBeforeRound = chapterContent;
         chapterContent = outcome.content;
         session.finalChapterDrafts[chapterIndex] = { ...draftChapter, content: chapterContent };
         chapterRepaired = true;
+        // 4.56 2-b 落地后章级超额检查（只观测不改写：本轮新增多少字 + 超出多少 → 阶段 message/
+        // details + diagnostics.metrics。强制截断需改造 2-a 的单一写入通道，属后续批次）
+        const roundBudgetEntry = chapterBudgetEntryFor(session, chapterIndex, contentBeforeRound);
+        const overflowReport = roundBudgetEntry
+          ? chapterOverflowAfterRound({ chapterId: draftChapter.id, title: draftChapter.title, target: roundBudgetEntry.target, beforeContent: contentBeforeRound, afterContent: chapterContent })
+          : undefined;
+        if (overflowReport) {
+          overflowNotes.push(renderChapterOverflowNote(overflowReport));
+          recordChapterBudgetMetric({ diagnostics: session.generationDiagnostics, round: 'content-depth-repair', startedAt: roundStartedAt, report: overflowReport });
+        }
         const afterResidual = outcome.afterMetrics[0] ?? await chapterResidual(session, chapterIndex, todos, chapterContent, overview);
         residualTrajectory.push(afterResidual);
         // 收敛判定：清零即通过；未下降（含回滚/空修复）即停止；下降且未达上限 → 再修一轮
@@ -766,7 +805,9 @@ export async function stageContentDepthRepair(session: FinalizeSession): Promise
       else if (chapterRepaired) message = `内容深度补写部分生效${cycleLabel}：${draftChapter.title}（残留轨迹 ${residualTrajectory.join('→')}，已执行 ${rounds} 轮；${residualNote}）`;
       else if (anyRollback) message = `内容深度补写已回滚${cycleLabel}：${draftChapter.title}（修复后缺口数未下降，保留修复前正文；${residualNote}）`;
       else message = `内容深度补写未生效${cycleLabel}：${draftChapter.title}（模型未产生有效修改；${residualNote}）`;
-      const completedStage = displayStage({ type: 'llm_review', roleId, status: repairOutcomeStatus({ before: residualTrajectory[0], after: finalResidual, repaired: chapterRepaired }), message, details: [...todos.map(todo => `缺陷：${todo.issue.message.slice(0, 90)}`), ...(finalResidual > 0 ? [`残留深度缺口量 ${finalResidual}`] : [])] }, { subtitle: '内容深度补写核验' });
+      // 4.56 2-b：章级超额观测上屏（message 摘要 + details 逐条；超产不经观测不落账）
+      if (overflowNotes.length > 0) message = `${message}；${overflowNotes[overflowNotes.length - 1]}`;
+      const completedStage = displayStage({ type: 'llm_review', roleId, status: repairOutcomeStatus({ before: residualTrajectory[0], after: finalResidual, repaired: chapterRepaired }), message, details: [...todos.map(todo => `缺陷：${todo.issue.message.slice(0, 90)}`), ...(finalResidual > 0 ? [`残留深度缺口量 ${finalResidual}`] : []), ...overflowNotes] }, { subtitle: '内容深度补写核验' });
       upsertProgressStage(session.progressStages, completedStage);
       upsertProgressStage(session.finalGateRepairStages, completedStage);
       session.emitProgress(session.finalChapterDrafts, session.progressStages);
@@ -789,7 +830,14 @@ export async function stageContentDepthRepair(session: FinalizeSession): Promise
   // 终态残留=重算后检测链最新 blocker 数（含语义通道复验，口径比确定性复检更宽松）
   const residualBlockers = contentDepthBlockers(session);
   if (repairedInAnyCycle || firstCycleBlockerCount > 0 || firstCycleScoreCount > 0 || firstCycleDrawingCount > 0) {
-    session.generationDiagnostics.llm.lastInfo = `内容深度定向补写：初检 ${firstCycleBlockerCount} 项深度类阻断${firstCycleScoreCount > 0 ? `、${firstCycleScoreCount} 章专业评分不足（补写线 ${PROFESSIONAL_SCORE_LINE}/12，资源类章 10/12）` : ''}${firstCycleDrawingCount > 0 ? `、${firstCycleDrawingCount} 份图纸事实未落位（引用率目标 90%）` : ''}（定位 ${firstCycleBlockerCount - Math.min(unlocatedTotal, firstCycleBlockerCount)} 项${unlocatedTotal > 0 ? `，未定位 ${unlocatedTotal} 项` : ''}），章级定向补写（六类每章最多 ${MAX_CONTENT_DEPTH_REPAIR_ROUNDS} 轮 + 专业评分每章最多 ${MAX_PROFESSIONAL_SCORE_REPAIR_ROUNDS} 轮/单周期最多 ${MAX_PROFESSIONAL_SCORE_REPAIR_CHAPTERS} 章 + 图纸落位每章最多 ${MAX_DRAWING_REFERENCE_REPAIR_ROUNDS} 轮/单周期最多 ${MAX_DRAWING_REFERENCE_REPAIR_CHAPTERS} 章，收敛周期上限 ${MAX_CONTENT_DEPTH_REPAIR_CYCLES}），${repairedChaptersTotal} 章次落地，本次消解 ${resolvedTotal} 项缺口，终态残留 ${residualBlockers.length} 项（由终门禁照常复核）`;
+    // 4.56 2-b：本轮终态章预算账（补写轮「知道额度」的可复盘出口：各章 current 与超额明细）
+    const ledger = buildChapterBudgetLedger({
+      chapterTargets: session.documentBudget?.chapterTargets,
+      chapters: session.finalChapterDrafts,
+      documentTargetChars: session.documentBudget?.targetChars,
+    });
+    const budgetNote = `；${renderDocumentBudgetSummary(ledger)}${ledger.overBudget.length > 0 ? `（超额章：${ledger.overBudget.map(chapter => `${chapter.title.slice(0, 16)} 超 ${Math.abs(chapter.remaining)} 字`).join('、')}）` : ''}`;
+    session.generationDiagnostics.llm.lastInfo = `内容深度定向补写：初检 ${firstCycleBlockerCount} 项深度类阻断${firstCycleScoreCount > 0 ? `、${firstCycleScoreCount} 章专业评分不足（补写线 ${PROFESSIONAL_SCORE_LINE}/12，资源类章 10/12）` : ''}${firstCycleDrawingCount > 0 ? `、${firstCycleDrawingCount} 份图纸事实未落位（引用率目标 90%）` : ''}（定位 ${firstCycleBlockerCount - Math.min(unlocatedTotal, firstCycleBlockerCount)} 项${unlocatedTotal > 0 ? `，未定位 ${unlocatedTotal} 项` : ''}），章级定向补写（六类每章最多 ${MAX_CONTENT_DEPTH_REPAIR_ROUNDS} 轮 + 专业评分每章最多 ${MAX_PROFESSIONAL_SCORE_REPAIR_ROUNDS} 轮/单周期最多 ${MAX_PROFESSIONAL_SCORE_REPAIR_CHAPTERS} 章 + 图纸落位每章最多 ${MAX_DRAWING_REFERENCE_REPAIR_ROUNDS} 轮/单周期最多 ${MAX_DRAWING_REFERENCE_REPAIR_CHAPTERS} 章，收敛周期上限 ${MAX_CONTENT_DEPTH_REPAIR_CYCLES}），${repairedChaptersTotal} 章次落地，本次消解 ${resolvedTotal} 项缺口，终态残留 ${residualBlockers.length} 项（由终门禁照常复核）${budgetNote}`;
   }
   // G 线 P2-4：LLM 补写轮消解缺口项数计量（与确定性修复器「处数」同口径——两者计的都是被消解的问题数）
   recordRepairActions(session.generationDiagnostics, resolvedTotal);

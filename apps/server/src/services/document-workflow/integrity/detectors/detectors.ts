@@ -3780,6 +3780,138 @@ export function duplicateParagraphIssues(markdown: string): ValidationIssue[] {
   return issues;
 }
 
+// ── §L3-5 段落级近似重复（近重复族：骨架一致 + 同对象集）──
+// 段落维度原有判据只有「去空白后完全相等」（duplicateParagraphIssues），实测漏网形态为同一批工程量/
+// 同一工序被两处重复叙述（招标答疑原文粘贴 vs 正文归纳、同节详述 vs 汇总）：逐字不同（重复段落判据
+// 零命中）但骨架与数值指纹一致。判据三项全满足才报（缺一即不报——防「同一模板句式套不同单体工程」
+// 误伤，实测该误报类 8-gram 重叠 0.05~0.2、数值集不同）：
+//   ① 骨架一致：数字掩码（`\d+(?:\.\d+)?` → `#`）后 5-gram Jaccard ≥ 0.3（结构帧相同）；
+//   ② 同对象集：实质数值 token（≥2 位数字，排除「1次/2处」类频次词）交集 ≥2 个且交并比 ≥0.6——
+//      同一批工程量即同一批对象，与①互为独立证据（纯 Jaccard 会把同模板不同单体判成重复）；
+//   ③ 单体互斥排除：两块各自的「N#」单体标识均非空且交集为空 → 不同单体，模板句式合法，不报。
+// 只报不删：近重复之间无「哪份是原稿、哪份是副本」的确定性判据（后者常含前者缺失的信息，删除即信息
+// 丢失），收敛路径=修复轮合并去重或显式人工复核（注册表 fixerDisposition='manual'）。
+export const NEAR_DUPLICATE_MIN_HAN = 40;
+export const NEAR_DUPLICATE_SKELETON_GRAM = 5;
+export const NEAR_DUPLICATE_SKELETON_JACCARD = 0.3;
+export const NEAR_DUPLICATE_MIN_SHARED_NUMBERS = 2;
+export const NEAR_DUPLICATE_NUMBER_OVERLAP = 0.6;
+/** 实质数值 token：≥2 位数字（`1次/2处` 类单字频次词不构成「同对象集」证据） */
+const SUBSTANTIVE_NUMBER_RE = /\d{2,}(?:\.\d+)?/gu;
+/** 单体标识（`1#厂房`/`2#门卫`/`3# `）：判「不同单体」用的机制化标识，非材料/数值白名单 */
+const UNIT_MARKER_RE = /\d+\s*#/gu;
+
+export interface ParagraphNearDuplicateHit {
+  /** 首次出现段落的起始行（1 基） */
+  firstLine: number;
+  /** 重复出现段落的起始行（1 基） */
+  secondLine: number;
+  /** 掩码骨架 5-gram Jaccard */
+  skeletonJaccard: number;
+  /** 实质数值交并比 */
+  numberOverlap: number;
+  /** 重复段摘要（前缀） */
+  excerpt: string;
+}
+
+function maskDigits(text: string): string {
+  return text.replace(/\d+(?:\.\d+)?/gu, '#');
+}
+
+function compressedNgrams(text: string, size: number): Set<string> {
+  const clean = text.replace(/[\s　|*`_]/gu, '');
+  const grams = new Set<string>();
+  for (let index = 0; index + size <= clean.length; index += 1) grams.add(clean.slice(index, index + size));
+  return grams;
+}
+
+function jaccardOf(left: Set<string>, right: Set<string>): number {
+  if (left.size === 0 || right.size === 0) return 0;
+  let intersection = 0;
+  for (const item of left) if (right.has(item)) intersection += 1;
+  return intersection / (left.size + right.size - intersection);
+}
+
+/** 段落级近似重复扫描（检测器与报告/取证同源单扫描；只报定位不产出替代内容）。
+ *  单元口径=**正文行**（叙述单元）：本类文档正文为标题/空行分隔的硬换行长行（实测目标稿 260 正文行
+ *  ↔ 243 段落块，行级与块级近乎同构），逐字重复的行才是可定位、可复核的重复证据。
+ *  备选口径「相邻行先并块再比较」实测会漏掉目标稿全部重复对（重复句与邻句并块后骨架相似度被稀释，
+ *  0 命中）——故取行级。 */
+export function scanParagraphNearDuplicates(markdown: string): ParagraphNearDuplicateHit[] {
+  const lines = markdown.split(/\r?\n/u);
+  const units: Array<{ line: number; text: string; skeleton: Set<string>; numbers: Set<string>; markers: Set<string> }> = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const trimmed = lines[index].trim();
+    // 标题行/表格行/列表项不入池（与 duplicateParagraphIssues 同口径：结构元素由各自检测器负责）
+    if (!trimmed || /^#{1,6}\s/u.test(trimmed) || trimmed.startsWith('|') || /^(?:[-*+•]|\d{1,3}[.、)])\s*/u.test(trimmed)) continue;
+    if ((trimmed.match(/[一-龥]/gu) || []).length < NEAR_DUPLICATE_MIN_HAN) continue;
+    units.push({
+      line: index + 1,
+      text: trimmed,
+      skeleton: compressedNgrams(maskDigits(trimmed), NEAR_DUPLICATE_SKELETON_GRAM),
+      numbers: new Set(trimmed.match(SUBSTANTIVE_NUMBER_RE) || []),
+      markers: new Set((trimmed.match(UNIT_MARKER_RE) || []).map(marker => marker.replace(/\s/gu, ''))),
+    });
+  }
+  // 候选对生成：以实质数值建倒排索引（只有共享 ≥2 个实质数值的两段才进入骨架比较），
+  // 既保证「同对象集」前置成立，也把 O(n²) 全比压到同批量的少数段之间（长文性能保障）
+  const byNumber = new Map<string, number[]>();
+  units.forEach((unit, unitIndex) => {
+    for (const number of unit.numbers) {
+      const bucket = byNumber.get(number) || [];
+      bucket.push(unitIndex);
+      byNumber.set(number, bucket);
+    }
+  });
+  const candidateCounts = new Map<string, number>();
+  for (const bucket of byNumber.values()) {
+    for (let i = 0; i < bucket.length; i += 1) {
+      for (let k = i + 1; k < bucket.length; k += 1) {
+        const key = `${bucket[i]}|${bucket[k]}`;
+        candidateCounts.set(key, (candidateCounts.get(key) || 0) + 1);
+      }
+    }
+  }
+  const hits: ParagraphNearDuplicateHit[] = [];
+  for (const [key, sharedNumbers] of candidateCounts) {
+    if (sharedNumbers < NEAR_DUPLICATE_MIN_SHARED_NUMBERS) continue;
+    const [leftIndex, rightIndex] = key.split('|').map(Number);
+    const left = units[leftIndex];
+    const right = units[rightIndex];
+    if (Math.abs(left.line - right.line) < 2) continue;
+    const union = new Set([...left.numbers, ...right.numbers]).size;
+    const numberOverlap = union === 0 ? 0 : sharedNumbers / union;
+    if (numberOverlap < NEAR_DUPLICATE_NUMBER_OVERLAP) continue;
+    const skeletonJaccard = jaccardOf(left.skeleton, right.skeleton);
+    if (skeletonJaccard < NEAR_DUPLICATE_SKELETON_JACCARD) continue;
+    // 单体互斥：两块各自点名了不同单体工程（`1#厂房` vs `2#门卫`）→ 模板句式套用，非重复
+    if (left.markers.size > 0 && right.markers.size > 0 && ![...left.markers].some(marker => right.markers.has(marker))) continue;
+    hits.push({
+      firstLine: left.line,
+      secondLine: right.line,
+      skeletonJaccard: Number(skeletonJaccard.toFixed(3)),
+      numberOverlap: Number(numberOverlap.toFixed(2)),
+      excerpt: right.text.slice(0, 40),
+    });
+  }
+  return hits.sort((left, right) => left.secondLine - right.secondLine).slice(0, 20);
+}
+
+/** 段落级近似重复终检（id=`paragraph-near-duplicate`）：同一批对象/工程量被两处重复叙述即阻断。
+ *  收敛：无确定性修复器（近重复不产出替代内容，删除哪一份须语义判断），只报不删——
+ *  由修复轮合并去重或经 manualDispositionIssues 转人工复核（注册表 fixerDisposition='manual'）。 */
+export function paragraphNearDuplicateIssues(markdown: string): ValidationIssue[] {
+  return scanParagraphNearDuplicates(markdown).slice(0, 3).map(hit => ({
+    level: 'error' as const,
+    severity: 'blocker' as const,
+    category: 'style' as const,
+    owner: 'llm' as const,
+    repairability: 'llm_repairable' as const,
+    message: `段落近似重复：第 ${hit.secondLine} 行与第 ${hit.firstLine} 行叙述同一批对象与工程量（骨架一致度 ${hit.skeletonJaccard}、数值一致度 ${hit.numberOverlap}）：“${hit.excerpt}…”`,
+    suggestion: '两处仅保留信息完整的一处并合并差异（不得改写既有数值与工序事实）；重复段落后含原文粘贴来源的，以正文归纳口径为准。',
+  }));
+}
+
 /** 段落完全重复确定性删除：保留首次出现，删除后续完全相同段落（标题行/表格行/分隔行不动） */
 
 export function fabricatedAwardIssues(markdown: string, factsModel: DocumentFactsModel, tenderRequirements?: TenderRequirementModel): ValidationIssue[] {

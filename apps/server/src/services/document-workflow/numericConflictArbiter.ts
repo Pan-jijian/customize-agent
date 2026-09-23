@@ -13,6 +13,7 @@
  * 前置段）——历史缺陷：参数口径冲突 12 项 llm-patch 不收敛空转，确定性可裁者必须先分流。
  * 与检测端同源扫描（conceptConflictGroups / scanSpecLocationMismatchHits）保证检测定位=修复定位。
  */
+import { normalizeUnitAlias, unitsAreEquivalent } from './unitAliases';
 import { authorityRewriteVerdict } from './authorityRewriteGuard';
 import { applySpanReplacements, scanSpecLocationMismatchHits } from './documentIntegrityChecks';
 import { arbitrateConceptGroup, conceptConflictGroups } from './parameterConceptConflicts';
@@ -69,10 +70,10 @@ function transcribedEqualBinding(textValue: number, authorityValue: number): boo
 }
 
 /** 单位书写变体归一（与 factReconciliation.normalizeUnitText 同口径：米/m、㎡/m2/平方米、m³/m3/立方米、吨/t） */
-const BINDING_UNIT_ALIAS: Record<string, string> = { '米': 'm', 'm': 'm', '公里': 'km', 'km': 'km', '平方米': 'm2', '㎡': 'm2', 'm²': 'm2', 'm2': 'm2', '立方米': 'm3', 'm³': 'm3', 'm3': 'm3', '吨': 't', 't': 't' };
 function normalizeBindingUnit(unit: string): string {
   const u = (unit || '').trim().toLowerCase();
-  return BINDING_UNIT_ALIAS[u] ?? u;
+  // 4.56 改造 3-b：单位别名统一走 `unitAliases` 单源（原先本文件自带一份副本）
+  return normalizeUnitAlias(u);
 }
 
 /** A3 名称-数值绑定命中（与检测端 D4.6a 同源定位） */

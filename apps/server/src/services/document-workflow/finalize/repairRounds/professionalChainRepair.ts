@@ -16,6 +16,8 @@
  */
 import { repairOutcomeReason, repairOutcomeStatus } from './repairOutcome';
 import { displayStage, upsertProgressStage } from '../../progress';
+import { buildChapterBudgetLedger, chapterOverflowAfterRound, recordChapterBudgetMetric, renderChapterBudgetInstruction, renderChapterOverflowNote } from './chapterBudgetLedger';
+import type { ChapterBudgetEntry } from './chapterBudgetLedger';
 import { repairChapterByQuality, repairPatchGuard } from '../../rolePipeline';
 import { withPatchRollback } from '../../patchRollback';
 import { professionalChainScan, type ProfessionalChainDeficit } from '../../constructionOrgQualityRules';
@@ -38,7 +40,7 @@ function deficitWeight(deficit: ProfessionalChainDeficit): number {
 }
 
 /** 定向修复指令：缺陷分型描述（错位节改写 / 缺链补写）+ 局部修改约束 + 标准工序名落位要求 */
-function instructionFor(draftChapter: DocumentDraftChapter, deficits: ProfessionalChainDeficit[]): string {
+function instructionFor(draftChapter: DocumentDraftChapter, deficits: ProfessionalChainDeficit[], budgetEntry?: ChapterBudgetEntry): string {
   const lines: string[] = [
     '【工序链与项目属性适配定向修复】',
     `《${draftChapter.title}》存在下列工序链与项目属性不匹配问题，请在对应位置自然修复：`,
@@ -56,8 +58,25 @@ function instructionFor(draftChapter: DocumentDraftChapter, deficits: Profession
     '2. 工序叙述须结合本章既有语境（工程部位、材料、机具、检查要求），与既有句子自然衔接，不得出现“本节按…重新组织”类改写痕迹；',
     '3. 工序环节按标准工序名落位（如“基层处理”“成品保护”“回填”），不得以近义改述代替；',
     '4. 禁止「按招标文件要求：」类条幅前缀与任何元话语，必须为正式施工组织设计正文行文，不得编造参数。',
+    // 4.56 2-b：章预算账（本轮补写额度约束；工序链补写同样属「修复链无预算追加」）
+    ...(budgetEntry ? [renderChapterBudgetInstruction(budgetEntry)] : []),
   );
   return lines.join('\n');
+}
+
+/**
+ * 4.56 2-b 章预算账查表（与 contentDepthRepair 同口径同源）：content 传「本章实时正文」，
+ * 修复轮内上一轮已改写过章正文时额度必须按实时字数结算，否则额度是过期分母。
+ */
+function chapterBudgetEntryFor(session: FinalizeSession, chapterIndex: number, content: string): ChapterBudgetEntry | undefined {
+  const chapters = session.finalChapterDrafts;
+  if (!chapters[chapterIndex]) return undefined;
+  const ledger = buildChapterBudgetLedger({
+    chapterTargets: session.documentBudget?.chapterTargets,
+    chapters: chapters.map((chapter, index) => (index === chapterIndex ? { ...chapter, content } : chapter)),
+    documentTargetChars: session.documentBudget?.targetChars,
+  });
+  return ledger.chapters[chapterIndex];
 }
 
 export async function stageProfessionalChainRepair(session: FinalizeSession): Promise<void> {
@@ -106,11 +125,14 @@ export async function stageProfessionalChainRepair(session: FinalizeSession): Pr
     let anyRollback = false;
     const roleId = `agent-professional-chain-repair-${draftChapter.id}`;
     const residualTrajectory = [beforeResidual];
+    /** 4.56 2-b：本章跨轮超额注记（累积进阶段 message/details，与 metrics 同源） */
+    const overflowNotes: string[] = [];
     while (rounds < MAX_CHAIN_REPAIR_ROUNDS) {
       rounds += 1;
       // 当前残留缺陷（每轮以最新文本重新定位，检测定位=修复定位）
       const pendingDeficits = scanWith(chapterContent);
       if (pendingDeficits.length === 0) break;
+      const roundStartedAt = Date.now();
       const runningStage = displayStage({ type: 'llm_review', roleId, status: 'running', message: `工序链适配修复中（第 ${rounds}/${MAX_CHAIN_REPAIR_ROUNDS} 轮）：${draftChapter.title}（${pendingDeficits.map(deficit => deficit.kind === 'mixed' ? `「${deficit.sectionTitle}」错位` : `${deficit.label}缺${deficit.missing.length}项`).join('、')}）` }, { subtitle: '工序链适配核验' });
       upsertProgressStage(session.progressStages, runningStage);
       upsertProgressStage(session.finalGateRepairStages, runningStage);
@@ -121,11 +143,13 @@ export async function stageProfessionalChainRepair(session: FinalizeSession): Pr
         diagnostics: session.generationDiagnostics,
         beforeMetrics: [beforeResidual, -hanCount(chapterContent)],
         apply: async () => {
+          // 4.56 2-b：预算账按实时正文结算后注入指令（本轮额度约束）
+          const budgetEntry = chapterBudgetEntryFor(session, chapterIndex, chapterContent);
           const repaired = await session.withProgressHeartbeat(() => repairChapterByQuality({
             template: session.template,
             chapter: { id: draftChapter.id, title: draftChapter.title, content: chapterContent, evidence: draftChapter.evidence, missingFacts: draftChapter.missingFacts, sections: draftChapter.sections },
             issues: pendingDeficits.map(deficit => deficit.kind === 'mixed' ? `「${deficit.sectionTitle}」疑似${deficit.label}内容混入不匹配工序：${deficit.hits.join('、')}` : `${deficit.label}工序链覆盖不足：缺 ${deficit.missing.join('、')}`),
-            promptTexts: instructionFor(draftChapter, pendingDeficits),
+            promptTexts: instructionFor(draftChapter, pendingDeficits, budgetEntry),
             requirement: session.requirement,
             forbidDrawingImages: false,
             // 标书编制规格（正文表格口径）：修复链 system 口径同步
@@ -142,9 +166,19 @@ export async function stageProfessionalChainRepair(session: FinalizeSession): Pr
       });
       if (outcome.rolledBack) anyRollback = true;
       if (outcome.rolledBack || outcome.content === chapterContent) break;
+      const contentBeforeRound = chapterContent;
       chapterContent = outcome.content;
       session.finalChapterDrafts[chapterIndex] = { ...draftChapter, content: chapterContent };
       chapterRepaired = true;
+      // 4.56 2-b 落地后章级超额检查（只观测不改写：本轮新增多少字 + 超出多少）
+      const roundBudgetEntry = chapterBudgetEntryFor(session, chapterIndex, contentBeforeRound);
+      const overflowReport = roundBudgetEntry
+        ? chapterOverflowAfterRound({ chapterId: draftChapter.id, title: draftChapter.title, target: roundBudgetEntry.target, beforeContent: contentBeforeRound, afterContent: chapterContent })
+        : undefined;
+      if (overflowReport) {
+        overflowNotes.push(renderChapterOverflowNote(overflowReport));
+        recordChapterBudgetMetric({ diagnostics: session.generationDiagnostics, round: 'professional-chain-repair', startedAt: roundStartedAt, report: overflowReport });
+      }
       const afterResidual = outcome.afterMetrics[0] ?? residualOf(chapterContent);
       residualTrajectory.push(afterResidual);
       // 收敛判定：清零即通过；未下降（含回滚/空修复）即停止；下降且未达上限 → 再修一轮
@@ -160,7 +194,9 @@ export async function stageProfessionalChainRepair(session: FinalizeSession): Pr
     else if (chapterRepaired) message = `工序链适配修复部分生效：${draftChapter.title}（残留轨迹 ${residualTrajectory.join('→')}，已执行 ${rounds} 轮；${residualNote}）`;
     else if (anyRollback) message = `工序链适配修复已回滚：${draftChapter.title}（修复后缺陷数未下降或汉字大幅减少，保留修复前正文；${residualNote}）`;
     else message = `工序链适配修复未生效：${draftChapter.title}（模型未产生有效修改；${residualNote}）`;
-    const completedStage = displayStage({ type: 'llm_review', roleId, status: repairOutcomeStatus({ before: initialDeficits.length, after: finalResidual }), message, details: initialDeficits.map(deficit => `缺陷：${deficit.kind === 'mixed' ? `「${deficit.sectionTitle}」${deficit.label}内容混入不匹配工序（${deficit.hits.join('、')}）` : `${deficit.label}缺${deficit.missing.join('、')}`}`) }, { subtitle: '工序链适配核验' });
+    // 4.56 2-b：章级超额观测上屏（message 摘要 + details 逐条）
+    if (overflowNotes.length > 0) message = `${message}；${overflowNotes[overflowNotes.length - 1]}`;
+    const completedStage = displayStage({ type: 'llm_review', roleId, status: repairOutcomeStatus({ before: initialDeficits.length, after: finalResidual }), message, details: [...initialDeficits.map(deficit => `缺陷：${deficit.kind === 'mixed' ? `「${deficit.sectionTitle}」${deficit.label}内容混入不匹配工序（${deficit.hits.join('、')}）` : `${deficit.label}缺${deficit.missing.join('、')}`}`), ...overflowNotes] }, { subtitle: '工序链适配核验' });
     upsertProgressStage(session.progressStages, completedStage);
     upsertProgressStage(session.finalGateRepairStages, completedStage);
     session.emitProgress(session.finalChapterDrafts, session.progressStages);
