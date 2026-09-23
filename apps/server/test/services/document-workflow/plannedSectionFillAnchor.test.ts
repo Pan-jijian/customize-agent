@@ -43,9 +43,16 @@ describe('4.58 R1 缺节补写锚点分流', () => {
     expect(source).toContain('**保留该小节标题行原文不动**，在其后补写正式正文段落');
   });
 
-  it('锚点行定位与判据单源（复用 sameSectionTitle，不自造第二套标题比对）', () => {
-    expect(source).toContain('sameSectionTitle(line.replace(/^#{3,4}\\s+/u, \'\'), gap.sectionTitle)');
-    expect(source).toContain("import { applyDeterministicConsistencyFixes");
+  it('锚点行定位用**严格**归一化相等（不可用同义宽容口径，否则多个相似兄弟标题全锚到同一个）', () => {
+    /**
+     * 首版实现用 `sameSectionTitle` 定位锚点行，测试当场抓到回归：它带 `nearSubsectionTitleMatch`
+     * 的宽容口径（本为「规划名 vs 成稿名单字漂移」设计），在 `劳动力保障与工资支付措施` /
+     * `劳动力组织与实名制管理` / `分阶段劳动力投入与动态调配` 三个共享「劳动力」前缀的兄弟标题间
+     * **全部命中同一个标题行**，三个就地补写都锚到 1.3（内容全挤进 1.3，另两个仍旧空着）。
+     */
+    expect(source).toContain("normalizeSectionTitleForGap(line.replace(/^#{3,4}\\s+/u, '')) === normalizeSectionTitleForGap(gap.sectionTitle)");
+    expect(source).not.toContain('sameSectionTitle(line.replace');
+    // 判据仍走单源模块（不自造第二套标题归一化）
     expect(source).toMatch(/from '\.\/qualityValidation'/u);
   });
 });

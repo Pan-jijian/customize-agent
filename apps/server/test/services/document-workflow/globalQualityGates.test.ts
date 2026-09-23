@@ -556,9 +556,28 @@ describe('enforcePlannedSectionCompleteness（缺规划小节补写收口：F1�
     const input = makePlannedInput({ chapterDraftsFinal: [chapter] });
     const result = await enforcePlannedSectionCompleteness(input);
     expect(result.plannedSectionFixApplied).toBe(false);
-    // 缺「资源配置计划」触发 1 次补写调用，锚点 = 章末标题行（章末追加模式：锚点仅作存在性校验）
-    expect(repairMock).toHaveBeenCalledTimes(1);
-    const firstCall = repairMock.mock.calls[0][0];
+    /**
+     * 4.58 R1-b 后本用例为 **4 次调用**（原为 1 次）——口径变了，且新口径才是对的：
+     * 该章三类缺口并存——`资源配置计划` 整节缺失（missing）、另三个小节正文仅一句话（too_short）。
+     * 旧实现把三类合成一批、统一用「章末追加」锚点：too_short 的补写被追加到**章末**，
+     * 而它本该写在**自己的标题下**——终检仍报「小节正文过短」，永远修不掉。
+     * 现按性质分流：too_short → 就地补写（3 次）；missing → 章末追加（1 次）。
+     */
+    expect(repairMock).toHaveBeenCalledTimes(4);
+    const anchorOf = (call: unknown[]): Array<{ text: string; appendAt?: string }> =>
+      ((call[0] as { anchorTexts?: Array<{ text: string; appendAt?: string }> }).anchorTexts || []);
+    const chapterEndCalls = repairMock.mock.calls.filter(call => anchorOf(call).some(anchor => anchor.appendAt === 'chapter-end'));
+    const inPlaceCalls = repairMock.mock.calls.filter(call => anchorOf(call).every(anchor => anchor.appendAt === undefined));
+    expect(chapterEndCalls).toHaveLength(1);
+    expect(inPlaceCalls).toHaveLength(3);
+    // 就地补写：锚点必须是**该小节自己的标题行原文**（补写才落在自己标题下）。
+    // 按集合比较而非顺序——顺序取决于 collectSectionContentGaps 的产出次序，不是本判据的语义。
+    expect(inPlaceCalls.map(call => anchorOf(call)[0]!.text).sort()).toEqual([
+      '### 1.1 劳动力组织与实名制管理',
+      '### 1.2 分阶段劳动力投入与动态调配',
+      '### 1.3 劳动力保障与工资支付措施',
+    ].sort());
+    const firstCall = chapterEndCalls[0]![0] as { chapter: { title: string }; anchorTexts: unknown; issues: string[] };
     expect(firstCall.chapter.title).toBe('劳动力安排计划');
     expect(firstCall.anchorTexts).toEqual([{ text: '### 1.3 劳动力保障与工资支付措施', append: true, appendAt: 'chapter-end' }]);
     // 编号口径（r28g B）：章末追加语义下取章内现有 H3 最大小节号 +1（1.1/1.2/1.3 → 1.4），
@@ -684,18 +703,29 @@ describe('enforcePlannedSectionCompleteness（缺规划小节补写收口：F1�
     chapter.sections = ['扬尘治理六个百分百落实措施', '环境污染物管控指标与监测'];
     const input = makePlannedInput({ chapterDraftsFinal: [chapter] });
     const result = await enforcePlannedSectionCompleteness(input);
-    // 环境污染物小节连标题都没有（缺节）+ 扬尘小节纯表格（planned empty）：两类都进补写目标
-    expect(repairMock).toHaveBeenCalledTimes(1);
-    const firstCall = repairMock.mock.calls[0][0];
-    // 纯表格小节：指令必须是既有小节内补写正文，禁止新增同名小节标题
-    const emptyIssue = firstCall.issues.find(issue => issue.includes('扬尘治理六个百分百落实措施'));
+    // 环境污染物小节连标题都没有（缺节）+ 扬尘小节纯表格（planned empty）：两类都进补写目标。
+    // 4.58 R1-b：两类**分流为 2 次调用**（原为合并 1 次）——纯表格小节就地补、缺节小节章末追加。
+    expect(repairMock).toHaveBeenCalledTimes(2);
+    const callsWith = (needle: string) => repairMock.mock.calls.filter(call =>
+      ((call[0] as { issues?: string[] }).issues || []).some(issue => issue.includes(needle)));
+    // 纯表格小节：指令必须是既有小节内补写正文，禁止新增同名小节标题；且锚点 = 该小节标题行原文（就地）
+    const emptyCalls = callsWith('扬尘治理六个百分百落实措施');
+    expect(emptyCalls).toHaveLength(1);
+    const emptyIssue = (emptyCalls[0]![0] as { issues: string[] }).issues.find(issue => issue.includes('扬尘治理六个百分百落实措施'));
     expect(emptyIssue).toBeDefined();
     expect(emptyIssue).toContain('只有标题或表格无正式正文');
     expect(emptyIssue).toContain('不得新增同名小节标题');
-    // 缺节小节：指令仍是章末新增小节标题
-    const missingIssue = firstCall.issues.find(issue => issue.includes('环境污染物管控指标与监测'));
+    expect(emptyIssue).toContain('保留该小节标题行原文不动');
+    expect((emptyCalls[0]![0] as { anchorTexts: Array<{ text: string; appendAt?: string }> }).anchorTexts)
+      .toEqual([{ text: '### 1.1 扬尘治理六个百分百落实措施', append: true, appendAt: undefined }]);
+    // 缺节小节：指令仍是章末新增小节标题，锚点走章末追加
+    const missingCalls = callsWith('环境污染物管控指标与监测');
+    expect(missingCalls).toHaveLength(1);
+    const missingIssue = (missingCalls[0]![0] as { issues: string[] }).issues.find(issue => issue.includes('环境污染物管控指标与监测'));
     expect(missingIssue).toBeDefined();
     expect(missingIssue).toContain('新增小节标题');
+    expect((missingCalls[0]![0] as { anchorTexts: Array<{ appendAt?: string }> }).anchorTexts)
+      .toEqual([{ text: '### 1.1 扬尘治理六个百分百落实措施', append: true, appendAt: 'chapter-end' }]);
     expect(result.plannedSectionFixApplied).toBe(false);
   });
 

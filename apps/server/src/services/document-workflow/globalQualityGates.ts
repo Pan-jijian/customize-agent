@@ -1272,10 +1272,22 @@ export async function enforcePlannedSectionCompleteness(input: {
     }> = [];
     // ① 就地补写：逐个空/过短小节，锚点取其标题行原文
     for (const gap of chapterGaps.filter(item => item.reason !== 'missing_planned_section')) {
+      /**
+       * 锚点行定位必须用**严格归一化相等**，不能用 `sameSectionTitle`。
+       *
+       * `sameSectionTitle` 带 `nearSubsectionTitleMatch` 的宽容口径（本为「规划名 vs 成稿名单字漂移」
+       * 设计，如「…目标落位」与「…目标落实」），用它在一章的多个相似兄弟标题里挑一个必然挑错：
+       * 实测 `劳动力保障与工资支付措施` / `劳动力组织与实名制管理` / `分阶段劳动力投入与动态调配`
+       * 三者共享「劳动力」前缀，宽容口径下**全部命中同一个标题行**，三个就地补写都锚到 1.3
+       * （补写内容会全部挤进 1.3，另外两个小节依旧空着）。测试已锁定该回归。
+       *
+       * 严格口径：`normalizeSectionTitleForGap` 已剥离编号/空白/标点，相等即同一小节——定位所需仅此。
+       */
       const headingLine = chapterLines
         .map(line => line.trim())
         .reverse()
-        .find(line => /^#{3,4}\s/u.test(line) && sameSectionTitle(line.replace(/^#{3,4}\s+/u, ''), gap.sectionTitle));
+        .find(line => /^#{3,4}\s/u.test(line)
+          && normalizeSectionTitleForGap(line.replace(/^#{3,4}\s+/u, '')) === normalizeSectionTitleForGap(gap.sectionTitle));
       if (!headingLine) continue;
       result.push({
         chapter,

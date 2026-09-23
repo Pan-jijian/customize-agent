@@ -129,8 +129,19 @@ describe('M19 接线守护（章末追加链路）', () => {
     expect(source).toContain("spec.append === true && spec.appendAt !== 'chapter-end'");
   });
 
-  it('globalQualityGates.ts：planned-section-repair 调用点锚点使用章末追加模式', () => {
+  it('globalQualityGates.ts：planned-section-repair 调用点锚点按缺口性质分流（4.58 R1-b）', () => {
     const source = readFileSync(path.join(SRC_DIR, 'globalQualityGates.ts'), 'utf8');
-    expect(source).toContain("anchorTexts: [{ text: target.lastHeadingLine, append: true, appendAt: 'chapter-end' }]");
+    /**
+     * 4.58 R1-b 口径变更：锚点不再一律取章末标题行，而由 `target.appendAt` 决定——
+     * - `missing`（整节缺失）→ `'chapter-end'`（新增小节落章末，锚点仅作存在性校验）
+     * - `empty`/`too_short` → `undefined`（rolePipeline 的「补写定位」语义：就地补写在**该小节标题行后**）
+     *
+     * 旧实现把三类缺口合并、统一章末追加，导致 empty/too_short 的补写落在章末、
+     * 原小节标题下依旧无正文 → 终检「空小节」「小节只有标题或表格无正文」反复不清零。
+     */
+    expect(source).toContain('anchorTexts: [{ text: target.anchorLine, append: true, appendAt: target.appendAt }]');
+    expect(source).not.toContain('anchorTexts: [{ text: target.lastHeadingLine');
+    // 就地补写的锚点定位必须用严格归一化相等（用同义宽容口径会把多个相似兄弟标题全锚到同一个）
+    expect(source).toContain('normalizeSectionTitleForGap(line.replace(/^#{3,4}\\s+/u, \'\')) === normalizeSectionTitleForGap(gap.sectionTitle)');
   });
 });

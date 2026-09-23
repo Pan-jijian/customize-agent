@@ -109,7 +109,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
       generationDiagnostics: session.planning.generationDiagnostics, progressStages: session.global.progressStages, emitProgress: session.global.emitProgress, withProgressHeartbeat: session.global.withProgressHeartbeat,
       bidComposition: session.understanding.bidComposition,
     });
-    if (!plannedSectionPassResult.plannedSectionFixApplied) break;
+    // 可选链：本轮无 patch 落地（含早退无返回值）即停——不空转，也防未来早退分支漏带字段时崩栈
+    if (!plannedSectionPassResult?.plannedSectionFixApplied) break;
   }
 
   // 表格执行率确定性核验已提取至 globalQualityGates.repairTableExecutionGaps（单轮定向补表修复闭环，失败即放弃）

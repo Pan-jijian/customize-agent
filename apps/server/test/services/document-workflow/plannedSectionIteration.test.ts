@@ -19,7 +19,8 @@ describe('4.58 R1-c 缺节补写迭代到收敛', () => {
 
   it('调用侧循环（上限 3 轮），无 patch 落地即退出', () => {
     expect(source).toContain('for (let plannedSectionPass = 0; plannedSectionPass < 3; plannedSectionPass += 1)');
-    expect(source).toContain('if (!plannedSectionPassResult.plannedSectionFixApplied) break;');
+    // 可选链：无 patch 落地（含早退无返回值）即停——不空转，也防未来早退分支漏带字段时崩栈
+    expect(source).toContain('if (!plannedSectionPassResult?.plannedSectionFixApplied) break;');
   });
 
   it('迭代理由入注释（防后人删掉循环时不知道代价）', () => {
