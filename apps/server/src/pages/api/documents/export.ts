@@ -827,25 +827,37 @@ async function ensureDocxPackageParts(zip: JSZip, title: string, settings?: Docu
  * 多候选启动（与 renderPdfBuffer 同源：bundled chromium → 系统 chrome/edge → 常见路径）；
  * 任一图失败仅跳过该图（不阻断导出）。
  */
-async function buildDocx(title: string, markdown: string, settings?: DocumentExportSettings, templatePath?: string, projectRoot = process.cwd()) {
+async function buildDocx(title: string, markdown: string, settings?: DocumentExportSettings, templatePath?: string, projectRoot = process.cwd()): Promise<{ buffer: Buffer; templateWarning?: string }> {
   const context: DocxBuildContext = { projectRoot, images: [] };
   // 4.55.18：SVG 图件预光栅化（DOCX 不能内联 SVG；失败仅跳过该图）
   const contentXml = markdownToDocxXml(markdown, settings, context);
+  let templateWarning: string | undefined;
   if (templatePath && fs.existsSync(templatePath)) {
     const zip = await JSZip.loadAsync(fs.readFileSync(templatePath));
     const documentFile = zip.file('word/document.xml');
     if (documentFile) {
       const xml = await documentFile.async('string');
-      zip.file('word/document.xml', xml.replace(/\{\{title\}\}/gu, escapeXml(title)).replace(/\{\{content\}\}/gu, contentXml));
-      await ensureDocxPackageParts(zip, title, settings, context.images);
-      return zip.generateAsync({ type: 'nodebuffer' });
+      /**
+       * 4.56 L4-1 **静默交付错误产物**根治：原实现在模板 `document.xml` 无 `{{content}}` 占位符时，
+       * `String.replace` 是**空操作** → 返回的 docx 是**模板原文**、正文一字不进，
+       * 且无报错、无响应头、无阶段事件——交付物与本次生成的文档完全无关却无从察觉。
+       * 现口径：无占位符 → **回退到标准生成路径**（正文正确，仅不套模板样式）+ 显式告警落盘与响应头；
+       * **绝不以模板原文冒充实交付物**。
+       */
+      if (/\{\{content\}\}/u.test(xml)) {
+        zip.file('word/document.xml', xml.replace(/\{\{title\}\}/gu, escapeXml(title)).replace(/\{\{content\}\}/gu, contentXml));
+        await ensureDocxPackageParts(zip, title, settings, context.images);
+        return { buffer: await zip.generateAsync({ type: 'nodebuffer' }) };
+      }
+      console.error(`[export] 模板缺少 {{content}} 占位符，已回退标准生成路径（正文正确、未套模板样式）：${templatePath}`);
+      templateWarning = `模板缺少 {{content}} 占位符，已回退标准生成路径（未套模板样式）`;
     }
   }
   const page = settings?.page || {};
   const zip = new JSZip();
   zip.folder('word')?.file('document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${contentXml}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="${lengthToTwips(page.marginTop, 2.5)}" w:right="${lengthToTwips(page.marginRight, 2)}" w:bottom="${lengthToTwips(page.marginBottom, 2)}" w:left="${lengthToTwips(page.marginLeft, 2)}"${page.gutter ? ` w:gutter="${lengthToTwips(page.gutter, 0)}"` : ''}/></w:sectPr></w:body></w:document>`);
   await ensureDocxPackageParts(zip, title, settings, context.images);
-  return zip.generateAsync({ type: 'nodebuffer' });
+  return { buffer: await zip.generateAsync({ type: 'nodebuffer' }), templateWarning };
 }
 
 /** 生成 HTML 文档外壳，包含可配置打印样式和中文排版优化 */
@@ -1321,7 +1333,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
     // DOCX 格式
     if (format === 'docx') {
-      const docx = await buildDocx(title, markdown, exportSettings, body.wordTemplatePath, projectRoot);
+      const docxBuild = await buildDocx(title, markdown, exportSettings, body.wordTemplatePath, projectRoot);
+      const docx = docxBuild.buffer;
+      // L4-1：模板占位符缺失时的回退必须**可见**（响应头 + 导出报告），不得静默
+      if (docxBuild.templateWarning) {
+        res.setHeader('X-Export-Template-Warning', encodeURIComponent(docxBuild.templateWarning));
+        console.error(`[export] ${docxBuild.templateWarning}`);
+      }
       archiveExportReport(record, format, projectRoot, renderAuditReport, gateIssues);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${filename}.docx`)}`);
