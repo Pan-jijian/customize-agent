@@ -412,6 +412,109 @@ describe('口径残留终检（被取代值不得作为现行口径）', () => {
     const issues = caliberConsistencyIssues('本工程总工期330日历天，另含1365日历天的保修期。', ledger);
     expect(issues).toEqual([]);
   });
+
+  /**
+   * 4.55.29 的 `caliber === false` 跳过语句**只应覆盖"落位"分支**：残留分支的判据是
+   * 「正文不得再把已被变更链取代的值当现行口径陈述」，而现行口径硬约束
+   *（`renderTruthConstraintBlock`）对**凡有 superseded 的属性**（不限 caliber）都下达过。
+   * 实测（doc-1790119909475-7ea5c969 巢湖）：真值层已判 330、正文 6 处 365，残留零报告。
+   */
+  it('残留分支不受 caliber 集限制（非口径属性的被取代值同样不得再现）', async () => {
+    const { caliberConsistencyIssues } = await import('@/services/document-workflow/qualityValidation');
+    const issues = caliberConsistencyIssues('窗材质为2.5mm厚的铝合金型材，局部1.8mm。', [
+      { attribute: '窗材质', value: '2.5mm', rule: 'R7', evidence: [{ source: 答疑 }], superseded: ['1.8mm'], caliber: false },
+    ]);
+    expect(issues.map(issue => issue.message).join('|')).toContain('被取代口径残留');
+  });
+});
+
+/**
+ * 4.55.31 变更链被取代值**留存**（finalize 读侧盲区）。
+ *
+ * 真实证据链（doc-1790119909475-7ea5c969 巢湖，三条 blocker 的共同根源）：
+ *   ① 招标文件.pdf p5「2.8计划工期：365 日历天」；1号答疑「原计划工期:365日历天，现变更修改为:330日历天」；
+ *      7号答疑「计划工期于2026年08月05日变更修改为330日历天」。
+ *   ② 写侧（stageUnderstanding）真值层裁决 330日历天（被取代 365日历天）→ 随后把事实池、模型池与
+ *      `writerEvidence` **就地**改写为 330；而 `writerEvidence` 与 `allEvidence` **共享对象引用**
+ *      （partitionEvidenceByContentSafety 用 filter 返回同引用切片），故 `session.allEvidence` 同步变成 330。
+ *   ③ finalize 读侧重算（rebuildAndRecompute）时候选集里**已无 365** → `matchedOverrideChains` 的
+ *      `candidates.some(含旧值)` 失配 → superseded 只剩「2026年10月10日」「资料中未明确体现计划工期。」
+ *      这类**非单位值** → 残留模式为空 → 残留闸静默；正文里 6 处 365日历天 只能靠别的检测器偶然撞见。
+ *
+ * 判据修复 = 变更链自证（链声明的生效值 == 本次裁决胜出值 ⇒ 链的被取代值确是本属性旧口径），
+ * 与"旧值候选是否还在"解耦：旧值消失恰恰是「它已被取代」的结果，不是「它不存在」的证据。
+ */
+describe('4.55.31 变更链被取代值留存（finalize 读侧盲区）', () => {
+  const 答疑1 = '巢湖项目/答疑文件/1招标答疑文件（电子签章版）.pdf';
+  const 答疑7 = '巢湖项目/答疑文件/7招标答疑文件（电子签章版）.pdf';
+  // 写侧「现行口径前置」后的读侧输入：招标正文证据里的 365 已被就地改写为 330
+  const overrides = collapseOverrideChains(extractValueOverrides([
+    { text: '1、本次招标项目原计划工期:365日历天，现变更修改为:330日历天。', source: 答疑1 },
+  ]));
+  const build = () => buildAuthoritativeValues({
+    facts: [
+      { key: '计划工期', value: '330日历天', sourceFile: 招标 },
+      { key: '计划工期', value: '365日历天，现变更修改为:330日历天', sourceFile: 答疑1 },
+      { key: '计划工期', value: '2026年10月10日（具体开工日期以招标人出具的书面开工通知为准）', sourceFile: 答疑7 },
+      { key: '计划工期', value: '资料中未明确体现计划工期。', sourceFile: 招标 },
+    ],
+    overrides,
+    labeledValues: extractLabeledAuthorityValues([
+      { text: '2.8 计划工期：330 日历天', source: 招标 },
+      { text: '1、本次招标项目原计划工期:365日历天，现变更修改为:330日历天。', source: 答疑1 },
+    ]),
+  });
+  const pick = () => build().resolved.find(item => item.attribute === '计划工期');
+
+  it('回归：同一组候选真值层必须判出 330（不是 365），且 caliber 为真', () => {
+    expect(pick()?.value).toBe('330日历天');
+    expect(pick()?.caliber).toBe(true);
+  });
+
+  it('留存：旧值候选已被写侧归一掉，365 仍必须登记为被取代值（残留闸的判据来源）', () => {
+    expect(pick()?.superseded).toContain('365日历天');
+  });
+
+  it('正例：正文出现 365日历天 → 必须报「被取代口径残留」', async () => {
+    const { caliberConsistencyIssues } = await import('@/services/document-workflow/qualityValidation');
+    const body = [
+      '建筑面积72062.84平方米，计划工期365日历天，质量标准为合格。',
+      '总工期330日历天，按施工准备、三通一平、主体结构、装饰装修推进。',
+    ].join('\n');
+    const issues = caliberConsistencyIssues(body, pick() ? [pick()!] : []);
+    expect(issues.map(issue => issue.message).join('|')).toContain('被取代口径残留');
+  });
+
+  it('反例：正文只写 330日历天 → 零 issue', async () => {
+    const { caliberConsistencyIssues } = await import('@/services/document-workflow/qualityValidation');
+    const issues = caliberConsistencyIssues('本工程总工期330日历天，按施工准备、主体结构推进。', pick() ? [pick()!] : []);
+    expect(issues).toEqual([]);
+  });
+
+  it('反例：如实陈述变更过程（原为365日历天，经答疑澄清变更为330日历天）→ 不报残留', async () => {
+    const { caliberConsistencyIssues } = await import('@/services/document-workflow/qualityValidation');
+    const body = '本工程总工期330日历天（原为365日历天，经答疑澄清变更为330日历天）。';
+    const issues = caliberConsistencyIssues(body, pick() ? [pick()!] : []);
+    expect(issues.map(issue => issue.message).join('|')).not.toContain('被取代口径残留');
+  });
+
+  it('澄清/变更语境优先于载体优先级：答疑复述的旧值（96）不得压过变更句声明的新值（90）', () => {
+    // 载体优先级若先收窄（招标 90 < 答疑 96），变更句声明的新值会被 R2 提前淘汰、R2.5 不可达
+    const audit = buildAuthoritativeValues({
+      facts: [
+        { key: '计划工期', value: '原为365日历天，现变更为330日历天', sourceFile: 招标 },
+        { key: '计划工期', value: '计划工期365日历天', sourceFile: 答疑 },
+      ],
+      overrides: [],
+      labeledValues: extractLabeledAuthorityValues([
+        { text: '2.8计划工期：365日历天', source: 招标 },
+        { text: '计划工期365日历天', source: 答疑 },
+      ]),
+    });
+    const resolved = audit.resolved.find(item => item.attribute === '计划工期');
+    expect(resolved?.value).toBe('330日历天');
+    expect(resolved?.superseded).toContain('365日历天');
+  });
 });
 
 describe('覆盖表文本应用（写作输入就地替换）', () => {

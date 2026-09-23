@@ -18,7 +18,7 @@ import { stageTableRepair } from './finalize/repairRounds/tableRepair';
 import { stageSemanticChoice } from './finalize/repairRounds/semanticChoice';
 import { stageDeterministicStage5 } from './finalize/repairRounds/deterministicStage5';
 import { stagePostReviewSurface, runSurfaceDeterministicCleans, replayBlueprintCitationNumericFixes, replayStage5FactsModelNumericFixes, replaySurfacePunctuationClosure } from './finalize/repairRounds/postReviewSurface';
-import { backfillUsedNotDeclared } from './finalize/repairRounds/basisRegulationsCrossRepair';
+import { backfillUsedNotDeclared, replayTailStrippedBasisCitations } from './finalize/repairRounds/basisRegulationsCrossRepair';
 import { stageFactDistribution } from './finalize/repairRounds/factDistribution';
 import { stageNumericVerification } from './finalize/repairRounds/numericVerification';
 import { replayRequirementTailClosure, stageRequirementResponseRepair } from './finalize/repairRounds/requirementResponseRepair';
@@ -234,6 +234,32 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // 追加块（补写/删除类）仍可能带回标点叠用残留（「。。」句段拼接、「、、」并列删除），
   // round-2 链无二次消费点直坠终门禁——同源修复器在终门禁前最后收口（终门禁所检 = 交付所存）
   await replaySurfacePunctuationClosure(session);
+  // 4.55.31 链尾编制依据引用小句回补重放（巢湖实机归因：修复轮成果被链尾清洗确定性删除）：
+  // basis-regulations-cross-repair 的 Phase B 把「声明未用」条目以「…按《X》（编号）控制…」形态
+  // 补进章草稿（阶段记录 success、缺口 29→1），其后的 runSurfaceDeterministicCleans →
+  // fixFormalSourceResidue → materialResidue.stripDrawingPointerPhrases 把这类小句整句删除——
+  // 清洗器判据（锚词＋书名号）**宽于**检测端判据（drawing-pointer-phrase 只判「按设计图纸」「图集号」
+  // 「缺资料搪塞」，不判《标准名》（编号）引用），且清洗在最后一次净变更点之后执行、其后无重建无重放
+  // → 交付 markdown 里引用消失、章草稿里仍在，终检记 22 处「声明未用」（报告说改了、产物里没有）。
+  // 同链尾重放范式（replayBlueprintCitationNumericFixes / replayRequirementTailClosure）：在真正的
+  // 链尾以章草稿为源、按清洗后形态精确对齐回插被误删的引用小句（真指向小句照旧删除，不回补），
+  // markdown-only 写回 + 重算校验组——终门禁所检 = 交付所存 = 回补后成稿。零 LLM、幂等。
+  {
+    const citationReplay = replayTailStrippedBasisCitations(session);
+    if (citationReplay.restored > 0) {
+      session.finalMarkdown = citationReplay.markdown;
+      await session.recomputeFinalValidationBundle();
+      const message = `链尾编制依据引用回补：${citationReplay.restored} 处被链尾指向型清洗误删的标准引用小句按章草稿恢复（覆盖 ${citationReplay.labels.slice(0, 6).join('、')}${citationReplay.labels.length > 6 ? ' 等' : ''}）`;
+      session.generationDiagnostics.llm.lastInfo = message;
+      upsertProgressStage(session.finalGateRepairStages, displayStage({
+        type: 'reference',
+        roleId: 'basis-regulations-tail-citation-replay',
+        status: 'success',
+        message,
+        details: citationReplay.labels.slice(0, 12),
+      }, { subtitle: '链尾编制依据引用回补' }));
+    }
+  }
   // 链尾编制依据回补（确定性，零 LLM）：正文引用但未列入编制依据小节的标准，按编号族补入编制依据。
   // 此处是**真正的链尾**——其后无任何改写正文的轮次，故轮次中途新增的引用（链尾要求收口的补写会带入
   // 新的《》引用）才有收口点。实测巢湖：链路中段的 basis-regulations-cross-repair 报「未记录」，

@@ -1602,6 +1602,115 @@ describe('4.55.29 反向验证：同一对象同一属性写成清单外规格 �
   });
 });
 
+// ═══════ 4.55.30 口径池抽取边界 + 对象维度（巢湖实测「垫层混凝土强度等级 C35 与 C15 与 C20 两套口径」归因） ═══════
+// 真实 draft doc-1790119909475-7ea5c969 的三条命中：
+// ① 「第二步，承台与基础梁土方开挖、垫层浇筑、钢筋绑扎、模板支设，采用C35商品混凝土分层振捣」——垫层是工序
+//    枚举中的一项，C35 的主语是枚举整体主语「承台与基础梁」：锚点词后「工序动词 + 枚举标点」形态不作数值宿主
+//    （负向断言；同句他项枚举「垫层厚度200mm、C20」「垫层、圈梁、压顶采用C20」数值确属垫层自身，照常入池）；
+// ② 「基础下做100厚碎石垫层与100厚C15」「侧缘石垫层562m3采用C20」——材质限定语是**另一类对象**（清单另有
+//    「侧缘石垫层」条目），不与裸条目部位词同池（与 F14 specObjectScope 同一分类判据，不另起一套机制）。
+// 反向守护：裸条目名互斥、部位限定同对象（承台垫层 vs 垫层）、A 标号真值仍必须报出（真冲突不放过）。
+
+describe('4.55.30 口径池抽取边界：工序枚举项不作数值宿主', () => {
+  it('「垫层浇筑、钢筋绑扎、模板支设，采用C35商品混凝土」→ C35 不入垫层池（真实误报回归）', () => {
+    const markdown = '第二步，承台与基础梁土方开挖、垫层浇筑、钢筋绑扎、模板支设，采用C35商品混凝土分层振捣。垫层采用C15混凝土，浇筑后12h内覆盖养护。';
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.filter(issue => /垫层|C标号/u.test(issue.message))).toEqual([]);
+  });
+
+  it('边界守护：同句他项枚举「垫层厚度200mm、C20商品混凝土」值确属垫层自身 → 照常入池互斥', () => {
+    const markdown = '垫层厚度200mm、C20商品混凝土，浇筑后养护不少于7d。垫层采用C15混凝土，表面收平。';
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.some(issue => /C20/u.test(issue.message) && /C15/u.test(issue.message))).toBe(true);
+  });
+
+  it('反向：裸口径两值仍互斥（垫层采用C15。垫层采用C20。）', () => {
+    const markdown = '垫层采用C15混凝土，浇筑后养护。主体结构施工后，垫层采用C20混凝土浇筑。';
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.some(issue => /C15/u.test(issue.message) && /C20/u.test(issue.message))).toBe(true);
+  });
+
+  it('反向：部位限定同对象仍互斥（承台垫层 C15 vs 垫层 C20，部位限定不构成另一类对象）', () => {
+    const markdown = '承台垫层采用C15混凝土。垫层采用C20混凝土浇筑。';
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.some(issue => /C15/u.test(issue.message) && /C20/u.test(issue.message))).toBe(true);
+  });
+
+  it('A 标号真值边界：陶粒砌块 CA5.0 不误采为加气混凝土砌块 A 标号（假冲突回归）', () => {
+    const markdown = '外墙采用蒸压加气混凝土砌块，强度级别A3.5，专用粘结剂砌筑。外墙另采用240厚保温陶粒砌块，强度级别CA5.0、干密度级别B07。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('A 标号反向：同墙两个真 A 标号仍互斥（A3.5 vs A5.0）', () => {
+    const markdown = '外墙采用蒸压加气混凝土砌块，强度级别A3.5，专用粘结剂砌筑。外墙采用蒸压加气混凝土砌块，强度级别A5.0。';
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.some(issue => /A3\.5/u.test(issue.message) && /A5\.0/u.test(issue.message))).toBe(true);
+  });
+});
+
+describe('4.55.30 口径池对象维度闸：材质限定语不作裸条目部位词的第二口径', () => {
+  it('「碎石垫层 C15」+「侧缘石垫层 C20」+ 裸「垫层 C15」→ 0 冲突（真实误报回归）', () => {
+    const markdown = '基础下做100厚碎石垫层与100厚C15混凝土垫层。侧缘石垫层562m3采用C20。垫层采用C15混凝土。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('对照：去掉材质限定语（裸垫层 C15 vs 侧缘石垫层 C20）→ 侧缘石仍不入裸池，0 冲突', () => {
+    const markdown = '侧缘石垫层562m3采用C20。垫层采用C15混凝土。';
+    expect(crossSectionNumericConflictIssues(markdown)).toEqual([]);
+  });
+
+  it('对照：裸垫层 C15 vs 裸垫层 C20（无限定语）→ 仍报（对象维度闸不扩大放过面）', () => {
+    const markdown = '垫层采用C15混凝土，浇筑后养护。垫层采用C20混凝土浇筑。';
+    const issues = crossSectionNumericConflictIssues(markdown);
+    expect(issues.some(issue => /C15/u.test(issue.message) && /C20/u.test(issue.message))).toBe(true);
+  });
+});
+
+// ═══════ 4.55.30 规格错位：总平面区域限定语（场地做法）≠ 清单实体部位 ═══════
+// 归因：真实 draft「场内主干道及材料加工区地面采用200mm厚C20混凝土硬化」被当清单条目「地面」
+// （3#门卫 13.350m2 180mm 楼地面）的规格错位报 blocker——限定语「干道及材料加工区」尾字「区」
+// 属仓库部位词表故原判 same-class；但场地硬化是临时设施做法，与清单楼地面不是同一对象。
+// 判据为**总平面区域词类**（办公区/生活区/加工区/堆放区/驻地/仓库/材料库/库房…，机制而非材料名白名单）。
+describe('4.55.30 规格错位：总平面区域限定语（场地做法）与清单实体部位不是同一对象', () => {
+  function siteMap(): SpecAuthorityMap {
+    return {
+      厚度规格: [
+        { location: '地面', spec: '180mm', quantity: '13.350m2', sourceFile: '清单.xls' },
+        { location: '垫层', spec: '100mm', quantity: '5466.840m3', sourceFile: '清单.xls' },
+      ],
+    };
+  }
+
+  it('「场内主干道及材料加工区地面采用200mm厚C20混凝土硬化」→ 静默（真实误报回归）', () => {
+    const markdown = '场内主干道及材料加工区地面采用200mm厚C20混凝土硬化，两侧设排水沟。';
+    expect(scanSpecLocationMismatchHits(markdown, siteMap())).toEqual([]);
+  });
+
+  it('其它总平面区域词（材料仓库地面）同样静默', () => {
+    expect(specLocationMismatchIssues('材料仓库地面采用200mm厚C20混凝土硬化。', siteMap())).toEqual([]);
+  });
+
+  it('反向：裸「地面采用200mm厚C20混凝土浇筑」vs 清单 180mm → 仍报 blocker，且不产替换 span', () => {
+    const hits = scanSpecLocationMismatchHits('地面采用200mm厚C20混凝土浇筑，随捣随抹。', siteMap());
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.issue.severity).toBe('blocker');
+    expect(hits[0]!.issue.message).toContain('180mm');
+    // 判定通过但未达硬判（对象维度缺失）→ 不给 replacement，确定性改写通道不开启（与 4.55.29 收口一致）
+    expect(hits[0]!.replacement).toBeUndefined();
+  });
+
+  it('反向：实体部位限定（承台垫层 200mm vs 清单 100mm）→ 仍报 blocker（部位限定不受场地词闸影响）', () => {
+    const map: SpecAuthorityMap = {
+      厚度规格: [
+        { location: '承台垫层', spec: '100mm', quantity: '120m3', sourceFile: '清单.xls' },
+        { location: '地面', spec: '180mm', quantity: '13.350m2', sourceFile: '清单.xls' },
+      ],
+    };
+    const hits = scanSpecLocationMismatchHits('承台垫层厚度为200mm，分层浇筑振捣密实。', map);
+    expect(hits.some(hit => hit.issue.severity === 'blocker')).toBe(true);
+  });
+});
+
 // ═══════ F6 劳动力口径隔离（resourceConsistencyIssues） ═══════
 // 历史缺陷：管理口径（18人）与全员峰值（286人）、不同工种（钢筋工60/木工80）被当同口径互斥误报；
 // 改造后仅同组互查：管理 vs 管理、同工种 vs 同工种、峰值 vs 峰值。

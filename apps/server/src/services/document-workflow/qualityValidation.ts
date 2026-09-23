@@ -19,6 +19,7 @@ import { PAIRED_PUNCTUATION_SYMBOLS } from './structureIntegrityRules';
 import type { BlueprintData } from './integratedBlueprint';
 import { drawingFactPlacement, type DrawingFactLock } from './drawingFactLock';
 import { assignBillRowChapter, scanBillExplicitDispositions } from './billFactLock';
+import type { BillFactLock } from './billFactLock';
 import { buildResourceBreakdownAuthority, normalizeEquipmentClaimName, scanEquipmentCountClaims, scanEquipmentNamesIn, scanResourceBreakdownClaims } from './resourceBreakdownNumbers';
 import { evidenceSatisfiesSpecField } from './factMatching';
 import { readPromptContents } from './templateStore';
@@ -1087,8 +1088,9 @@ export function basisRegulationsCoverageIssues(markdown: string, blueprintData?:
  * 三类模式口径与十度/十一度既有实现一致（工种构成：桥接词白名单+群体语境豁免+阶段部署段落豁免；
  * 机械台数：单条目锚定名称语境、同名多条目按规格语境；材料拆分：多规格+同族单位+合计行豁免）；
  * issue 按条目 label 去重（每条目最多一条阻断，全部偏离由修复器一轮收敛）。 */
-export function resourceBreakdownConsistencyIssues(markdown: string, blueprintData?: BlueprintData): ValidationIssue[] {
-  const authority = buildResourceBreakdownAuthority(blueprintData);
+export function resourceBreakdownConsistencyIssues(markdown: string, blueprintData?: BlueprintData, lock?: BillFactLock): ValidationIssue[] {
+  // 4.55.30 口径分层：逐条口径（清单行级）作为第二源，单体语句按逐条口径裁决（蓝图汇总为跨单体总量）
+  const authority = buildResourceBreakdownAuthority(blueprintData, lock);
   if (!authority) return [];
   const issues: ValidationIssue[] = [];
   const seen = new Set<string>();
@@ -3531,9 +3533,11 @@ export function caliberConsistencyIssues(markdown: string, ledger: Array<{ attri
     // 钢筋连接/主要材料包括/机械设备计划…），其值是写作素材而非口径；对它们要求逐字落位，
     // 等于用一个写手从未收到、也永不消解的约束产 blocker（巢湖最新实测 9 条中的 5 条）。
     // 口径集由原文口径标签抽取单源划定（`buildAuthoritativeValues` 的 labeledValues），读写同源。
-    if (item.caliber === false) continue;
+    // 注意：本闸**只覆盖落位分支**——残留分支（下方 `item.superseded`）不得被它连带跳过：
+    // 被取代值残留是「正文写了旧口径」，与写手有没有被告知过该属性无关，写手一律不得写旧值。
     const token = String(item.value || '').replace(/\s+/gu, '');
-    if (token.length >= 3 && CALIBER_VERBATIM_SHAPES.has(classifyValueShape(String(item.value || ''))) && !normalized.includes(token)) {
+    if (item.caliber !== false
+      && token.length >= 3 && CALIBER_VERBATIM_SHAPES.has(classifyValueShape(String(item.value || ''))) && !normalized.includes(token)) {
       issues.push({
         level: 'error',
         severity: 'blocker',

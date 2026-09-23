@@ -15,16 +15,24 @@
  *   （防误报回滚），汉字数不低于「修复前 − 设计移除量 − max(40, 5%)」门槛（防删除式修复），
  *   任一违反即整体回滚（恢复章草稿 + 重建 + 重算）。
  *
- * 口径单源：审计/匹配/标签渲染复用 basisRegulationsCross（检测定位=修复定位）；区段范围复用
- * qualityValidation.basisRegulationSectionRanges（与检测端排除区段同源）。编制依据区段位于
+ * 口径单源：审计/匹配/标签渲染复用 basisRegulationsCross（检测定位=修复定位）；声明侧区段分层
+ * 复用 basisRegulationsCross.basisDeclarationRanges（标题段优先、零条目退回词锚候选——与检测端
+ * 排除区段同源；4.55.31 前两端口径分叉是「词锚段 10 条幻影声明」的成因）。编制依据区段位于
  * 章外结构（章级无区段）时确定性插入/移除无定向目标，显性记录交终门禁，不猜测改写。
+ *
+ * 4.55.31 补：链尾引用小句回补（`replayTailStrippedBasisCitations`，见其函数注释）——本轮的引用
+ * 补写被链尾指向型清洗误删（清洗判据宽于检测判据），由链尾重放按判据对齐恢复，防「报告说改了、
+ * 产物里没有」。
  */
 import { repairOutcomeReason, repairOutcomeStatus } from './repairOutcome';
-import { basisRegulationSectionRanges, extractBasisRegulationSection } from '../../qualityValidation';
+import { stripDrawingPointerPhrases } from '../../materialResidue';
 import {
   auditBasisRegulationsCross,
+  basisDeclarationRanges,
+  extractBasisDeclarationText,
   extractRegulationBookNames,
   extractRegulationCodes,
+  normalizeRegulationCode,
   normalizeRegulationName,
   REGULATION_BOOK_RE,
   REGULATION_CODE_RE,
@@ -81,9 +89,10 @@ function lineOffsets(text: string): number[] {
   return offsets;
 }
 
-/** 剔除编制依据区段行（评分/引用判定口径与检测端一致：声明区段不计为正文引用） */
+/** 剔除编制依据区段行（评分/引用判定口径与检测端一致：声明区段不计为正文引用；
+ * 区段分层与检测端同源——basisDeclarationRanges，标题段优先、零条目时退回词锚候选） */
 function stripBasisSectionLines(text: string): string {
-  const ranges = basisRegulationSectionRanges(text);
+  const ranges = basisDeclarationRanges(text);
   if (ranges.length === 0) return text;
   const excluded = new Set<number>();
   for (const range of ranges) {
@@ -184,7 +193,7 @@ function appendEntriesToLine(line: string, joined: string): string {
 /** Phase A 主体：把缺口条目插入编制依据区段条目最密集的非表格行尾（同类目追加；无则表格块后新起一行） */
 function insertUsedEntries(content: string, entries: string[]): string | undefined {
   if (entries.length === 0) return undefined;
-  const ranges = basisRegulationSectionRanges(content);
+  const ranges = basisDeclarationRanges(content);
   if (ranges.length === 0) return undefined;
   const lines = content.split(/\r?\n/u);
   let bestNonTable: { index: number; score: number } | undefined;
@@ -273,7 +282,7 @@ function resolveEntrySpans(slice: string, gap: BasisRegulationCrossGap): Surgery
 
 /** 区段字符切片内定位缺口条目 span（按区段行号换算字符偏移；首个含命中的区段） */
 function locateGapSpans(content: string, gap: BasisRegulationCrossGap): SurgerySpan[] | undefined {
-  const ranges = basisRegulationSectionRanges(content);
+  const ranges = basisDeclarationRanges(content);
   if (ranges.length === 0) return undefined;
   const offsets = lineOffsets(content);
   for (const range of ranges) {
@@ -336,8 +345,8 @@ function removeDeclaredGap(content: string, gap: BasisRegulationCrossGap): strin
     working = applySurgery(working, spans);
   }
   if (working === content || working.length >= content.length) return undefined;
-  if (basisRegulationSectionRanges(working).length === 0) return undefined;
-  if (gapDeclaredInSection(extractBasisRegulationSection(working), gap)) return undefined;
+  if (basisDeclarationRanges(working).length === 0) return undefined;
+  if (gapDeclaredInSection(extractBasisDeclarationText(working), gap)) return undefined;
   return working;
 }
 
@@ -350,8 +359,9 @@ function buildApplicationInstruction(chapterTitle: string, gaps: BasisRegulation
     ...gaps.map(gap => `- ${renderGapLabel(gap)}`),
     '修复要求：',
     '1. 在本章对应工序/质量验收要求的既有段落中补写自然应用引用句（写清该标准用于哪个工序环节的什么控制指标或验收要求），引用必须使用《标准名称》（编号）正式形态；',
-    '2. 引用句须镶嵌进既有施工或验收语境，不得写成孤立口号句、纯清单句或文末罗列；',
-    '3. 不改写、不删除既有内容，不新增/删除小节标题，不调整表格结构；其余内容一字不动。',
+    '2. 引用形态硬约束（链尾指向型清洗判据单源）：《标准名称》（编号）必须写在**小句开头**，例如「《X》（GB 50202-2018）规定，桩位偏差与基底标高按…控制」；**禁止**写成「…按《X》（GB 50202-2018）控制…」「…依据/参照/参见《X》（GB 50202-2018）…」形态——该形态会被链尾「指向型表述」确定性清洗整小句删除（评标人看不到该标准落位，对账缺口复现）；',
+    '3. 引用句须镶嵌进既有施工或验收语境，不得写成孤立口号句、纯清单句或文末罗列；',
+    '4. 不改写、不删除既有内容，不新增/删除小节标题，不调整表格结构；其余内容一字不动。',
   ].join('\n');
 }
 
@@ -372,7 +382,7 @@ export async function stageBasisRegulationsCrossRepair(session: FinalizeSession)
   };
 
   // 编制依据所在章定位（确定性插入/移除的定向目标；区段位于章外结构时不猜测改写）
-  const basisChapterIndex = session.finalChapterDrafts.findIndex(chapter => basisRegulationSectionRanges(chapter.content).length > 0);
+  const basisChapterIndex = session.finalChapterDrafts.findIndex(chapter => basisDeclarationRanges(chapter.content).length > 0);
   if (basisChapterIndex < 0) {
     emitRecord(displayStage({ type: 'validation', roleId: 'basis-regulations-cross-repair', status: 'failed', message: '编制依据双向对账收口：全文存在对账缺口但各章均无编制依据区段（区段位于章外结构），确定性插入/移除无定向目标，由终门禁照常复核' }, { subtitle: '评审后兜底' }));
   }
@@ -381,7 +391,7 @@ export async function stageBasisRegulationsCrossRepair(session: FinalizeSession)
   let insertedCount = 0;
   if (basisChapterIndex >= 0 && entryAudit.usedNotDeclared.length > 0) {
     const basisContent = contentOf(basisChapterIndex);
-    const sectionText = extractBasisRegulationSection(basisContent);
+    const sectionText = extractBasisDeclarationText(basisContent);
     const missing = entryAudit.usedNotDeclared.filter(gap => !gapDeclaredInSection(sectionText, gap));
     if (missing.length > 0) {
       const inserted = insertUsedEntries(basisContent, missing.map(gap => buildInsertionEntry(gap, session.finalMarkdown)));
@@ -586,17 +596,120 @@ export async function stageBasisRegulationsCrossRepair(session: FinalizeSession)
  *（r14 citation 回退、r23「一级建造师」5 条补写零踪迹、M24c 961.42 回归…）。改为 markdown-only 后，
  * 链尾各轮的产物不再被任何后续重建抹掉，补丁链可终止。
  *
- * `extractBasisRegulationSection` / `insertUsedEntries` 均为纯文本函数（不依赖 session），
+ * `extractBasisDeclarationText` / `insertUsedEntries` 均为纯文本函数（不依赖 session），
  * 对整篇 markdown 与对单章 content 行为一致。
  */
 export function backfillUsedNotDeclared(session: FinalizeSession): { inserted: number; labels: string[]; markdown?: string } {
   const audit = auditBasisRegulationsCross(session.finalMarkdown);
   if (audit.usedNotDeclared.length === 0) return { inserted: 0, labels: [] };
-  const sectionText = extractBasisRegulationSection(session.finalMarkdown);
+  const sectionText = extractBasisDeclarationText(session.finalMarkdown);
   if (!sectionText) return { inserted: 0, labels: [] };
   const missing = audit.usedNotDeclared.filter(gap => !gapDeclaredInSection(sectionText, gap));
   if (missing.length === 0) return { inserted: 0, labels: [] };
   const updated = insertUsedEntries(session.finalMarkdown, missing.map(gap => buildInsertionEntry(gap, session.finalMarkdown)));
   if (!updated) return { inserted: 0, labels: [] };
   return { inserted: missing.length, labels: missing.map(renderGapLabel), markdown: updated };
+}
+
+// ═══════════════ 链尾引用小句回补（4.55.31 链尾重放；判据对齐，确定性零 LLM） ═══════════════
+
+/** 非全局正则副本（避免 /g 的 lastIndex 状态污染判定；惰性构造——模块级构造会踩
+ * documentPipeline→postReviewSurface→本模块→basisRegulationsCross 的循环导入 TDZ） */
+let standardCodeProbeRe: RegExp | undefined;
+function hasStandardCode(text: string): boolean {
+  if (!standardCodeProbeRe) standardCodeProbeRe = new RegExp(REGULATION_CODE_RE.source, 'u');
+  return standardCodeProbeRe.test(text);
+}
+
+/** 小句是否为链尾清洗判定的「指向型」——**以清洗函数本身为唯一判据源**（不复制其模式表，
+ * 判据升级时两侧自动同步）。 */
+function isPointerClause(clause: string): boolean {
+  const trimmed = clause.trim();
+  if (!trimmed) return false;
+  return stripDrawingPointerPhrases(trimmed).text.replace(/[，,、；;。.\s]/gu, '').length === 0;
+}
+
+/** 小句删除是否**由《标准名》（编号）引用触发**（判据对齐的关键）：去掉书名号引用后该小句
+ * 已不再是指向型 → 删除动因是引用本身（「按《X》（GB 50202-2018）控制」被当成指向），
+ * 属误删（检测端 drawing-pointer-phrase 判据**没有**《》分支，只判图纸/图集/缺资料）；
+ * 去掉引用后仍是指向型（「参见《…》20S515/29」「按设计图纸控制」「待补充」）→ 真指向，
+ * 不回补（回补会引入检测端 blocker）。 */
+function isCitationDrivenPointerClause(clause: string): boolean {
+  if (!isPointerClause(clause)) return false;
+  const hasCitation = extractRegulationBookNames(clause).length > 0 || hasStandardCode(clause);
+  if (!hasCitation) return false;
+  const withoutCitation = clause.replace(REGULATION_BOOK_RE, '').replace(REGULATION_CODE_RE, '');
+  return !isPointerClause(withoutCitation);
+}
+
+/** 清洗重建（保留引用小句；其余指向型小句照删——清洗口径不放松，只豁免带标准引用的误删小句） */
+function keepCitationClauses(sentence: string): string {
+  const pieces = sentence.split(/([，,、；;])/u);
+  const kept: string[] = [];
+  for (let index = 0; index < pieces.length; index += 2) {
+    const clause = pieces[index] ?? '';
+    if (isPointerClause(clause) && !isCitationDrivenPointerClause(clause)) continue;
+    kept.push(clause);
+    const delimiter = pieces[index + 1];
+    if (delimiter && index + 2 < pieces.length) kept.push(delimiter);
+  }
+  return kept.join('').replace(/^[，,、]+/u, '').replace(/[，,、]+$/u, '');
+}
+
+/**
+ * 链尾编制依据引用小句回补（4.55.31 巢湖实机归因；markdown-only、确定性零 LLM）。
+ *
+ * **缺陷**：`stageBasisRegulationsCrossRepair` 的 Phase B 把「声明未用」条目以「…按《X》（编号）控制…」
+ * 形态补进章草稿（阶段记录 success、复检缺口 29→1），但其后的链尾确定性清洗
+ * （`documentPipeline` 的 `runSurfaceDeterministicCleans` → `fixFormalSourceResidue` →
+ * `materialResidue.stripDrawingPointerPhrases`）把这类小句整句删除——该清洗器的
+ * `POINTER_CLAUSE_PATTERNS[0]`（锚词＋《书名号》）比检测端判据宽：检测端只判「按设计图纸」
+ * 「图集号」「缺资料搪塞」，**不判**《标准名》（编号）引用。清洗在最后一次净变更点之后执行，
+ * 其后无重建、无重放 → 交付 markdown 里引用消失，**章草稿里仍在**，终检按 markdown 记 22 处
+ * 「声明未用」缺口——「报告说改了、产物里没有」。
+ *
+ * **处置（判据对齐 + 链尾重放）**：在真正的链尾（其后无任何改写正文的轮次）以章草稿为源，
+ * 把「由引用触发被误删、且该标准已在编制依据声明」的小句按清洗后形态精确对齐回插
+ * （源句按清洗口径重建，只豁免这些引用小句；真指向小句照旧删除）。对齐要求清洗后形态在
+ * markdown 中原样存在（后续轮次改写过的句子跳过，绝不猜写），恢复后同样形态不得已存在
+ * （防重复句复活）。
+ *
+ * **调用契约**：只返回新 markdown（不改章草稿、不 rebuild），调用方写回
+ * `session.finalMarkdown` 并重算校验组（终门禁所检=交付所存）。
+ */
+export function replayTailStrippedBasisCitations(session: FinalizeSession): { markdown: string; restored: number; labels: string[] } {
+  const markdown = session.finalMarkdown;
+  if (!markdown) return { markdown, restored: 0, labels: [] };
+  const declaredText = extractBasisDeclarationText(markdown);
+  const declaredCodes = extractRegulationCodes(declaredText);
+  const declaredNames = extractRegulationBookNames(declaredText);
+  if (declaredCodes.length === 0 && declaredNames.length === 0) return { markdown, restored: 0, labels: [] };
+  let working = markdown;
+  let restored = 0;
+  const labels: string[] = [];
+  for (const chapter of session.finalChapterDrafts) {
+    for (const sentence of (chapter.content ?? '').split(/(?<=[。；\n])/u)) {
+      const trimmed = sentence.trim();
+      if (trimmed.length < 8) continue;
+      const cleaned = stripDrawingPointerPhrases(trimmed).text;
+      if (cleaned === trimmed || cleaned.trim().length < 8) continue;
+      const citesDeclaredStandard = extractRegulationCodes(trimmed).some(code => declaredCodes.some(declared => sameRegulationCodeFamily(code, declared)))
+        || extractRegulationBookNames(trimmed).some(name => declaredNames.some(declared => regulationNameMatches(name, declared)));
+      if (!citesDeclaredStandard) continue;
+      const kept = keepCitationClauses(trimmed);
+      if (kept === cleaned) continue;
+      if (!working.includes(cleaned)) continue;
+      if (working.includes(kept)) continue;
+      const gained = extractRegulationCodes(kept).filter(code => !extractRegulationCodes(cleaned).some(hit => sameRegulationCodeFamily(hit, code)));
+      if (gained.length === 0 && extractRegulationBookNames(kept).length === 0) continue;
+      working = working.replace(cleaned, () => kept);
+      restored += 1;
+      for (const code of gained) {
+        const label = normalizeRegulationCode(code);
+        if (!labels.includes(label)) labels.push(label);
+      }
+    }
+  }
+  if (restored === 0 || hanCount(working) < hanCount(markdown)) return { markdown, restored: 0, labels: [] };
+  return { markdown: working, restored, labels };
 }

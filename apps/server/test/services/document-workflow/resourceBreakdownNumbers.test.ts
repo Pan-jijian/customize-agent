@@ -9,16 +9,34 @@
  */
 import { describe, expect, it } from 'vitest';
 import { buildResourceBreakdownAuthority, fixResourceBreakdownNumbers, scanResourceBreakdownClaims } from '@/services/document-workflow/resourceBreakdownNumbers';
+import type { BillFactLock, BillFactLockEntry } from '@/services/document-workflow/billFactLock';
 import type { BlueprintData } from '@/services/document-workflow/integratedBlueprint';
 
 function blueprint(labor: unknown, equipment: unknown[] = [], materialsPlan: unknown[] = []): BlueprintData {
   return { resources: { labor, equipment }, materialsPlan } as unknown as BlueprintData;
 }
 
-function authorityOf(labor: unknown, equipment: unknown[] = [], materialsPlan: unknown[] = []) {
-  const authority = buildResourceBreakdownAuthority(blueprint(labor, equipment, materialsPlan));
+function authorityOf(labor: unknown, equipment: unknown[] = [], materialsPlan: unknown[] = [], lock?: BillFactLock) {
+  const authority = buildResourceBreakdownAuthority(blueprint(labor, equipment, materialsPlan), lock);
   if (!authority) throw new Error('authority 构造失败');
   return authority;
+}
+
+/** 清单事实锁（口径分层第二源）：条目名 + 工程量 + 规格-数量对（规格 token 照抄锁） */
+function lockOf(rows: Array<{ name: string; quantity: number; unit?: string; specs?: string[] }>): BillFactLock {
+  const entries: BillFactLockEntry[] = rows.map((row, index) => ({
+    seq: index + 1,
+    name: row.name,
+    description: '',
+    quantity: row.quantity,
+    unit: row.unit || '',
+    section: '',
+    subsection: '',
+    villageGroup: '',
+    sourceFile: 'test-lock.xls',
+    specQuantityPairs: (row.specs || []).map(spec => ({ spec, quantity: `${row.quantity}${row.unit || ''}` })),
+  }));
+  return { entries, totalEntries: entries.length, sourceFile: 'test-lock.xls', complete: true };
 }
 
 describe('scanResourceBreakdownClaims 阶段部署子窗口豁免（A3 基线形态）', () => {
@@ -142,5 +160,82 @@ describe('fixResourceBreakdownNumbers 定点修复与复检', () => {
   it('无蓝图 → 静默零改动', () => {
     expect(buildResourceBreakdownAuthority(undefined)).toBeUndefined();
     expect(fixResourceBreakdownNumbers('混凝土工10人。')).toEqual({ markdown: '混凝土工10人。', fixedCount: 0, details: [], residualCount: 0 });
+  });
+});
+
+// ═══════ 4.55.30 材料拆分归属锚定 + 口径分层（巢湖真实 draft 两条误报归因，机制口径） ═══════
+// ① 归属：规格数量属分句内**最近**的权威材料名，不属同句更早出现的其它材料
+//（「…，管道消毒冲洗DN401m」的 DN40 1m 属管道消毒冲洗，曾被整句 includes 归到复合管名下）；
+// ② 口径分层：蓝图 materialsPlan 是项目级汇总（跨单体求和），清单事实锁是逐条口径（单体/条目级）——
+//    正文在单体语境引用逐条口径属正常，不得拿汇总值比对/改写。
+describe('4.55.30 材料拆分归属锚定（分句内最近材料名）', () => {
+  const materialsPlan = [
+    { name: '复合管', spec: 'DN80', quantity: 430, unit: 'm', basis: '' },
+    { name: '复合管', spec: 'DN40', quantity: 136.8, unit: 'm', basis: '' },
+    { name: '管道消毒冲洗', spec: 'DN25', quantity: 229.2, unit: 'm', basis: '' },
+    { name: '管道消毒冲洗', spec: 'DN40', quantity: 140.4, unit: 'm', basis: '' },
+  ];
+  /** 巢湖 3#门卫给水系统原文（复合管 0.6/5/1 三值由「计」桥接，不构成拆分宣称） */
+  const markdown = '3#门卫给水系统作业对象为门卫室内生活给水管道及配套附件，复合管DN40计0.6m、DN20计5m、DN15计1m，配套减压器DN20共1组，管道消毒冲洗DN401m，成品管卡安装DN15、DN40各1项。';
+
+  it('「管道消毒冲洗DN401m」不归到复合管名下（跨材料误绑 → 无复合管 claim）', () => {
+    const claims = scanResourceBreakdownClaims(markdown, authorityOf({ composition: [] }, [], materialsPlan));
+    expect(claims.filter(claim => claim.label.includes('复合管'))).toEqual([]);
+    // 该值归其就近材料（管道消毒冲洗）：正文 1 vs 蓝图汇总 140.4 → 照常报出
+    const disinfection = claims.filter(claim => claim.label.includes('管道消毒冲洗'));
+    expect(disinfection).toHaveLength(1);
+    expect(disinfection[0]).toMatchObject({ actual: 1, expected: 140.4, kind: 'material' });
+  });
+
+  it('同分句内其它材料名在前仍按最近名归属（复合管DN40 130m 照报，不串值）', () => {
+    const claims = scanResourceBreakdownClaims('管道消毒冲洗DN40 1m，复合管DN40 130m。', authorityOf({ composition: [] }, [], materialsPlan));
+    const byLabel = new Map(claims.map(claim => [claim.label, claim.actual]));
+    expect([...byLabel.keys()].sort()).toEqual(['材料拆分 复合管（DN40）', '材料拆分 管道消毒冲洗（DN40）']);
+    expect(byLabel.get('材料拆分 管道消毒冲洗（DN40）')).toBe(1);
+    expect(byLabel.get('材料拆分 复合管（DN40）')).toBe(130);
+  });
+});
+
+describe('4.55.30 材料拆分口径分层（逐条口径优先于项目级汇总）', () => {
+  const materialsPlan = [
+    { name: '管道消毒冲洗', spec: 'DN25', quantity: 229.2, unit: 'm', basis: '' },
+    { name: '管道消毒冲洗', spec: 'DN40', quantity: 140.4, unit: 'm', basis: '' },
+  ];
+
+  it('正文值命中清单逐条口径 → 不判偏离（分层引用合法，零 claim、零改写）', () => {
+    const lock = lockOf([{ name: '管道消毒冲洗', quantity: 0.6, unit: 'm', specs: ['DN40'] }]);
+    const claims = scanResourceBreakdownClaims('管道消毒冲洗DN40 0.6m。', authorityOf({ composition: [] }, [], materialsPlan, lock));
+    expect(claims).toEqual([]);
+    // 对照：无锁（只有项目级汇总 140.4）时同一句会被判偏离
+    expect(scanResourceBreakdownClaims('管道消毒冲洗DN40 0.6m。', authorityOf({ composition: [] }, [], materialsPlan))).toHaveLength(1);
+  });
+
+  it('正文值不在逐条口径集 → 逐条口径唯一时以之为期望值（不得改写为项目级汇总）', () => {
+    const lock = lockOf([{ name: '管道消毒冲洗', quantity: 0.6, unit: 'm', specs: ['DN40'] }]);
+    const claims = scanResourceBreakdownClaims('管道消毒冲洗DN401m。', authorityOf({ composition: [] }, [], materialsPlan, lock));
+    expect(claims).toHaveLength(1);
+    expect(claims[0]).toMatchObject({ actual: 1, expected: 0.6 });
+    expect(claims[0]?.message).toContain('清单逐条口径 0.6m');
+    expect(claims[0]?.message).toContain('蓝图汇总 140.4m');
+  });
+
+  it('逐条口径多值（无唯一裁决依据）→ 维持蓝图汇总口径（现状不放大）', () => {
+    const lock = lockOf([
+      { name: '管道消毒冲洗', quantity: 0.6, unit: 'm', specs: ['DN40'] },
+      { name: '管道消毒冲洗', quantity: 139.8, unit: 'm', specs: ['DN40'] },
+    ]);
+    const claims = scanResourceBreakdownClaims('管道消毒冲洗DN401m。', authorityOf({ composition: [] }, [], materialsPlan, lock));
+    expect(claims).toHaveLength(1);
+    expect(claims[0]).toMatchObject({ actual: 1, expected: 140.4 });
+    expect(claims[0]?.message).toContain('蓝图权威 140.4m');
+  });
+
+  it('修复器按逐条口径收敛（0.6m 而非汇总 140.4m），复检零残留', () => {
+    const lock = lockOf([{ name: '管道消毒冲洗', quantity: 0.6, unit: 'm', specs: ['DN40'] }]);
+    const result = fixResourceBreakdownNumbers('3#门卫安装：管道消毒冲洗DN401m，安装后通水验收。', authorityOf({ composition: [] }, [], materialsPlan, lock));
+    expect(result.fixedCount).toBe(1);
+    expect(result.residualCount).toBe(0);
+    expect(result.markdown).toContain('管道消毒冲洗DN400.6m');
+    expect(result.markdown).not.toContain('140.4');
   });
 });

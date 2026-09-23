@@ -40,8 +40,10 @@ export async function stageDeterministicStage5(session: FinalizeSession): Promis
     // phase-labor-values 定点回写消费）
     phaseLaborAuthorities: blueprintPhaseLaborAuthorities(session.blueprintData),
     greeningMaintenanceAuthority: session.greeningMaintenanceAuthority,
-    // A3 资源拆分权威（蓝图资源清单推导；与检测器 resourceBreakdownConsistencyIssues 同源同扫描）
-    resourceBreakdownAuthority: buildResourceBreakdownAuthority(session.blueprintData),
+    // A3 资源拆分权威（蓝图资源清单推导 + 清单事实锁逐条口径第二源；与检测器
+    // resourceBreakdownConsistencyIssues 同源同扫描——4.55.30 口径分层：单体语句按逐条口径裁决/改写，
+    // 不用项目级汇总值）
+    resourceBreakdownAuthority: buildResourceBreakdownAuthority(session.blueprintData, session.billFactLock),
     // A4 支护形式选定值（支护体系权威映射；缺失时两可表述按正文主流侧默认归一）
     supportFormAuthority: session.supportAuthority === 'slope' ? '放坡' : session.supportAuthority === 'pile' ? '钢板桩' : undefined,
     // 4.36 D3 决策锁条目（rebuildFacts 阶段已计算；两可表述归一按锁定值裁决——有锁归一/无锁缺口，

@@ -19,6 +19,7 @@
  *   equipmentNameAtEndOf）：constructionOrgConsistency 机械数量型号规则（资料事实对账）与
  *   qualityValidation 跨章机械互斥（正文多值，进修复链）共用名称归一单源，避免检测口径漂移。
  */
+import type { BillFactLock } from './billFactLock';
 import type { BlueprintData, BlueprintEquipmentItem, BlueprintMaterialPlanItem } from './integratedBlueprint';
 
 export interface ResourceBreakdownAuthority {
@@ -28,6 +29,11 @@ export interface ResourceBreakdownAuthority {
   equipment: Array<{ name: string; spec: string; count: number; variantCount: number }>;
   /** 同名多规格材料权威（variantCount=同名条目数，恒 ≥2） */
   materials: Array<{ name: string; spec: string; quantity: number; unit: string; family: string; variantCount: number }>;
+  /** 口径分层（4.55.30）：同名同规格材料的**清单逐条口径**集（键 `${name}\u0000${SPEC}`，规格去空白大写归一）。
+   *  materials 的 quantity 是蓝图**项目级汇总**（跨单体求和），本表是**逐条口径**（单体/条目级）——
+   *  正文在单体语境引用逐条口径属正常，不得拿汇总值比对/改写（详见 scanResourceBreakdownClaims §3）。
+   *  无清单事实锁时为空表（行为与既有逐字一致）。 */
+  scopedQuantities: Map<string, Array<{ value: number; unit: string }>>;
 }
 
 export interface ResourceBreakdownClaim {
@@ -159,8 +165,38 @@ function equipmentCount(item: BlueprintEquipmentItem): number {
   return item.quantity && item.quantity > 0 ? item.quantity : Math.round(((item.min ?? 1) + (item.max ?? item.min ?? 1)) / 2);
 }
 
-/** 蓝图 → 权威口径（无蓝图返回 undefined，检测/修复一致静默跳过） */
-export function buildResourceBreakdownAuthority(blueprintData?: BlueprintData): ResourceBreakdownAuthority | undefined {
+/** 规格归一键（口径分层查表用）：去空白 + 大写（dn40/DN 40 与 DN40 同键） */
+function normalizeSpecLookupKey(spec: string): string {
+  return (spec || '').replace(/\s+/gu, '').toUpperCase();
+}
+
+/** 清单事实锁 → 逐条口径集（4.55.30）：条目名的规格 token 对（specQuantityPairs，逐项照抄锁）
+ *  给出「该条目该规格在单体/条目级的数量」。无锁返回空表。 */
+function buildScopedQuantities(lock?: BillFactLock): ResourceBreakdownAuthority['scopedQuantities'] {
+  const map: ResourceBreakdownAuthority['scopedQuantities'] = new Map();
+  if (!lock) return map;
+  for (const entry of lock.entries) {
+    const name = (entry.name || '').trim();
+    if (!name || !Number.isFinite(entry.quantity)) continue;
+    for (const pair of entry.specQuantityPairs || []) {
+      const spec = (pair.spec || '').trim();
+      if (!spec) continue;
+      const parsed = /^([\d,，]+(?:\.\d+)?)\s*(\S*)$/u.exec((pair.quantity || '').trim());
+      if (!parsed) continue;
+      const value = Number.parseFloat(parsed[1].replace(/[,，]/gu, ''));
+      if (!Number.isFinite(value)) continue;
+      const key = `${name}\u0000${normalizeSpecLookupKey(spec)}`;
+      const list = map.get(key) || [];
+      list.push({ value, unit: parsed[2] || '' });
+      map.set(key, list);
+    }
+  }
+  return map;
+}
+
+/** 蓝图 → 权威口径（无蓝图返回 undefined，检测/修复一致静默跳过）；
+ *  第二源 billFactLock 提供逐条口径（口径分层，见 ResourceBreakdownAuthority.scopedQuantities） */
+export function buildResourceBreakdownAuthority(blueprintData?: BlueprintData, lock?: BillFactLock): ResourceBreakdownAuthority | undefined {
   if (!blueprintData) return undefined;
   const composition = (blueprintData.resources?.labor?.composition ?? [])
     .filter(item => item.trade && Number.isFinite(item.count) && item.count > 0)
@@ -197,7 +233,7 @@ export function buildResourceBreakdownAuthority(blueprintData?: BlueprintData): 
       materials.push({ name, spec: item.spec, quantity: item.quantity as number, unit: item.unit || '', family, variantCount: items.length });
     }
   }
-  return { composition, equipment, materials };
+  return { composition, equipment, materials, scopedQuantities: buildScopedQuantities(lock) };
 }
 
 interface TextBlock {
@@ -274,6 +310,27 @@ export function scanResourceBreakdownClaims(markdown: string, authority: Resourc
       from = idx + word.length;
     }
     return positions;
+  };
+  // 4.55.30 归属锚定（抽取边界）：规格前的**最近权威材料名**——规格数量属句中就近的材料，
+  // 不属同句/同段更早出现的其它材料（巢湖实测 3#门卫：「复合管DN40计0.6m、DN20计5m、DN15计1m，
+  // 配套减压器DN20共1组，管道消毒冲洗DN401m」的 DN40 1m 是管道消毒冲洗的规格数量，
+  // 曾被整句 includes 校验归到复合管名下 → 假冲突「复合管（DN40）正文 1m，蓝图权威 136.8m」）。
+  // 分句界=逗号/句号/分号/换行（不含顿号：顿号并列项共用同一材料名），句内无可比名时回退既有句级校验。
+  const materialNames = [...new Set(authority.materials.map(item => item.name).filter(name => name.length >= 2))];
+  const nearestMaterialNameBefore = (text: string, position: number): string | undefined => {
+    const start = Math.max(
+      text.lastIndexOf('，', position - 1), text.lastIndexOf(',', position - 1),
+      text.lastIndexOf('。', position - 1), text.lastIndexOf('；', position - 1),
+      text.lastIndexOf(';', position - 1), text.lastIndexOf('\n', position - 1),
+    ) + 1;
+    const clause = text.slice(start, position);
+    let best: { name: string; at: number } | undefined;
+    for (const name of materialNames) {
+      const at = clause.lastIndexOf(name);
+      if (at < 0) continue;
+      if (!best || at > best.at || (at === best.at && name.length > best.name.length)) best = { name, at };
+    }
+    return best?.name;
   };
   // 阶段部署子窗口豁免：以块内各「阶段…N人」匹配为界划分子窗口（[本阶段匹配起点, 下一阶段匹配或块尾)），
   // 窗口内工种宣称合计恰为 N → 该窗口属阶段性部署（硬替换会破坏「43 人阶段含 88 混凝土工」类语义）。
@@ -403,13 +460,36 @@ export function scanResourceBreakdownClaims(markdown: string, authority: Resourc
       const nextPeriod = line.indexOf('。', lineOffset);
       const nextBreak = Math.min(nextSemicolon === -1 ? line.length : nextSemicolon, nextHalfSemicolon === -1 ? line.length : nextHalfSemicolon, nextPeriod === -1 ? line.length : nextPeriod);
       if (!markdown.slice(sentenceStart, lineStart + nextBreak).includes(item.name)) continue;
+      // 4.55.30 归属闸：分句内规格前最近的权威材料名不是本条目名 → 该规格数量不属本条目（见上注解）
+      const owner = nearestMaterialNameBefore(markdown, specIdx);
+      if (owner && owner !== item.name) continue;
       const afterStart = specIdx + item.spec.length;
       const after = markdown.slice(afterStart, afterStart + 16);
       const match = MATERIAL_SPLIT_QUANTITY_RE.exec(after);
       if (!match) continue;
       if (materialUnitFamily(match[2]) !== item.family) continue;
       const actual = Number(match[1]);
-      if (actual === item.quantity) continue;
+      // 4.55.30 口径分层（机制，无材料名/数值白名单）：同名同规格材料的数量有两层口径——
+      // 蓝图 materialsPlan 是**项目级汇总**（跨单体求和），清单事实锁是**逐条口径**（单体/条目级）。
+      // 正文在单体语境引用逐条口径属正常：拿汇总值比对会把合规引用判成偏离，并会把汇总值硬写进
+      // 单体语句（巢湖实测：3#门卫「管道消毒冲洗 DN40 1m」被判「蓝图权威 140.4m」——140.4m 是
+      // 1#厂房+室外+门卫的消毒冲洗总量，3#门卫逐条口径 0.600m）。逐条口径集非空时以其为准：
+      // ① 正文值 ∈ 逐条口径集 → 该语句与某条清单口径一致 → 不判偏离；
+      // ② 逐条口径唯一 → 机器可裁决的期望值取该逐条口径（message 与硬替换目标同步修正）；
+      // ③ 逐条口径多值 → 无唯一裁决依据，维持蓝图汇总口径（交 LLM/人工）。
+      const scoped = (authority.scopedQuantities.get(`${item.name}\u0000${normalizeSpecLookupKey(item.spec)}`) || [])
+        .filter(entry => materialUnitFamily(entry.unit) === item.family);
+      let expected = item.quantity;
+      let authorityLabel = '蓝图权威';
+      if (scoped.length > 0) {
+        if (scoped.some(entry => Math.abs(entry.value - actual) < 1e-9)) continue;
+        const distinct = [...new Set(scoped.map(entry => entry.value))];
+        if (distinct.length === 1) {
+          expected = distinct[0]!;
+          authorityLabel = '清单逐条口径';
+        }
+      }
+      if (actual === expected) continue;
       const numStart = afterStart + match[0].indexOf(match[1]);
       claims.push({
         kind: 'material',
@@ -417,9 +497,11 @@ export function scanResourceBreakdownClaims(markdown: string, authority: Resourc
         start: numStart,
         end: numStart + match[1].length,
         actual,
-        expected: item.quantity,
-        message: `材料规格拆分数量与蓝图权威不一致：${item.name}（${item.spec}）正文 ${actual}${item.unit}，蓝图权威 ${item.quantity}${item.unit}`,
-        suggestion: '同名多规格材料的拆分数量必须与清单逐项一致，不得自行分配。',
+        expected,
+        message: authorityLabel === '蓝图权威'
+          ? `材料规格拆分数量与蓝图权威不一致：${item.name}（${item.spec}）正文 ${actual}${item.unit}，蓝图权威 ${item.quantity}${item.unit}`
+          : `材料规格拆分数量与清单逐条口径不一致：${item.name}（${item.spec}）正文 ${actual}${item.unit}，清单逐条口径 ${expected}${item.unit}（蓝图汇总 ${item.quantity}${item.unit} 为跨单体总量，不得直接引用到单体语句）`,
+        suggestion: '同名多规格材料的拆分数量必须与清单逐项一致，不得自行分配；单体语句的数量按该单体的清单逐条口径引用，不得引用跨单体汇总值。',
       });
     }
   }

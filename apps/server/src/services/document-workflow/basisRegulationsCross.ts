@@ -24,8 +24,22 @@
  *   （正文以规范名引用而省略编号合法；反向同理——配对编号命中即视为该书名的引用已成立）；
  * - 输出合并：编号与书名同向缺口合并为 pair 一条（避免同一标准双报）；同族多写法（JGJ 130
  *   与 JGJ 130-2011）按同族去重，pair 信息最全优先保留。
+ *
+ * 等价形态（4.55.31 巢湖归因补认；双向对账口径须认形态而非字面）：
+ * - 全角/半角（编号与名称统一折半角，含全角数字/字母/斜杠/破折号）；
+ * - 带/不带年份（同族匹配已容忍）、标准号与名称分离书写（行内邻近配对已容忍）；
+ * - 书名号有无：正文**独立条目/表格单元格**内直接写标准全名（无《》）也是等价引用形态
+ *   （巢湖实测「建筑机电工程抗震设计规范」落在表格单元格内被漏认）；只认归一化后**精确相等**，
+ *   不做包含匹配（防行文片段误配）。
+ *
+ * 声明侧区段分层（4.55.31 巢湖归因·幻影声明根治）：**有权威「编制依据/编制说明/编制原则」标题段时，
+ * 该段即声明源**；第三轮词锚段（如「危险性较大的分部分项工程安全管理」段内的危大依据清单）只是
+ * **标题两轮零命中时的兜底**——巢湖终稿实测：词锚把 §2.7 危大依据清单并入声明源，其 10 条标准
+ * 既被当作「声明」又被排除出正文，凭空产生 10 处「声明未用」缺口（正文其实引用得到）。
+ * 分层判据：标题段存在且**有条目** → 只用标题段；标题段不存在或零条目（r28j：真实清单落在
+ * 无关标题段内）→ 退回全量候选（兜底不回归）。检测端与修复端共用本分层（检测定位=修复定位）。
  */
-import { basisRegulationSectionRanges, extractBasisRegulationSection } from './qualityValidation';
+import { basisRegulationSectionRanges, type BasisSectionRange } from './qualityValidation';
 import type { ValidationIssue } from './types';
 
 // ═══════════════════════ 提取与归一化原语（检测/修复共用） ═══════════════════════
@@ -51,14 +65,23 @@ export function extractRegulationBookNames(text: string): string[] {
   return [...text.matchAll(REGULATION_BOOK_RE)].map(match => match[0].replace(/《|》/gu, ''));
 }
 
-/** 编号归一：去空白与零宽字符、破折号统一为连字符、大写（/ 与 - 保留结构语义供年号判定） */
+/** 全角→半角（等价形态：编号/名称的全角数字、字母、斜杠、破折号统一折半角；
+ * 中文标点（《》，、等）不在 U+FF01-U+FF5E 段内，保持原样） */
+function toHalfWidth(raw: string): string {
+  return raw
+    .replace(/[！-～]/gu, ch => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
+    .replace(/　/gu, ' ');
+}
+
+/** 编号归一：全角折半角、去空白与零宽字符、破折号统一为连字符、大写
+ * （/ 与 - 保留结构语义供年号判定） */
 export function normalizeRegulationCode(raw: string): string {
-  return raw.replace(/[\s\u200b-\u200d\ufeff]/gu, '').replace(/[—–－]/gu, '-').toUpperCase();
+  return toHalfWidth(raw).replace(/[\s\u200b-\u200d\ufeff]/gu, '').replace(/[—–－]/gu, '-').toUpperCase();
 }
 
 /** 书名归一：去书名号、括号注释（如「（2011年版）」）、空白与零宽字符（保留汉字本体供包含匹配） */
 export function normalizeRegulationName(raw: string): string {
-  return raw
+  return toHalfWidth(raw)
     .replace(/《|》/gu, '')
     .replace(/[（(][^）)]{0,40}[）)]/gu, '')
     .replace(/[\s\u200b-\u200d\ufeff]/gu, '');
@@ -131,18 +154,22 @@ const PAIR_CONNECTOR_RE = /^[\s（）()【】[\]、,，;；:：·.及和与]*$/u
 
 /** 行内邻近配对解析：每个编号与最近的未配对书名成对（先左后右；间隔仅连接符/空白）——
  * 顺序配对在多书名单编号行会错位（s28l 实测「《建质规〔2025〕5号》及《智慧工地建设标准》
- * （DB34/T5175-2025）」需配到第二本书名），故按位置邻近判定。 */
+ * （DB34/T5175-2025）」需配到第二本书名），故按位置邻近判定。
+ * 4.55.31 等价形态补认：**扫描用全角折半角后的行**（toHalfWidth 逐字符 1:1，索引保持对齐），
+ * 取值仍切原行——否则「ＧＢ５０２０４－２０１５」这类全角编号根本不被 REGULATION_CODE_RE
+ * 提取（编号词形是 ASCII），声明侧条目退化为「仅书名」并报出虚假「声明未用」。 */
 function pairLineEntries(text: string): CrossEntry[] {
   const entries: CrossEntry[] = [];
   for (const line of text.split(/\r?\n/u)) {
+    const scan = toHalfWidth(line);
     const tokens: Array<{ type: 'code' | 'name'; value: string; index: number; end: number }> = [];
-    for (const match of line.matchAll(REGULATION_CODE_RE)) {
+    for (const match of scan.matchAll(REGULATION_CODE_RE)) {
       const index = match.index ?? 0;
-      tokens.push({ type: 'code', value: match[0], index, end: index + match[0].length });
+      tokens.push({ type: 'code', value: line.slice(index, index + match[0].length), index, end: index + match[0].length });
     }
-    for (const match of line.matchAll(REGULATION_BOOK_RE)) {
+    for (const match of scan.matchAll(REGULATION_BOOK_RE)) {
       const index = match.index ?? 0;
-      tokens.push({ type: 'name', value: match[0].replace(/《|》/gu, ''), index, end: index + match[0].length });
+      tokens.push({ type: 'name', value: line.slice(index + 1, index + match[0].length - 1), index, end: index + match[0].length });
     }
     if (tokens.length === 0) continue;
     tokens.sort((left, right) => left.index - right.index);
@@ -221,14 +248,59 @@ function mergeFamilyGaps(gaps: BasisRegulationCrossGap[]): BasisRegulationCrossG
   return merged;
 }
 
+/** 声明侧区段分层（单源导出：检测端与修复端共用同一范围判定——检测定位=修复定位）：
+ * 标题两轮命中的「编制依据/编制说明/编制原则/编制目的」段为权威声明源；该段**零声明条目**或
+ * 标题两轮全无命中时退回全量候选（含词锚段，r28j 兜底不回归）。
+ * 巢湖终稿实测：词锚段（§2.7 危大工程安全管理段内的危大依据清单）被并入声明源后，其 10 条
+ * 标准既算「已声明」又被排除出正文，凭空产生 10 处「声明未用」——分层后该段回归正文语境。 */
+const DECLARATION_TITLE_RE = /编制依据|编制说明|编制原则|编制目的/u;
+
+export function basisDeclarationRanges(markdown: string): BasisSectionRange[] {
+  const ranges = basisRegulationSectionRanges(markdown);
+  if (ranges.length === 0) return ranges;
+  const titled = ranges.filter(range => DECLARATION_TITLE_RE.test(range.title));
+  if (titled.length === 0) return ranges;
+  const lines = markdown.split(/\r?\n/u);
+  const entryCount = titled.reduce((total, range) => total + pairLineEntries([range.title, ...lines.slice(range.start + 1, range.end)].join('\n')).length, 0);
+  return entryCount > 0 ? titled : ranges;
+}
+
+/** 声明区段文本（与 extractBasisRegulationSection 同构，但按分层区段构造——标题段优先、
+ * 零条目时退回词锚候选；供双向对账声明侧解析与修复端定向手术共用）。 */
+export function extractBasisDeclarationText(markdown: string): string {
+  const lines = markdown.split(/\r?\n/u);
+  return basisDeclarationRanges(markdown)
+    .map(range => [range.title, ...lines.slice(range.start + 1, range.end)].join('\n'))
+    .join('\n');
+}
+
+/** 无书名号等价形态片段（4.55.31 补认）：正文**独立条目/表格单元格**内直接书写标准全名
+ * （无《》）也是等价引用形态——巢湖实测「建筑机电工程抗震设计规范」写在表格单元格内被漏认。
+ * 只取「整段即标准名」的片段（归一后精确相等才判命中），行文片段不入围。 */
+function bareStandardNameSegments(text: string): string[] {
+  const segments: string[] = [];
+  for (const line of text.split(/\r?\n/u)) {
+    if (!line.trim()) continue;
+    const cells = line.trim().startsWith('|') ? line.split('|') : line.split(/[、，,；;]/u);
+    for (const cell of cells) {
+      const segment = cell.trim();
+      if (segment.length < 4 || segment.length > 40) continue;
+      if (segment.includes('《')) continue;
+      if (!TECHNICAL_STANDARD_TAIL_RE.test(normalizeRegulationName(segment))) continue;
+      segments.push(segment);
+    }
+  }
+  return segments;
+}
+
 /** 编制依据↔正文双向对账审计（检测/评分/修复共用单源）：
  * 声明侧条目 = 编制依据区段行内配对解析；引用侧条目 = 正文（排除区段）行内配对解析；
  * 双向缺口 = 同族匹配（编号年号缺省容忍 / 书名包含匹配）后无任何命中的声明/引用条目。
  * 配对容忍：编号与配对书名任一在对方侧命中即该条目视为已引用/已声明（对称判定）；两侧均
  * 零命中且书名为技术标准类时合并为 pair 一条，否则按编号/书名单独报出。 */
 export function auditBasisRegulationsCross(markdown: string): BasisRegulationCrossAudit {
-  const ranges = basisRegulationSectionRanges(markdown);
-  const sectionText = extractBasisRegulationSection(markdown);
+  const ranges = basisDeclarationRanges(markdown);
+  const sectionText = extractBasisDeclarationText(markdown);
   const lines = markdown.split(/\r?\n/u);
   const excluded = new Set<number>();
   for (const range of ranges) {
@@ -242,8 +314,11 @@ export function auditBasisRegulationsCross(markdown: string): BasisRegulationCro
   const declaredNames = declaredEntries.filter(entry => entry.name).map(entry => entry.name!);
   const bodyCodes = bodyEntries.filter(entry => entry.code).map(entry => entry.code!);
   const bodyNames = bodyEntries.filter(entry => entry.name).map(entry => entry.name!);
+  const bodyBareNames = bareStandardNameSegments(bodyText);
   const codeUsedInBody = (code: string) => bodyCodes.some(bodyCode => sameRegulationCodeFamily(code, bodyCode));
-  const nameUsedInBody = (name: string) => bodyNames.some(bodyName => regulationNameMatches(name, bodyName));
+  // 名称命中：书名号形态（含包含匹配）或独立条目/单元格内无书名号全名（精确相等）
+  const nameUsedInBody = (name: string) => bodyNames.some(bodyName => regulationNameMatches(name, bodyName))
+    || bodyBareNames.some(segment => normalizeRegulationName(segment) === normalizeRegulationName(name));
   const codeDeclared = (code: string) => declaredCodes.some(declared => sameRegulationCodeFamily(declared, code));
   const nameDeclared = (name: string) => declaredNames.some(declared => regulationNameMatches(declared, name));
 

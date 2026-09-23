@@ -298,7 +298,7 @@ export async function buildStandardFinalValidationIssues(input: {
     ...det('basis-regulations-cross', () => basisRegulationsCrossIssues(input.markdown)),
     // 十度实测缺陷：资源章工种构成人数/机械台数/同名多规格材料拆分数量 LLM 自行分配与蓝图权威漂移，
     // 交付前确定性兑底（保守口径只比对「名称后紧邻数字+单位」形态），漂移即 error 进修复轮
-    ...det('resource-breakdown-consistency', () => resourceBreakdownConsistencyIssues(input.markdown, input.blueprintData)),
+    ...det('resource-breakdown-consistency', () => resourceBreakdownConsistencyIssues(input.markdown, input.blueprintData, input.billFactLock)),
     ...det('section-content-integrity', () => sectionContentIntegrityIssues(input.markdown, input.chapters)),
     ...det('professional-content', () => professionalContentIssues(input.chapters, analyses)),
     ...det('professional-score', () => professionalScoreIssues(input.chapters, analyses)),

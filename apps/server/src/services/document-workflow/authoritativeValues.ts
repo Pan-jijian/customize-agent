@@ -58,10 +58,13 @@ export interface AuthoritativeValueAudit {
   noiseRejected: Array<{ attribute: string; value: string; source: string; reason: string }>;
 }
 
+/** 澄清/变更载体的来源指纹（答疑 / 澄清 / 补疑 / 补遗 / 问答） */
+const CLARIFY_SOURCE_RE = /补遗|补疑|答疑|澄清|question/i;
+
 /** 载体优先级（按来源串判定；不依赖字段） */
 export function sourcePriority(source: string): number {
   const text = String(source || '');
-  if (/补遗|补疑|答疑|澄清|question/i.test(text)) return 96;
+  if (CLARIFY_SOURCE_RE.test(text)) return 96;
   if (/招标|投标须知|招标公告/.test(text)) return 90;
   if (/清单|bill|boq|xls/i.test(text)) return 80;
   if (/图纸|dwg|施工图|设计说明/i.test(text)) return 75;
@@ -317,8 +320,9 @@ function valueEquivalenceKey(value: string): string {
 
 /**
  * 决定性裁决链（R1..R7，全序）：
- * 候选集 → R1 变更链（被取代值出局）→ R2 载体优先级 → R3 时序 → R4 同源条款序
- * → R5 形态类型专属权威 → R6 证据计数 → R7 兜底（按形态定义）→ 唯一值
+ * 候选集 → R1 变更链（被取代值出局）→ R1.5 强地址形 → R2.5 澄清/变更语境优先 → R2 载体优先级
+ * → R3 时序 → R4 同源条款序 → R5 形态类型专属权威 → R6 证据计数 → R7 兜底（按形态定义）→ 唯一值
+ * （R2.5 必须在 R2 之前：载体优先级若先收窄，澄清值可能已被淘汰，R2.5 不可达）
  */
 /**
  * 命中本属性候选的变更链（被取代值 → 链声明的生效值）。
@@ -334,6 +338,19 @@ function matchedOverrideChains(candidates: TruthCandidate[], overrides: ValueOve
     matched.set(override.superseded, override.effective);
   }
   return matched;
+}
+
+/**
+ * 澄清/变更语境的确定性信号（R2.5 的唯一判据）：
+ * ① 候选构造时值文本自带澄清/变更标记（`clarified`）；或
+ * ② **载体来源**为答疑/澄清/补疑/补遗 **且** 值文本含变更连接语
+ *    —— 事实池把「原计划工期:365日历天，现变更修改为:330日历天」整句抽成值时，语境在整句里；
+ *    抽取器/写侧归一各自剥掉语境后，值本身只剩「330日历天」，载体来源是唯一留存的语境证据。
+ *    故仅凭 `clarified` 字段会把「变更句被剥壳后的新值」降级为普通候选（实测漏判口子）。
+ */
+function clarifiedPreference(candidate: TruthCandidate): boolean {
+  if (candidate.clarified) return true;
+  return CLARIFY_SOURCE_RE.test(candidate.source) && CHANGE_CONNECTOR_RE.test(candidate.value);
 }
 
 function arbitrate(candidates: TruthCandidate[], overrides: ValueOverride[]): { winner: TruthCandidate; rule: string; superseded: string[] } | undefined {
@@ -371,15 +388,25 @@ function arbitrate(candidates: TruthCandidate[], overrides: ValueOverride[]): { 
   const strongAddress = pool.filter(candidate => STRONG_ADDRESS_RE.test(candidate.value) && /省|市|区|县/u.test(candidate.value));
   if (strongAddress.length > 0 && strongAddress.length < pool.length) pool = strongAddress;
   if (pool.length === 1) return { winner: pool[0]!, rule: 'R1.5', superseded: [...supersededSet] };
+  // R2.5 澄清语境优先（**先于载体优先级收窄**）：澄清/变更值是本属性的**后口径**，载体优先级
+  // 绝不能把招标正文旧值抬成生效值——原序把本判据排在 R2 之后，等于让 R2 先按「答疑 96 > 招标 90」
+  // 收窄，一旦澄清值所在载体的优先级不最高（或来源串未命中答疑指纹），澄清值被 R2 提前淘汰、
+  // R2.5 根本不可达，只能指望 R6/R7 兜底（R6 证据计数按候选条数计票，旧值来源多时反被抬回）。
+  // 实测（doc-1790119909475-7ea5c969，巢湖）：计划工期 招标 365 / 答疑澄清 330，正文写出 365。
+  //
+  // **链升格候选（promoted）不参与本判据**：它的权威由 R1（旧值出局）+ 载体优先级承担；若让它
+  // 借 `clarified` 标记参与语境优先，跨分项误配的变更链（scope「厚度」的 1.8mm→50mm 挂到「窗材质」）
+  // 会压过真正的答疑口径（4.55.22 实测边界，见单测「变更链自证…不符时不登记」）。升格候选仍留在池内。
+  const promotedSet = new Set(promoted);
+  const clarifiedOnes = pool.filter(candidate => !promotedSet.has(candidate) && clarifiedPreference(candidate));
+  if (clarifiedOnes.length > 0 && clarifiedOnes.length < pool.filter(candidate => !promotedSet.has(candidate)).length) {
+    pool = [...clarifiedOnes, ...pool.filter(candidate => promotedSet.has(candidate))];
+  }
+  if (pool.length === 1) return { winner: pool[0]!, rule: 'R2.5', superseded: [...supersededSet] };
   // R2 载体优先级
   const maxPriority = Math.max(...pool.map(candidate => candidate.priority));
   let narrowed = pool.filter(candidate => candidate.priority === maxPriority);
   if (narrowed.length === 1) return ruleOf('R2', narrowed);
-  // R2.5 澄清语境优先：来自澄清/变更语境的值是**后口径**（实测：开工日期 2026-10-10 出自澄清表、
-  // 2026-08-31 出自"见招标公告"的指针句 —— 同来源同优先级时，澄清语境者是生效值）
-  const clarifiedOnes = narrowed.filter(candidate => candidate.clarified);
-  if (clarifiedOnes.length > 0 && clarifiedOnes.length < narrowed.length) narrowed = clarifiedOnes;
-  if (narrowed.length === 1) return { winner: narrowed[0]!, rule: 'R2.5', superseded: [...supersededSet] };
   // R3 时序（后发布者胜；仅按**来源发布时序**，不按数组下标——同文件内出现序不代表时间先后）
   const maxOrder = Math.max(...narrowed.map(candidate => sourceOrder(candidate.source)));
   if (maxOrder > 0) {
@@ -670,13 +697,29 @@ export function buildAuthoritativeValues(input: {
     const chains = matchedOverrideChains(candidates, overrides);
     const chainedLosers = result.superseded.filter(value =>
       caliberAttributes.has(attribute) || chains.get(value) === result.winner.value);
+    // 变更链声明的被取代值必须**留存**（4.55.31）。写侧「现行口径前置」会把旧值就地改写进事实池/
+    // 检索证据（`writerEvidence` 与 `allEvidence` 共享对象引用 → 证据侧同步被改写），到 finalize 读侧
+    // 重算时候选集里**已无旧值** → `matchedOverrideChains` 的 `candidates.some(含旧值)` 失配 →
+    // superseded 只剩「2026年10月10日」「资料中未明确体现计划工期。」这类**非单位值** →
+    // 残留闸的残留集为空 → 正文里 6 处 365日历天 全部静默放行（实测 doc-1790119909475-7ea5c969 巢湖）。
+    // 判据 = **变更链自证**：链声明的生效值 == 本次裁决胜出值 ⇒ 链的被取代值确是**本属性**的旧口径，
+    // 与候选是否还在无关（旧值消失恰恰是"它已被取代"的结果，不是"它不存在"的证据）。
+    // 安全边界与 losers 同源：仅单值型项目口径（caliberAttributes），且形态与胜出值同类（防跨形态误登）。
+    const chainDeclared = caliberAttributes.has(attribute)
+      ? overrides
+        .filter(override => override.kind === 'override'
+          && override.superseded !== result.winner.value
+          && valueEquivalenceKey(override.effective) === valueEquivalenceKey(result.winner.value)
+          && classifyValueShape(override.superseded) === winnerShape)
+        .map(override => override.superseded)
+      : [];
     resolved.push({
       subject: result.winner.subject,
       attribute,
       value: result.winner.value,
       rule: result.rule,
       evidence: [{ source: result.winner.source, snippet: result.winner.value.slice(0, 120) }],
-      superseded: [...new Set([...chainedLosers.filter(value => value !== result.winner.value), ...losers])],
+      superseded: [...new Set([...chainedLosers.filter(value => value !== result.winner.value), ...chainDeclared, ...losers])],
       // 项目级口径 = 原文带口径标签抽取出的属性（caliberAttributes）；其余为章节内容型属性。
       // 商务口径（暂列金额/暂估价/预留金…）**不入**「正文须逐字落位」集——技术标不承载金额类数据，
       // 变更追踪仍由 superseded 承担（`caliberAttributes` 未变），两者职责分离。
