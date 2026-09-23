@@ -33,6 +33,12 @@ export interface ResourceBreakdownAuthority {
   equipment: Array<{ name: string; spec: string; count: number; variantCount: number }>;
   /** 同名多规格材料权威（variantCount=同名条目数，恒 ≥2） */
   materials: Array<{ name: string; spec: string; quantity: number; unit: string; family: string; variantCount: number }>;
+  /** 归属闸名称全集（4.59 C2）：materialsPlan **全量**材料名（含单规格条目，去重、长度 ≥2）。
+   *  归属判定回答的是「规格前最近的材料名是谁」，单规格材料同样是合法归属方——
+   *  只用多规格名集会漏判（巢湖实测：「单管荧光灯1×18W 104套」的 18W 被误归到 普通灯具（18W）名下，
+   *  owner=undefined 被旧实现当作「允许」→ 假冲突「普通灯具（18W）正文 104套，蓝图权威 161套」，
+   *  104 实为荧光灯 18W 的蓝图值）。 */
+  materialNames: string[];
   /** 口径分层（4.55.30）：同名同规格材料的**清单逐条口径**集（键 `${name}\u0000${SPEC}`，规格去空白大写归一）。
    *  materials 的 quantity 是蓝图**项目级汇总**（跨单体求和），本表是**逐条口径**（单体/条目级）——
    *  正文在单体语境引用逐条口径属正常，不得拿汇总值比对/改写（详见 scanResourceBreakdownClaims §3）。
@@ -295,7 +301,9 @@ export function buildResourceBreakdownAuthority(blueprintData?: BlueprintData, l
       materials.push({ name, spec: item.spec, quantity: item.quantity as number, unit: item.unit || '', family, variantCount: items.length });
     }
   }
-  return { composition, equipment, materials, scopedQuantities: buildScopedQuantities(lock) };
+  // 名称全集与 materials 同源（同一 materialsByName 分组，单源）：材料名的唯一来源是 blueprintData.materialsPlan
+  const materialNames = [...materialsByName.keys()].filter(name => name.length >= 2);
+  return { composition, equipment, materials, materialNames, scopedQuantities: buildScopedQuantities(lock) };
 }
 
 interface TextBlock {
@@ -378,21 +386,35 @@ export function scanResourceBreakdownClaims(markdown: string, authority: Resourc
   // 配套减压器DN20共1组，管道消毒冲洗DN401m」的 DN40 1m 是管道消毒冲洗的规格数量，
   // 曾被整句 includes 校验归到复合管名下 → 假冲突「复合管（DN40）正文 1m，蓝图权威 136.8m」）。
   // 分句界=逗号/句号/分号/换行（不含顿号：顿号并列项共用同一材料名），句内无可比名时回退既有句级校验。
-  const materialNames = [...new Set(authority.materials.map(item => item.name).filter(name => name.length >= 2))];
+  const materialNames = authority.materialNames;
+  // 4.59 C2 窗口放宽（巢湖 ea380252 实测 2 条假冲突的根因）：分句界含逗号，而正文常见
+  // 「…套管制作与安装55个，止水节安装39个，DN100 21个、DN50 18个」形态——规格紧随逗号，
+  // 分句窗口恰为空串，旧实现 owner=undefined 被当作「允许」→ 报「套管制作与安装（DN100）正文 21个，
+  // 蓝图权威 18个」（21/18 实为 止水节安装 DN100/DN50 的逐条值，55 = 套管制作与安装各规格之和，
+  // 正文两处均正确）。改法：分句内找不到任何材料名时**不放行**，把窗口放宽到所在句（到上一个
+  // 。；;或换行为界）再找一次；仍无名（句子与材料名无关）才回退旧口径。
+  const NEAREST_MATERIAL_WINDOW_CHARS = 200;
   const nearestMaterialNameBefore = (text: string, position: number): string | undefined => {
-    const start = Math.max(
-      text.lastIndexOf('，', position - 1), text.lastIndexOf(',', position - 1),
+    const sentenceStart = Math.max(
       text.lastIndexOf('。', position - 1), text.lastIndexOf('；', position - 1),
       text.lastIndexOf(';', position - 1), text.lastIndexOf('\n', position - 1),
+      position - NEAREST_MATERIAL_WINDOW_CHARS - 1,
     ) + 1;
-    const clause = text.slice(start, position);
-    let best: { name: string; at: number } | undefined;
-    for (const name of materialNames) {
-      const at = clause.lastIndexOf(name);
-      if (at < 0) continue;
-      if (!best || at > best.at || (at === best.at && name.length > best.name.length)) best = { name, at };
-    }
-    return best?.name;
+    const clauseStart = Math.max(
+      text.lastIndexOf('，', position - 1), text.lastIndexOf(',', position - 1),
+      sentenceStart - 1,
+    ) + 1;
+    const ownerIn = (from: number): string | undefined => {
+      let best: { name: string; at: number } | undefined;
+      const window = text.slice(from, position);
+      for (const name of materialNames) {
+        const at = window.lastIndexOf(name);
+        if (at < 0) continue;
+        if (!best || at > best.at || (at === best.at && name.length > best.name.length)) best = { name, at };
+      }
+      return best?.name;
+    };
+    return ownerIn(clauseStart) ?? ownerIn(sentenceStart);
   };
   // 阶段部署子窗口豁免：以块内各「阶段…N人」匹配为界划分子窗口（[本阶段匹配起点, 下一阶段匹配或块尾)），
   // 窗口内工种宣称合计恰为 N → 该窗口属阶段性部署（硬替换会破坏「43 人阶段含 88 混凝土工」类语义）。

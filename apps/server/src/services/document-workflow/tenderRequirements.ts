@@ -386,7 +386,11 @@ const CLAUSE_JUDGE_PROMPT = [
   '   - "comply"：不逐条抄写但全文必须遵守的约束（以开工令为准的日期约束、工期总日历天数基准、全局禁止性事项）',
   '4. coreTerms：2-4 个用于正文核对的核心词（专有名词/等级名/体系名/关键数字参数，如「××杯」「二星级」「六个百分百」「300万元」）；',
   '   数字参数必须保留数字与单位；不要泛化词（「施工」「工程」类不能作为核心词）；',
-  '   必须是正文中可自然逐字出现的完整词/短语（括号/标点保持原文形态），不得使用去标点拼接的短语碎片或合同填空语言（如「承包人自理」）',
+  '   必须是正文中可自然逐字出现的完整词/短语（括号/标点保持原文形态），不得使用去标点拼接的短语碎片或合同填空语言（如「承包人自理」）；',
+  '   不得取条目的名目/评价维度词（如「技术能力」「其他内容」「针对性」「可行性」「主要人员」）与引用性空话',
+  '   （如「按设计图纸要求」「详见招标文件」「满足设计要求」）——正文响应写的是实质内容与数据，',
+  '   条目名与空话在正文中必然不落位，取作核心词会把「已按实响应」判成未响应（4.59 R-C4 实机：',
+  '   这两类核心词是「招标要求部分响应/未响应」误报的主要成分）',
   '5. category：按招标语义命名类别（如「质量创优」「工期进度」「安全文明」「绿色施工」「人员管理」「商务支付」「禁止性要求」），',
   '   同类要求使用同一类别名',
   '6. structures：该条是否明文要求内容的呈现形态？命中时输出数组（element 呈现对象名 + form 形态），无呈现要求时省略该字段：',
@@ -724,6 +728,79 @@ function isDocumentReferenceTerm(term: string): boolean {
  * - 字母前缀 + 数字：`GB50242`、`JGJ94`、`DB34/T4289`、`CECS`、`ISO9001`；
  * - 图集号：`23S516`、`20S515`、`12J201`、`皖2015S209`（数字年份 + 字母 + 序号）。
  */
+/**
+ * 材料牌号/强度等级谓词（4.59 R-C4，判据单源：锚点族与标准/图集代号判据共用）：
+ * 热轧/冷轧带肋钢筋牌号（HPB300、HRB400、HRB335E、RRB400、CRB550）、碳素结构钢/低合金钢牌号
+ * （Q235B、Q355）、砌体材料强度等级（MU10、MU15）、混凝土强度等级（C30、C35），允许带图纸
+ * 希腊字母前缀（Φ-HPB300、φHRB400）。形态闭合：字母牌号前缀 + 1~4 位数字 + 可选字母后缀。
+ * 与 `isStandardOrAtlasCode` 分开成独立谓词（而非并进去）：标准/图集代号是**引用型**内容
+ * （正文按做法写、不逐字复现编号即合规 → 不作锚点），材料牌号是**实质规格**（正文必须写出
+ * `HPB300`/`HRB400` 才算响应 → 必须作锚点且整词作锚，不走复合词分解）。
+ */
+const MATERIAL_GRADE_TOKEN_RE = /^(?:Φ|φ|Ø|ø)?-?(?:HPB|HRB|HRBF|RRB|CRB|Q|MU|C)\d{1,4}[A-Z]?$/u;
+
+function isMaterialGradeToken(term: string): boolean {
+  return MATERIAL_GRADE_TOKEN_RE.test(term.replace(/\s+/gu, '').toUpperCase());
+}
+
+/**
+ * 占位指引值判据（4.59 R-C4）：条款**值部分**为引用性空话（「按设计图纸要求」「详见招标文件」）时，
+ * 条款本身没有可核验的实质值——与 `clauseSentenceHasNoValue` 的「值部分为占位指引（见《××》）」
+ * 同一口径，只是把形态从「见《规范》」扩到引用动词 + 被引用对象的闭合形态族。
+ * 值部分的取法与 `clauseSentenceHasNoValue` 逐字同源（最后一个「：」之后）。
+ * 用途见 {@link collectRequirementAnchors}：占位指引条款的**名目/概括词**不作锚点。
+ */
+const PLACEHOLDER_VALUE_RE = /^(?:按|依据|见|详见|参见|遵照|参照|执行|满足|符合)(?:设计图纸|设计文件|图纸|图集|规范|标准|招标文件|合同|国家现行标准|现行标准|相关规范|有关规定|设计要求)(?:的)?(?:要求|规定|执行|施工|做法|标准|为准)?\s*[。；;]?\s*$/u;
+
+/** 占位指引判定的值部分（与 clauseSentenceHasNoValue 同源取法：最后一个全角冒号之后） */
+function clauseValuePart(text: string): string {
+  return (normalizePercent(text).split('：').pop() || text).replace(/\s+/gu, '').trim();
+}
+
+/**
+ * 名目清单条款判据（4.59 R-C4）：把条款文本去掉编号前缀/标点/空白后，若**全部由自身 coreTerms
+ * 拼接而成**（顿号枚举的名目），则该条款就是一张「条目名清单」——评标办法/编制要求里
+ * 「（6）施工组织措施的针对性、可行性；」这类条目（实机 cfb0a0da blocker 的 clause 头即 `（6）`）。
+ * 名目清单没有实质内容与数据，正文响应是"写出该维度的内容"，不是逐字回抄条目名：
+ * 该判定把它交给结构通道（评分标准条目的承接小节由 constructionBidStructure 负责补位），
+ * 本通道不作逐字锚点核验（名目作锚点 = 把"写实"判成未响应）。
+ * 保守边界：只要条款文本里剩下任何一个非名目字（义务词/数据/其余描述）即**不判**名目清单；
+ * 百分比不参与剥除（`一次性成活率95%` 这类条款的 `%` 会留下 → 不判），防把数据条款误判成名目。
+ */
+const LABEL_LIST_PUNCTUATION_RE = /[\s。；;，,、：:（）()]/gu;
+
+function clauseIsLabelList(item: { text: string; coreTerms: string[] }): boolean {
+  const stripped = normalizePercent(item.text)
+    .replace(/^#{0,6}\s*/u, '')
+    .replace(/^[（(]\s*(?:\d{1,3}|[一二三四五六七八九十]{1,3})\s*[)）]/u, '')
+    .replace(/^\d+(?:[.-]\d+)*[.、]?/u, '')
+    .replace(LABEL_LIST_PUNCTUATION_RE, '');
+  if (stripped.length === 0) return false;
+  let rest = stripped;
+  for (const term of item.coreTerms) {
+    const clean = normalizePercent(term).replace(LABEL_LIST_PUNCTUATION_RE, '');
+    if (clean.length < 2) continue;
+    rest = rest.split(clean).join('');
+  }
+  return rest.length === 0;
+}
+
+/**
+ * 空话/占位锚点形态（4.59 R-C4 实测 doc-1790178570374-cfb0a0da / doc-1790176444035-ea380252）。
+ *
+ * 缺陷：条款 coreTerms 会取到**引用性空话**——实测条款「关于建造要求：4 5.1.1 （1）绿色建筑等级要求：
+ * 按设计图纸要求；」coreTerms=['绿色建筑等级要求','按设计图纸要求']，`按设计图纸要求` 在两份真实文档
+ * 正文中 **0 次**（且写作口径本身就禁止正文出现这类空话引用句：构造做法/指标必须写实值与实际做法），
+ * 即该锚点在判据层「必然不命中」→ 正文写实反而被判未响应（两份文档各报 1 条 blocker，实机确认）。
+ * 形态族（闭合形态，不是开放词表）：引用动词（按/依据/见/详见/参见/遵照/参照/执行/满足/符合）
+ * + 被引用对象（设计图纸/设计文件/图纸/图集/规范/标准/招标文件/合同/国家现行标准/现行标准/相关规范/
+ * 有关规定/设计要求）+ 可选尾缀（要求/规定/执行/施工/做法/标准/为准）。
+ * 保守边界：**必须带引用动词**——「设计要求」「招标文件要求」这类无动词形态不在此列（可能是实质
+ * 条款的名目，误滤会凭空丢真锚点）；与构造做法判据的 `HARD_REFERENCE_PHRASE_RE` 同族（该表管正文侧，
+ * 本表管锚点侧，两侧同一形态口径）。
+ */
+const PLACEHOLDER_ANCHOR_RE = /^(?:按|依据|见|详见|参见|遵照|参照|执行|满足|符合)(?:设计图纸|设计文件|图纸|图集|规范|标准|招标文件|合同|国家现行标准|现行标准|相关规范|有关规定|设计要求)(?:的)?(?:要求|规定|执行|施工|做法|标准|为准)?$/u;
+
 function isStandardOrAtlasCode(term: string): boolean {
   const clean = term.replace(/\s+/gu, '').toUpperCase();
   if (clean.length < 4 || clean.length > 24) return false;
@@ -738,6 +815,14 @@ function isStandardOrAtlasCode(term: string): boolean {
   if (/\d{3,}$/u.test(clean)) return true;
   // ③ 含 / 或 - 分隔：GB/T、JGJ/T 类
   if (/[/-]/u.test(clean)) return true;
+  // ⓪ 材料牌号/强度等级不作标准/图集代号（4.59 R-C4）：① 的「字母段 ≥2 位」会误伤
+  //    牌号前缀（`HPB300`/`HRB400` → `HPB`/`HRB` 命中）→ coreTerm 整体被丢弃、锚点集空。
+  //    实测条款「7、本工程所使用的钢筋强度等级不应小于HPB300.HRB400。」coreTerms=['HPB300','HRB400']，
+  //    两份真实文档正文都逐字写着这两个牌号（ea380252 HPB300 4 处/HRB400 7 处；cfb0a0da 3/9 处），
+  //    却因锚点被丢空而报「招标要求未响应：…零命中」（cfb0a0da review 实机 blocker）。
+  //    本函数下方注释本已声明「C30、MU10 这类材料强度等级**不判**」，但 `MU10` 恰是 2 个字母开头被 ① 误伤，
+  //    本判据是把已声明的口径补齐（不是放宽：牌号是正文该写的实质规格，排除才是丢真锚点）。
+  if (isMaterialGradeToken(clean)) return false;
   // 单字母 + 短数字（C30、MU10 这类材料强度等级）**不判**——它们是正文该写的实质规格，
   // 排除会白白丢掉一个真锚点；上面前三条已覆盖全部标准/图集代号形态。
   return false;
@@ -940,8 +1025,11 @@ export async function extractTenderRequirements(
  * 跳过判定 LLM」（executionStages 实锤），出池判据从未执行致「M10 折算未兑现」。本版起缓存 key
  * 追加密判据指纹（CACHE_JUDGE_FINGERPRINT_SOURCES）：判据函数/正则源码变更自动失效缓存，
  * 新增判据须同步入表（守护测试扫描 judgeTenderClauses 调用清单比对，漏加即红）。
+ * v10（4.59 R-C4）：提取提示词的 coreTerms 形态口径收紧（禁取条目名目/评价维度词与引用性空话——
+ * 这两类是「部分响应/零命中」误报的主要成分，实机两份真实文档各 1 条空锚点 blocker 实录）；
+ * 提示词是判定输入的一部分（锚点集由 coreTerms 生成），故属判定口径变更 → 旧提取池失效重算。
  */
-const TENDER_REQUIREMENTS_CACHE_VERSION = 'tender-requirements-extraction-v9';
+const TENDER_REQUIREMENTS_CACHE_VERSION = 'tender-requirements-extraction-v10';
 
 // 商务域条款排除词表（4.40.0 零商务句根治，取代旧「定性响应句」通道）：丰乐镇与舒城实测均出现
 // 商务条款原文/商务声明句被写入技术标正文——商务与造价条款（金额/利率/时限/计价规则）在判定层
@@ -1613,6 +1701,12 @@ function normalizeAnchorCompareText(text: string): string {
     // 因分隔符字形不同被判未落位（`600*600mm` 全文 0 次、`600×600mm` 有；该条是
     // 「招标要求部分响应」11 条 blocker 的主要成分）。两侧同折为 `×` 后逐字可比，不产生假命中。
     .replace(/[*✕╳xX×]/gu, '×')
+    // 4.59 R-C4 单体编号归一：条款 coreTerms 写 `1厂房`（招标范围条款原文如此），正文写作口径
+    // 统一写 `1#厂房`——实测两份真实文档正文 `1#厂房` 79 处 / 53 处，裸 `1厂房` **0 处**，
+    // 锚点 `1厂房`、`2门卫`、`3门卫` 全部命中不了 → 实机报「部分响应：…已命中『建筑面积72062.84平方米』，
+    // 但缺少『1厂房、2门卫、3门卫』」。`#` 在正文只作单体编号分隔与标题记号，锚点侧同样归一
+    //（两侧同源折算，`1#厂房` ≡ `1厂房`），标题记号 `##` 一并折除不影响判定（锚点均不含 `#`）。
+    .replace(/[#＃]/gu, '')
     // 破折号/连接号族归一（与 normalizeRegulationCode 同口径）
     .replace(/[—–―─－〜～]/gu, '-')
     .replace(/[「」『』“”"'`《》]/gu, '')
@@ -1658,11 +1752,31 @@ export function collectRequirementAnchors(
 ): string[] {
   const text = normalizePercent(item.text.replace(/\s+/gu, ''));
   const anchors = new Set<string>();
+  // 4.59 R-C4 占位指引条款（实测 doc-1790176444035-ea380252 / doc-1790178570374-cfb0a0da）：
+  // 条款值为「按设计图纸要求」类引用性空话时，条款侧的**名目/概括词**（纯汉字 coreTerms）不作锚点——
+  // 正文响应写实值与实际做法，不回抄名目（实测条款「（1）绿色建筑等级要求：按设计图纸要求；」
+  // coreTerms=['绿色建筑等级要求','按设计图纸要求']，两份真实文档「绿色建筑等级要求」0 次，而绿色建筑
+  // 内容均已写实：基本级/二星级）；留着名目锚点 = 把"响应写实"判成未响应，且该 blocker 的补写素材
+  // 就是空话原文，会把空话写进正文。数据形态（含数字/字母/《》）与具名奖项不受影响：条款带数据时
+  // 照常逐项核验；名目锚点被跳过后若锚点为空，终检按「无可用锚点」降 warning 显性记录（零静默降级）。
+  const valueIsPlaceholder = PLACEHOLDER_VALUE_RE.test(clauseValuePart(item.text));
+  const labelOnlyClause = clauseIsLabelList(item);
   // 专有名词：coreTerms 全部作为锚点（长度≥2；引用性词过滤；含数字复合词分解）
   for (const term of item.coreTerms) {
     const clean = normalizePercent(term.replace(/\s+/gu, ''));
     if (clean.length < 2) continue;
     if (isDocumentReferenceTerm(clean)) continue;
+    // 占位指引条款/名目清单条款：名目与概括词不作锚点（数据形态与具名奖项不受影响）
+    if ((valueIsPlaceholder || labelOnlyClause) && !/[0-9A-Za-z]|《|[\u4e00-\u9fa5]{2,6}[杯奖星]/u.test(clean)) continue;
+    // 4.59 R-C4：引用性空话（`按设计图纸要求` 类）不作锚点——正文写实值与实际做法，空话锚点必然
+    // 不命中（实测两份真实文档 0 次），留着它 = 把「响应写实」判成未响应（见 PLACEHOLDER_ANCHOR_RE）
+    if (PLACEHOLDER_ANCHOR_RE.test(clean)) continue;
+    // 4.59 R-C4：材料牌号/强度等级**整词**作锚点，且不走下面的复合词分解——`HPB300` 分解产物
+    // `HPB`+`300` 是无意义碎片（正文写的是完整牌号），与 isStandardOrAtlasCode 的牌号豁免同源
+    if (isMaterialGradeToken(clean)) {
+      anchors.add(clean);
+      continue;
+    }
     // 4.58 R4：标准/图集代号不进锚点——它们的数字是**代号的一部分**，
     // 走下面的复合词分解会切成无意义碎片（`23S516` → `23S` + `516`，正文写全编号也命不中）
     if (isStandardOrAtlasCode(clean)) continue;
@@ -1688,6 +1802,11 @@ export function collectRequirementAnchors(
       // M26 编号切片守卫：「N.N项」为「N.N项目/N.N项次」编号前缀被截断的产物（r28k「1.1项」←「1.1项目名称」、
       // 「2.10项」←「2.10项目类别」、「3.3项」←「第1.3.3项」实机），非真实数量参数——整数+项（3项）保留，小数+项丢弃
       if (/^\d+\.\d+项$/u.test(anchorText)) continue;
+      // 4.59 R-C4：零值数量参数不作锚点——实测条款原文（招标文件表格/OCR 残片）
+      // 「0.0个坡百雨求井，带道理深0.b~0.9m」中的 `0.0个`：正文没有任何"响应0个"的写法，
+      // 该锚点必然不命中（cfb0a0da 实机报「部分响应：…但缺少『0.0个』」）。只丢**数值恰为 0**
+      //的锚点（0.5m、101.0个 这类正常参数不受影响），比"纯数字不作锚点"更窄。
+      if (Number.parseFloat(anchorText) === 0) continue;
       anchors.add(anchorText);
     }
   }
@@ -1875,6 +1994,26 @@ export async function requirementAcceptanceIssues(input: {
     // 字面锚点兜底升级 + 分句兜底 + voice 通道：共享谓词 clauseSatisfied——三通道任一完全命中即已响应
     if (clauseSatisfied(entry, normalized, variant)) continue;
     const coverage = requirementAnchorCoverage(entry, normalized, variant);
+    if (coverage.total === 0) {
+      // 4.59 R-C4 零锚点条款：条款内没有任何可核验锚点（coreTerms 全为引用性/空话形态，且条款
+      // 无数字参数与具名奖项），确定性三通道**无据可判**。此前照报 blocker「在正文中零命中」而
+      // 缺失锚点为空——报告自相矛盾（实机 ea380252/cfb0a0da 各 1 条 missing=∅ 实录），且修复轮
+      // 拿不到缺口、补写素材为空（空转 LLM 轮）。
+      // 处置 = 本文件修复轮既有口径「宁缺毋假」（要求未响应是评标失分风险，但有锚点才谈得上"缺"）
+      // + 全局纪律「零静默降级」：降为 warning 显性记录（进报告可见、不阻断导出、不引修复轮空转）。
+      // 边界：**只降无锚点条款**；有锚点但缺锚点的条款照常 blocker（部分/零命中判定不变）。
+      issues.push({
+        level: 'warning',
+        severity: 'warning',
+        category: 'evidence_coverage',
+        owner: 'system',
+        repairability: 'not_repair_needed',
+        message: `招标要求无法确定性核验：${kind}“${entry.text}”条款内无可用锚点（核心词均为引用性/空话形态，且无数字参数与具名奖项），确定性通道未作响应判定（最佳语义相似度 ${bestSimilarity.toFixed(2)}）`,
+        suggestion: '该条款未进入确定性核验：如需逐字核验，应在招标要求提取阶段为该条款给出可核验的核心词（专有名词/等级名/体系名/关键数字参数）。',
+        provenance: { detectorId: 'requirements-coverage', fingerprint: stableHash(entry.text) },
+      });
+      continue;
+    }
     if (coverage.hit.length > 0) {
       // 部分响应候选：锚点部分命中，「或/及」条款由 LLM 批量判定兜底防误报
       partialResponseCandidates.push({ item: entry, kind, bestSimilarity, hit: coverage.hit, missing: coverage.missing });

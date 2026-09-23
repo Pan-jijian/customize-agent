@@ -8,6 +8,9 @@
  *   终检同源复核 chapter-fact-density），与预算天然自洽（不用绝对数量，避免「预算小要求多」的矛盾）；
  * - 模板化：套话句占比 >10% 或模糊句式 ≥3 处/块（本模块 scanBlockTemplating，句池与判定器与
  *   fillerDensityReport 同源，占比线即终检达标线 ≤10%）；
+ * - 短语级套话（4.59 R-B5 ①，同一家族的**粒度下沉**通道）：≥1 处/块（本模块 scanBlockFillerPhrases，
+ *   判据与 tenderBidChecks.scanZeroInfoFillerPhrases 同源）；句级占比通道对本族**天然不开火**
+ *   （实测：套话嵌在实质句中，整句占比恒低于 10%），故必须独立成器；
  * - 归因量化：重难点类章条目须含归因链与量化目标，双达标率 <50% 阻断（assessDifficultyEntries
  *   与 difficultyCountermeasureReport 同源，同验收线 ≥50%）；
  * - 数值：正文数值 vs 证据池对账矛盾即阻断（writeBlock 内联 reconcileContentNumbers，
@@ -16,7 +19,7 @@
  */
 import { documentTextLength } from './budget';
 import { BACKSTAGE_OR_FALLBACK_TEXT_RE } from './markdownComposer';
-import { assessDifficultyEntries, buildFillerSentencePool, judgeFillerSentences, splitDifficultyEntries } from './tenderBidChecks';
+import { assessDifficultyEntries, buildFillerSentencePool, judgeFillerSentences, scanZeroInfoFillerPhrases, splitDifficultyEntries } from './tenderBidChecks';
 
 // ═══════════════════ ② 密度：事实落位比例口径（≥1.5/千字） ═══════════════════
 
@@ -107,6 +110,51 @@ export async function scanBlockTemplating(text: string): Promise<BlockTemplating
 
 export function templatingBlockingOf(verdict: BlockTemplatingVerdict): boolean {
   return verdict.fillerRatio > BLOCK_TEMPLATING_RATIO_LIMIT || verdict.vagueCount >= BLOCK_TEMPLATING_VAGUE_LIMIT;
+}
+
+// ═══════════ ③-b 短语级套话（R9-a 粒度下沉；4.59 R-B5 ① 接线：块成稿后 self-check） ═══════════
+
+/**
+ * 短语级套话阻断线（处/块）。
+ *
+ * 为什么不用占比/句数比例：本族判定粒度是**子句**，命中句几乎都是**有实质内容**的句子——
+ * 实测缺陷「塘渣石垫层、水泥稳定碎（砾）石各分项施工质量验收统一以“精心组织施工”为总控目标，
+ * 检验批验收逐级对照核验」整句有部位/工序/参数，只是**短语**是套话：句级占比门（套话句/句池 >10%）
+ * 在这种形态下分母大、命中少而恒不开火；若改用"该句 1/1 是套话"的整句口径，修复动作就变成删整句
+ *（连带丢掉句内实质信息），与缺陷实际不符。故本族用**计数**口径（处理单位是短语，不是句子）。
+ *
+ * 为什么是 1：零信息短语通道在真实成稿 878 句/3906 子句里命中 **2 处，人工复核 2/2 全为真套话**
+ *（词表子串误伤「最高标准」由程度修饰保护拦截归零，见 tenderBidChecks.hitsForbiddenEmptyPhrase），
+ * 即**命中即缺陷**，"成片"门槛不是精度需要；代价侧，首轮阻断 = 该块一次**定向重写**（二轮放行，
+ * 与句级模板化门同属"首轮模式"），且反馈只要求改写该短语、保留句中实质信息（不删整句）。
+ */
+export const BLOCK_FILLER_PHRASE_LIMIT = 1;
+
+export interface BlockFillerPhraseVerdict {
+  /** 命中处数（子句粒度，非句子数） */
+  count: number;
+  /** 命中短语原文（去重，改写锚点：只改这一处，不删整句） */
+  phrases: string[];
+  /** 命中短语所属整句（去重，供定向重写提供上下文；上限 8 条防反馈超长） */
+  sentences: string[];
+  /** 句子总数（与终检句池同源，留痕用于观测命中率） */
+  totalSentences: number;
+}
+
+/** 块级短语级套话扫描（判据与 tenderBidChecks.scanZeroInfoFillerPhrases 同源：同一份句池/子句切分 +
+ * 空话词表 + 零信息判据；本模块不另造词表或阈值） */
+export function scanBlockFillerPhrases(text: string): BlockFillerPhraseVerdict {
+  const hits = scanZeroInfoFillerPhrases(text);
+  return {
+    count: hits.length,
+    phrases: [...new Set(hits.map(hit => hit.phrase))].slice(0, 8),
+    sentences: [...new Set(hits.map(hit => hit.sentence))].slice(0, 8),
+    totalSentences: buildFillerSentencePool(text).length,
+  };
+}
+
+export function fillerPhraseBlockingOf(verdict: BlockFillerPhraseVerdict): boolean {
+  return verdict.count >= BLOCK_FILLER_PHRASE_LIMIT;
 }
 
 // ═══════════════════ ④ 归因量化：重难点类章条目双达标率 <50% 阻断 ═══════════════════

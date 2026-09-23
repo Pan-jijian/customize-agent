@@ -4,6 +4,8 @@ import { displayStage } from './progress';
 import { throwIfAborted } from './utils';
 import { buildSectionFactCard, evidenceForSection, sectionFactUsageIssue } from './chapterGeneration';
 import { extractGeneratedSections, docSystemPrefix } from './markdownComposer';
+import { det } from './detectorFixerRegistry';
+import { scanTableLeakParagraphs } from './tenderBidChecks';
 
 export async function chapterSectionFactUsageIssues(input: { chapter: DocumentTemplateChapter; content: string; evidence: DocumentEvidence[] }, embedDocuments?: (texts: string[]) => Promise<number[][]>): Promise<string[]> {
   // 结构口径：按最终 markdown 中实际存在的 ### 小节标题检查，模板细目只作为写作清单。
@@ -22,6 +24,40 @@ export async function chapterSectionFactUsageIssues(input: { chapter: DocumentTe
     if (issue) issues.push(`${title}：${issue}`);
   }
   return issues;
+}
+
+/**
+ * 4.59 R-B5 ③ 章成稿后自检：表格内容泄漏成散文（P0 门声明的处置通道 = self-check/章成稿后）。
+ *
+ * 实测缺陷（4.59 交付物）：「编制依据表」的条目被倒成一段散文——整段仅由书名号枚举构成、无主谓
+ *（「《建筑桩基技术规范》（JGJ 94-2008）、《建筑机电工程抗震设计规范》（GB 50981-2014）、…」），
+ * 判据（书名号枚举 ≥3 ∧ 非书名号/规范号残留占比 ≤35% ∧ 残留无谓语）与阈值实测依据见
+ * tenderBidChecks 10.3。修复动作是"改回表格或补主谓"（结构性改写），故处置通道是**章成稿后自检**：
+ * 章级发现 → 随章问题清单进"待优化"与诊断，交由后续修复轮/人工复核处置，不在写作期打断。
+ *
+ * 为什么**不**把本族判成章失败：`chapterCompletionStatus` 只认"章未产出"三类形态
+ *（字数为 0 / 生成失败 / 缺小节），表格内容泄漏是"章已产出但有一处表达形态缺陷"——
+ * 判失败会触发整章重写（成本与丢内容风险远大于收益）。消息措辞有意避开「空小节/缺少规划小节」字样。
+ *
+ * 零静默降级：扫描器异常时**不返回空**（空 = 本维度干净），而是返回一条"本次未执行"的可复核问题
+ * 并写 console.error + diagnostics —— 检测维度静默退役是本仓反复出现的形态。
+ */
+export function chapterTableLeakIssues(input: { chapterTitle: string; content: string; diagnostics?: DocumentGenerationDiagnostics }): string[] {
+  let paragraphs: string[];
+  try {
+    paragraphs = det('table-content-leak', () => scanTableLeakParagraphs(input.content));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error(`[gen][chapter-qc] 章级表格内容泄漏自检失败（该维度本次未执行）: ${input.chapterTitle}`, error);
+    if (input.diagnostics) input.diagnostics.llm.lastError = `章级表格内容泄漏自检未完成：${input.chapterTitle} —— ${detail}`;
+    return [`表格内容泄漏自检未完成（该检测维度本次未执行，已记录待复核）：${detail}`];
+  }
+  if (paragraphs.length === 0) return [];
+  console.error(`[gen][chapter-qc] 章级表格内容泄漏 ${paragraphs.length} 段（表格条目被倒成无主谓散文）: ${input.chapterTitle}`);
+  return paragraphs.map(paragraph => {
+    const flat = paragraph.replace(/\s+/gu, '');
+    return `表格内容泄漏：表格条目被倒成散文段（无主谓书名号枚举 ${flat.length} 字），应改回表格或补出主谓——段首「${flat.slice(0, 40)}…」`;
+  });
 }
 
 

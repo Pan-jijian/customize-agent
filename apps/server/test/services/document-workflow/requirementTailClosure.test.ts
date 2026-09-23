@@ -217,8 +217,17 @@ describe('C8 S1 · 链尾插入物质量闸（签名查重 + 形态拒插 + 跨�
     });
   });
 
-  it('三连重复根因回归：短条款「（9）发现脏、差，有缺损。」插入一次即 satisfied，链上重跑零重插', async () => {
-    const entry: TenderRequirementEntry = { text: '（9）发现脏、差，有缺损。', coreTerms: [], sources: [], category: '现场管理', policy: 'respond' };
+  /**
+   * 4.59 R-C4 口径变更（fixture 更新，**意图不变**）：
+   * `requirementAcceptanceIssues` 新增「**零锚点条款降为 warning**」——条款内无任何可核验锚点
+   * （coreTerms 全为引用性/空话形态且无数字参数与具名奖项）时确定性通道**无据可判**，
+   * 此前照报「在正文中零命中」而 missing 为空（报告自相矛盾、修复轮空转）。
+   * 故本用例原 fixture（`coreTerms: []`）不再进 blocker 通道、也就到不了 tail closure。
+   * 这里补一个**可核验锚点**（`M10` 砂浆强度等级——非标准/图集代号、非引用性空话）保住原意图：
+   * 短条款插入一次即 satisfied、链上重跑零重插。
+   */
+  it('三连重复根因回归：短条款插入一次即 satisfied，链上重跑零重插', async () => {
+    const entry: TenderRequirementEntry = { text: '（9）发现脏、差，有缺损，砂浆强度等级不小于M10。', coreTerms: ['M10'], sources: [], category: '现场管理', policy: 'respond' };
     const first = await applyRequirementTailClosure({
       markdown: BASE_MARKDOWN,
       tenderRequirements: modelOf([entry]),
@@ -228,7 +237,7 @@ describe('C8 S1 · 链尾插入物质量闸（签名查重 + 形态拒插 + 跨�
     expect(first.insertedCount).toBe(1);
     expect(first.rejectedCount).toBe(0);
     // 「（9）」条款号随 bidderVoiceClauseText 剥离，正文只留实质表述
-    expect(first.markdown).toContain('发现脏、差，有缺损。');
+    expect(first.markdown).toContain('发现脏、差，有缺损');
     expect(first.markdown).not.toContain('（9）发现脏');
     // 插入后确定性复检（检测端同源三通道）：voice 分句通道整体命中 → 无「未确认落位」
     expect(first.details.filter(line => line.includes('未确认落位'))).toHaveLength(0);
@@ -269,7 +278,8 @@ describe('C8 S1 · 链尾插入物质量闸（签名查重 + 形态拒插 + 跨�
   });
 
   it('跨轮幂等：形态闸拒插素材显性记录且跨轮不重试（attemptedSignatures 传递）', async () => {
-    const entry: TenderRequirementEntry = { text: '归档资料详见（18laxj）记录。', coreTerms: [], sources: [], category: '资料管理', policy: 'respond' };
+    // 同上口径变更：补 `压实度` 作可核验锚点，使该条款进入 blocker 通道并由形态闸（OCR 残片 `18laxj`）拒插
+    const entry: TenderRequirementEntry = { text: '归档资料详见（18laxj）记录，压实度不小于93%。', coreTerms: ['压实度'], sources: [], category: '资料管理', policy: 'respond' };
     const attempted = new Set<string>();
     const first = await applyRequirementTailClosure({
       markdown: BASE_MARKDOWN,
@@ -296,5 +306,31 @@ describe('C8 S1 · 链尾插入物质量闸（签名查重 + 形态拒插 + 跨�
     expect(second.rejectedCount).toBe(0);
     expect(second.details).toHaveLength(0);
     expect(attempted.size).toBe(1);
+  });
+});
+
+/**
+ * 4.59 R-C4 零锚点条款的**新口径**自身用例（防「降级即静默」）：
+ * 零锚点 ⇒ 确定性通道无据可判 ⇒ 报 warning 显性记录（**不是** blocker，也**不是**静默跳过）。
+ */
+describe('4.59 R-C4 零锚点条款降级可见', () => {
+  it('条款无任何可核验锚点时：tail closure 不插入、不拒插、零明细（不误报、不空转）', async () => {
+    const entry: TenderRequirementEntry = { text: '（9）发现脏、差，有缺损。', coreTerms: [], sources: [], category: '现场管理', policy: 'respond' };
+    const result = await applyRequirementTailClosure({
+      markdown: BASE_MARKDOWN, tenderRequirements: modelOf([entry]), requirementAssignments: [], embedDocuments: zeroEmbed,
+    });
+    expect(result.insertedCount).toBe(0);
+    expect(result.rejectedCount).toBe(0);
+    expect(result.details).toEqual([]);
+    expect(result.markdown).toBe(BASE_MARKDOWN);
+  });
+
+  it('有锚点但未命中时**照常进入补写**（降级只针对零锚点，不放宽真缺口）', async () => {
+    const entry: TenderRequirementEntry = { text: '砂浆强度等级不小于M10。', coreTerms: ['M10'], sources: [], category: '现场管理', policy: 'respond' };
+    const result = await applyRequirementTailClosure({
+      markdown: BASE_MARKDOWN, tenderRequirements: modelOf([entry]), requirementAssignments: [], embedDocuments: zeroEmbed,
+    });
+    expect(result.insertedCount).toBe(1);
+    expect(result.markdown).toContain('M10');
   });
 });

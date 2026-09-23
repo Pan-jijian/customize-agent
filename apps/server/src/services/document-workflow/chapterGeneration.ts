@@ -9,7 +9,7 @@ import { callDocumentLlm, callDocumentLlmJson, contextLayerChars, getDocumentLlm
 import { alignSimilarHeadingsToPlan, dedupeRepeatedSubsections, findDuplicateH4Titles, findExtraneousBlockTitles, normalizeSubsectionTitleForDedup, stableHash, stringifyFactValue, stripExtraneousBlockHeadings, throwIfAborted } from './utils';
 import { measureGenerationStep } from './rolePipeline';
 import { normalizePlannedSections, sectionTitleEquivalent } from './promptRuleExtraction';
-import { diagramRequirementsPrompt, tablePlansPrompt, unassignedSectionTablePlans } from './constructionOrgTablePlan';
+import { TABLE_CAPTION_MECHANICAL_RULE, diagramRequirementsPrompt, tablePlansPrompt, unassignedSectionTablePlans } from './constructionOrgTablePlan';
 import { bidCompositionWritingRules, isBodyTableForbidden, type BidCompositionSpec } from './bidComposition';
 import { constructionOrgBonusModulePrompt, constructionOrgChapterRulePrompt, constructionOrgProjectTypePrompt } from './constructionOrgQualityRules';
 import { renderBlueprintBlockSlice, renderBlueprintDataTextForBlock } from './integratedBlueprint';
@@ -21,7 +21,9 @@ import { cleanStructureDefects, scanStructureDefects, structureIntegrityFeedback
 import { normalizeTableTitleInHeaders } from './tableRepairHelpers';
 import { HAS_QUANTIFIED_VALUE_RE, PRECISE_TOKEN_RE, QUANTIFIED_FACT_RE } from './parameterPatterns';
 import { det } from './detectorFixerRegistry';
-import { BLOCK_FACT_DENSITY_PER1000, assessBlockFactDensity, attributionBlockingOf, backstageFallbackHits, requiresAttributionQuantification, scanAttributionQuantification, scanBlockTemplating, templatingBlockingOf, type AttributionQuantificationVerdict, type BlockTemplatingVerdict } from './blockQualityExecutors';
+import { BLOCK_FACT_DENSITY_PER1000, assessBlockFactDensity, attributionBlockingOf, backstageFallbackHits, fillerPhraseBlockingOf, requiresAttributionQuantification, scanAttributionQuantification, scanBlockFillerPhrases, scanBlockTemplating, templatingBlockingOf, type AttributionQuantificationVerdict, type BlockFillerPhraseVerdict, type BlockTemplatingVerdict } from './blockQualityExecutors';
+// 4.59 R-B5 ②：条款体复述（写作期 constraint 通道）——判据与约束文本同源于检测器模块（不另造一份口径）
+import { CLAUSE_RECITATION_CONSTRAINT_RULE, scanClauseRecitationSentences } from './tenderBidChecks';
 import { buildSemanticGate } from './semanticGate';
 import type { PlannedChapterBlock, PlannedChapterStructure } from './integratedBlueprint';
 import { cleanFactValue, isActionableFactValue } from './documentFactTrace';
@@ -637,12 +639,32 @@ export async function buildSectionFactCard(sectionTitle: string, evidence: Docum
    *
    * 第 ② 项**同时点明不得全篇复用同一句式**——实测该文档「先…再…随后…然后…接着…最后」链
    * 全篇复读被 `sentence-pattern-repeat` 判 blocker，而写作期从未被告知这一限制。
+   *
+   * ## 4.59 R-B7：删除示例数字（实测未泄漏也不保留）
+   *
+   * 原 ① 项写作「（如「塑料管铺设8205.53m」）」——给模型一个**真实格式的数字示例**属不必要的风险：
+   * 提示词里的具体数值会被当作"可抄用的资料事实"（对本地模型的复读倾向而言，示例比抽象指令强得多），
+   * 一旦被抄进正文，该数值没有资料出处，直接触发 `factReconciliation`「无据不写」族。
+   * 4.59 本轮实测未泄漏，但"未泄漏"是结果不是保证——故删除示例数字，替换为**不含数字**的口径说明
+   *（数量照抄资料/清单原文）：既保留"必须引用清单数量"的硬要求，也不提供可抄的数字。
+   *
+   * ## 4.59 R-B3：题注机械生成的写作期一半
+   *
+   * 题注编号的所有权在**链尾剥离 + 注入器**（constructionOrgTablePlan.finalizeTableCaptions），
+   * 本卡只声明"不写编号前缀、引用用表名"。实测依据：模型按小节号写 `表1-34-1`、又按文档表序写 `表1-3`，
+   * 两套编号并存；注入器的两条幂等/残缺判据都不认 `表1-34-1`，最终产出「表1-3 表1-34-1 表名」双编号——
+   * 写作期不写编号才能从源头消除该形态。
+   *
+   * ⚠ 接线现状（4.59 记录）：本卡（`buildSectionFactCard().prompt`）自 4.55.22（commit 2e7d35c 删除
+   * `buildLlmSectionContent`）后**没有生产消费方**（死路径，仅测试引用）。故上述 B3/B7 写作期约束
+   * **同时**下在块写作的真实任务卡上（writeBlock 的 `blockRoleContext` 写作红线，接线注释见彼处），
+   * 否则本卡的措辞只是文档，不是约束。
    */
   const taskCardPrompt = lines.length ? `【当前小节写作任务卡】
 小节：${sectionTitle}
 必须优先落位的资料事实：
 ${lines.join('\n')}
-成稿要求：1）至少自然写入其中 2 条资料事实；2）如存在数字、规格、标准编号、数量、工期，必须至少原样写入 1 条；3）本节必须**完整包含**下列要素（终检逐项判定，缺项即打回）：① 作业对象与工程量——写出具体部位/单体并引用清单数量（如「塑料管铺设8205.53m」）；② 工序顺序——编号步骤、箭头链、表格均可，但**不得全篇复用「先…再…随后…最后」同一句式**；③ 施工方法——含不少于 4 个工艺参数（材料牌号/强度等级/厚度/间距/偏差/试验压力等）；④ 检查验收与闭环——责任岗位 + 检查频次 + 整改销项；不得写成"结合实际、按规范执行"的泛化空话；4）不得改写、换算或编造资料未提供的参数；5）量化参数落位硬性要求：本节正文每千字不少于 2 个不同量化参数（优先使用上方清单参数与资料原文参数），同一参数不得反复堆砌凑数；当本节资料可落位参数不足 2 个/千字时，以全部可落位参数写入为准，不得虚构参数凑数——「参数不足」仅在资料中仍有未落位参数时构成打回理由；6）**本节出现的每一个数值都必须来自上方资料事实、量化参数清单或蓝图锁定值**，不得出现清单外的数值，也不得用「约/左右/若干」变通；涉及危险性较大的分部分项工程时，必须写「本项目实际参数 + 判定阈值对照 + 结论」，禁止只抄规范阈值。` : '';
+成稿要求：1）至少自然写入其中 2 条资料事实；2）如存在数字、规格、标准编号、数量、工期，必须至少原样写入 1 条；3）本节必须**完整包含**下列要素（终检逐项判定，缺项即打回）：① 作业对象与工程量——写出具体部位/单体并引用清单数量（数量照抄资料/清单原文，不得改写或换算）；② 工序顺序——编号步骤、箭头链、表格均可，但**不得全篇复用「先…再…随后…最后」同一句式**；③ 施工方法——含不少于 4 个工艺参数（材料牌号/强度等级/厚度/间距/偏差/试验压力等）；④ 检查验收与闭环——责任岗位 + 检查频次 + 整改销项；不得写成"结合实际、按规范执行"的泛化空话；4）不得改写、换算或编造资料未提供的参数；5）量化参数落位硬性要求：本节正文每千字不少于 2 个不同量化参数（优先使用上方清单参数与资料原文参数），同一参数不得反复堆砌凑数；当本节资料可落位参数不足 2 个/千字时，以全部可落位参数写入为准，不得虚构参数凑数——「参数不足」仅在资料中仍有未落位参数时构成打回理由；6）**本节出现的每一个数值都必须来自上方资料事实、量化参数清单或蓝图锁定值**，不得出现清单外的数值，也不得用「约/左右/若干」变通；涉及危险性较大的分部分项工程时，必须写「本项目实际参数 + 判定阈值对照 + 结论」，禁止只抄规范阈值；7）${TABLE_CAPTION_MECHANICAL_RULE}${CLAUSE_RECITATION_CONSTRAINT_RULE}` : '';
   // 4.1 量化参数落位清单（两步生成第一步，零 LLM）：复用 extractChapterPreciseTokens 纯本地提取，
   // 在任务卡事实行（句粒度）之外单列精炼参数清单（词粒度），直接引导 LLM 逐参数落位，
   // 弥补「事实行被整行跳过时量化参数一并丢失」的规划缺位。（原 DOCUMENT_SECTION_QUANT_PLAN 回退已固化删除：注入恒开）
@@ -1300,9 +1322,45 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     // F9：章级角色上下文（评分项要求路由/数据口径约束）拆出上移 L2 共享段（同章各块完全相同），
     // 块级 roleContext 只保留块专属段（factsHint/coverageList）——共享前缀变长，命中率回升
     const forbiddenTitlesLine = otherBlockTitleSet.size > 0 ? `严禁将以下属于本章其他小节的标题作为本节任何标题输出（H3 仅允许「${block.title}」，H4 仅允许上面清单中的标题）：${[...otherBlockTitleSet].join('、')}。` : '';
+    /**
+     * 4.59 R-B5 ② 条款体复述的写作期落点（P0 门声明的处置通道 = constraint/块任务卡）。
+     *
+     * 为什么下在**块任务卡**而不是块质检：本族缺陷形态是"整句条款复述"，修复动作是**改语体**
+     *（条款语体 → 本项目做法），不是删除也不是补数值——语体在写作期给约束只花"一次调用内的措辞选择"，
+     * 成稿后给反馈则要重写整块（且模型极易整段删掉、连带丢失信息）。故按声明走任务卡。
+     *
+     * 检测在这里**真的跑**（不是声明了却零调用点）：扫描本块材料（块专属事实 + 块级证据）——
+     * 材料里出现条款体原句时，模型原样抄入的概率显著升高（实测缺陷段「我方在任何时候都应采取各种
+     * 合理的预防措施…」即自招标文件条款），此时把约束**升级为带计数的点名约束**；无命中则只下发基线约束。
+     * 计数只报数量、**不回引条款原句**（与本批 R-B7 删示例数字同一原则：进提示词的原文示例都可能被复读，
+     * 而条款原句被复读恰是本族要治的形态）。
+     */
+    const clauseRecitationMaterial = [factsHint, ...blockEvidence.map(item => item.content)].filter(Boolean).join('\n');
+    const clauseRecitationHits = det('clause-recitation', () => scanClauseRecitationSentences(clauseRecitationMaterial));
+    const clauseRecitationConstraint = clauseRecitationHits.length > 0
+      ? `${CLAUSE_RECITATION_CONSTRAINT_RULE}（本节材料中含 ${clauseRecitationHits.length} 处条款体/承诺式原文，属高风险抄用源——必须改写为本项目做法后方可写入，不得整句照抄。）`
+      : CLAUSE_RECITATION_CONSTRAINT_RULE;
+    // 4.59 R-B3 前半（写作期一半）：题注编号由系统机械生成——链尾剥离见 constructionOrgTablePlan
+    const tableCaptionConstraint = `【表格题注】${TABLE_CAPTION_MECHANICAL_RULE}`;
+    /**
+     * 4.59 P2 三要素 + 数值来源约束（**4.59 接线纠正**）。
+     *
+     * ## 为什么必须挂在这里
+     *
+     * 4.58 P2 把这两条写进了 `buildSectionFactCard().prompt`（`taskCardPrompt`）——但该卡自 4.55.22
+     * 起**没有生产消费方**（死路径，仅测试引用；唯一调用方 `chapterReview` 只用 `factCard` 做
+     * `sectionFactUsageIssue`，不读 `.prompt`）。**即那批约束从未到达写手**，这解释了为何
+     * 「参数落位」在后续自测中毫无改善（19/34 反而下降——属波动，但至少可确认约束未生效）。
+     *
+     * `blockRoleContext` 才是块写作的真实通道（见下方 `writeCall` 的 `roleContext` 传参）。
+     * 两条约束在此**逐字重申**，与 `taskCardPrompt` 共用同一措辞来源（`SECTION_ELEMENT_REQUIREMENTS`
+     * / `NUMERIC_SOURCE_REQUIREMENT`），避免两处漂移。
+     */
+    const sectionElementConstraint = `【要素完整性】本节必须**完整包含**下列要素（终检逐项判定，缺项即打回）：① 作业对象与工程量——写出具体部位/单体并引用清单数量（数量照抄资料/清单原文，不得改写或换算）；② 工序顺序——编号步骤、箭头链、表格均可，但**不得全篇复用「先…再…随后…最后」同一句式**；③ 施工方法——含不少于 4 个工艺参数（材料牌号/强度等级/厚度/间距/偏差/试验压力等）；④ 检查验收与闭环——责任岗位 + 检查频次 + 整改销项。`;
+    const numericSourceConstraint = `【数值来源】本节出现的**每一个数值**都必须来自上方资料事实、量化参数清单或蓝图锁定值；不得出现清单外的数值，也不得用「约/左右/若干」变通；涉及危险性较大的分部分项工程时，必须写「本项目实际参数 + 判定阈值对照 + 结论」，禁止只抄规范阈值。`;
     const blockRoleContext = [factsHint, blockSkeletonPrompt, divisionContainerPrompt, divisionElementFusionPrompt, keySectionKind && !isDivisionChapterContainer ? flowRotationDirective(index) : '', block.subPoints.length > 0
       ? `本节是「${input.chapter.title}」章的一个主题小节，只写本节标题覆盖的内容，不得重复本章其他节内容；必须按以下清单逐点写出实施性正文，标题必须与给定标题完全一致，不得改名、合并或遗漏；每个要点必须覆盖其标注的全部评分细目内容，但不得为这些细目单独开设小节标题；清单标注的篇幅为该要点字数上限，按标注控制详略、不得超出：\n${coverageList}${forbiddenTitlesLine ? `\n${forbiddenTitlesLine}` : ''}`
-      : `本节是「${input.chapter.title}」章的唯一小节（本章无细分小节规划）：正文在 H3 标题下直接展开为连贯的正式叙述，不使用四级标题；覆盖本节标题对应的全部实质内容，不得重复章外内容。`, '【防复读硬约束】本节内同一句话只允许出现一次：同一段落内不得复读任何已写出的句子，不同段落之间不得整句复制，同一工艺/措施只在一处完整表述、其余位置引用结论不重述原文；段落结尾不得复读段内前句（禁止“为此/综上/因此”后接照抄句）。'].filter(Boolean).join('\n\n');
+      : `本节是「${input.chapter.title}」章的唯一小节（本章无细分小节规划）：正文在 H3 标题下直接展开为连贯的正式叙述，不使用四级标题；覆盖本节标题对应的全部实质内容，不得重复章外内容。`, '【防复读硬约束】本节内同一句话只允许出现一次：同一段落内不得复读任何已写出的句子，不同段落之间不得整句复制，同一工艺/措施只在一处完整表述、其余位置引用结论不重述原文；段落结尾不得复读段内前句（禁止“为此/综上/因此”后接照抄句）。', tableCaptionConstraint, clauseRecitationConstraint, sectionElementConstraint, numericSourceConstraint].filter(Boolean).join('\n\n');
     let lastMissing: string[] = [];
     let lastDuplicates: string[] = [];
     let lastExtraneous: string[] = [];
@@ -1311,6 +1369,9 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     let lastFlowFeedback = '';
     // C3 生成期套话反馈（第二轮注入）：首轮套话句阻断时携带命中句原文定向重写
     let lastFillerFeedback = '';
+    // 4.59 R-B5 ① 短语级套话反馈（第二轮注入）：与句级套话分开承载——修复动作不同（句级=整句改写/删除，
+    // 短语级=**只改短语、保留句中实质信息**），合并成一条反馈会把两种处置混成"整句重写"
+    let lastFillerPhraseFeedback = '';
     // 方案 2.2 执行器反馈（第二轮注入）：密度缺口/归因量化/格式硬约束定向重写
     let lastDensityFeedback = '';
     let lastAttributionFeedback = '';
@@ -1408,6 +1469,8 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         lastFlowFeedback,
         // C3 套话句反馈（第二轮注入）：首轮命中句原文定向重写为可核查措施
         lastFillerFeedback,
+        // 4.59 R-B5 ① 短语级套话反馈（第二轮注入）：命中短语定点改写（不删整句）
+        lastFillerPhraseFeedback,
         // 方案 2.2 执行器反馈（第二轮注入）：密度缺口/归因量化/格式硬约束定向重写
         lastDensityFeedback,
         lastAttributionFeedback,
@@ -1672,6 +1735,40 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         if (fillerBlocking && blockTemplating) {
           console.error(`[gen][block-qc] 首轮模板化阻断（套话 ${blockTemplating.fillerSentences}/${blockTemplating.totalSentences} 句、占比 ${(blockTemplating.fillerRatio * 100).toFixed(1)}%、模糊 ${blockTemplating.vagueCount} 处）: ${block.title}: ${blockTemplating.fillerDetails.slice(0, 3).join(' / ')}`);
         }
+        /**
+         * 4.59 R-B5 ① 短语级套话执行器（首轮模式，P0 门声明的处置通道 = self-check/块成稿后）。
+         *
+         * 为什么要独立成器、而不是靠上面的句级模板化门：句级门的两条线是"套话**句**占比 >10%"
+         * 与"模糊句式 ≥3 处"——本族命中嵌在**有实质内容的句子**里（实测「塘渣石垫层、水泥稳定碎（砾）石
+         * 各分项施工质量验收统一以“精心组织施工”为总控目标，检验批验收逐级对照核验」整句有实质信息、
+         * 只有短语是套话），任何句级占比口径都不会开火。这正是该族"检测已就位却零调用点"之外的第二层盲区。
+         * 判据来源：blockQualityExecutors.scanBlockFillerPhrases → tenderBidChecks.scanZeroInfoFillerPhrases
+         *（同一份句池/子句切分 + 空话词表 + 零信息判据；语义通道实测在子句粒度 0 命中，故不启用、
+         * 也不为一个不开火的通道付每块一次嵌入调用）。
+         *
+         * 异常处置与 block-templating 同口径（**异常不得等于通过**）：重试一次；仍失败则按未通过处理
+         *（该块首轮走重写路径），并把原因写进 lastError 供定位——确定性扫描器崩溃属代码缺陷，
+         * 显性失败远比静默放行安全。
+         */
+        let blockFillerPhrases: BlockFillerPhraseVerdict | undefined;
+        let fillerPhraseScanFailure: string | undefined;
+        if (attempt === 0) {
+          for (let scanTry = 0; scanTry < 2 && blockFillerPhrases === undefined; scanTry += 1) {
+            try {
+              blockFillerPhrases = det('block-filler-phrase', () => scanBlockFillerPhrases(withBlockShell));
+            } catch (error) {
+              fillerPhraseScanFailure = error instanceof Error ? error.message : String(error);
+              console.error(`[gen][block-qc] 短语级套话扫描第 ${scanTry + 1} 次失败: ${block.title}`, error);
+            }
+          }
+          if (fillerPhraseScanFailure && input.diagnostics) {
+            input.diagnostics.llm.lastError = `块级短语级套话质检未完成（按未通过处理）：${block.title} —— ${fillerPhraseScanFailure}`;
+          }
+        }
+        const fillerPhraseBlocking = attempt === 0 && (fillerPhraseScanFailure !== undefined || (blockFillerPhrases !== undefined && fillerPhraseBlockingOf(blockFillerPhrases)));
+        if (fillerPhraseBlocking && blockFillerPhrases) {
+          console.error(`[gen][block-qc] 首轮短语级套话阻断（命中 ${blockFillerPhrases.count} 处/${blockFillerPhrases.totalSentences} 句）: ${block.title}: ${blockFillerPhrases.phrases.slice(0, 3).join(' / ')}`);
+        }
         // 方案 2.2 ② 密度执行器（比例口径 ≥1.5/千字，首轮模式）：材料中仍有未落位参数才构成打回理由
         //（与提示词单源语义一致：材料参数不足时以全部参数落位为准，不得借参数凑数）
         const densityMaterialText = [
@@ -1821,8 +1918,9 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         lastAttemptOnlyUnderProduced = (underProduceBlocking || criticalDepthBlocking)
           && !overProduceBlocking && !elementBlocking && missing.length === 0 && duplicates.length === 0
           && extraneous.length === 0 && !numericBlocking && !flowFormBlocking && !fillerBlocking
+          && !fillerPhraseBlocking
           && !structureBlocking && !densityBlocking && !attributionBlocking && !formatBlocking;
-        if (!underProduceBlocking && !overProduceBlocking && !criticalDepthBlocking && !elementBlocking && missing.length === 0 && duplicates.length === 0 && extraneous.length === 0 && !numericBlocking && !flowFormBlocking && !fillerBlocking && !structureBlocking && !densityBlocking && !attributionBlocking && !formatBlocking) {
+        if (!underProduceBlocking && !overProduceBlocking && !criticalDepthBlocking && !elementBlocking && missing.length === 0 && duplicates.length === 0 && extraneous.length === 0 && !numericBlocking && !flowFormBlocking && !fillerBlocking && !fillerPhraseBlocking && !structureBlocking && !densityBlocking && !attributionBlocking && !formatBlocking) {
           // R0-c 章完成率补足：块**已通过验收**但低于目标 95% 时，再做一次有界续写（瞄块目标）。
           // 动机（实测）：验收下限 0.85× 只管"能收稿"，块稳定停在 0.85~1.0 → 章完成率随之停在
           // ~0.9，而章预算缺口随即被修复链以无上限追加的方式补上（终稿 +66% 的来源）。
@@ -1864,7 +1962,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           && numericBlocking
           && !underProduceBlocking && !overProduceBlocking && !criticalDepthBlocking && !elementBlocking
           && missing.length === 0 && duplicates.length === 0 && extraneous.length === 0
-          && !flowFormBlocking && !fillerBlocking && !structureBlocking && !densityBlocking
+          && !flowFormBlocking && !fillerBlocking && !fillerPhraseBlocking && !structureBlocking && !densityBlocking
           && !attributionBlocking && !formatBlocking;
         if (numericOnlyFailure) {
           const mismatchCount = numericReconciliation.mismatched.length;
@@ -1884,6 +1982,12 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           : '';
         lastFillerFeedback = fillerBlocking && blockTemplating
           ? `【上一轮空话套话句】以下句子是空泛口号（无责任岗位、量化标准、检查频次等可核查信息）：${blockTemplating.fillerDetails.map(sentence => `“${sentence}”`).join('、')}。必须删除或改写为“责任岗位 + 执行动作 + 量化标准 + 检查频次 + 整改时限”式具体措施，并嵌入本节项目事实（不得编造数值）。`
+          : '';
+        // 4.59 R-B5 ① 短语级套话反馈（首轮阻断定向重写）：**只改短语、保留句中实质信息**——
+        // 与句级反馈（整句改写/删除）分开措辞，否则模型会把带实质信息的整句一起删掉（本仓 4.47 实测过的
+        // "按短语删整句连带删信息"形态，见 tenderBidChecks 10.1 注释："不进删除判定"）。
+        lastFillerPhraseFeedback = fillerPhraseBlocking && blockFillerPhrases
+          ? `【上一轮套话短语】以下短语是空泛口号（不承载任何可核查信息）：${blockFillerPhrases.phrases.map(phrase => `“${phrase}”`).join('、')}。命中位置所在句子见：${blockFillerPhrases.sentences.map(sentence => `“${sentence.slice(0, 60)}”`).join('、')}。**只改写这些短语**（换成具体做法、责任岗位、执行动作或量化标准），句中其余实质信息（部位、工序、参数）必须原样保留；不得删除整句，也不得改写句内其它内容。`
           : '';
         // 方案 2.2 执行器反馈（首轮阻断定向重写）：密度缺口/归因量化/格式硬约束
         lastDensityFeedback = densityBlocking
@@ -1921,7 +2025,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         //（篇幅深度不足），标题层修复（去重/剥标题）不解决内容量问题。原实现漏列 → 深度不足的块
         // 经标题清洗后由本通道**直接放行**（且首轮即放行，因 repairedUnderProduce 按比例线判、
         // 而绝对门槛当时被折进了比例线才侥幸未暴露），深度门因此被架空。
-        if (missing.length === 0 && !structureBlocking && !numericBlocking && !fillerBlocking && !densityBlocking && !attributionBlocking && !formatBlocking && !elementBlocking && !criticalDepthBlocking) {
+        if (missing.length === 0 && !structureBlocking && !numericBlocking && !fillerBlocking && !fillerPhraseBlocking && !densityBlocking && !attributionBlocking && !formatBlocking && !elementBlocking && !criticalDepthBlocking) {
           // 4.19.1 确定性修复优先：先同 H3 重复 H4 去重，再清单外标题行剥离（正文零丢失），
           // 修复后字数达标即通过——标题层问题由代码确定性修复，不因整块删除掉档触发重试/失败
           const repaired = stripExtraneousBlockHeadings(dedupeRepeatedSubsections(withBlockShell), block.title, sectionTitles, [...block.subPoints.flatMap(point => point.sources)]);
@@ -1958,15 +2062,18 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           // （elementBlocking 同理：仅首轮生效，不进终态失败类别）
           ...(numericBlocking ? ['numeric'] : []),
           ...(flowFormBlocking ? ['flow-form'] : []),
-          ...(fillerBlocking ? ['templating'] : []),
+          // 4.59 R-B5 ①：短语级套话**复用 'templating' 键**（同一家族、同属表达质量；新建键需同步
+          // 块失败类别 → 人话原因映射表与 C7 章级超产对冲接纳的"仅 over-produce"判定，
+          // 而这两处都不应因本族变化：短语级阻断**仅首轮生效**，与句级 fillerBlocking 一样不进终态失败类别）
+          ...(fillerBlocking || fillerPhraseBlocking ? ['templating'] : []),
           ...(densityBlocking ? ['density'] : []),
           ...(attributionBlocking ? ['attribution'] : []),
           ...(formatBlocking ? ['format'] : []),
         ]);
-        if (input.diagnostics) input.diagnostics.llm.lastError = `规划块质检未达标：${block.title}（${chars} 字，缺 ${missing.join('、') || '无'}${duplicates.length ? `，重复 H4 ${duplicates.join('、')}` : ''}${extraneous.length ? `，清单外 ${extraneous.slice(0, 5).join('、')}${extraneous.length > 5 ? ' 等' : ''}` : ''}${criticalDepthBlocking ? `，关键小节深度不足 ${chars}/${criticalDepthFloor} 字` : ''}${elementBlocking ? `，工作包结构/要素门禁 ${sectionElementIssue}` : ''}${blockStructureScan.blocking.length ? `，结构缺陷 ${blockStructureScan.blocking.length} 处` : ''}${densityBlocking ? `，密度缺口 ${densityAssessment.verdict.params}/${densityAssessment.verdict.required}` : ''}${attributionBlocking && attributionVerdict ? `，归因量化 ${(attributionVerdict.bothRatio * 100).toFixed(0)}%` : ''}${formatBlocking ? `，后台话术 ${formatHits.length} 行` : ''}）`;
+        if (input.diagnostics) input.diagnostics.llm.lastError = `规划块质检未达标：${block.title}（${chars} 字，缺 ${missing.join('、') || '无'}${duplicates.length ? `，重复 H4 ${duplicates.join('、')}` : ''}${extraneous.length ? `，清单外 ${extraneous.slice(0, 5).join('、')}${extraneous.length > 5 ? ' 等' : ''}` : ''}${criticalDepthBlocking ? `，关键小节深度不足 ${chars}/${criticalDepthFloor} 字` : ''}${elementBlocking ? `，工作包结构/要素门禁 ${sectionElementIssue}` : ''}${blockStructureScan.blocking.length ? `，结构缺陷 ${blockStructureScan.blocking.length} 处` : ''}${densityBlocking ? `，密度缺口 ${densityAssessment.verdict.params}/${densityAssessment.verdict.required}` : ''}${attributionBlocking && attributionVerdict ? `，归因量化 ${(attributionVerdict.bothRatio * 100).toFixed(0)}%` : ''}${formatBlocking ? `，后台话术 ${formatHits.length} 行` : ''}${fillerPhraseBlocking ? (fillerPhraseScanFailure ? `，短语级套话扫描失败按未通过处理（${fillerPhraseScanFailure}）` : `，短语级套话 ${blockFillerPhrases?.count ?? 1} 处`) : ''}）`;
         // 章失败归因诊断日志：块级质检不达标详情落盘（轮3 实测“重点难点/新技术”两章两次尝试仍未成稿，
         // failures=0 表示 LLM 正常返回但质检不过，必须拿到具体不达标项才能定向修复）
-        console.error(`[gen][block-qc] 块质检不达标 attempt=${attempt}: ${block.title}（目标 ${block.targetWords} 字，实际 ${chars} 字，缺 ${missing.join('、') || '无'}，重复 ${duplicates.join('、') || '无'}，清单外 ${extraneous.join('、') || '无'}，结构缺陷 ${blockStructureScan.blocking.length} 处，关键小节深度 ${criticalDepthBlocking ? `${chars}<${criticalDepthFloor}` : '达标/不适用'}，工作包要素门禁 ${elementBlocking ? sectionElementIssue : '通过/不适用'}，密度缺口 ${densityBlocking ? '是' : '否'}，归因量化 ${attributionBlocking ? '不达标' : '达标'}，后台话术 ${formatBlocking ? '有' : '无'}，keySection=${keySectionKind || 'none'}）`);
+        console.error(`[gen][block-qc] 块质检不达标 attempt=${attempt}: ${block.title}（目标 ${block.targetWords} 字，实际 ${chars} 字，缺 ${missing.join('、') || '无'}，重复 ${duplicates.join('、') || '无'}，清单外 ${extraneous.join('、') || '无'}，结构缺陷 ${blockStructureScan.blocking.length} 处，关键小节深度 ${criticalDepthBlocking ? `${chars}<${criticalDepthFloor}` : '达标/不适用'}，工作包要素门禁 ${elementBlocking ? sectionElementIssue : '通过/不适用'}，密度缺口 ${densityBlocking ? '是' : '否'}，归因量化 ${attributionBlocking ? '不达标' : '达标'}，后台话术 ${formatBlocking ? '有' : '无'}，短语级套话 ${fillerPhraseBlocking ? (fillerPhraseScanFailure ? '扫描失败（按未通过处理）' : `${blockFillerPhrases?.count ?? 1} 处`) : '无'}，keySection=${keySectionKind || 'none'}）`);
       } catch (error) {
         if (input.diagnostics) input.diagnostics.llm.lastError = error instanceof Error ? error.message : String(error);
       }

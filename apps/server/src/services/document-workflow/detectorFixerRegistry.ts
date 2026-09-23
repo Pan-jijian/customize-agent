@@ -179,6 +179,9 @@ export const DETECTOR_WRITING_TIME_DISPOSITIONS: Readonly<Record<string, Writing
   'bidder-qualification-section': { kind: 'constraint', channel: '全局约束' },
   'block-attribution-quantification': { kind: 'constraint', channel: '块任务卡' },
   'block-fact-density': { kind: 'constraint', channel: '块任务卡' },
+  // 4.59 R-B5 ① 短语级套话：与 ③ 模板化同族（表达质量），但**粒度下沉到子句**——成稿后机械可判
+  //（同一份句池/词表/零信息判据），故处置同为 self-check/块成稿后；实现 scanBlockFillerPhrases
+  'block-filler-phrase': { kind: 'self-check', stage: '块成稿后' },
   'block-format-constraints': { kind: 'constraint', channel: '全局约束' },
   'block-numeric-reconciliation': { kind: 'constraint', channel: '块任务卡' },
   'block-structure-contract': { kind: 'self-check', stage: '章成稿后' },
@@ -191,6 +194,9 @@ export const DETECTOR_WRITING_TIME_DISPOSITIONS: Readonly<Record<string, Writing
   'caliber-consistency': { kind: 'constraint', channel: '块任务卡' },
   'chapter-dependency': { kind: 'terminal-only', reason: '章间依赖关系是全文拓扑性质' },
   'chapter-fact-density': { kind: 'constraint', channel: '块任务卡' },
+  // 4.59 R-B5 ② 条款体复述：语体约束须在**写作期**下达（成稿后反馈=整块重写且易连带丢信息），
+  // 处置为 constraint/块任务卡；调用点每块扫描本块材料，命中即把约束升级为带计数的点名约束
+  'clause-recitation': { kind: 'constraint', channel: '块任务卡' },
   'closed-loop-density': { kind: 'self-check', stage: '章成稿后' },
   'closure-phrase-density-cap': { kind: 'self-check', stage: '块成稿后' },
   'collision-numbered-heading': { kind: 'terminal-only', reason: '编号冲突需全文标题集合，跨章同名编号在单章内不可见' },
@@ -312,6 +318,9 @@ export const DETECTOR_WRITING_TIME_DISPOSITIONS: Readonly<Record<string, Writing
   'support-system-conflict': { kind: 'constraint', channel: '块任务卡' },
   'table-arithmetic-consistency': { kind: 'constraint', channel: '块任务卡' },
   'table-caption': { kind: 'constraint', channel: '全局约束' },
+  // 4.59 R-B5 ③ 表格内容泄漏成散文：判定单位是**整段**（无小节归属），且修复动作是结构性改写
+  //（改回表格/补主谓）——故在章收口处自检（chapterReview.chapterTableLeakIssues），处置为 self-check/章成稿后
+  'table-content-leak': { kind: 'self-check', stage: '章成稿后' },
   'table-quality': { kind: 'self-check', stage: '章成稿后' },
   'table-spam': { kind: 'self-check', stage: '章成稿后' },
   'templated-label': { kind: 'self-check', stage: '章成稿后' },
@@ -676,6 +685,18 @@ export const AUXILIARY_DETECTORS: readonly DetectorEntry[] = [
   { id: 'block-numeric-reconciliation', scope: 'chapter', category: 'fact_consistency', fixerDisposition: 'exempt', fixerDispositionReason: '写作期块级执行器门：不产出 ValidationIssue 只返回 NumericReconciliation，阻断重写即修复手段' },
   // ⑥ 格式（后台/兜底话术硬约束：backstageFallbackHits，终检复核 formal-text-gate）
   { id: 'block-format-constraints', scope: 'chapter', category: 'format', fixerDisposition: 'exempt', fixerDispositionReason: '写作期块级执行器门：不产出 ValidationIssue 只返回命中行；终检侧同词表门为 formal-text-gate' },
+  // ── 4.59 R-B5 表达质量三族接线（此前"检测已就位、零调用点"：tenderBidChecks §10 只产出事实，
+  //    未接入块质检/任务卡/章成稿复核任一端；本批按 P0 门声明的处置通道逐族接线）──
+  // ①-b 短语级套话（R9-a 粒度下沉）：句级模板化门天然不开火（套话嵌在有实质内容的句中，占比口径恒不触发），
+  //    故与 ③ 并列独立成器；实现 blockQualityExecutors.scanBlockFillerPhrases（判据同源 tenderBidChecks）
+  { id: 'block-filler-phrase', scope: 'chapter', category: 'style', deterministicSafe: true, fixerDisposition: 'exempt', fixerDispositionReason: '写作期块级执行器门：不产出 ValidationIssue 只返回 BlockFillerPhraseVerdict，首轮阻断重写即其修复手段（反馈只要求改写命中短语、保留句中实质信息）' },
+  // ②-b 条款体复述（R9-b）：写作期**约束**通道（块任务卡）——语体问题的修复动作是"改语体"而非删除/补值，
+  //    写作期给约束只花一次调用内的措辞选择，成稿后给反馈要重写整块且易连带丢信息。
+  //    调用点：chapterGeneration 块任务卡组装（det('clause-recitation')，扫描本块材料并据此升级约束）
+  { id: 'clause-recitation', scope: 'chapter', category: 'style', deterministicSafe: true, fixerDisposition: 'exempt', fixerDispositionReason: '写作期块任务卡约束通道：检测结果只用于升级/降级约束措辞（不回写正文、不产出 ValidationIssue），无对象可被 FixerEntry 锚定' },
+  // ③-b 表格内容泄漏成散文（R9-d）：章成稿后自检——泄漏段是"整张表被倒成一段散文"，段本身无小节归属，
+  //    故判定层是章级；调用点 chapterReview.chapterTableLeakIssues（stageChapterLoop 章收口处消费）
+  { id: 'table-content-leak', scope: 'chapter', category: 'table', deterministicSafe: true, fixerDisposition: 'exempt', fixerDispositionReason: '章成稿后自检：进章问题清单（待优化 + 诊断），修复动作是结构性改写（改回表格/补主谓），不在确定性修复链内，故无 FixerEntry 可锚定' },
 ];
 
 // ═══════════════════════════ 修复器声明表 ═══════════════════════════

@@ -16,7 +16,7 @@ import { evidenceSafetyKey } from '../evidenceContentSafety';
 import { normalizeChapterTitleLine, renderChapterRequirementSlice, renderChapterStructureSlice } from '../tenderRequirements';
 import { buildChapterFactNeeds, factNeedsCoveragePrompt, factsForChapterNeeds, resolveChapterFactNeeds } from '../factsModel';
 import { QUANTIFIED_FACT_RE } from '../parameterPatterns';
-import { chapterSectionFactUsageIssues } from '../chapterReview';
+import { chapterSectionFactUsageIssues, chapterTableLeakIssues } from '../chapterReview';
 import { retrieveWebEvidence } from '../webResearchService';
 import { buildChapterReadinessPlan } from '../chapterReadiness';
 import { buildCrossChapterDutyDeclaration } from '../chapterDutyDeclaration';
@@ -1011,7 +1011,11 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     const sections = plannedSectionTitles.length > 0 ? plannedSectionTitles : (generatedSectionsForReview.length > 0 ? generatedSectionsForReview : []);
     const expandedSectionIssues = sectionContentIntegrityIssues(content, [{ title: chapter.title, content, sections }]).map(issue => issue.message);
     const factUsageWarnings = factUsageIssues.slice(0, 6).map(issue => `小节事实密度需优化：${issue}`);
-    const chapterIssues = [...expandedSectionIssues, ...factUsageWarnings];
+    // 4.59 R-B5 ③ 章成稿后自检：表格内容泄漏（判据与阈值实测依据见 chapterReview.chapterTableLeakIssues）。
+    // 章级（非小节级）判定：泄漏段是"整张表被倒成一段散文"，段本身无小节归属；
+    // 只进"待优化"与诊断，不改章状态（判据避开 chapterCompletionStatus 的失败关键词，有意）。
+    const tableLeakWarnings = chapterTableLeakIssues({ chapterTitle: chapter.title, content, diagnostics: session.planning.generationDiagnostics }).slice(0, 4);
+    const chapterIssues = [...expandedSectionIssues, ...factUsageWarnings, ...tableLeakWarnings];
     // 4.55.30 降级章状态：块失守章不再走 chapterCompletionStatus 的 failed（失守块使「缺少规划小节」
     // 成立，但那只是「少一块」而非「章未产出」），改用三档词汇的 partial（黄灯：有净损失、章已产出，
     // 缺口由 blocker + 复核清单消费）；判据与修复轮同源（plannedBlocks → droppedBlocks）。

@@ -194,8 +194,22 @@ function splitTableCells(line: string): string[] {
   return line.trim().replace(/^\|/u, '').replace(/\|$/u, '').split('|').map(cell => cell.trim()).filter(Boolean);
 }
 
-/** 题注编号前缀识别（“表3-2”“表3.2”“表一、”）：已带题注的表题不重复注入（幂等）与题注校验共用 */
-const TABLE_CAPTION_PREFIX_RE = /^表\s*[\d一二三四五六七八九十]+(?:[-－.．—]\s*[\d一二三四五六七八九十]+)?\s*[:：、.．]?\s/u;
+/**
+ * 题注编号口径的**共享碎片**（判据单源）：编号概念只有一个，两个变体只能共用同一份字符类与标点类——
+ * 两处各写一份"表 + 数字 + 破折号"的字符类，任何一处扩容（如新增中文数字形态）都会让另一处沉默失配，
+ * 而"两个编号判据互不承认"正是 4.58 实测的双编号根因（见 TABLE_CAPTION_NUMBER_HEAD_SOURCE 注释）。
+ */
+const TABLE_CAPTION_DIGITS = '[\\d一二三四五六七八九十]+';
+const TABLE_CAPTION_TAIL_PUNCT = '[:：、.．]?';
+
+/**
+ * 题注编号前缀识别（“表3-2”“表3.2”“表一、”）：已带题注的表题不重复注入（幂等）与题注校验共用。
+ *
+ * 与下方 `TABLE_CAPTION_NUMBER_HEAD_SOURCE` **同源不同口径**（有意保留两个变体，共用上面的碎片）：
+ * 本变体是**窄口径**（编号段至多一段破折号 + 必须以空白收尾）= "完整编号"，用于注入器的幂等判定；
+ * 放宽它会改变"是否跳过注入"的行为（见 R9-e 判据注释的实测理由），故不在本处放宽。
+ */
+const TABLE_CAPTION_PREFIX_RE = new RegExp(`^表\\s*${TABLE_CAPTION_DIGITS}(?:[-－.．—]\\s*${TABLE_CAPTION_DIGITS})?\\s*${TABLE_CAPTION_TAIL_PUNCT}\\s`, 'u');
 
 /** 题注编号前缀剥离：兼容“表3-2 劳动力投入计划表”“表 3.2：”“表一、”等系统/人工题注 */
 function stripTableNumberPrefix(title: string) {
@@ -205,7 +219,7 @@ function stripTableNumberPrefix(title: string) {
 /** r28h M4b 残缺题注前缀（「表N-题名」——编号的表序段丢失形态：数值清理误删「M 道」类数字的历史
  * 产物）：完整前缀判据（TABLE_CAPTION_PREFIX_RE）要求编号段以数字收尾，此形态漏网会让注入器
  * 在原行上再叠「表N-M 表N-题名」双编号；注入前剥离前缀按当前表序重新编号（题名余文保留） */
-const MALFORMED_CAPTION_PREFIX_RE = /^表\s*[\d一二三四五六七八九十]+\s*[-—–－.．]\s*(?=[^\d\s])/u;
+const MALFORMED_CAPTION_PREFIX_RE = new RegExp(`^表\\s*${TABLE_CAPTION_DIGITS}\\s*[-—–－.．]\\s*(?=[^\\d\\s])`, 'u');
 
 /** 中文章节号 → 阿拉伯数字（“第十章”→10，“二十三”→23；纯数字原样；通用中文数字，无项目语义） */
 const CHINESE_DIGIT_VALUE: Record<string, number> = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
@@ -669,8 +683,10 @@ const CAPTION_FOLLOWUP_PREFIX_RE = /^(?:上述|前述|相关|该项|该表|本�
  * 编号实体判据失配（题注不再贴表）、引用成孤儿、读序上续文插断题表相邻。
  * 将单行回指续文原位移到表格块之后（回指句以表为先行词，后置读序自然）；
  * 非回指行（引导句/引用句/正文叙述）不移动；仅处理单行续文 + 表格紧邻（空行分隔）形态；幂等。
+ * 4.59 R-B3：本函数与 splitGluedTableCaptions 一并导出——题注剥离（stripModelAuthoredCaptionNumbers）
+ * 必须在其**之后**（粘连形态拆开成干净题注行后，剥离判据才认得出"贴表题注"），链序见 finalizeTableCaptions。
  */
-function relocateCaptionFollowUps(markdown: string): string {
+export function relocateCaptionFollowUps(markdown: string): string {
   const lines = markdown.replace(/\r/gu, '').split('\n');
   const output: string[] = [];
   let index = 0;
@@ -975,13 +991,29 @@ const DETACHED_CAPTION_MAX_GAP_LINES = 2;
  * 为何不直接放宽 `TABLE_CAPTION_PREFIX_RE`：它是**注入器的幂等判据**，
  * 放宽会改变"是否跳过注入"的行为，波及面远大于本处所需。故 R9-e 用独立判据，
  * 只服务于收敛与归位两个动作（语义是"这一行看起来是题注"）。
+ *
+ * 4.59 R-B3：本串同时是**剥离器**（stripModelAuthoredCaptionNumbers）的判据来源——剥离只针对
+ * 被本判据认作题注的行。两处（判定与剥离）共用同一份编号头串＝同一份"什么算题注编号"的口径；
+ * 与窄口径变体之间只共享字符类碎片（TABLE_CAPTION_DIGITS / TABLE_CAPTION_TAIL_PUNCT），
+ * 两个变体的差异（破折号段数、尾部空白）各有实测理由，见各处注释。
  */
-const TABLE_CAPTION_LINE_RE = /^表\s*[\d一二三四五六七八九十]+(?:\s*[-－.．—]\s*[\d一二三四五六七八九十]+)*\s*[:：、.．]?\s*\S/u;
+const TABLE_CAPTION_NUMBER_HEAD_SOURCE = `表\\s*${TABLE_CAPTION_DIGITS}(?:\\s*[-－.．—]\\s*${TABLE_CAPTION_DIGITS})*\\s*${TABLE_CAPTION_TAIL_PUNCT}\\s*`;
 
-/** 题注行判定（R9-e 专用；见 TABLE_CAPTION_LINE_RE 注释） */
+/** 题注行判据（R9-e 专用；见上方注释）：编号头 + 表名首字 */
+const TABLE_CAPTION_LINE_RE = new RegExp(`^${TABLE_CAPTION_NUMBER_HEAD_SOURCE}\\S`, 'u');
+
+/**
+ * 题注行判定（R9-e 专用；见 TABLE_CAPTION_LINE_RE 注释）。
+ * 4.59 R-B3：本函数同时是剥离器（stripModelAuthoredCaptionNumbers）的判据来源——**剥离器只剥离
+ * 被本判据认作题注的行**，两处共用同一份编号头串（TABLE_CAPTION_NUMBER_HEAD_SOURCE），不另造第二份
+ * 「什么算题注编号」的口径（判据单源）。
+ */
 export function isTableCaptionLine(line: string): boolean {
   return TABLE_CAPTION_LINE_RE.test((line || '').trim());
 }
+
+/** 4.59 R-B3：题注编号头剥离（与 isTableCaptionLine 同源；仅用于剥离器内部与判据自检测试） */
+export const TABLE_CAPTION_NUMBER_HEAD_RE = new RegExp(`^${TABLE_CAPTION_NUMBER_HEAD_SOURCE}`, 'u');
 
 export function relocateDetachedTableCaptions(markdown: string): string {
   const lines = markdown.replace(/\r/gu, '').split('\n');
@@ -1025,6 +1057,78 @@ export function relocateDetachedTableCaptions(markdown: string): string {
 }
 
 /**
+ * 4.59 R-B3 第二半：**模型自写题注编号的确定性剥离**（链尾一半；写作期一半在章任务卡的同名声明，
+ * 见 TABLE_CAPTION_MECHANICAL_RULE）。
+ *
+ * ## 为什么光靠"收敛/归位/单一入口"不够（4.58 R9-e 之后仍复现的实测根因）
+ *
+ * R9-e 做的是**在模型写下的编号之上**收敛与重排；编号的**所有权仍在模型手里**，于是：
+ * - 实测形态（4.59 交付物，编制依据章）：模型按**小节号**写 `表1-34-1 本工程编制依据文件一览表`，
+ *   又按**文档表序**写 `表1-3 本工程编制依据文件一览表`，两行连续；
+ * - `collapseDuplicateTableCaptions` 收敛掉第二行（表名同），保留 `表1-34-1 …`；
+ * - 注入器的幂等判据 `TABLE_CAPTION_PREFIX_RE`（编号须以数字收尾）与残缺判据
+ *   `MALFORMED_CAPTION_PREFIX_RE`（破折号后须为非数字）对 `表1-34-1` **两条都不匹配**，
+ *   于是注入器把它当"无题注表"再叠一层 → `表1-3 表1-34-1 本工程编制依据文件一览表`。
+ *   双编号从「两行」变成「一行内两段」，机械编号仍然不成立。
+ * 结论：只要模型写下的编号能被原样保留，"机械生成"就永远是尽力而为——必须**剥离**，
+ * 让注入器按章内表序重新分配（编号单点所有权）。
+ *
+ * ## 判据（三重门，缺一不可——防"剥了但没被重新认领"造成题注丢失）
+ *
+ * ① 整行是题注行（`isTableCaptionLine`，与 R9-e 同一份编号头串，判据单源）；
+ * ② 该行**紧邻表格**（`captionFollowedByTable`）：只有紧邻才保证剥离后注入器必然重新认领
+ *    （probe 上溯 ≤8 行、剥编号后余文 ≤40 字 → kind='line'，题名摘要见 probeTableBlock）。
+ *    悬挂题注（题名合法、表在 2 行正文之外）**不剥**：剥离它只会把题注变成一句游离正文，
+ *    而它由 relocateDetachedTableCaptions / 终检「题注悬空」族负责，不归本函数；
+ * ③ 剥离后余文本身是合法题名（`validCaptionTitle`：长度/尾词/字符集/无句读）：防剥出空行或半截句，
+ *    同时保证 ② 的"重新认领"成立（kind='line' 的判据正是一个合法题名行）。
+ *
+ * ## 口径边界（有意如此，均为实测形态）
+ *
+ * - **对所有模型题注一视同仁**（含"编号写对"的）：编号所有权必须单点，否则"对的保留、错的剥离"
+ *   本身就是第二套编号口径。代价是正常章（模型按 1..N 顺序写对）也要重排一次——`normalizeTableNumbering`
+ *   按章内表序重排后结果与原编号一致（同一章同序），不产生内容差。
+ * - 只处理**正文区**：附表区（`## 附表N`）不碰——附表编号体系独立，与 `normalizeTableNumbering`
+ *   同一段边界口径。
+ * - 剥离**编号头**而非整行：重复叠加的编号头（模型写 `表1-3 表1-34-1 表名`）循环剥离至无编号头
+ *   （上限 3 轮，防病态输入）。
+ * - 残余边界：正文里的**行内引用**（"见表1-3 所列"）不动——剥了会让引用指向失效；重排后引用与题注
+ *   可能不齐（模型引用口径本身就没有可判据的基准），不在本函数取值范围内。
+ *
+ * 返回剥离计数：调用方（finalizeTableCaptions）据此留下可见记录（零静默降级）。
+ */
+export function stripModelAuthoredCaptionNumbers(markdown: string): { markdown: string; stripped: number } {
+  const lines = markdown.replace(/\r/gu, '').split('\n');
+  const appendixIndex = lines.findIndex(line => /^##\s+附表\s*[一二三四五六七八九十\d]{1,3}/u.test(line));
+  const bodyEnd = appendixIndex >= 0 ? appendixIndex : lines.length;
+  let stripped = 0;
+  for (let index = 0; index < bodyEnd; index += 1) {
+    const line = lines[index] || '';
+    if (!isTableCaptionLine(line)) continue;
+    if (!captionFollowedByTable(lines, index)) continue;
+    let name = line.trim();
+    for (let round = 0; round < 3 && TABLE_CAPTION_NUMBER_HEAD_RE.test(name); round += 1) {
+      name = name.replace(TABLE_CAPTION_NUMBER_HEAD_RE, '').trim();
+    }
+    if (!validCaptionTitle(name)) continue;
+    lines[index] = name;
+    stripped += 1;
+  }
+  if (stripped === 0) return { markdown, stripped };
+  return { markdown: lines.join('\n'), stripped };
+}
+
+/**
+ * 写作期任务卡里的题注声明（4.59 R-B3 前半，**单一出处**：章任务卡引用本常量，不另抄一份文本）。
+ *
+ * 为什么要写进任务卡：链尾剥离是**确定性兜底**，但模型每写一次编号就多一次"编号与最终表序不齐"
+ * 的机会（重排后正文引用可能对不上）；写作期不写编号能从源头消除该形态。
+ * 为什么只声明"题注行"、不要求模型改正文引用：模型无法预知最终编号（机械编号按章内表序分配），
+ * 要求它写引用编号只会制造新的不一致——引用一律用表名（见条文）。
+ */
+export const TABLE_CAPTION_MECHANICAL_RULE = '表格题注（表名行）不要写「表X-Y」编号前缀，只写表名本身（如「主要施工机械设备配置表」）——题注编号由系统在成稿后按章内表序机械生成；正文引用表时用表名指代（如「见主要施工机械设备配置表」），不要写编号。';
+
+/**
  * 表格题注收口**单一入口**（4.58 R9-e）。
  *
  * 题注链此前在 4 处各自拼 `normalizeTableNumbering(injectTableCaptions(x))`——拼接方式一致但
@@ -1032,9 +1136,27 @@ export function relocateDetachedTableCaptions(markdown: string): string {
  * 收敛为单一入口后，新增/调整步骤只需改这一处。
  */
 export function finalizeTableCaptions(markdown: string): string {
-  // 顺序有意：先归位脱位题注（让它们回到表格上方，注入器才能认出"已有题注"），
-  // 再收敛连续多题注（去重），再注入缺失的，最后统一重排编号。
-  return normalizeTableNumbering(collapseDuplicateTableCaptions(injectTableCaptions(relocateDetachedTableCaptions(markdown))));
+  // 顺序有意（4.59 R-B3 在 ②-c 与 ③ 之间插入剥离，位置不可挪）：
+  // ① 先归位脱位题注（让它们回到表格上方，注入器/剥离器才能认出"这是一条题注"）；
+  // ②-a 收敛连续多题注（去重）——**必须在剥离之前**：此时模型编号还在，isTableCaptionLine 才认得出
+  //    那一行是题注（实测 `表1-34-1 本工程编制依据文件一览表` 只被该判据认出）；
+  // ②-b 粘连拆分 + 回指续文回位**提前到剥离之前**（4.59 幂等修正）：这两步原是 normalizeTableNumbering
+  //    的第一步（在注入之后），于是「表1-3 劳动力投入计划表上述措施…」这类粘连题注在**第一遍**
+  //    既不满足剥离的"残留即合法题名"判据（残留含句读）、也不满足注入器的幂等跳过条件以外的路径，
+  //    模型编号被原样保留；而第二遍（题注已被拆干净）剥离才开始生效 → 同一份 markdown 两遍产出不同编号
+  //    （实测：第一遍 表1-3 → 第二遍 表1-1）。把拆分提前，剥离在**同一遍内**就看得到干净题注行，
+  //    编号所有权从此是单点的、且逐遍一致（幂等）。两步本身幂等（normalizeTableNumbering 内再跑一次不变）。
+  // ③ 剥离模型自写编号（R-B3）：让下一步的注入器按章内表序重新分配编号（编号单点所有权）；
+  // ④ 注入缺失的题注；⑤ 统一重排编号（含粘连拆分/重复编号归并，与 ②-b 同源调用）。
+  const relocated = relocateDetachedTableCaptions(markdown);
+  const deduped = collapseDuplicateTableCaptions(relocated);
+  const splitCaptions = relocateCaptionFollowUps(splitGluedTableCaptions(deduped));
+  const { markdown: strippedMarkdown, stripped } = stripModelAuthoredCaptionNumbers(splitCaptions);
+  if (stripped > 0) {
+    // 零静默降级：题注编号被改写属内容面变换，必须留可见记录（含实测依据编号，便于回查交付物）
+    console.warn(`[table-caption] 4.59 R-B3 剥离模型自写题注编号 ${stripped} 处（编号改由注入器按章内表序机械分配）`);
+  }
+  return normalizeTableNumbering(injectTableCaptions(strippedMarkdown));
 }
 
 export function normalizeTableNumbering(markdown: string): string {

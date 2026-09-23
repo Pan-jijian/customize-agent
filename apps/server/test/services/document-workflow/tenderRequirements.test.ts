@@ -1401,9 +1401,9 @@ describe('M14a 判定口径指纹（缓存失效自动防线：口径变更不�
     expect(tenderRequirementsJudgeFingerprint([/a/u])).not.toBe(tenderRequirementsJudgeFingerprint([/b/u]));
   });
 
-  it('缓存 key 接线（源码守护）：v9 版本 + judgeFingerprint 入 key（防版本漏递增/指纹漏接线回归）', () => {
+  it('缓存 key 接线（源码守护）：v10 版本 + judgeFingerprint 入 key（防版本漏递增/指纹漏接线回归）', () => {
     const source = fs.readFileSync(SRC, 'utf8');
-    expect(source).toContain("const TENDER_REQUIREMENTS_CACHE_VERSION = 'tender-requirements-extraction-v9'");
+    expect(source).toContain("const TENDER_REQUIREMENTS_CACHE_VERSION = 'tender-requirements-extraction-v10'");
     expect(source).toContain('judgeFingerprint: tenderRequirementsJudgeFingerprint()');
   });
 

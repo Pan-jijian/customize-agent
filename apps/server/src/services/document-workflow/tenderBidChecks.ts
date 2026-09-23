@@ -744,6 +744,30 @@ export async function scanFillerPhrases(
   return judgeFillerPhrases(buildFillerSentencePool(markdown), embedDocuments);
 }
 
+/**
+ * 短语级套话**确定性通道**（zero-info 单通道，无需嵌入）：块质检入口（4.59 R-B5 ① 接线用）。
+ *
+ * 为什么不复用 `judgeFillerPhrases`（async + 嵌入通道）：
+ * ① 实测语义通道**在短语粒度 0 命中**（878 句/3906 子句最高余弦 0.794 < 阈值 0.80，见 judgeFillerPhrases
+ *    注释）——块级质检每块都跑，为一个**不开火的通道**付每块一次嵌入调用是纯成本；
+ * ② 嵌入调用失败会把块质检拖进"扫描失败"分支，把质检风险从"判据"变成"基础设施"。
+ * 判据**完全同源**（同一份 `splitFillerPhrases` + `hitsForbiddenEmptyPhrase` + `isZeroInfoSloganSentence`，
+ * 只是不计算 semantic 分），不存在第二把标尺。
+ *
+ * `similarity` 恒 0：本入口**不计算**语义分，消费端不得把 0 读作"距离远"——语义分只由 judgeFillerPhrases 产出。
+ */
+export function scanZeroInfoFillerPhrases(markdown: string): FillerPhraseHit[] {
+  const hits: FillerPhraseHit[] = [];
+  for (const sentence of buildFillerSentencePool(markdown)) {
+    for (const phrase of splitFillerPhrases(sentence)) {
+      if (hitsForbiddenEmptyPhrase(phrase) && isZeroInfoSloganSentence(phrase)) {
+        hits.push({ phrase, sentence, similarity: 0, channel: 'zero-info' });
+      }
+    }
+  }
+  return hits;
+}
+
 // ── 10.2 条款体复述（R9-b：法律/条款语体，零本项目信息的义务复述）──
 /**
  * 缺口：既有 14 条套话原型全是**口号体**（精心组织/严格执行/加强管理…），条款语体不在覆盖内。
@@ -834,6 +858,19 @@ export function isClauseRecitationSentence(sentence: string): boolean {
 export function scanClauseRecitationSentences(markdown: string): string[] {
   return buildFillerSentencePool(markdown).filter(sentence => isClauseRecitationSentence(sentence));
 }
+
+/**
+ * 条款体复述的**写作期约束文本**（4.59 R-B5 ②：处置通道 = constraint/块任务卡；单一出处，
+ * 写作期任务卡与本模块判据同属一处，不另抄一份口径）。
+ *
+ * 为什么约束要写成"改写为本项目做法"而不是"禁止写条款"：本族的判定是**语体形态**
+ *（「应/必须/不得」式义务复述 ∧ 无本项目实体 ∧ 无可核查承诺 ∧ 无岗位/手续/专业做法锚点），
+ * 而正确写法是同一件事的**项目化表达**（谁做、何时、何部位、频次、记录）——写手需要的是替换目标，
+ * 不是禁令（只禁不导会退化为"少写一段"）。
+ * 为什么不给示例句（与 4.59 R-B7 同一原则）：给出条款体示例句等于给出可抄用的句子模板，
+ * 本地模型对提示词示例的复读倾向远高于抽象指令；故只描述语体特征，不提供任何可抄句子。
+ */
+export const CLAUSE_RECITATION_CONSTRAINT_RULE = '【写作红线】不得整句复述规范/合同/招标文件的条款原文（“应/必须/不得”式义务复述语体，且句中无本项目实体、无可核查承诺）——把条款内容改写为本项目的具体做法：谁执行、何时执行、在哪个部位、频次多少、留什么记录，只写本项目实际执行的内容。';
 
 /**
  * 条款体语义原型（**与口号体原型互补**的寄存器基准）：口号体原型测“鼓动/管理空话”

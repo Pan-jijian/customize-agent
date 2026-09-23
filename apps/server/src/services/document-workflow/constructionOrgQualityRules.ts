@@ -541,11 +541,7 @@ function scanMajorContentDeficits(content: string): MajorContentDeficitScan {
   // 不再按“施工概况/施工流程/施工方法”标签字面判定——无标签但写法正确的块不应被误判缺失（写作侧同样不再强制标签）
   // r11 兜底块豁免（丰乐镇门禁 #9 归因）：「其他…施工要点/施工内容」是模型对未归类工程量的兜底汇总块
   //（标题即声明非单一专业工程），按专业工程三要素判定恒误报——标题以「其他/其它」开头的块不参与要素判定
-  const incompletePackages = packageBlocks.filter(block => {
-    const blockTitle = (block.split('\n')[0] || '').trim();
-    if (/^[\d.．、\s]*(?:其他|其它)/u.test(blockTitle)) return false;
-    return !workPackageContentElementsComplete(block);
-  });
+  const incompletePackages = packageBlocks.filter(block => !isCatchAllPackageBlock(block) && !workPackageContentElementsComplete(block));
   // 粗体伪标题只认整行粗体（^**…**$ + m 旗）：行内强调用粗体是正常行文，不得误报脏事实（4.31）
   const dirtyPackages = packageBlocks.filter(block => /资料内容事实|#{2,6}\s+|^\*\*[^*]+\*\*$|未尽事宜|专业施工内容统筹|招标范围还包含|具备有效的.*资质/um.test(block));
   const weakMethodPackages = packageBlocks.filter(block => {
@@ -777,6 +773,48 @@ function chapterSectionFromMarkdown(markdown: string, chapter: DocumentDraftChap
   return lines.slice(start, end).join('\n');
 }
 
+/** 兜底块判定（「其他/其它…」标题 = 模型对未归类工程量的汇总块，标题即声明非单一专业工程）：
+ * r11 在「主要施工内容」侧豁免该类块的三要素判定；4.59 C1 把同一口径接到分部分项侧——巢湖 ea380252
+ * 实测 6 个「内容要素不全」分项中 5 个标题为「其他分部分项工程施工要点」（1.17.3/1.18.3/1.19.3/
+ * 1.22.3/1.25.3），两侧共用本函数（判据单源，防口径漂移）。 */
+function isCatchAllPackageBlock(block: string): boolean {
+  const blockTitle = (block.split('\n')[0] || '').trim();
+  return /^[\d.．、\s]*(?:其他|其它)/u.test(blockTitle);
+}
+
+/** 非施工方案主题小节的标题族（4.59 C1「类别不适用」，非降级）：编制依据/法规标准清单、文明施工要点、
+ * 总进度计划网络图横道图要点等小节按体裁不承载「作业对象与工程量/工序顺序/施工方法」三要素，
+ * 对它们判三要素属类别错误。实测依据（巢湖 cfb0a0da 的 13 个「要素不全」中 5 个属本族）：
+ * 1.1.1/1.1.2/1.1.3 是法规/规范依据一览表（无工程量、无工序），1.7.1 文明施工要点、
+ * 1.16.1 总进度计划网络图横道图要点。该类小节仍受其余判据约束（正文过短/工艺参数/概括话术/
+ * 表格质量/资料落位），豁免仅限三要素一维（可观测清单见 scan.categoryExemptPackages）。
+ * 实测口径（两份巢湖终稿）：本族 5 个小节在「工序顺序表达/工艺参数密度」判据下仍被逐条报出
+ *（cfb0a0da「缺少工序顺序表达 12 个」含本族 5 个），故本豁免**不构成静默降级**；
+ * 两份文档中本族豁免对「要素不全」的结论改变数为 0（同一小节的前导正文承载了三要素，前导继承已可救），
+ * 保留本族的理由是类别正确性：编制依据类小节无前导正文时（另一形态）按三要素判必然误报。 */
+const NON_PACKAGE_SECTION_TITLE_RE = /编制依据|编制说明|编制原则|法律法规|规范标准|标准规范|技术标准|地方性法规|政府规章|文明施工|环境保护|进度计划|网络图|横道图|施工部署|平面布置|组织机构|资源配置|职责分工/u;
+
+/** H4 分项块所属 H3 小节上下文（标题 + 小节前导正文）：前导正文 = H3 标题行之后、本小节第一个标题行
+ * 之前的整段。4.59 C1 实测（巢湖 cfb0a0da）：写作侧把分项方案的作业对象与工程量写在 ### 小节前导
+ *（### 1.14 室外给水与消防施工：「作业对象为室外安装工程给水与消防给水系统，复合管合计2342.2m…」
+ * 另有工序与工艺参数），而 #### 1.14.1 只承接试验/验收段（200 字）——只按块判三要素必然误报
+ *（13 个中 6 个由小节前导承载要素）。 */
+function h3SectionContextAt(content: string, offset: number): { title: string; preamble: string } {
+  let owner: { title: string; end: number } | undefined;
+  for (const match of content.matchAll(/^###\s+([^\n]*)/gmu)) {
+    const at = match.index ?? 0;
+    if (at >= offset) break;
+    owner = { title: (match[1] ?? '').trim(), end: at + match[0].length };
+  }
+  if (!owner) return { title: '', preamble: '' };
+  const preambleLines: string[] = [];
+  for (const line of content.slice(owner.end).split('\n')) {
+    if (/^#{1,6}\s/u.test(line.trim())) break;
+    preambleLines.push(line);
+  }
+  return { title: owner.title, preamble: preambleLines.join('\n').trim() };
+}
+
 /** 分项块名称提取（拆块首行=标题文本或粗体伪标题；消息明细化展示用） */
 function divisionPackageName(block: string): string {
   const firstLine = (block.split('\n')[0] ?? '').trim();
@@ -797,6 +835,8 @@ function describeDivisionPackages(packages: string[]): string {
 interface DivisionDeficitScan {
   packageBlocks: string[];
   incompletePackages: string[];
+  /** 类别豁免块（兜底块 + 非施工方案主题小节）：不做三要素判定，仅留可观测清单（4.59 C1） */
+  categoryExemptPackages: string[];
   genericReferencePackages: string[];
   dirtyPackages: string[];
   weakChainPackages: string[];
@@ -810,19 +850,46 @@ function scanDivisionDeficits(content: string): DivisionDeficitScan {
   // 分项工程方案 = #### 小节（与 majorContent 工作包口径一致）；
   // 兼容粗体伪标题一段式：无 #### 小节时按“行首 **分项名**”切块（真实生成缺陷：LLM 用粗体行替代小节标题，
   // 历史验收器按 #### 切出 0 块只能报“分项不足”，无法定位各分项缺什么，粗体形态由此穿透门禁交付）
-  let packageBlocks = content.split(/^####\s+/gmu).slice(1).map(block => cutAtEmbeddedHeading(block)).filter(Boolean);
-  if (packageBlocks.length === 0) {
-    packageBlocks = [...content.matchAll(/^\*\*[^*]+\*\*[\s\S]*?(?=^\*\*[^*]+\*\*|\s*$)/gmu)].map(match => cutAtEmbeddedHeading(match[0])).filter(Boolean);
+  // 4.59 C1：拆块保留「块起点在正文中的偏移量」——偏移量用于取所属 H3 小节前导正文（h3SectionContextAt），
+  // 使「分项方案」的判定粒度回到小节整体（写作侧把作业对象/工程量/工序写在小节前导是常态）
+  const h4Anchors = [...content.matchAll(/^####\s+/gmu)].map(match => ({ at: match.index ?? 0, contentStart: (match.index ?? 0) + match[0].length }));
+  const h4Packages = h4Anchors.map((anchor, index) => {
+    // 块边界必须与旧 split 口径逐字一致：块 = 本 H4 标题之后到下一个 H4 之前（末尾再按 cutAtEmbeddedHeading
+    // 截到小节边界）。注意 cutAtEmbeddedHeading 的「嵌入标题」只认 #{1,3}（#### 不匹配），
+    // 因此「切到下一个 H1~H3」只能在单个 split 片段内生效——不能用 slice(offset) 直取整条尾串，
+    // 否则会把后续 H4 兄弟块一并吞入（实测：1.1.1 由 221 字变 1206 字，判据口径被静默放宽）
+    const end = index + 1 < h4Anchors.length ? h4Anchors[index + 1].at : content.length;
+    return { offset: anchor.at, block: cutAtEmbeddedHeading(content.slice(anchor.contentStart, end)) };
+  }).filter(entry => Boolean(entry.block));
+  // 块来源：H4（可分项继承小节前导）→ 粗体伪标题/H3 兼容（块自身即小节，不继承前导，保持既有口径）
+  let packages = h4Packages;
+  let usesSectionContext = packages.length > 0;
+  if (packages.length === 0) {
+    packages = [...content.matchAll(/^\*\*[^*]+\*\*[\s\S]*?(?=^\*\*[^*]+\*\*|\s*$)/gmu)].map(match => ({ offset: match.index ?? 0, block: cutAtEmbeddedHeading(match[0]) })).filter(entry => Boolean(entry.block));
+    usesSectionContext = false;
   }
   // 章-节两级新结构（统一融合规划产物）：无 H4 工作包时，章下 H3 小节本身就是分项方案
-  // （「### 2.1 场地平整与土方回填方法」= 一个分项）；H4 存在时仍按 H4 切块，保证与写作规格一致
-  if (packageBlocks.length === 0) {
-    packageBlocks = content.split(/^###\s+/gmu).slice(1).map(block => cutAtEmbeddedHeading(block)).filter(Boolean);
+  //（「### 2.1 场地平整与土方回填方法」= 一个分项）；H4 存在时仍按 H4 切块，保证与写作规格一致
+  if (packages.length === 0) {
+    packages = content.split(/^###\s+/gmu).slice(1).map(block => ({ offset: 0, block: cutAtEmbeddedHeading(block) })).filter(entry => Boolean(entry.block));
+    usesSectionContext = false;
   }
+  const packageBlocks = packages.map(entry => entry.block);
+  const sectionContexts = packages.map(entry => (usesSectionContext ? h3SectionContextAt(content, entry.offset) : { title: '', preamble: '' }));
   // 4.17.9/4.31 内容要素检查（呈现形式不限）：与主要施工内容同口径——三要素判定统一走
   // utils.workPackageContentElementsComplete（词表已覆盖「总量/共N」工程量表达与「检查/整改/养护」方法证据），
-  // 不再按“施工概况/工艺流程/施工方法”标签字面判定缺失（历史缺陷：自然成文分项块被恒判要素不全）
-  const incompletePackages = packageBlocks.filter(block => !workPackageContentElementsComplete(block));
+  // 不再按“施工概况/工艺流程/施工方法”标签字面判定缺失（历史缺陷：自然成文分项块被恒判要素不全）。
+  // 4.59 C1 两处口径修正（均有真实文档逐字证据，见函数上方注释）：
+  // ① 类别豁免——兜底块（「其他…施工要点」）与非施工方案主题小节（编制依据/文明施工/进度计划）不判三要素；
+  // ② 判定文本 = H3 小节前导正文 + 本块（仅 H4 形态；粗体/H3 兼容形态不并入）
+  const exemptFlags = packages.map((entry, index) => isCatchAllPackageBlock(entry.block)
+    || NON_PACKAGE_SECTION_TITLE_RE.test(`${sectionContexts[index].title} ${(entry.block.split('\n')[0] ?? '')}`));
+  const categoryExemptPackages = packages.filter((entry, index) => exemptFlags[index]).map(entry => entry.block);
+  const incompletePackages = packages.filter((entry, index) => {
+    if (exemptFlags[index]) return false;
+    const judgementText = sectionContexts[index].preamble ? `${sectionContexts[index].preamble}\n${entry.block}` : entry.block;
+    return !workPackageContentElementsComplete(judgementText);
+  }).map(entry => entry.block);
   // 脏事实：资料原文残留、嵌入标题、粗体伪标题、空话套话（与专项提示词禁止项同口径）
   // 粗体伪标题只认整行粗体（4.31）：行内强调用粗体是正常行文；嵌入标题已由切块截尾消除，此处为防御
   const dirtyPackages = packageBlocks.filter(block => /资料内容事实|#{2,6}\s+|^\*\*[^*]+\*\*$|未尽事宜|按规范施工|结合实际执行|招标范围还包含/um.test(block));
@@ -857,7 +924,7 @@ function scanDivisionDeficits(content: string): DivisionDeficitScan {
   // 分项深度均衡：最短分项不足最长分项 balanceRatio 时给扩充建议（warning 不阻断，由质量报告引导后续优化）
   const packageLengths = packageBlocks.map(block => block.replace(/\s/gu, '').length);
   const imbalanced = packageLengths.length > 1 && Math.min(...packageLengths) > 0 && Math.min(...packageLengths) < Math.max(...packageLengths) * DIVISION_SECTION_QUALITY.balanceRatio;
-  return { packageBlocks, incompletePackages, genericReferencePackages, dirtyPackages, weakChainPackages, weakParamPackages, shallowPackages, imbalanced };
+  return { packageBlocks, incompletePackages, categoryExemptPackages, genericReferencePackages, dirtyPackages, weakChainPackages, weakParamPackages, shallowPackages, imbalanced };
 }
 
 /** 逐分项缺陷项数（残差细分口径与检测器同源）：blocker 类缺陷逐项求和——
@@ -1107,7 +1174,17 @@ export function majorContentGovernanceIssues(markdown: string): ValidationIssue[
       });
     }
     // 4.31 “按实(?!际)”：「按实际需要留置」等正常规范句不含清单口径语义，原正则裸匹配“按实”误报（丰乐镇 v6 实测）
-    const strongHits = [...new Set((body.match(/[^\n]{0,18}(?:分部小计|本页小计|按实(?!际)|暂估|综合单价|规费|税金)[^\n]{0,18}/gu) || []).map(item => item.trim()))];
+    //
+    // 4.59 C5 实测收窄（两份巢湖终稿 4 处 blocker 全部逐字复核）：
+    // ① `按实测` —— 「按实测值逐点验收」「按实测尺寸下料」是施工语言（实测实量下料/验收），
+    //    与清单计价口径无关；实测两稿 kb.db 全库检索「按实测」命中切片 0（该表述是写手按工艺写的，
+    //    不是从清单抄来的）→ 负向断言补 `测`，仅排除「按实际/按实测」两类合法表述；
+    // ② `按实+数字` —— 巢湖「悬挂灯按实11 LED 200W杆吊」的原文出处是**CAD 图纸标注**
+    //    （1#厂房施工图_t3.dwg 文本「悬挂灯…按实按实 1111 杆吊，距顶板底1.0米」：按实 是图纸对安装
+    //    高度的现场确定标注、11 是灯具编号），不是工程量清单内部口径词——本判据的族是「清单口径词」，
+    //    图纸标注被抄入正文属另一族（脏事实/表达质量），在此族点名会误导修复轮去删施工语言。
+    //    计价语义的「按实」恒后接动词（按实结算/按实计量/按实调整/按实收方），不接数字。
+    const strongHits = [...new Set((body.match(/[^\n]{0,18}(?:分部小计|本页小计|按实(?!际|测|\d)|暂估|综合单价|规费|税金)[^\n]{0,18}/gu) || []).map(item => item.trim()))];
     // 「措施项目」是工程类别名词的合法用法（2.18 措施项目小节、2.24 分部分项方案列举），
     // 仅当与清单计价语境共现（措施项目费 / 措施项目+清单/计价/费）才属清单内部口径（丰乐镇实测误报）
     const measureHits = [...new Set((body.match(/[^\n]{0,18}(?:措施项目费|措施项目[^\n]{0,8}(?:清单|计价|费率))[^\n]{0,18}/gu) || []).map(item => item.trim()))];

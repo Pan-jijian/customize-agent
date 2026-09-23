@@ -107,7 +107,9 @@ function h3TitlesInChapter(markdown: string, chapterTitle: string): string[] {
   const lines = markdown.replace(/\r/gu, '').split('\n');
   const normalized = chapterTitle.replace(/\s+/gu, '');
   const h2 = lines.map((line, index) => ({ index, title: /^##\s+(.+?)\s*$/u.exec(line.trim())?.[1]?.replace(/\s+/gu, '') }))
-    .filter((item): item is { index: number; title: string } => Boolean(item.title) && !/^(目录|附表)/u.test(item.title));
+    // 既有类型错误（非本批引入）：Boolean(x) 不构成 TS 收窄，item.title 在谓词体内仍是 string|undefined
+    //（`?.` 链的产物），传给 RegExp.test 报 TS2345。判据语义不变：title 缺省时该行本就应被滤掉。
+    .filter((item): item is { index: number; title: string } => Boolean(item.title) && !/^(目录|附表)/u.test(item.title ?? ''));
   const start = h2.find(item => item.title.includes(normalized) || normalized.includes(item.title));
   if (!start) return [];
   const next = h2.find(item => item.index > start.index);
