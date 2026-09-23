@@ -1637,7 +1637,7 @@ export function collectRequirementAnchors(
      * 正文写出完整的 `700×700mm` 也永远命不中，是「招标要求部分响应」假 blocker 的第二个来源。
      * 与 `unitAliases.ts` 的 `MEASURE_UNIT_SOURCE` 同一条纪律（注释里已写明「多字符在前」）。
      */
-    for (const match of text.matchAll(/(?:\d+(?:\.\d+)?\s*(?:%|％|万元|亿元|小时|分钟|毫米|MPa|kPa|mm|MPa|天|日|元|米|m|M|层|年|个|月|周|项|处|台|套|辆|人|家|次|遍|道|吨))/giu)) {
+    for (const match of text.matchAll(/(?:\d+(?:\.\d+)?\s*(?:%|％|万元|亿元|小时|分钟|毫米|MPa|kPa|mm|天|日|元|米|m|M|层|年|个|月|周|项|处|台|套|辆|人|家|次|遍|道|吨))/giu)) {
       const anchorText = normalizePercent(match[0].replace(/\s+/gu, ''));
       // M26 编号切片守卫：「N.N项」为「N.N项目/N.N项次」编号前缀被截断的产物（r28k「1.1项」←「1.1项目名称」、
       // 「2.10项」←「2.10项目类别」、「3.3项」←「第1.3.3项」实机），非真实数量参数——整数+项（3项）保留，小数+项丢弃

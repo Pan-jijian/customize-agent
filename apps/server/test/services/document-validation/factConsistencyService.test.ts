@@ -404,3 +404,53 @@ describe('4.56.3 事实对账误报族（真实数据回放）', () => {
     expect(placeConflict).toHaveLength(1);
   });
 });
+
+/**
+ * 4.56.4 第二轮实测（`doc-1790160473728-0afe2740`）残留的 3 条多值冲突逐条回放。
+ * 三条各自对应一处**判据分裂**（真值层有、对账侧没有）或缺口。
+ */
+describe('4.56.4 多值冲突残留族（真实数据回放）', () => {
+  it('时间槽位分桶：`330日历天` 与 `计划开工日期：2026年10月10日（…）` 不是同一个槽位', () => {
+    // 真值层早已按形态分桶（factsModel 的 D-T4 ④），对账侧没有 → 同一份答疑文件相邻两句被判多值
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '计划工期', value: '330日历天', sourceFile: '招标文件.pdf' }),
+      makeFact({ key: 'b', fieldName: '计划工期', value: '计划开工日期：2026年10月10日（具体开工日期以招标人出具的书面开工通知为准）', sourceFile: '7招标答疑文件.pdf' }),
+      makeFact({ key: 'c', fieldName: '计划工期', value: '未识别', sourceFile: '招标文件.pdf' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+
+  it('时间槽位分桶不静默真冲突：两个不同时长仍报', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '计划工期', value: '330日历天', sourceFile: '招标文件.pdf' }),
+      makeFact({ key: 'b', fieldName: '计划工期', value: '365日历天', sourceFile: '答疑文件.pdf' }),
+    ]));
+    expect(issues).toHaveLength(1);
+  });
+
+  it('尾随形式括注剥离：`…有限公司（盖单位章）` 与裸名是同一实体', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '招标人', value: '巢湖执珩建设投资有限公司', sourceFile: '招标文件.pdf' }),
+      makeFact({ key: 'b', fieldName: '招标人', value: '巢湖执珩建设投资有限公司（盖单位章）', sourceFile: '招标文件.pdf' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+
+  it('名称**中间**括注不剥（是名称组成部分）→ 真实不同地点仍报', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '建设地点', value: '巢湖市居巢经开区义成路与南外环路交口北侧' }),
+      makeFact({ key: 'b', fieldName: '建设地点', value: '巢湖市中科智城（中国科大英才创新创业基地）6号楼' }),
+    ]));
+    expect(issues).toHaveLength(1);
+  });
+
+  it('`未识别` 等新增缺省声明形态不参与对账（信息缺席不是信息）', () => {
+    for (const absence of ['未识别', '未获取', '未解析', '未提取']) {
+      const issues = validateFactConsistency(input([
+        makeFact({ key: 'a', fieldName: '工期关键节点', value: '主体结构封顶 2026年12月' }),
+        makeFact({ key: 'b', fieldName: '工期关键节点', value: absence }),
+      ]));
+      expect(issues, absence).toEqual([]);
+    }
+  });
+});

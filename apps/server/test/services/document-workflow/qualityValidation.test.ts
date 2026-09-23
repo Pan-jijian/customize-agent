@@ -429,6 +429,48 @@ describe('collectLayerNumbers 层厚度物理边界（4.19.5 真实回归：面�
     expect(issues.length).toBe(1);
     expect(issues[0].message).toContain('800mm');
   });
+
+  /**
+   * 4.56.4 口径唯一性判据的**对称补全**（实测 8 条 blocker 复现）。
+   *
+   * 原判据只要求**资料侧**口径唯一，却拿资料里唯一的「垫层 120mm」去要求正文每一处「垫层」都等于 120mm。
+   * 而 `垫层` 在道路/管沟/地坪/基础下本就是不同对象、不同厚度——实测
+   * `doc-1790160473728-0afe2740` 正文出现 50/100/200/10/30/300/150/5mm 八种取值 → 8 条 error。
+   * `factIntegrity` 统计本类别**全部** error（`factErrors.length`），8 条即把 60% 分量压到 0。
+   */
+  describe('4.56.4 层名口径唯一性对称判据（正文侧多值 → 不裁决）', () => {
+    // 复现八种取值的正文（与实测同形：垫层在不同对象下厚度本就不同）
+    const multiObjectBody = [
+      '基础下做100mm厚C15混凝土垫层。',
+      '管沟砂石垫层厚200mm，分层夯实。',
+      '道路基层下碎石垫层150mm。',
+      '地坪混凝土垫层厚300mm。',
+      '散水部位垫层厚度50mm。',
+    ].join('\n');
+
+    it('正文同层名出现多值 → 不报 error，改为显性 warning（不静默）', async () => {
+      const issues = await processSpecConflictIssues(multiObjectBody, specFactsModel('垫层厚度120mm'), embedDocuments);
+      expect(issues.filter(issue => issue.level === 'error')).toEqual([]);
+      const skipped = issues.filter(issue => issue.level === 'warning');
+      expect(skipped).toHaveLength(1);
+      // 显性记录：说明跳过原因与正文取值，供人工复核（零静默降级口径）
+      expect(skipped[0]!.message).toContain('口径不唯一');
+      expect(skipped[0]!.message).toContain('垫层');
+      expect(skipped[0]!.message).toContain('200');
+    });
+
+    it('**单值正文仍照旧裁决**（召回不丢）：一处 200mm vs 资料 800mm 照报 error', async () => {
+      const issues = await processSpecConflictIssues('混凝土垫层厚200mm。', specFactsModel('垫层厚800mm'), embedDocuments);
+      expect(issues.filter(issue => issue.level === 'error')).toHaveLength(1);
+      expect(issues.filter(issue => issue.level === 'warning')).toEqual([]);
+    });
+
+    it('多值跳过不触发确定性改写（正文数值零改动）', async () => {
+      const fixed = await applyDeterministicConsistencyFixesToMarkdown(multiObjectBody, specFactsModel('垫层厚度120mm'), undefined, embedDocuments);
+      expect(fixed.fixedCount).toBe(0);
+      expect(fixed.markdown).toBe(multiObjectBody);
+    });
+  });
 });
 
 describe('formalHeadingHierarchyIssues（P5 复选框符号残留检测）', () => {

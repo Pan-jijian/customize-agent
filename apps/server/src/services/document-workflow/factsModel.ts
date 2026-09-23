@@ -4,7 +4,7 @@ import * as XLSX from 'xlsx';
 import type { AutoDocumentSpecPackage } from '../document-core/autoDocumentSpecTypes';
 import { getProjectKbRoot, getProjectRoot } from '../knowledge/kbService';
 import { DEFAULT_DOCUMENT_DOMAIN_PROFILE, factFieldForLabel, isDiagnosticFactValue, isForbiddenFactValue, isLowConfidenceFactValue, type DocumentDomainProfile, type FactFieldProfile } from '../document-core/documentDomainProfileService';
-import { hasCorruptTextMarkers, valueAfterChangeConnector } from './factValueNoise';
+import { TEMPORAL_DATE_VALUE_RE, hasCorruptTextMarkers, stripFactLabelPrefix, temporalValueKind, valueAfterChangeConnector } from './factValueNoise';
 import { detectSmartTableHeader, locateTableColumns } from '@customize-agent/knowledge';
 import type { ChapterFactNeed, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, ResolvedFactNeed, SpecAuthorityMap, StructuredTableFact } from './types';
 import { evidenceSatisfiesSpecField, specFactTargets } from './factMatching';
@@ -461,17 +461,9 @@ function conflictComparableFactValue(value: unknown, profile: DocumentDomainProf
   return normalized;
 }
 
-/** 时间值形态分桶（D-T4 ④ 槽位对齐，r28f #3 归因）：「计划工期=90日历天」与「开工日期=2026年9月24日」
- * 在周期要求域（schedule_requirement，aliases 含开工/竣工日期）归并后互比，时长与日期是不同槽位。
- * 判定口径：仅当组内值全部可判形态且时长、日期并存时分桶各自比对（同形态多值照报，跨形态不报）；
- * 含未判形态值或单一形态时维持全量互比口径，防真冲突被静默。 */
-const TEMPORAL_DURATION_VALUE_RE = /^\d+\s*个?\s*(?:日历天|天|个月|月|周|年)$/u;
-const TEMPORAL_DATE_VALUE_RE = /^20\d{2}\s*(?:年\s*\d{1,2}\s*月|[.\-/]\d{1,2}(?:[.\-/]|$))/u;
-function temporalValueKind(value: string): 'duration' | 'date' | 'plain' {
-  if (TEMPORAL_DURATION_VALUE_RE.test(value)) return 'duration';
-  if (TEMPORAL_DATE_VALUE_RE.test(value)) return 'date';
-  return 'plain';
-}
+/* temporalValueKind（时间值形态分桶）已于 4.56.4 迁至 ./factValueNoise
+ *（判据单源：对账终检侧 `document-validation/factConsistencyService` 需要同一份槽位判据，
+ *  原先只有真值层有 → 「330日历天」与「计划开工日期：2026年10月10日」被判多值冲突） */
 
 function conflictComparableField(key: string, profile: DocumentDomainProfile) {
   const field = factFieldForLabel(profile, key);
@@ -544,23 +536,12 @@ export function normalizeOcrFactText(text: string) {
     .trim();
 }
 
-/** 标签前缀剥离（C-T7：自 helpers/factCoverage 迁移单源）：「招标人：肥西县丰乐镇人民政府」类值
- *  前缀剥离后与纯值同口径——基本信息表行、占位修复取值与事实落位检测三处共用。 */
-export function stripFactLabelPrefix(value: string) {
-  const text = String(value || '');
-  const closed = text.replace(/^(?:招标人|招标单位|建设单位|发包人|项目名称|工程名称|项目编号|招标项目编号|标段名称|建设地点|建设规模|招标范围|计划工期|合同工期|质量标准|质量目标)[：:]\s*/u, '');
-  if (closed !== text) return closed;
-  /**
-   * 形态规则（4.56 L6-C）：**短中文标签 + 冒号 + 时间形态开头** → 该标签是口径名，剥掉再判值形态。
-   *
-   * 实测（巢湖 doc-a5d1a87f）：答疑抽取出的「计划开工日期：2026年10月10日（具体开工日期以招标人
-   * 出具的书面开工通知为准）」因带标签前缀而**形态判为 plain**（日期正则锚定 `^20\d{2}`），
-   * 使「时长 vs 日期」的**槽位分桶**因 plain 混入整体失效 → 同一个日期与工期值被判「多值冲突」。
-   * 闭集（上面的具名标签）覆盖不到「计划开工日期」这类组合标签，故用形态判定而非继续扩表。
-   * 边界收紧：仅当冒号后紧跟**时间形态**（`20XX年` / 数字+时长）时才剥——避免误伤普通句式值。
-   */
-  return text.replace(/^[\u4e00-\u9fa5]{2,10}[：:]\s*(?=(?:20\d{2}\s*年|\d+\s*(?:日历天|天|个月|月|年)))/u, '');
-}
+/* 标签前缀剥离（C-T7 迁移单源；4.56.4 实现迁至 ./factValueNoise）——
+ * 判据单源：对账终检侧（document-validation/factConsistencyService）需要同一份口径标签剥离，
+ * 否则「计划开工日期：2026年10月10日（…）」形态判为 plain，槽位分桶失效 → 多值冲突误报。
+ * 本处保留 re-export，既有 5 处消费方（keyFactPlacement / projectBasicInfo / factDistribution /
+ * factCoverage / 本文件）零改动。 */
+export { stripFactLabelPrefix };
 
 /** 名称+编号连读拆分（C-T7 #4 口径单源）：「项目名称」类值尾部粘连「2.2招标项目编号：2026AEEGZ50048」
  *  形态（PDF 标题行/行内连读——r28f 实测 #4「名称 vs 名称+编号」多值冲突根因）——剥离「章节编号+

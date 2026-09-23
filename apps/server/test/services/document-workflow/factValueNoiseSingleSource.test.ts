@@ -57,6 +57,9 @@ describe('4.56.3 事实值噪声判据单源', () => {
       // 函数体级重复定义（不是 import、不是调用）
       if (/function\s+hasCorruptTextMarkers\s*\(/u.test(text)) offenders.push(`${relative}：重复定义 hasCorruptTextMarkers`);
       if (/function\s+valueAfterChangeConnector\s*\(/u.test(text)) offenders.push(`${relative}：重复定义 valueAfterChangeConnector`);
+      if (/function\s+temporalValueKind\s*\(/u.test(text)) offenders.push(`${relative}：重复定义 temporalValueKind`);
+      if (/function\s+stripFactLabelPrefix\s*\(/u.test(text) || /function\s+stripFactLabelPrefix\s*\(value\s*:\s*string\)/u.test(text)) offenders.push(`${relative}：重复定义 stripFactLabelPrefix`);
+      if (/function\s+stripTrailingFormAnnotation\s*\(/u.test(text)) offenders.push(`${relative}：重复定义 stripTrailingFormAnnotation`);
       // 手抄连接语正则（应 import valueAfterChangeConnector）
       if (/CHANGE_CONNECTORS\s*\}\s*\|\|/u.test(text) && /exec\(raw\)/u.test(text)) offenders.push(`${relative}：手抄变更连接语取值逻辑`);
     }
@@ -75,5 +78,8 @@ describe('4.56.3 事实值噪声判据单源', () => {
     expect(consistency).toContain('isTableScrapeFragment(');
     expect(consistency).toContain('valueAfterChangeConnector(');
     expect(consistency).toContain('foldHomoglyphVariants(');
+    expect(consistency).toContain('temporalValueKind(');
+    expect(consistency).toContain('stripFactLabelPrefix(');
+    expect(consistency).toContain('stripTrailingFormAnnotation(');
   });
 });

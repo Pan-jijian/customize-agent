@@ -2071,7 +2071,38 @@ export async function processSpecConflictIssues(markdown: string, factsModel: Do
   for (const [layer, sources] of sourceByLayer) {
     const sourceRatios = [...new Set(sources.map(entry => entry.ratio).filter(Boolean))];
     const sourceThicknesses = [...new Set(sources.map(entry => entry.thickness).filter((value): value is number => Number.isFinite(value)))];
-    for (const body of bodyEntries.filter(entry => entry.layer === layer)) {
+    const layerBodyEntries = bodyEntries.filter(entry => entry.layer === layer);
+    /**
+     * 4.56.4 口径唯一性判据的**对称补全**（实测 8 条 blocker 的根因）。
+     *
+     * 原判据只保证**资料侧**口径唯一（`sourceThicknesses.length === 1`，见上方注释「资料侧同一结构层
+     * 出现多个不同规格时口径不唯一，跳过该层」），却对**正文侧**不作任何唯一性要求——于是
+     * 「资料里垫层只有一个厚度 120mm」被用来要求**正文里每一处「垫层」都等于 120mm**。
+     * 而 `垫层` 在道路/管沟/地坪/基础下本就是**不同对象、不同厚度**：实测正文出现
+     * 50/100/200/10/30/300/150/5mm 八种取值 → 8 条「工序规格冲突」error，
+     * 而 `factIntegrity` 统计的是本类别**全部** error（`factErrors.length`），
+     * 8 条即把 60% 分量压到 0（事实维度 40 分、综合 87 的直接成因）。
+     *
+     * 判据：**正文侧同一层名出现 >1 个不同厚度/配比时，该层名不再唯一指代某一对象**，
+     * 与资料侧同源规则一致——无法确定性裁决，跳过比对。**且显性记录不静默**（零静默降级口径）：
+     * 逐层输出 warning 说明跳过原因与取值清单，供人工复核，绝不假装「已核对通过」。
+     *
+     * 召回损失是**真实且已权衡**的：正文写对一处、写错一处（2 种取值）时也不再报。
+     * 该场景在层名不含对象限定时本就不可裁决（无法判定哪一处对应资料口径），
+     * 与其用同一份资料值去批量改写正确内容（历史事故：正文防水层 250/30/100mm 被批量改成 3mm），
+     * 不如如实标注"无法裁决"并交给人工。
+     */
+    const bodyThicknesses = [...new Set(layerBodyEntries.map(entry => entry.thickness).filter((value): value is number => Number.isFinite(value)))];
+    const bodyRatios = [...new Set(layerBodyEntries.map(entry => entry.ratio).filter(Boolean))];
+    if (bodyThicknesses.length > 1 || bodyRatios.length > 1) {
+      issues.push({
+        level: 'warning',
+        message: `工序规格口径不唯一，已跳过确定性比对：正文「${layer}」出现 ${bodyThicknesses.length} 种厚度（${bodyThicknesses.join('、')}mm）${bodyRatios.length > 1 ? `、${bodyRatios.length} 种配比（${bodyRatios.join('、')}）` : ''}——该层名在正文中指代多个对象（如道路/管沟/地坪垫层厚度本就不同），资料侧单一口径无法裁决`,
+        suggestion: `如需确定性核对，请在正文为层名补充对象限定（如「管沟垫层 120mm」「道路垫层 200mm」），或在资料/参数桶中分别登记各对象的规格。`,
+      });
+      continue;
+    }
+    for (const body of layerBodyEntries) {
       if (sourceRatios.length === 1 && body.ratio && body.ratio !== sourceRatios[0]) {
         const key = `ratio|${layer}|${body.ratio}`;
         if (!reported.has(key)) {

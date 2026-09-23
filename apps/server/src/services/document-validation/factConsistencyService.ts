@@ -1,6 +1,6 @@
 import { DEFAULT_DOCUMENT_DOMAIN_PROFILE, factFieldForLabel, isDiagnosticFactValue, isForbiddenFactValue, type DocumentDomainProfile } from '../document-core/documentDomainProfileService';
 import { rejectValueNoise } from '../document-workflow/authoritativeValues';
-import { foldHomoglyphVariants, hasCorruptTextMarkers, isTableScrapeFragment, valueAfterChangeConnector } from '../document-workflow/factValueNoise';
+import { TEMPORAL_DATE_VALUE_RE, foldHomoglyphVariants, hasCorruptTextMarkers, isTableScrapeFragment, stripFactLabelPrefix, stripTrailingFormAnnotation, temporalValueKind, valueAfterChangeConnector } from '../document-workflow/factValueNoise';
 import type { DocumentFact, ValidationIssue } from '../document-workflow/types';
 import type { ProjectMaterialSummary } from '../document-core/projectMaterialService';
 
@@ -61,7 +61,10 @@ function comparableValue(value: string, profile: DocumentDomainProfile, label?: 
     // E2 标签前缀剥离（r14 丰乐镇实测）：「招标人：肥西县丰乐镇人民政府」与「肥西县丰乐镇人民政府」
     // 因字段名前缀粘连被归一为两个 key 误报多值冲突——先剥离「label[：]」前缀再比较。
     const stripped = trimmed.replace(new RegExp(`^${escapeRegExp(label)}\\s*[：:、,，.．]?\\s*`, 'u'), '');
-    const base = stripped || trimmed;
+    // 4.56.4 尾随形式括注剥离：`巢湖执珩建设投资有限公司（盖单位章）` 与裸名是同一实体的两种书写，
+    // 实测被判「招标人 存在多个值」。只剥尾部、单组 ≤12 字（中间括注如「（中国科大英才创新创业基地）」
+    // 是名称组成部分，不剥）。
+    const base = stripTrailingFormAnnotation(stripped || trimmed);
     // E3 粘连残片卫生（r14 丰乐镇实测）：页码表头粘连（「第页共页1.本报价依据…」）、段落粘连
     //（「安徽省合肥市肥西县2.6建设规模：…」）、多句标点、路径串、纯括号占位（「（合同名称）」）、
     // 超长值（>40 字必为表格/段落残片）一律不作为比较值——名称类事实就绪值应短且纯净。
@@ -73,7 +76,19 @@ function comparableValue(value: string, profile: DocumentDomainProfile, label?: 
     if (normalize(base) === normalize(label)) return '';
     return normalize(base);
   }
-  const duration = /\d+(?:\.\d+)?\s*(?:日历天|天|个月|月)/u.exec(trimmed)?.[0];
+  /**
+   * 4.56.4 时间值口径三步（与真值层 `stripFactLabelPrefix` / `temporalValueKind` **同源**）：
+   *
+   * ① 剥口径标签前缀：`计划开工日期：2026年10月10日（…）` 不剥标签则起始不是 `20\d{2}`，
+   *    `temporalValueKind` 判为 plain → 槽位分桶因 plain 混入整体失效 → 与工期值被判多值冲突；
+   * ② **日期形态先行识别**：工期类标签下不得把日期里的「10月」当作时长——
+   *    `2026年10月10日` 会被 `\d+…(?:月)` 匹配出 `10月`，把日期伪装成时长（实测正是如此）；
+   * ③ 剩余文本再走时长正则。
+   */
+  const withoutLabel = stripFactLabelPrefix(trimmed);
+  const dateShaped = withoutLabel.replace(/（[^）]*）|\([^)]*\)/gu, '').replace(/\s+/gu, '').trim();
+  if (TEMPORAL_DATE_VALUE_RE.test(dateShaped)) return normalize(dateShaped.slice(0, 40));
+  const duration = /\d+(?:\.\d+)?\s*(?:日历天|天|个月|月)/u.exec(withoutLabel)?.[0];
   // V5 P6 label 感知工期归一（run1 实测）：「计划工期=360日历天；2.9」的 value 本身不含
   // 「工期」二字，旧口径只看 value 导致整串归一，与「360日历天」被误报多值冲突——
   // 工期类 label 下总是优先提取 duration 片段参与比较。
@@ -149,7 +164,27 @@ export function validateFactConsistency(input: { markdown: string; facts: Docume
       }
       for (const key of absorbed) grouped.delete(key);
     }
+    /**
+     * 4.56.4 时间槽位分桶（判据单源：与真值层 `temporalValueKind` 同源）。
+     *
+     * 实测 `计划工期` 被判「存在多个值」：`330日历天` vs `计划开工日期：2026年10月10日（具体开工日期
+     * 以招标人出具的书面开工通知为准）`——**时长与日期是不同槽位**，同一份答疑文件的相邻两句本来就同时成立。
+     * 真值层早已按形态分桶（`factsModel` 的 D-T4 ④），对账侧没有 → 又是一处判据分裂。
+     * 口径与真值层一致：组内值**全部**可判形态且时长/日期并存时按形态分桶各自比对；
+     * 含 plain 值时维持全量互比（防真冲突被静默）。
+     */
     if (grouped.size > 1) {
+      const kinds = new Set([...grouped.keys()].map(temporalValueKind));
+      if (kinds.size === 2 && !kinds.has('plain')) {
+        for (const kind of ['duration', 'date'] as const) {
+          const bucket = new Map([...grouped].filter(([key]) => temporalValueKind(key) === kind));
+          if (bucket.size > 1) {
+            const detail = [...bucket.values()].map(group => `${group[0]!.value}（${group.map(item => item.source).filter(Boolean).join('、') || '未知来源'}）`).join(' vs ');
+            issues.push({ level: 'error', message: `事实一致性冲突：${label} 存在多个值：${detail}`, suggestion: '请确认当前绑定材料组，或在模板绑定中只绑定当前文档所需材料。' });
+          }
+        }
+        continue;
+      }
       const detail = [...grouped.values()].map(group => `${group[0]!.value}（${group.map(item => item.source).filter(Boolean).join('、') || '未知来源'}）`).join(' vs ');
       issues.push({ level: 'error', message: `事实一致性冲突：${label} 存在多个值：${detail}`, suggestion: '请确认当前绑定材料组，或在模板绑定中只绑定当前文档所需材料。' });
     }
