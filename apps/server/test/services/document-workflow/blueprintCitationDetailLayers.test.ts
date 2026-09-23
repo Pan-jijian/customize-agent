@@ -52,6 +52,41 @@ function realShape(): BlueprintData {
 
 const subjects = (markdown: string) => collectBlueprintCitationCandidates(markdown, realShape()).candidates.map(candidate => `${candidate.subject} ${candidate.value}${candidate.unit}`);
 
+/** 4.55.33 实机形态（巢湖 doc-1790132484476 蓝图 quantities 原值）。三条 blocker 的值（工厂灯1179套／
+ *  A型应急照明集中1台／等电位端子箱、测试板1套）逐条取证：均**不是**专业（单位工程）小计——
+ *  ① 逐条清单：1179 = 「悬挂灯（深照型）」行（同工程「悬挂灯（广照型）」43套，1179+43=1222 恰为
+ *     该工程小计）；1 = A型应急照明集中 4 条配电箱行（1ALE1／1ALE2／1ALE-GG1／1ALE-GG2）之一；
+ *     1 = 等电位端子箱、测试板「总等电位联结箱MEB」行（同工程「局部等电位端子箱LEB」20套）；
+ *  ② 蓝图权威：工厂灯分工程明细 1#厂房安装工程=1222（同项目级合计），等电位端子箱、测试板
+ *     1#厂房安装工程=21／2#门卫安装工程=4／3#门卫安装工程=2（合计 27）——1179／1／1 与任何
+ *     专业小计皆不相等，且蓝图权威全文（grep）不含 1179／深照型／广照型（单条清单行值未获分层投影）。 */
+function professionShape(): BlueprintData {
+  const quantities: Record<string, BlueprintQuantity> = {
+    // 专业（单位工程）小计 21 ≠ 项目级合计 27：只在对象作用域内合法（1#厂房小节）
+    '等电位端子箱、测试板': {
+      value: 27,
+      unit: '套',
+      groups: [
+        { group: '1#厂房安装工程', value: 21 },
+        { group: '2#门卫安装工程', value: 4 },
+        { group: '3#门卫安装工程', value: 2 },
+      ],
+    },
+    // 分工程明细 == 合计：不承载分层信息（单条清单行值 1179 在权威层无出处）
+    '工厂灯': { value: 1222, unit: '套', groups: [{ group: '1#厂房安装工程', value: 1222 }] },
+    'A型应急照明集中': { value: 4, unit: '台', groups: [{ group: '1#厂房安装工程', value: 4 }] },
+  };
+  return {
+    quantities,
+    redLineFacts: [],
+    resources: { labor: { peakValue: 0 } },
+    contract: { totalDays: 0 },
+    project: { scope: '' },
+  } as unknown as BlueprintData;
+}
+
+const professionSubjects = (markdown: string) => collectBlueprintCitationCandidates(markdown, professionShape()).candidates.map(candidate => `${candidate.subject} ${candidate.value}${candidate.unit}`);
+
 describe('口径分层放行：规格-数量拆分小计（R20 合法值，反向改写即规格错位缺陷复活）', () => {
   it('规格小计引用不入候选（金属栏杆 247.990m／钢天沟 31.845t／防火涂料 26494.190m² 实机形态）', () => {
     expect(collectBlueprintCitationCandidates('金属栏杆247.990m。', realShape()).candidates).toEqual([]);
@@ -127,5 +162,58 @@ describe('口径分层放行不吞真缺陷：未登记值产 blocker 并由锚�
   it('回归：值 == 条目权威仍不入候选', () => {
     expect(collectBlueprintCitationCandidates('金属栏杆410.290m。', realShape()).candidates).toEqual([]);
     expect(collectBlueprintCitationCandidates('防火涂料143188.740m²。', realShape()).candidates).toEqual([]);
+  });
+});
+
+/**
+ * 专业（单位工程）口径（4.55.33）：分组名「1#厂房安装工程」= 对象 + 专业，作用域判定含专业维度——
+ * 规范单位工程标题形态（对象名紧跟专业词再跟「工程」）限定到**另一专业**时不授权（跨专业错位照报）；
+ * 对象作用域成立时专业小计放行且不给 replacement（放行不入候选 → 无锚点 → 修复器不触碰）。
+ */
+describe('口径分层放行：专业（单位工程）口径与跨专业错位', () => {
+  it('正例：对象作用域句内引用本工程专业小计不入候选（1#厂房小节／1#厂房安装工程 小节）', () => {
+    expect(collectBlueprintCitationCandidates('#### 1.4.6 1#厂房\n\n安装工程含等电位端子箱、测试板21套。', professionShape()).candidates).toEqual([]);
+    expect(collectBlueprintCitationCandidates('### 1.25 1#厂房安装工程\n\n等电位端子箱、测试板21套。', professionShape()).candidates).toEqual([]);
+  });
+
+  it('反例：项目级语境写专业小计必须报出（无对象作用域标题链）', () => {
+    expect(professionSubjects('本标段安装工程含等电位端子箱、测试板21套。')).toEqual(['等电位端子箱、测试板 21套']);
+  });
+
+  it('反例：跨专业错位（1#厂房土建工程 小节写 1#厂房安装工程 小计）照报', () => {
+    expect(professionSubjects('### 1.25 1#厂房土建工程\n\n等电位端子箱、测试板21套。')).toEqual(['等电位端子箱、测试板 21套']);
+    // 复合标题（「3#门卫土建零星装饰工程」形态）不构成专业限定：实机该形态小节内合法并列电气量
+    // （「1.48 3#门卫土建零星装饰工程」列 3#门卫安装工程 值 3.3m／30m／40.33m 等，全量复跑零新增候选）
+    expect(collectBlueprintCitationCandidates('### 1.48 3#门卫土建零星装饰工程\n\n等电位端子箱、测试板2套。', professionShape()).candidates).toEqual([]);
+  });
+
+  it('反例：未登记值照报（实机 1179／1／1 三条：单条清单行量，非专业小计）并收敛到条目合计', async () => {
+    const data = professionShape();
+    const markdown = '#### 1.4.6 1#厂房\n\n安装工程含工厂灯1179.000套、A型应急照明集中1.000台、等电位端子箱、测试板1.000套。';
+    expect(professionSubjects(markdown)).toEqual(['工厂灯 1179套', 'A型应急照明集中 1台', '等电位端子箱、测试板 1套']);
+    const verdict = await blueprintCitationVerdict(markdown, data, { adjudicate: conflictAll });
+    expect(verdict.issues.filter(issue => issue.level === 'error').map(issue => issue.message)).toEqual([
+      expect.stringContaining('工程量 工厂灯 1179套'),
+      expect.stringContaining('工程量 A型应急照明集中 1台'),
+      expect.stringContaining('工程量 等电位端子箱、测试板 1套'),
+    ]);
+    expect(verdict.anchors.map(anchor => `${anchor.name} ${anchor.value}→${anchor.authorityValue}`)).toEqual([
+      '工厂灯 1179→1222',
+      'A型应急照明集中 1→4',
+      '等电位端子箱、测试板 1→27',
+    ]);
+    const fixed = fixQuantityAuthorityConflicts(markdown, verdict.anchors);
+    expect(fixed.fixedCount).toBe(3);
+    expect(fixed.markdown).toContain('工厂灯1222套');
+    expect(fixed.markdown).toContain('A型应急照明集中4台');
+    expect(fixed.markdown).toContain('等电位端子箱、测试板27套');
+    expect(fixed.markdown).not.toContain('1179');
+  });
+
+  it('放行项不给 replacement：放行值零锚点（含专业小计与规格小计混排句）', async () => {
+    const markdown = '#### 1.4.6 1#厂房\n\n安装工程含等电位端子箱、测试板21套，主要工程量为金属栏杆247.990m。';
+    const verdict = await blueprintCitationVerdict(markdown, professionShape(), { adjudicate: conflictAll });
+    expect(verdict.issues.filter(issue => issue.level === 'error')).toEqual([]);
+    expect(verdict.anchors).toEqual([]);
   });
 });

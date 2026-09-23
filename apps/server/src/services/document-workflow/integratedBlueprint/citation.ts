@@ -92,15 +92,38 @@ function nearlyEqualValue(a: number, b: number): boolean {
   return Math.abs(a - b) <= 0.01 + 1e-6 * Math.max(Math.abs(a), Math.abs(b));
 }
 
+/** 专业维度的正则片段：土建/安装/装饰/市政（「附属」不是专业维度——「室外附属工程」与
+ *  「室外安装工程」同属「室外」对象，实机同节并列引用属合法：1.4.3「室外附属工程」小节列
+ *  室外安装工程明细值 复合管1991.6m／电力电缆1447.55m） */
+const PROFESSION_ALTERNATION = '土建|安装|装饰|市政';
+
+/** 分组标签的专业尾缀：「1#厂房安装工程」→ 安装；「室外附属工程」/「1#厂房工程」→ 无 */
+const GROUP_PROFESSION_RE = new RegExp(`(${PROFESSION_ALTERNATION})工程$`, 'u');
+/** 正则元字符转义（对象名可含「（3T/D)」等括号，直接内插会构造出畸形正则） */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
 /** 对象维度（结构层）：引用位置的上位标题链是否限定到「分工程明细」所属对象。
  *  标题「#### 1.25.1 1#厂房」下的「金属栏杆316.630m」是单体内合法口径；无单体限定的项目级标题链
  *  （如正文「本标段金属栏杆316.630m」）不在此列，仍入候选交判定层（防跨单体合计写进单体范围句）。
  *  标题链按层级收敛判定：向上仅接受层级更浅的标题（#### 1.25.1 的兄弟小节 #### 1.25.4 不构成
- *  上位作用域），防止同文档他处单体标题把兄弟小节内的引用误判为单体内口径。 */
+ *  上位作用域），防止同文档他处单体标题把兄弟小节内的引用误判为单体内口径。
+ *  专业维度（4.55.33 实机取证）：分组名形如「1#厂房安装工程」= 对象（1#厂房）+ 专业（安装）。
+ *  「最近的对象作用域标题是同一对象的**另一专业**的单位工程名」时不授权——防跨专业错位
+ *  （「1#厂房土建工程」小节把 1#厂房安装工程明细值当本专业量陈述）。判定限**规范单位工程标题形态**
+ *  （对象名紧跟专业词再跟「工程」，如「1#厂房土建工程」）：实机复合标题（「3#门卫土建零星装饰工程」
+ *  「1#厂房土建装饰装修工程」）与混合专业小节（「1.48 3#门卫土建零星装饰工程」内列电气量、
+ *  「1.4.3 室外附属工程」内列室外安装工程量）均属合法跨专业并列陈述——全量复跑实测：按「标题行
+ *  含任一专业词即校专业」（专业词不必紧跟对象名）的宽口径判定会新造 10 条假候选，故按规范形态收敛。 */
 function scopedToGroup(masked: string, position: number, groupLabel: string): boolean {
   // 明细行标签去尾缀取对象名：「1#厂房土建工程」→「1#厂房」、「室外附属工程」→「室外附属」
-  const token = groupLabel.replace(/(?:土建|安装|装饰|市政)?工程$/u, '').trim();
+  const token = groupLabel.replace(new RegExp(`(?:${PROFESSION_ALTERNATION})?工程$`, 'u'), '').trim();
   if (token.length < 2) return false;
+  const groupProfession = GROUP_PROFESSION_RE.exec(groupLabel)?.[1];
+  const professionConflictRe = groupProfession
+    ? new RegExp(`${escapeRegExp(token)}(${PROFESSION_ALTERNATION})工程`, 'u')
+    : undefined;
   let enclosingLevel = 7;
   let lineEnd = masked.indexOf('\n', position);
   let lineStart = masked.lastIndexOf('\n', position) + 1;
@@ -109,7 +132,12 @@ function scopedToGroup(masked: string, position: number, groupLabel: string): bo
     const heading = /^\s*(#{1,6})\s/u.exec(line);
     if (heading && heading[1]!.length < enclosingLevel) {
       enclosingLevel = heading[1]!.length;
-      if (line.includes(token) || line.includes(groupLabel)) return true;
+      if (line.includes(token) || line.includes(groupLabel)) {
+        // 规范单位工程形态的对象+专业限定：专业与分组专业不一致即跨专业错位（不入作用域）
+        const headingProfession = professionConflictRe?.exec(line)?.[1];
+        if (headingProfession && headingProfession !== groupProfession) return false;
+        return true;
+      }
     }
     if (lineStart === 0) return false;
     lineEnd = lineStart - 1;
@@ -260,9 +288,21 @@ export function collectBlueprintCitationCandidates(markdown: string, data: Bluep
     //    值集」直接判定，不再要求 token 邻接与干净切分。
     // ② 单体层（groups）：明细值只在所属对象作用域内合法（金属栏杆 1#厂房316.63 / 2#门卫78.7 /
     //    3#门卫14.96 → 合计410.29）——上位标题限定到该单体的范围句内引用明细值不该被改写成跨单体
-    //    合计（对象错位）；无单体限定的项目级语境不在此列，仍入候选。
+    //    合计（对象错位）；无单体限定的项目级语境不在此列，仍入候选。作用域判定含专业维度
+    //    （scopedToGroup）：单体+专业（单位工程）分组名在另一专业的小节内不授权（跨专业错位照报）。
     // 分层值必须与该条目权威合计异值（同值项不承载分层信息，且上方 value === quantity.value 已放行）；
     // 未登记值（单条清单行的规格量等）照常入候选 → 判定层裁决 → 锚点修复链收敛（真冲突仍报出）。
+    // 4.55.33 实机取证（巢湖 doc-1790132484476 三条 blocker：工厂灯1179套／A型应急照明集中1台／
+    // 等电位端子箱、测试板1套）：三条均**不是**专业（单位工程）小计，故不放行——① 该条目在
+    // 「1#厂房安装工程」的分工程明细值分别是 1222／4／21，项目级合计 1222／4／27，正文值 1179／1／1
+    // 与之皆不相等；② 逐条清单核对：1179 = 工厂灯「悬挂灯（深照型）」行（同工程「悬挂灯（广照型）」
+    // 43 套，1179+43=1222 恰为该工程小计），1 = A型应急照明集中 4 条配电箱行（1ALE1/1ALE2/1ALE-GG1/
+    // 1ALE-GG2）之一，1 = 等电位端子箱、测试板「总等电位联结箱MEB」行（同工程「局部等电位端子箱LEB」
+    // 20 套）；③ 蓝图权威（grep 全量）不含 1179／深照型／广照型，即这些单条清单行值未获任何分层投影
+    // （与 blueprintCitationDetailLayers 的「金属窗334.840／钢支撑182.513 无分层出处」同型）——正文以
+    // 条目名口径陈述单行量，收敛方向只能是条目合计（判定层 rationale 中的「安装工程汇总口径」系模型
+    // 臆测：安装工程汇总即 1222／4／21）。要真正放行此型需先由蓝图投影层登记拆分（specBreakdown 现按
+    // 特征描述规格 token 聚合，「深照型／广照型」落在名称字段而同型号 LED 200W 被合并 → 拆分被剔除）。
     const splitValues = (quantity.specBreakdown ?? []).filter(item => !nearlyEqualValue(item.value, quantity.value)).map(item => item.value);
     if (splitValues.some(splitValue => nearlyEqualValue(splitValue, value))) continue;
     const groupValues = (quantity.groups ?? []).filter(group => !nearlyEqualValue(group.value, quantity.value));

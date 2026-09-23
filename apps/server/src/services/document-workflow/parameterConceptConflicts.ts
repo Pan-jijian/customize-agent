@@ -88,6 +88,26 @@ function normalizeConcept(concept: string): string {
     .replace(/[\s,，、；;：:（）()]/gu, '');
 }
 
+/** 并列链成员是否**异名**（与 token 概念互不包含，经归一化）：异名成员各自带数值 = 分对象列举，
+ *  同名成员（含互为包含，如「钢柱」vs「钢柱基础」）仍是同一参数的重复取值。 */
+function enumerationMemberIsDistinct(member: string, concept: string): boolean {
+  const name = normalizeConcept(member);
+  const target = normalizeConcept(concept);
+  if (name.length === 0 || target.length === 0) return false;
+  return !name.includes(target) && !target.includes(name);
+}
+
+/** 枚举窗口内是否出现「顿号/斜杠 + 成员名 + 数值」的并列成员（成员名可省略 = 匿名成员）：
+ *  匿名成员（「厚15cm、8cm」的「、8」）与**异名成员**（「钢柱1228.24t、钢梁1591.306t」的「、钢梁1591」）
+ *  两形态都算——异名成员是另一个对象各自的量，不是本 token 的重复取值。 */
+function enumeratedMemberIn(window: string, concept: string): boolean {
+  if (/[、/](?:与)?[A-Za-z]?\d/u.test(window)) return true;
+  for (const match of window.matchAll(/[、/](?:与|和|及)?([\p{Script=Han}A-Za-z]{1,8})\d/gu)) {
+    if (enumerationMemberIsDistinct(match[1] || '', concept)) return true;
+  }
+  return false;
+}
+
 function dot(left: number[], right: number[]): number {
   const length = Math.min(left.length, right.length);
   let sum = 0;
@@ -388,10 +408,13 @@ export async function conceptConflictGroups(markdown: string): Promise<ConceptCo
         // occurrence.matchIndex 取出现位上下文判定（检测定位=原文定位）；4.52 P3a 前窗对称化：
         // 尾成员枚举链的顿号在其前窗（「300×300断面3003m、500×600断面1797m」的尾 token 前有
         // 「、500×」而后窗无顿号）——仅后窗判定收集不全致真枚举误报多口径（「300断面」簇实测）
+        // 4.55.32 异名成员扩围：成员自带数值且成员名与本 token 概念互不包含（「钢柱1228.24t、
+        // 钢梁1591.306t、钢吊车梁623.564t」三构件分列成量；「塔式起重机（QTZ63）2台、混凝土输送泵
+        // 3台配置」两设备分列成量）时同为分对象列举；同名成员（「试压压力1.5、试压压力1.0」）不豁免。
         const enumerations = unitGroup.filter(token => token.occurrences.some(occurrence => {
           const after = markdown.slice(occurrence.matchIndex, occurrence.matchIndex + token.raw.length + 12);
           const before = markdown.slice(Math.max(0, occurrence.matchIndex - 12), occurrence.matchIndex);
-          return /[、/](?:与)?[A-Za-z]?\d/u.test(after) || /[、/](?:与)?[A-Za-z]?\d/u.test(before);
+          return enumeratedMemberIn(after, token.concept) || enumeratedMemberIn(before, token.concept);
         }));
         if (enumerations.length >= 2) continue;
         // 对象限定词不相容豁免（r23 P3b 归因）：「工具式脚手架搭设面积76.62m²」与「外脚手架

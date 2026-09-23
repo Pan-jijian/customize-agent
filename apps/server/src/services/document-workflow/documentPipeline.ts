@@ -8,6 +8,7 @@ import { buildSuspensionChecklist } from './suspensionChecklist';
 import { DOCUMENT_WORKFLOW_VERSION } from './documentWorkflowVersion';
 import { partialChapterStatus } from './documentGeneratorHelpers';
 import { assertRegistryConsistency } from './detectorFixerRegistry';
+import { backfillCaliberPlacements } from './authoritativeValues';
 import { createFinalizeSession, type FinalizeGenerationInput } from './finalize/finalizeSession';
 import { stageRebuildFacts } from './finalize/rebuildFacts';
 import { stageComposeFinal, stageRebuildAndRecompute, stageValidationPack } from './finalize/rebuildAndRecompute';
@@ -201,6 +202,24 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // 「一级建造师」等 5 条补写阶段记录 success 而终稿零踪迹、终检重新检出直坠终门禁；在最后一次净变更
   // 点之后、终门禁之前重放（同 runSurfaceDeterministicCleans / replayBlueprintCitationNumericFixes 范式）
   await replayRequirementTailClosure(session);
+  // 4.55.33 口径链尾确定性回填（实测：开工日期真值层有值、写作侧已被告知必须写，模型仍以
+  // 「以监理工程师签发开工令之日起算」代替、全篇零次出现该日期 → 口径终检阻断且无修复轮消费）：
+  // 「必须在正文出现」的项目级口径在链尾按真值补一句，原文一字不删（纯增量、幂等）；
+  // markdown-only，位于最后净变更点之后、终门禁之前——终门禁所检 = 交付所存
+  {
+    const backfill = backfillCaliberPlacements(session.finalMarkdown, session.truthValues || []);
+    if (backfill.inserted.length > 0) {
+      session.finalMarkdown = backfill.markdown;
+      const stage = displayStage({
+        type: 'validation',
+        roleId: 'caliber-placement-backfill',
+        status: 'success',
+        message: `口径链尾回填：${backfill.inserted.length} 项项目级口径在正文逐字缺位，已按真值层生效值补写（${backfill.inserted.map((item: { attribute: string; value: string }) => `${item.attribute}=${item.value}`).slice(0, 6).join('、')}）`,
+      }, { subtitle: '口径回填' });
+      upsertProgressStage(session.executionStages, stage);
+      await session.recomputeFinalValidationBundle();
+    }
+  }
   // D-T6 ①③ 交付结构收口（r28f 门禁 #1「目录 29 节 vs 正文 28 节」与 warningIssues 长段归因）：
   // ①目录按正文实际 H2/H3 结构重建（fixTocFromBody——其后各 draft-mutating 轮 rebuild 均可改变
   // 正文 H3 结构）；③>380 字符超长段落链尾切分（splitOverlengthBodyParagraphs）。两操作均为

@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { caliberConsistencyIssues, crossChapterConsistencyIssues } from '@/services/document-workflow/qualityValidation';
-import { attributeValueShapeMismatch, rejectValueNoise, renderTruthConstraintBlock } from '@/services/document-workflow/authoritativeValues';
+import { attributeValueShapeMismatch, backfillCaliberPlacements, rejectValueNoise, renderTruthConstraintBlock } from '@/services/document-workflow/authoritativeValues';
 import { detectFactConflicts } from '@/services/document-workflow/factsModel';
 import { splitScoringBlocks } from '@/services/document-workflow/tenderBidScoring';
 import { classifyValueShape } from '@/services/document-workflow/valueOverride';
@@ -214,5 +214,42 @@ describe('L0 口径须落位清单（读写同源）', () => {
       noiseRejected: [],
     });
     expect(block).toBe('');
+  });
+});
+describe('L0 口径链尾确定性回填', () => {
+  const caliber = (attribute: string, value: string, extra: Record<string, unknown> = {}) => ({
+    subject: '', attribute, value, rule: 'R7', evidence: [{ source: '招标文件.pdf', snippet: value }],
+    superseded: [], caliber: true, candidates: [], ...extra,
+  }) as never;
+
+  it('正文逐字缺位的项目级口径由链尾补写（实测：开工日期全篇零次出现）', () => {
+    // 实测原文：正文写「开工日期以监理工程师签发开工令之日起算」，真值 2026年10月10日 零次出现
+    const markdown = '第一章 工程概况\n本工程开工日期以监理工程师签发开工令之日起算，总工期330日历天。\n';
+    const result = backfillCaliberPlacements(markdown, [caliber('开工日期', '2026年10月10日')]);
+    expect(result.inserted).toEqual([{ attribute: '开工日期', value: '2026年10月10日' }]);
+    expect(result.markdown).toContain('开工日期为2026年10月10日。');
+    // 原文一字不删（纯增量插入）
+    expect(result.markdown).toContain('本工程开工日期以监理工程师签发开工令之日起算，总工期330日历天。');
+  });
+
+  it('已落位的口径不重复插入（幂等）', () => {
+    const markdown = '本工程开工日期为2026年10月10日。\n';
+    const first = backfillCaliberPlacements(markdown, [caliber('开工日期', '2026年10月10日')]);
+    expect(first.inserted).toHaveLength(0);
+    const second = backfillCaliberPlacements(first.markdown, [caliber('开工日期', '2026年10月10日')]);
+    expect(second.inserted).toHaveLength(0);
+  });
+
+  it('正文未提起该属性名时不硬塞（不得插入无关段落）', () => {
+    const markdown = '第一章 施工部署\n按流水段组织施工。\n';
+    const result = backfillCaliberPlacements(markdown, [caliber('开工日期', '2026年10月10日')]);
+    expect(result.inserted).toHaveLength(0);
+    expect(result.markdown).toBe(markdown);
+  });
+
+  it('段落型值与非口径属性不插入', () => {
+    const markdown = '第一章 概况\n机械设备计划见后。\n';
+    expect(backfillCaliberPlacements(markdown, [caliber('机械设备计划', '模板材质由投标人自行选择')]).inserted).toHaveLength(0);
+    expect(backfillCaliberPlacements(markdown, [caliber('底坑垫层做法', 'C20', { caliber: false })]).inserted).toHaveLength(0);
   });
 });

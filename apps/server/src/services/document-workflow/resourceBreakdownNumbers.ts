@@ -460,6 +460,19 @@ export function scanResourceBreakdownClaims(markdown: string, authority: Resourc
       });
     }
   }
+  // 4.55.32 机械台数**单源归属**（与 scanEquipmentCountClaims 同一扫描，防跨对象归账）：一处台数宣称
+  // 按引导它的设备名唯一归属（scan 的左起最早可得者），另一设备名只是**配套说明**时不得再认领该台数。
+  // 巢湖实测（doc-1790132484476-29b74c88）「钢结构吊装以QTZ63塔式起重机配混凝土输送泵2台作业」：
+  // 台数 2 由「塔式起重机…配…」引导（桥接语是配套关系），却紧邻混凝土输送泵被记到其名下，与其
+  // 蓝图权威 3 台（正文另 7 处均写 3 台）冲突 → 「机械台数与蓝图权威不一致」误报根因。
+  const equipmentClaimOwnerAt = new Map<number, string>();
+  for (const claim of scanEquipmentCountClaims(markdown)) {
+    const numberMatch = /(\d+)\s*(?:台|套|辆)$/u.exec(claim.text);
+    if (!numberMatch || numberMatch.index === undefined) continue;
+    const numberStart = claim.start + numberMatch.index;
+    const existing = equipmentClaimOwnerAt.get(numberStart);
+    if (!existing || existing.length < claim.name.length) equipmentClaimOwnerAt.set(numberStart, claim.name);
+  }
   // 2. 机械台数：单条目锚定名称语境（≤2 桥接字内紧邻 数字+台）；同名多条目按规格词语境单独比对
   for (const item of authority.equipment) {
     if (item.variantCount === 1) {
@@ -469,8 +482,12 @@ export function scanResourceBreakdownClaims(markdown: string, authority: Resourc
         if (!match) continue;
         if (match[1] && !EQUIPMENT_BRIDGE_WORD_RE.test(match[1])) continue;
         const actual = Number(match[2]);
-        if (actual === item.count) continue;
         const numStart = idx + item.name.length + match[1].length;
+        // 归属闸：该台数已归属**另一台设备名**（本名只出现在配套/桥接说明里）→ 不记本条目名下。
+        // 名称互含（类别名与全名写法差异，如「起重机」与「塔式起重机」）视为同一条目，照常对账。
+        const claimOwner = equipmentClaimOwnerAt.get(numStart);
+        if (claimOwner && !claimOwner.includes(item.name) && !item.name.includes(claimOwner)) continue;
+        if (actual === item.count) continue;
         claims.push({
           kind: 'equipment',
           label: `机械台数 ${item.name}`,

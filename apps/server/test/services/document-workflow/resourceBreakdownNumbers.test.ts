@@ -321,3 +321,39 @@ describe('4.55.32 语句口径层级 ↔ 权威口径层级（单体语句比逐
     expect(result.markdown).toContain('管道消毒冲洗DN40 0.6m');
   });
 });
+
+describe('4.55.32 机械台数单源归属（#5 配套说明不得被记为本设备台数）', () => {
+  /** 真机蓝图为中值口径：塔式起重机（QTZ63）min1max3 → 2 台；混凝土输送泵 min2max4 → 3 台 */
+  const realAuthority = () => authorityOf({ composition: [] }, [
+    { name: '塔式起重机', spec: 'QTZ63', min: 1, max: 3 },
+    { name: '混凝土输送泵', min: 2, max: 4 },
+  ]);
+
+  it('正样本：塔式起重机配混凝土输送泵2台作业 —— 2 台属塔式起重机（配套说明），不记入混凝土输送泵名下', () => {
+    // 真机 doc-1790132484476-29b74c88 原句；旧实现把「…配混凝土输送泵2台」的 2 台记到混凝土输送泵
+    // （蓝图权威 3 台）名下 → 「机械台数与蓝图权威不一致：混凝土输送泵 正文 2 台，蓝图权威 3 台」误报
+    const claims = scanResourceBreakdownClaims('钢结构吊装以QTZ63塔式起重机配混凝土输送泵2台作业，各工序经施工员自检、质检员复检并报监理验收后进入下道工序。', realAuthority());
+    expect(claims).toEqual([]);
+  });
+
+  it('反例：混凝土输送泵自身台数漂移仍照报（归属闸不掩盖真偏离）', () => {
+    const claims = scanResourceBreakdownClaims('混凝土输送泵5台配置。', realAuthority());
+    expect(claims).toHaveLength(1);
+    expect(claims[0]?.message).toContain('混凝土输送泵 正文 5 台，蓝图权威 3 台');
+  });
+
+  it('反例：塔式起重机自身台数漂移仍照报（引导名即本条目，互含视为同条目）', () => {
+    const claims = scanResourceBreakdownClaims('QTZ63塔式起重机3台安装并完成检测验收。', realAuthority());
+    expect(claims).toHaveLength(1);
+    expect(claims[0]?.message).toContain('塔式起重机 正文 3 台，蓝图权威 2 台');
+  });
+
+  it('反例：同类设备并列各自成量（挖掘机2台、装载机3台）不跨名归账', () => {
+    const authority = authorityOf({ composition: [] }, [
+      { name: '挖掘机', quantity: 2, spec: '' },
+      { name: '装载机', quantity: 3, spec: '' },
+    ]);
+    const claims = scanResourceBreakdownClaims('土方阶段配置挖掘机2台、装载机3台。', authority);
+    expect(claims).toEqual([]);
+  });
+});

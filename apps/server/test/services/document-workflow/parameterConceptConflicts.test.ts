@@ -466,3 +466,41 @@ describe('C8-7 日期时间锚豁免（r28m\' 组7：「开工日期为2026年9�
     expect(issues.some(issue => /工期/u.test(issue.message))).toBe(true);
   });
 });
+
+describe('4.55.32 异名成员枚举豁免（#4 概念边界：分对象列举不得判同一概念多口径）', () => {
+  /** 真机 doc-1790132484476-29b74c88 原句抽出的概念 → 按簇给向量（复刻 bge 两簇误聚） */
+  const TAI = new Set(['塔式起重机配混凝土输送泵作业', '塔式起重机（QTZ63）', '电焊机', '混凝土输送泵配置']);
+  const DUN = new Set(['钢结构吊装按钢柱', '钢梁', '钢吊车梁分区分段组织']);
+  const cluster = () => embedMock.mockImplementation(async (texts: string[]) => texts.map(text => (TAI.has(text) ? [1, 0] : DUN.has(text) ? [0, 1] : [0, 0, 1])));
+
+  it('正样本：塔式起重机（QTZ63）2台、电焊机2台、混凝土输送泵3台配置 —— 各设备各自成量不判冲突', async () => {
+    // 真机原句（bge 因共享「塔式起重机/混凝土输送泵」词面把三台设备的台数误聚同簇）：
+    // 「…钢结构吊装以QTZ63塔式起重机配混凝土输送泵2台作业…主要施工机械按塔式起重机（QTZ63）2台、
+    //   电焊机2台、混凝土输送泵3台配置」——顿号链上每个成员各自带台数，属分对象列举
+    cluster();
+    const markdown = '土方作业以挖掘机配自卸汽车开挖外运，钢结构吊装以QTZ63塔式起重机配混凝土输送泵2台作业，各工序经施工员自检、质检员复检并报监理验收后进入下道工序。主要施工机械按塔式起重机（QTZ63）2台、电焊机2台、混凝土输送泵3台配置。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues.filter(issue => /塔式起重机|混凝土输送泵|电焊机/u.test(issue.message))).toEqual([]);
+  });
+
+  it('正样本：钢结构吊装按钢柱1228.24t、钢梁1591.306t、钢吊车梁623.564t —— 三构件分列成量不判冲突', async () => {
+    // 真机原句：钢柱/钢梁/钢吊车梁是三个不同构件的工程量（清单各行独立），bge 因共享「钢」字误聚
+    cluster();
+    const markdown = '钢结构吊装按钢柱1228.24t、钢梁1591.306t、钢吊车梁623.564t分区分段组织。';
+    const issues = await parameterConceptConflictIssues(markdown);
+    expect(issues.filter(issue => /钢柱|钢梁|钢吊车梁/u.test(issue.message))).toEqual([]);
+  });
+
+  it('反例：同对象两句各自成量（无并列链）必须照报', async () => {
+    embedMock.mockImplementation(async (texts: string[]) => texts.map(text => (text === '钢结构吊装按钢柱组织' ? [1, 0] : [0, 0, 1])));
+    const issues = await parameterConceptConflictIssues('钢结构吊装按钢柱1228.24t组织。钢结构吊装按钢柱1591.306t组织。高强螺栓40158套按节点配套供应。');
+    expect(issues.some(issue => /钢柱/u.test(issue.message))).toBe(true);
+  });
+
+  it('反例：同一设备在同一并列链上两个矛盾台数（同名成员）必须照报', async () => {
+    // 同名成员（成员名 = 本概念）不属异名列举：「混凝土输送泵2台、混凝土输送泵3台」是同一参数两个口径
+    embedMock.mockImplementation(async (texts: string[]) => texts.map(text => (text === '混凝土输送泵' ? [1, 0] : [0, 0, 1])));
+    const issues = await parameterConceptConflictIssues('混凝土输送泵2台、混凝土输送泵3台、电焊机2台。');
+    expect(issues.some(issue => /混凝土输送泵/u.test(issue.message))).toBe(true);
+  });
+});

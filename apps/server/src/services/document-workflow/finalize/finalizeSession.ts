@@ -8,6 +8,7 @@
  * - 修复轮顺序由 FINALIZE_REPAIR_ROUNDS（detectorFixerRegistry）单源声明，顺序快照测试锁定。
  */
 import type { AgentWorkflowContext } from '../agentWorkflow';
+import type { ResolvedValue } from '../authoritativeValues';
 import type { ClarificationOverride } from '../clarificationOverrides';
 import type {
   DocumentAsset,
@@ -193,7 +194,7 @@ export interface FinalizeSession {
   /** 4.55.19 口径账本（真值层读侧产出：属性/生效值/裁决规则/依据/被取代值） */
   caliberLedger?: string[];
   /** 4.55.19 真值层结构化裁决结果（终检口径一致性自检消费） */
-  truthValues?: Array<{ subject: string; attribute: string; value: string; rule: string; evidence: Array<{ source: string; snippet: string }>; superseded: string[] }>;
+  truthValues?: ResolvedValue[];
   globalConsistencyIssues?: string[];
   agentWorkflow: AgentWorkflowContext;
   factExtractionPromptTexts: string;

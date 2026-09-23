@@ -761,6 +761,48 @@ export function renderTruthConstraintBlock(audit: AuthoritativeValueAudit): stri
   return blocks.join('\n\n');
 }
 
+/**
+ * 口径链尾确定性回填（4.55.33）——**「必须在正文出现」的项目级口径，写作没做到时由链尾补上**。
+ *
+ * 动因（实测）：口径终检要求正文逐字含项目级口径（如开工日期 `2026年10月10日`），
+ * 写作侧虽已在硬约束块里被告知必须写（`renderTruthConstraintBlock` 的「项目级口径（必须在正文出现）」），
+ * 但模型可能仍以**别的等价表述**代替（实测：写「开工日期以监理工程师签发开工令之日起算」，
+ * 全篇零次出现该日期）——写手未被强制，终检照常阻断，且该 blocker 无修复轮消费。
+ *
+ * 判据（机制，非模板套话）：
+ * ① 仅处理 `caliber === true` 且**值在正文中逐字缺席**的口径；
+ * ② 仅处理**可直接落位的值形态**（日期/金额/量值/规格/标准编号），段落型值不插；
+ * ③ 必须在正文中找到**属性名出现处**（口径名在本项目里被提起过）——找不到就不插（不硬塞进无关段落）；
+ * ④ 插在该句之后，形态为「{属性名}为{值}。」——原文一字不删，纯增量插入；已存在则不动（幂等）。
+ */
+const CALIBER_PLACEABLE_SHAPES = new Set(['measure', 'money', 'date', 'standard', 'spec']);
+
+export function backfillCaliberPlacements(markdown: string, ledger: readonly ResolvedValue[]): { markdown: string; inserted: Array<{ attribute: string; value: string }> } {
+  const inserted: Array<{ attribute: string; value: string }> = [];
+  let output = markdown;
+  const normalized = () => output.replace(/\s+/gu, '');
+  for (const item of ledger) {
+    if (!item.caliber) continue;
+    const attribute = String(item.attribute || '').trim();
+    const value = String(item.value || '').trim();
+    if (!attribute || !value) continue;
+    if (!CALIBER_PLACEABLE_SHAPES.has(classifyValueShape(value))) continue;
+    if (normalized().includes(value.replace(/\s+/gu, ''))) continue;
+    // 属性名出现处：取第一处，插在所属句子之后（句读边界 = 。；;\n）
+    const index = output.indexOf(attribute);
+    if (index < 0) continue;
+    let sentenceEnd = index + attribute.length;
+    while (sentenceEnd < output.length && !/[。；;\n]/u.test(output[sentenceEnd]!)) sentenceEnd += 1;
+    if (sentenceEnd >= output.length) continue;
+    const statement = `${attribute}为${value}。`;
+    // 幂等：该句已含该声明则跳过
+    if (output.slice(index, sentenceEnd).includes(value)) continue;
+    output = `${output.slice(0, sentenceEnd + 1)}${statement}${output.slice(sentenceEnd + 1)}`;
+    inserted.push({ attribute, value });
+  }
+  return { markdown: output, inserted };
+}
+
 /** 口径账本（交付报告可展开：属性/生效值/裁决规则/依据/被取代值） */
 export function renderCaliberLedger(audit: AuthoritativeValueAudit): string[] {
   return audit.resolved.map(item => {

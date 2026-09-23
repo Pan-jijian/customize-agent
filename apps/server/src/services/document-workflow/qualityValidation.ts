@@ -1806,7 +1806,13 @@ export async function crossChapterConsistencyIssues(markdown: string, factsModel
    * 因此「1.22 周」这类编号+标题首字不会被读成对象标识。
    */
   const objectSignature = (scope: string, scopeStart: number, index: number): string[] => {
-    const markers = [...scope.matchAll(OBJECT_MARKER_RE)].map(match => ({ marker: match[0].replace(/\s+/gu, ''), at: scopeStart + (match.index || 0) }));
+    const markers = [...scope.matchAll(OBJECT_MARKER_RE)]
+      .filter(match => !/[与同和及跟]\s*$/u.test(scope.slice(Math.max(0, (match.index || 0) - 3), match.index || 0)))
+      // 并列引用语境里的标识指向**被引用的另一个对象**，不是本取值所属对象——「3#门卫为框架结构…**与2#门卫**
+      // 同属门卫单体。作业对象含…挖沟槽土方37.51m³」中 37.51 属 3#门卫，而「与2#门卫」的 2# 距取值更近，
+      // 使 37.51 被归入 2# 组、与 2#门卫的 346.88 同组误报（4.55.32 巢湖实测 doc-1790132484476-29b74c88）。
+      // 故：标识紧接「与/同/和/及/跟」引导时剔除（「2#门卫与3#门卫」的 3# 同属被引用对象，同样剔除）。
+      .map(match => ({ marker: match[0].replace(/\s+/gu, ''), at: scopeStart + (match.index || 0) }));
     if (markers.length === 0) return [];
     const distances = markers.map(item => Math.abs(item.at - index));
     const nearest = Math.min(...distances);
@@ -1832,18 +1838,29 @@ export async function crossChapterConsistencyIssues(markdown: string, factsModel
       //   ① 两条各取到对象标识（`2#`/`三区`/`B栋`…）：交集非空 = 同组（同一对象）→ 多值即冲突；
       //      交集为空 = 跨组（不同对象）→ **不判**（巢湖实测 2#门卫 346.88 / 3#门卫 37.51 /
       //      室外 9926.65 / 室外安装 1900.8 四条即四组，各单体工程量天然不同）。
-      //   ② 任一条取不到标识（未标注组）——「未标注」不等于「同一对象」（4.55.31 巢湖实测：
-      //      未标注的 9926.65 属室外附属土方、1900.8 属室外安装管道沟槽，分属不同部位），
-      //      不能因组内多值即判冲突，故退化为**同源语境证据**：24 字前置语境共享 ≥6 字连续汉字
+      //   ② 两侧都取不到标识 = 同属**「未标注」组**——「未标注」不等于「同一对象」（4.55.31 巢湖
+      //      实测：未标注的 9926.65 属室外附属土方、1900.8 属室外安装管道沟槽，分属不同部位），
+      //      不能因组内多值即判冲突，须再有**同源语境证据**：24 字前置语境共享 ≥6 字连续汉字
       //      成分（同句/同列表并列）才算同一对象的同一工程量。阈值 6：单条锚点前缀「挖沟槽土方」
       //      仅 5 字，不至把纯锚点共享误判为同语境。
+      //   ③ 一方有标识、一方无标识 = **跨组**（未标注取值与有标识取值不能断言同一对象）→ 不判；
+      //      4.55.31 的「任一侧无标识即退回语境判据」即此残留误报来源，4.55.32 收口。
       // contextAware 条目（部位/单体分列成量是常态）用上述证据判据；其余条目（隔油池数量，
       // 窗口已阻断标点）维持原判据——多值即冲突，零放松（仅跨对象标识互斥时豁免）。
-      if (!entries.some((left, index) => entries.slice(index + 1).some(right => (
-        left.markers.length > 0 && right.markers.length > 0
-          ? left.markers.some(marker => right.markers.includes(marker))
-          : !contextAware || longestCommonHanSubstring(left.context, right.context) >= 6
-      )))) continue;
+      const unmarkedGroup = '\u0000未标注';
+      const groupsOf = (entry: { markers: string[] }) => (entry.markers.length > 0 ? entry.markers : [unmarkedGroup]);
+      const sameObjectGroups = (left: typeof entries[number], right: typeof entries[number]) => {
+        const rightGroups = groupsOf(right);
+        const shared = groupsOf(left).filter(group => rightGroups.includes(group));
+        if (shared.length === 0) return false;
+        // 两侧都无标识 = 同属「未标注」组，须再有同源语境证据才算同一对象；一方有标识一方无标识
+        // 属**跨组**（未标注 ≠ 同一对象），不判——③ 的旧行为（任一侧无标识即退回语境判据）正是
+        // 4.55.31 残留误报的来源。
+        return shared.every(group => group === unmarkedGroup)
+          ? !contextAware || longestCommonHanSubstring(left.context, right.context) >= 6
+          : true;
+      };
+      if (!entries.some((left, index) => entries.slice(index + 1).some(right => sameObjectGroups(left, right)))) continue;
       const values = entries.map(entry => entry.value).join('、');
       issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `跨章一致性冲突：正文${label}出现互相矛盾的取值 ${values}`, suggestion: `${label}必须全文唯一：以工程量清单为最高优先级裁定正确值，将正文全部相关表述统一为该值，并删除其余矛盾口径。` });
     }
