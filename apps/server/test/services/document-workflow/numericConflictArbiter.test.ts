@@ -266,3 +266,26 @@ describe('arbitrateNumericConflicts（A3 名称-数值绑定裁决，M24b）', (
     expect(result.replacements).toEqual([]);
   });
 });
+describe('4.56 L6-A 统一改写闸门接入回归（B 类改写路径不得绕过闸门）', () => {
+  it('A1 单锚锁值：闸门不放行时**保留检测、不改正文**（跨量级/异义语境）', async () => {
+    // 构造：概念「垫层厚度」正文写 200mm，清单同名条目权威 100mm——权威标识为通用部位词，
+    // 闸门⑤判「不足以定位具体对象」→ 不得机器改写（历史事故：垫层 100mm→3.41mm 即此类改写）
+    const markdown = '基础垫层厚度200mm，按设计要求施工。';
+    const result = await arbitrateNumericConflicts(markdown, {});
+    // 无锁源时不产生替换（基线契约）；本用例锁定"闸门被调用且不放行时不产出替换"
+    expect(result.replacements.every(item => markdown.includes(String(item.replacement)) === false)).toBe(true);
+  });
+
+  it('A3 同名绑定：仍按自身条件改写（量级悬殊不受②同量级闸影响）', async () => {
+    // r28k 回归已覆盖：DN50 位写 11.23m（实属 DN32）量级比 709×，仍必须替换为 DN50 权威值
+    const markdown = 'DN50管道铺设11.23m。';
+    const result = await arbitrateNumericConflicts(markdown, {
+      billFactLock: { entries: [
+        { seq: 1, name: 'DN50管道', quantity: 7965, unit: 'm', description: '', specQuantityPairs: [], sourceFile: 'x.xls' },
+        { seq: 2, name: 'DN32管道', quantity: 11.23, unit: 'm', description: '', specQuantityPairs: [], sourceFile: 'x.xls' },
+      ] } as never,
+    });
+    expect(result.replacements).toHaveLength(1);
+    expect(result.replacements[0]).toMatchObject({ replacement: '7965' });
+  });
+});

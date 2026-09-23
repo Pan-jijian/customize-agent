@@ -13,6 +13,7 @@
  * 前置段）——历史缺陷：参数口径冲突 12 项 llm-patch 不收敛空转，确定性可裁者必须先分流。
  * 与检测端同源扫描（conceptConflictGroups / scanSpecLocationMismatchHits）保证检测定位=修复定位。
  */
+import { authorityRewriteVerdict } from './authorityRewriteGuard';
 import { applySpanReplacements, scanSpecLocationMismatchHits } from './documentIntegrityChecks';
 import { arbitrateConceptGroup, conceptConflictGroups } from './parameterConceptConflicts';
 import { flexNameOptionalPattern, flexNamePattern } from './integrity/authorities/authorities';
@@ -182,9 +183,25 @@ export async function arbitrateNumericConflicts(markdown: string, ctx: {
         continue;
       }
       // ② 单锚锁值：非锚值逐处替换（occurrences 全量定位——同值多处出现逐处替换）
+      //
+      // 4.56 L6-A **统一改写闸门接入**：本路径此前是**未接闸门的改写出口**——历史事故
+      // `C80→C400`、`垫层 100mm→3.41mm` 正是经此处（与 A2/`fixers.ts` 同族）写入正文。
+      // 现与检测侧同一判据：不通过 → **保留检测、不改正文**（宁缺不假：机器不得在多套口径中盲选一套写入）。
       for (const value of arbitration.nonLock) {
         for (const occurrence of value.occurrences) {
           const start = occurrence.matchIndex + occurrence.valueOffset;
+          const bodyWindow = markdown.slice(Math.max(0, start - 40), start + occurrence.valueText.length + 40);
+          const verdict = authorityRewriteVerdict({
+            authorityOwner: arbitration.entryName,
+            bodyLocation: group.concept,
+            bodyWindow,
+            found: value.raw,
+            authority: `${arbitration.lockValue}${arbitration.lockUnit || ''}`,
+          });
+          if (!verdict.allowed) {
+            noAnchorGroups.push(`“${group.concept}” ${value.raw}→${arbitration.lockValue}${arbitration.lockUnit || ''} 未过统一改写闸门（${verdict.reason}），保留检测不改正文`);
+            continue;
+          }
           replacements.push({
             start,
             end: start + occurrence.valueText.length,
@@ -219,6 +236,20 @@ export async function arbitrateNumericConflicts(markdown: string, ctx: {
     }
     const anchor = hit.sameNameEntries[0]!;
     if (normalizeBindingUnit(hit.unit) !== normalizeBindingUnit(anchor.unit)) continue;
+    // 4.56 L6-A 统一闸门（sameName 绑定语义：对象身份由同名给出，故豁免①对象限定与⑤通用部位词，
+    // 但③异义语境与④形态合法仍必须过——防"跨属性同名"与伪 token 被改写）
+    const bindingVerdict = authorityRewriteVerdict({
+      authorityOwner: hit.name,
+      bodyLocation: hit.name,
+      bodyWindow: markdown.slice(Math.max(0, hit.valueStart - 40), hit.valueStart + hit.valueText.length + 40),
+      found: `${hit.value}${hit.unit}`,
+      authority: `${anchor.quantity}${anchor.unit}`,
+      bindingKind: 'sameName',
+    });
+    if (!bindingVerdict.allowed) {
+      noAnchorGroups.push(`“${hit.name}” ${hit.value}${hit.unit}→${anchor.quantity}${anchor.unit} 未过统一改写闸门（${bindingVerdict.reason}），保留检测不改正文`);
+      continue;
+    }
     replacements.push({
       start: hit.valueStart,
       end: hit.valueStart + hit.valueText.length,

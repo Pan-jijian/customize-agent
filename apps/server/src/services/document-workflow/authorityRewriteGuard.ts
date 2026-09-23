@@ -59,6 +59,16 @@ export interface AuthorityRewriteContext {
   found: string;
   /** 权威值 */
   authority: string;
+  /**
+   * 绑定语义（4.56 L6-A）：
+   * - `location`（默认）= 按**部位词**定位权威（「垫层」的权威改正文的垫层值）——① 对象限定与
+   *   ⑤ 通用部位词充分性两条判据都适用（裸部位词不足以证明同一对象）；
+   * - `sameName` = 按**同名**绑定（名称-数值绑定裁决：正文的「垫层 X」与清单同名条目「垫层」对账）——
+   *   对象身份由**同名**本身给出，故 ① 对象限定 / ② 同量级 / ⑤ 通用部位词充分性三条均不适用
+   *   （否则同名绑定裁决整体失效——量级天然可能悬殊），
+   *   但 ③ 异义语境与 ④ 形态合法仍必须过（防"跨属性同名"与伪 token）。
+   */
+  bindingKind?: 'location' | 'sameName';
 }
 
 export interface AuthorityRewriteVerdict {
@@ -74,9 +84,11 @@ export function authorityRewriteVerdict(ctx: AuthorityRewriteContext): Authority
   // ④ 形态合法（强度等级等）：非法权威值不得改写
   if (!isLegalConcreteGradeToken(ctx.authority)) return { allowed: false, reason: '权威值形态非法（非独立规格 token 或超值域）' };
   if (!isLegalConcreteGradeToken(ctx.found)) return { allowed: false, reason: '正文值形态非法（如桩型号内字母紧邻的伪 token）' };
+  const sameNameBinding = ctx.bindingKind === 'sameName';
   // ① 对象限定：权威所属条目名必须出现在正文命中处；无 owner 时用 bodyLocation 兜底比对
+  //（sameName 绑定下对象身份由同名给出，本条不适用）
   const ownerLabel = owner || location;
-  if (ownerLabel && ownerLabel !== location && !window.includes(ownerLabel)) {
+  if (!sameNameBinding && ownerLabel && ownerLabel !== location && !window.includes(ownerLabel)) {
     return { allowed: false, reason: `正文命中处未出现权威条目名「${ownerLabel}」（裸部位词「${location}」不足以证明同一对象）` };
   }
   // ③ 异义语境：邻近出现别的属性词 → 该数值不是本规格
@@ -85,13 +97,16 @@ export function authorityRewriteVerdict(ctx: AuthorityRewriteContext): Authority
   }
   // ⑤ 权威标识充分性：通用部位词（垫层/地面/墙面…）本身无法定位具体对象——
   // 实测：清单条目名「垫层」权威 100mm（基础垫层），正文里地坪/管道处写的 180/150/120mm 被统一成 100mm。
-  if (GENERIC_BODY_PART_RE.test(ownerLabel.replace(/[（(].*$/u, '').trim())) {
+  if (!sameNameBinding && GENERIC_BODY_PART_RE.test(ownerLabel.replace(/[（(].*$/u, '').trim())) {
     return { allowed: false, reason: `权威标识「${ownerLabel}」为通用部位词，不足以定位具体对象，不做机器改写（保留检测）` };
   }
-  // ② 同量级
+  // ② 同量级（sameName 绑定下不适用：该路径的语义正是"该值本属另一条目"，
+  //   量级天然可能悬殊——实测 r28k「DN50 位写 11.23m（实属 DN32）」量级比 709×，
+  //   若按量级闸拦截则同名绑定裁决整体失效；其安全边界由"同名 + 单条目 + 单位兼容 +
+  //   值 ∈ 他条目权威量集"四条自身条件承担）
   const foundNumber = numericPart(ctx.found);
   const authorityNumber = numericPart(ctx.authority);
-  if (foundNumber !== undefined && authorityNumber !== undefined) {
+  if (!sameNameBinding && foundNumber !== undefined && authorityNumber !== undefined) {
     const ratio = Math.max(foundNumber, authorityNumber) / Math.min(foundNumber, authorityNumber);
     if (ratio > AUTHORITY_REWRITE_MAX_MAGNITUDE_RATIO) {
       return { allowed: false, reason: `跨量级差异（${ctx.found} vs ${ctx.authority}，${ratio.toFixed(1)} 倍）不是同一量，不做机器改写` };
