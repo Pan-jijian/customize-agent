@@ -700,6 +700,49 @@ function isDocumentReferenceTerm(term: string): boolean {
   return /〔\d{4}〕/u.test(clean) || /(?:办法|通知|规定|条例|细则)$/u.test(clean);
 }
 
+/**
+ * 标准/图集代号判据（4.58 R4，实测 `doc-1790168542563-ea526b1b`）。
+ *
+ * ## 缺陷
+ *
+ * `collectRequirementAnchors` 对 coreTerms 做「含数字复合词分解」
+ *（`一次性成活率95%` → `一次性成活率` + `95%`），本意是让正文自然写作时数量词被分隔也能命中。
+ * 但该分解作用在**标准/图集代号**上会产出无意义碎片：实测 coreTerm `23S516`
+ * 被切成 `23S` + `516` 两个锚点，而正文里写的是完整的 `23S516`——
+ * **两个碎片都命中不了**，于是报「招标要求部分响应：…已命中『密闭性试验』，但缺少『23S、516』」。
+ *
+ * ## 口径
+ *
+ * 标准/图集代号属**引用型**内容：正文按该标准/图集的做法写、不逐字复现编号是合规的，
+ * 故既不作为锚点、也不做复合词分解（见 {@link collectRequirementAnchors} 的调用点）。
+ *
+ * 与 `isDocumentReferenceTerm` 分开成独立判据（而非并入后者）：后者还承担
+ * 「条款 coreTerms 全为引用词时该条款出池」的职责，把代号并进去会连带把
+ * 「依据 GB50242 验收」这类实质条款一并出池——波及面远大于本处所需。
+ *
+ * 形态（两类，标准写法）：
+ * - 字母前缀 + 数字：`GB50242`、`JGJ94`、`DB34/T4289`、`CECS`、`ISO9001`；
+ * - 图集号：`23S516`、`20S515`、`12J201`、`皖2015S209`（数字年份 + 字母 + 序号）。
+ */
+function isStandardOrAtlasCode(term: string): boolean {
+  const clean = term.replace(/\s+/gu, '').toUpperCase();
+  if (clean.length < 4 || clean.length > 24) return false;
+  if (!/^[A-Z0-9./-]+$/u.test(clean)) {
+    // 带省份简称前缀的图集号（皖2015S209）
+    return /^[一-龥]\d{4}[A-Z]{1,2}\d{1,4}$/u.test(clean);
+  }
+  if (!/[A-Z]/u.test(clean) || !/\d/u.test(clean)) return false;
+  // ① 字母段 ≥2 位：GB50242、JGJ94、DB34/T4289、GB/T50378、ISO9001、CECS
+  if (/^[A-Z]{2,}/u.test(clean)) return true;
+  // ② 尾部数字段 ≥3 位：20S515、23S516、12J201（图集号）
+  if (/\d{3,}$/u.test(clean)) return true;
+  // ③ 含 / 或 - 分隔：GB/T、JGJ/T 类
+  if (/[/-]/u.test(clean)) return true;
+  // 单字母 + 短数字（C30、MU10 这类材料强度等级）**不判**——它们是正文该写的实质规格，
+  // 排除会白白丢掉一个真锚点；上面前三条已覆盖全部标准/图集代号形态。
+  return false;
+}
+
 export function isDocumentReferenceOnlyClause(coreTerms: string[] | undefined): boolean {
   const terms = (coreTerms || []).map(term => (term || '').trim()).filter(term => term.length >= 2);
   return terms.length > 0 && terms.every(isDocumentReferenceTerm);
@@ -1620,6 +1663,9 @@ export function collectRequirementAnchors(
     const clean = normalizePercent(term.replace(/\s+/gu, ''));
     if (clean.length < 2) continue;
     if (isDocumentReferenceTerm(clean)) continue;
+    // 4.58 R4：标准/图集代号不进锚点——它们的数字是**代号的一部分**，
+    // 走下面的复合词分解会切成无意义碎片（`23S516` → `23S` + `516`，正文写全编号也命不中）
+    if (isStandardOrAtlasCode(clean)) continue;
     const compound = clean.match(/^(.*?)(\d+(?:\.\d+)?(?:%|％)?)$/u);
     if (compound && compound[1].length >= 2) {
       anchors.add(compound[1]);

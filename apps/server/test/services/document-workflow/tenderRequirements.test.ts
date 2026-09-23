@@ -1613,3 +1613,35 @@ describe('4.55.19 句中资料残片（澄清表残片以句子出现）', () =>
     expect(result.markdown).toBe(md);
   });
 });
+
+/**
+ * 4.58 R4 标准/图集代号不作锚点（实测 `doc-1790168542563-ea526b1b`）。
+ *
+ * coreTerm `23S516` 走「含数字复合词分解」（本为 `一次性成活率95%` → `…+95%` 设计）被切成
+ * `23S` + `516` 两个**无意义碎片**，正文写全 `23S516` 也命中不了 → 报
+ * 「招标要求部分响应：…已命中『密闭性试验』，但缺少『23S、516』」。
+ */
+describe('4.58 R4 标准/图集代号不作锚点', () => {
+  it('图集号 23S516 不再被切成 23S + 516 碎片', () => {
+    const anchors = collectRequirementAnchors({ text: '排水管道基础详见《混凝土排水管道基础及接口》23S516', coreTerms: ['23S516'] });
+    expect(anchors).not.toContain('23S');
+    expect(anchors).not.toContain('516');
+    expect(anchors).toEqual([]);
+  });
+
+  it('规范号（GB/JGJ/DB）同样不作锚点', () => {
+    for (const code of ['GB50242', 'JGJ94', 'DB34/T4289', '20S515', '12J201']) {
+      expect(collectRequirementAnchors({ text: `执行${code}的规定`, coreTerms: [code] }), code).toEqual([]);
+    }
+  });
+
+  it('**防过度**：真复合词（成活率95%）仍分解为两锚点', () => {
+    const anchors = collectRequirementAnchors({ text: '苗木一次性成活率95%以上', coreTerms: ['一次性成活率95%'] });
+    expect(anchors).toContain('一次性成活率');
+    expect(anchors).toContain('95%');
+  });
+
+  it('**防过度**：普通专有名词锚点不受影响', () => {
+    expect(collectRequirementAnchors({ text: '抗震支吊架安装', coreTerms: ['抗震支吊架'] })).toContain('抗震支吊架');
+  });
+});
