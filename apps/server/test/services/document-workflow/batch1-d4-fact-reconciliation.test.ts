@@ -11,7 +11,7 @@
  * 权威缺失（无清单/无蓝图/无事实主表）时全部规则静默跳过（不误伤无数据项目）。
  */
 import { describe, expect, it } from 'vitest';
-import { factReconciliationIssues, fixSpecQuantityBindings, fixUnsourcedNameBindings } from '@/services/document-workflow/factReconciliation';
+import { factReconciliationIssues, fixMislocatedNameBindings, fixSpecQuantityBindings, fixUnsourcedNameBindings } from '@/services/document-workflow/factReconciliation';
 import { collectBlueprintCitationCandidates } from '@/services/document-workflow/integratedBlueprint/citation';
 import { specLocationMismatchIssues } from '@/services/document-workflow/integrity/detectors/detectors';
 import type { BillFactLock, BillFactLockEntry } from '@/services/document-workflow/billFactLock';
@@ -631,6 +631,87 @@ describe('r26 名称绑定复报收敛与无源绑定确定性删除', () => {
   it('无清单权威 → 删除器静默跳过（不误伤无数据项目）', () => {
     const md = '任意正文水泥混凝土1757㎡。';
     const fixed = fixUnsourcedNameBindings(md, {});
+    expect(fixed.fixedCount).toBe(0);
+    expect(fixed.markdown).toBe(md);
+  });
+});
+
+// 4.55.34 实机归因（doc-1790141547504-a5d1a87f 的 3#门卫安装工程）：「名称-数值绑定错位」此前只有
+// 检测（D4.6a 出 blocker）没有收敛路径——交付前确定性修复器只筛「无源」前缀，轮内确定性集也不含本
+// 检测器，错位 blocker 直坠终门禁。本修复器把错位变体纳入同一引擎/边界口径（检测定位=修复定位）。
+describe('4.55.34 错位名称绑定的确定性收敛（同引擎同边界，删除而非改名）', () => {
+  /** 实机形态：14 条「复合管」全部在 1#厂房（本工程对象处无一条相符），另有「塑料管 11m」 */
+  const mislocatedLock = lockOf([
+    ...Array.from({ length: 14 }, (_, index) => lockEntry({ name: '复合管', quantity: Number((20 + index * 10).toFixed(1)), unit: 'm', villageGroup: '1#厂房' })),
+    lockEntry({ name: '塑料管', quantity: 11, unit: 'm', villageGroup: '3#门卫' }),
+  ]);
+
+  it('真错位：正文「复合管11m」（11m 属清单「塑料管」）→ blocker 命中且带聚合文案', () => {
+    const issues = factReconciliationIssues({ markdown: '管材已确定，室外埋地部分采用复合管11m，施工完成后进行水压试验。', billFactLock: mislocatedLock });
+    const mislocated = issues.filter(issue => issue.message.startsWith('名称-数值绑定错位'));
+    expect(mislocated).toHaveLength(1);
+    expect(mislocated[0].message).toContain('属清单条目「塑料管」');
+    expect(mislocated[0].message).toContain('同名清单条目（共 14 条');
+  });
+
+  it('确定性收敛：错位子句按子句边界删除（复检零残留 + 幂等 + 邻句保留）', () => {
+    const md = '管材已确定，室外埋地部分采用复合管11m，施工完成后进行水压试验。';
+    const fixed = fixMislocatedNameBindings(md, { billFactLock: mislocatedLock });
+    expect(fixed.fixedCount).toBe(1);
+    expect(fixed.details[0]).toContain('删除错位绑定「');
+    expect(fixed.markdown).toContain('管材已确定');
+    expect(fixed.markdown).not.toContain('复合管');
+    expect(fixed.markdown).toContain('施工完成后进行水压试验');
+    expect(factReconciliationIssues({ markdown: fixed.markdown, billFactLock: mislocatedLock }).filter(issue => issue.message.startsWith('名称-数值绑定'))).toEqual([]);
+    expect(fixMislocatedNameBindings(fixed.markdown, { billFactLock: mislocatedLock }).fixedCount).toBe(0);
+  });
+
+  it('反例·同名值集：同名同对象的其他权威数量（复合管137.5m）→ 不判错位、不删除', () => {
+    const lock = lockOf([
+      ...Array.from({ length: 14 }, (_, index) => lockEntry({ name: '复合管', quantity: Number((20 + index * 10).toFixed(1)), unit: 'm' })),
+      lockEntry({ name: '复合管', quantity: 137.5, unit: 'm' }),
+      lockEntry({ name: '塑料管', quantity: 11, unit: 'm' }),
+    ]);
+    const md = '管材已确定，室外埋地部分采用复合管137.5m，施工完成后进行水压试验。';
+    expect(factReconciliationIssues({ markdown: md, billFactLock: lock }).filter(issue => issue.message.startsWith('名称-数值绑定'))).toEqual([]);
+    const fixed = fixMislocatedNameBindings(md, { billFactLock: lock });
+    expect(fixed.fixedCount).toBe(0);
+    expect(fixed.markdown).toBe(md);
+  });
+
+  it('反例·同名组和：同名条目之和（复合管555m = 300 + 255）→ 聚合口径引用、不删除', () => {
+    const lock = lockOf([
+      lockEntry({ name: '复合管', quantity: 300, unit: 'm' }),
+      lockEntry({ name: '复合管', quantity: 255, unit: 'm' }),
+      lockEntry({ name: '塑料管', quantity: 11, unit: 'm' }),
+    ]);
+    const md = '管材已确定，室外埋地部分采用复合管555m，施工完成后进行水压试验。';
+    expect(factReconciliationIssues({ markdown: md, billFactLock: lock }).filter(issue => issue.message.startsWith('名称-数值绑定'))).toEqual([]);
+    expect(fixMislocatedNameBindings(md, { billFactLock: lock }).fixedCount).toBe(0);
+  });
+
+  it('反例·语境重叠：错位值条目名就在同句（「复合管11m、塑料管11m」枚举引用）→ 不删除', () => {
+    const md = '管材清点如下，复合管11m、塑料管11m，均已完成验收。';
+    expect(factReconciliationIssues({ markdown: md, billFactLock: mislocatedLock }).filter(issue => issue.message.startsWith('名称-数值绑定错位'))).toEqual([]);
+    const fixed = fixMislocatedNameBindings(md, { billFactLock: mislocatedLock });
+    expect(fixed.fixedCount).toBe(0);
+    expect(fixed.markdown).toBe(md);
+  });
+
+  it('变体隔离：无源绑定不由错位修复器删除（各变体只处理自己的判据）', () => {
+    const concreteLock = lockOf(
+      Array.from({ length: 49 }, (_, index) => lockEntry({ name: '水泥混凝土', quantity: Number((2300.57 + index).toFixed(2)), unit: 'm2' })),
+    );
+    const md = '道路工程涉及改造面积2783㎡，其中新建水泥混凝土面层面积1757㎡，施工放样复核后进入下道工序。';
+    const mislocatedOnly = fixMislocatedNameBindings(md, { billFactLock: concreteLock });
+    expect(mislocatedOnly.fixedCount).toBe(0);
+    expect(mislocatedOnly.markdown).toBe(md);
+    expect(fixUnsourcedNameBindings(md, { billFactLock: concreteLock }).fixedCount).toBe(1);
+  });
+
+  it('无清单权威 → 错位修复器静默跳过（不误伤无数据项目）', () => {
+    const md = '任意正文复合管11m。';
+    const fixed = fixMislocatedNameBindings(md, {});
     expect(fixed.fixedCount).toBe(0);
     expect(fixed.markdown).toBe(md);
   });

@@ -47,6 +47,20 @@ describe('G 线 P2-2 删除型修复器停用锁定', () => {
   });
 });
 
+/** 4.55.34：名称绑定两个变体（无源 / 错位）都必须在可重放清洗组内有确定性消费端。
+ * 实机归因：错位变体长期只有检测（D4.6a）没有修复器——删掉本块即退回「blocker 直坠终门禁」，
+ * 故与 P2-2 同类做字面接线锁定（行为语义见 batch1-d4-fact-reconciliation 正反例）。 */
+describe('名称绑定确定性收敛接线锁定', () => {
+  it('错位变体在可重放清洗组内（检测定位=修复定位，随 runSurfaceDeterministicCleans 重放）', () => {
+    const cleansBody = postReviewSrc.slice(postReviewSrc.indexOf('export async function runSurfaceDeterministicCleans'));
+    expect(cleansBody).toContain('fixMislocatedNameBindings(session.finalMarkdown, {');
+    expect(cleansBody).toContain("roleId: 'mislocated-binding-clean'");
+    expect(cleansBody).toContain('recordRepairActions(session.generationDiagnostics, mislocatedBindingFix.fixedCount);');
+    // 与无源变体同组同口径（两个变体共用删除引擎，不得只留其一）
+    expect(cleansBody).toContain('fixUnsourcedNameBindings(session.finalMarkdown, {');
+  });
+});
+
 /** P2-4：修复动作必须可计量 */
 describe('G 线 P2-4 修复动作计量接线锁定', () => {
   it('统一出口导出不缺失', () => {

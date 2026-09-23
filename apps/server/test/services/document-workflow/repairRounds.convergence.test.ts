@@ -16,8 +16,11 @@ vi.mock('@/services/document-workflow/rolePipeline', () => ({
 
 import { callDocumentLlmJson } from '@/services/document-workflow/llmClient';
 import { repairChapterByQuality } from '@/services/document-workflow/rolePipeline';
-import { stageNumericVerification } from '@/services/document-workflow/finalize/repairRounds/numericVerification';
+import { auditGapClosureHints, selfDeclaredClosedTotalTokens, stageNumericVerification } from '@/services/document-workflow/finalize/repairRounds/numericVerification';
 import { stageRequirementVerification } from '@/services/document-workflow/finalize/repairRounds/requirementVerification';
+import type { AuthorityAuditReport } from '@/services/document-workflow/authorityAudit';
+import type { BlueprintData } from '@/services/document-workflow/integratedBlueprint';
+import type { NamedAuthorityValue } from '@/services/document-workflow/factReconciliation';
 import type { FinalizeSession } from '@/services/document-workflow/finalize/finalizeSession';
 
 const llmMock = vi.mocked(callDocumentLlmJson);
@@ -116,6 +119,100 @@ describe('repairRounds.convergence · C2 数值核对收敛修复', () => {
     // 4.36.2 双写 parity：核对通过事件必须同入 finalGateRepairStages
     // （finalStages=executionStages 快照(早于修复轮)+finalGateRepairStages，单写事件在持久化 executionStages 中不可见）
     expect(stageOf(finalGateRepairStages, 'numeric-verification')?.status).toBe('success');
+  });
+});
+
+/** 4.55.34 A：审计↔修复轮两链判据单源（自称合计闭包豁免 / 覆盖缺口候选提示）。
+ * 实机归因：审计已收编的合法自算合计被本修复轮当「疑似无来源」删除（既与 G 线 P2-2 冲突又丢信息），
+ * 而覆盖缺口（值恰为具名分项之和）在指令里只是裸 token，可选动作只剩删除。 */
+describe('repairRounds.convergence · 4.55.34 A 两链判据单源（合计闭包豁免 / 缺口候选提示）', () => {
+  /** 最小蓝图 fixture（结构同 batch1 的 citationBlueprintOf：仅 quantities 参与具名值池与权威核） */
+  function blueprintOf(quantities: Record<string, { value: number; unit: string }>): BlueprintData {
+    return {
+      redLineFacts: [],
+      resources: { labor: { peakValue: 0 } },
+      contract: { totalDays: 0 },
+      project: { scope: '' },
+      quantities,
+    } as unknown as BlueprintData;
+  }
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('自称合计闭包单源豁免：句内「总量6403.78m²」＝具名分项之和 → 不进修复轮（审计所检=修复轮所见）', async () => {
+    const named: NamedAuthorityValue[] = [
+      { name: '墙面涂膜防水', value: 5764.81, unit: 'm2' },
+      { name: '天棚涂膜防水', value: 638.97, unit: 'm2' },
+    ];
+    const closed = selfDeclaredClosedTotalTokens('防水工程按施工段划分检验批并做蓄水（淋水）试验（总量6403.78m²）', ['6403.78m²'], named);
+    expect([...closed]).toEqual(['6403.78m²']);
+    // 未自称合计（分项值列举）→ 不收编（与审计 totalClaimClosure 同判据，不得比审计更宽）
+    expect([...selfDeclaredClosedTotalTokens('覆盖复合管350.6m、塑料管424.2m', ['424.2m'], named)]).toEqual([]);
+    // 名称锚定超出合计闭包窗口（±40 字）→ 不闭合（窗口口径与审计同宽）
+    const far = '本次防水工程依据设计图纸及相关规范要求组织施工并按检验批划分完成蓄水试验，累计验收总量6403.78m²';
+    expect([...selfDeclaredClosedTotalTokens(far, ['6403.78m²'], named)]).toEqual([]);
+
+    const { session, progressStages } = makeSession(
+      [{ id: 'ch1', title: '防水工程', content: '防水工程按施工段划分检验批并做蓄水（淋水）试验（总量6403.78m²）。' }],
+      { input: { blueprintData: blueprintOf({ 墙面涂膜防水: { value: 5764.81, unit: 'm2' }, 天棚涂膜防水: { value: 638.97, unit: 'm2' } }) }, blueprintData: blueprintOf({ 墙面涂膜防水: { value: 5764.81, unit: 'm2' }, 天棚涂膜防水: { value: 638.97, unit: 'm2' } }) },
+    );
+    await stageNumericVerification(session);
+    expect(repairMock).not.toHaveBeenCalled();
+    expect(stageOf(progressStages, 'numeric-verification')?.message).toContain('核对通过');
+  });
+
+  it('缺口候选进指令：424.2m＝复合管350.6m＋塑料管73.6m → 指令给非破坏性还原动作且明示不得删除', async () => {
+    const quantities = { 复合管: { value: 350.6, unit: 'm' }, 塑料管: { value: 73.6, unit: 'm' } };
+    const content = '作业对象为1#厂房室内给水系统，覆盖复合管350.6m、塑料管424.2m。';
+    const auditReport = {
+      derivationGaps: [{ token: '424.2m', value: '424.2', context: '覆盖复合管350.6m、塑料管424.2m', occurrences: 1, closureCandidates: ['复合管 350.6m', '塑料管 73.6m'] }],
+      processGaps: [],
+      unattributed: [],
+    } as unknown as AuthorityAuditReport;
+    const { session, progressStages } = makeSession([{ id: 'ch1', title: '给水系统', content }], {
+      input: { blueprintData: blueprintOf(quantities) },
+      blueprintData: blueprintOf(quantities),
+      authorityAuditReport: auditReport,
+    });
+    repairMock.mockResolvedValueOnce(repairResult('作业对象为1#厂房室内给水系统，给水管道按分项计量。'));
+    await stageNumericVerification(session);
+    const instruction = String(repairMock.mock.calls[0][0].promptTexts);
+    expect(instruction).toContain('具名分项和候选');
+    expect(instruction).toContain('复合管 350.6m + 塑料管 73.6m ＝ 424.2m');
+    expect(instruction).toContain('不得删除');
+    // 还原动作（第 3 条）在删除动作（第 4 条）之前：合法自算合计优先走非破坏性收敛
+    expect(instruction.indexOf('按分项显式还原')).toBeLessThan(instruction.indexOf('必须删除该数值'));
+    expect(stageOf(progressStages, 'agent-numeric-verification-ch1')?.message).toContain('残留轨迹 1→0');
+  });
+
+  it('无候选时不追加候选条与候选行（指令与历史逐字一致，不给 LLM 新的改写自由度）', async () => {
+    const { session } = makeSession([{ id: 'ch1', title: '施工组织', content: '本工程配置发电机75kW。' }]);
+    repairMock.mockResolvedValueOnce(repairResult('本工程按计划配置发电机。'));
+    await stageNumericVerification(session);
+    const instruction = String(repairMock.mock.calls[0][0].promptTexts);
+    expect(instruction).not.toContain('具名分项和候选');
+    expect(instruction).toContain('3. 其余情况必须删除该数值');
+  });
+
+  it('候选提示映射：审计缺口 token → 「分项 + 分项 ＝ 值」；无候选/无报告不给提示', () => {
+    const report = {
+      derivationGaps: [
+        { token: '424.2 m', closureCandidates: ['复合管 350.6m', '塑料管 73.6m'] },
+        { token: '773.8m', closureCandidates: [] },
+      ],
+      processGaps: [{ token: '0.529t', closureCandidates: ['钢筋 0.4t', '型钢 0.129t'] }],
+      unattributed: [{ token: '2.4m', closureCandidates: ['甲 1.5m', '乙 0.9m'] }],
+    } as unknown as AuthorityAuditReport;
+    const hints = auditGapClosureHints(report);
+    // token 去空白归一（与提取器 normToken 同口径）
+    expect(hints.get('424.2m')).toBe('复合管 350.6m + 塑料管 73.6m ＝ 424.2m');
+    expect(hints.get('0.529t')).toBe('钢筋 0.4t + 型钢 0.129t ＝ 0.529t');
+    expect(hints.has('773.8m')).toBe(false);
+    // 未登记（疑似编造红线）不是缺口候选的来源：不得为红线值提供「可闭合」台阶
+    expect(hints.has('2.4m')).toBe(false);
+    expect(auditGapClosureHints(undefined).size).toBe(0);
   });
 });
 

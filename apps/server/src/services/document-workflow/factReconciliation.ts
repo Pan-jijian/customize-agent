@@ -630,9 +630,15 @@ export interface UnsourcedNameBindingFixResult {
   details: string[];
 }
 
-export function fixUnsourcedNameBindings(
+/**
+ * 名称绑定缺口确定性移除引擎（检测定位=修复定位同源）：扫描器产出 → 消息锚筛选（变体由调用方声明）
+ * → 子句边界 span → 从后往前应用（重叠防护）→ 4 轮复扫（同句多处残留：每轮 markdown 已变，下一处浮出）。
+ * 两个变体（无源 / 错位）共用同一引擎与边界口径，差异仅在消息锚与明细文案——防两变体的删除边界漂移。
+ */
+function removeNameBindingClauses(
   markdown: string,
   input: Pick<FactReconciliationInput, 'billFactLock' | 'blueprintData' | 'factsModel'>,
+  variant: { prefix: string; detail: (excerpt: string) => string },
 ): UnsourcedNameBindingFixResult {
   const authority = buildReconciliationAuthority({ markdown, ...input });
   if (authority.entries.length === 0) return { markdown, fixedCount: 0, details: [] };
@@ -641,7 +647,7 @@ export function fixUnsourcedNameBindings(
   for (let round = 1; round <= 4; round += 1) {
     const spans: Array<{ start: number; end: number; excerpt: string }> = [];
     for (const finding of scanNameBindingFindings(result, authority, input.billFactLock)) {
-      if (!finding.issue.message.startsWith('名称-数值绑定无源')) continue;
+      if (!finding.issue.message.startsWith(variant.prefix)) continue;
       const span = unsupportedTotalClaimRemovalSpan(result, finding.matchStart, finding.matchEnd);
       if (span) spans.push(span);
     }
@@ -653,11 +659,55 @@ export function fixUnsourcedNameBindings(
       result = result.slice(0, span.start) + result.slice(span.end);
       lastStart = span.start;
       applied += 1;
-      details.push(`删除无源绑定「${span.excerpt.slice(0, 40)}」`);
+      details.push(variant.detail(span.excerpt.slice(0, 40)));
     }
     if (applied === 0) break;
   }
   return { markdown: result, fixedCount: details.length, details };
+}
+
+export function fixUnsourcedNameBindings(
+  markdown: string,
+  input: Pick<FactReconciliationInput, 'billFactLock' | 'blueprintData' | 'factsModel'>,
+): UnsourcedNameBindingFixResult {
+  return removeNameBindingClauses(markdown, input, {
+    prefix: '名称-数值绑定无源',
+    detail: excerpt => `删除无源绑定「${excerpt}」`,
+  });
+}
+
+// ═══════════ 交付前兜底：错位名称绑定确定性删除（4.55.34 实机归因） ═══════════
+//
+// **缺口**：终检 D4.6a 产出两种 blocker——「名称-数值绑定无源」（值不在任何权威数据）与
+// 「名称-数值绑定错位」（值恰属**另一**清单条目的权威数量，而本名称的同名条目无一相符）。
+// 交付前确定性修复器只按「无源」前缀筛选，**错位变体不在 span 处理范围内**，也无任何定向修复轮
+// 消费（轮内确定性集 runDeterministicConsistencyCheck 不含本检测器）——错位 blocker 直坠终门禁，
+// 属「有检测、无收敛」（实测 doc-1790141547504：3#门卫安装工程「塑料管 DN40/DN20/DN15」三值被
+// 写在「复合管」名下，清单「复合管」14 条全部在 1#厂房、本工程 0 条，全稿 LLM 轮后仍残留）。
+//
+// **为何是删除而不是「改写到正确对象名下」**：错位判定只证明**值**的归属（该值恰等于某清单条目
+// 数量），不证明**对象-工程范围**的归属——权威视图（ReconciliationEntry）只有 name/value/unit，
+// 不含 villageGroup/section（分工程范围），故把「复合管」改名为「塑料管」等于凭空断言「该条目的
+// 数量属本工程范围」。取名换算行后若跨范围，就把「值挂错名」升格为「张冠李戴的新事实」——违反
+// 宁缺毋假（漏报代价 < 误报代价）。原绑定（名称+值+单位）在权威两侧都不可验证：名无此值、值属他名，
+// 该子句不承载任何可核事实，按子句边界整体移除（与无源绑定/无源合计删除同一引擎与边界口径），
+// 移除动作计入明细（`删除错位绑定「…」`）可审计、可重放、幂等。
+//
+// **不做材料名白名单**：判据全部来自检测器 D4.6a 的名称/对象/量级归属链（同名值集 → 同名组和 →
+// 同名子集和 → 组和补差 → 名称相关组和 → foreign 名称语境重叠 → 正文自洽演算 → 权威数字池），
+// 任一豁免命中即不出 finding、本修复器即不触碰（同名同对象的合法多值——分村/分标段多条目引用，
+// 天然被同名值集与组和豁免拦下，见 batch1-d4-fact-reconciliation 正反例）。
+
+/** 错位名称绑定确定性删除（4.55.34）：终检「名称-数值绑定错位」blocker 的链尾收敛路径。
+ * 与 fixUnsourcedNameBindings 同引擎同边界口径（检测定位=修复定位）；无清单权威时静默跳过。 */
+export function fixMislocatedNameBindings(
+  markdown: string,
+  input: Pick<FactReconciliationInput, 'billFactLock' | 'blueprintData' | 'factsModel'>,
+): UnsourcedNameBindingFixResult {
+  return removeNameBindingClauses(markdown, input, {
+    prefix: '名称-数值绑定错位',
+    detail: excerpt => `删除错位绑定「${excerpt}」`,
+  });
 }
 
 // ═══════════════════════════ D4.2：规格-数值绑定 ═══════════════════════════

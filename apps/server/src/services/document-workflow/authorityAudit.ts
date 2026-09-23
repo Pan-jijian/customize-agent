@@ -35,9 +35,22 @@
  *   未自称合计的分项/单项数值不适用（单值溯源必须逐条命中权威核）：同实测文档的 424.2m 是系统级
  *   分项值（语境「覆盖复合管350.6m、塑料管424.2m」无合计词），保持推导缺口。放宽到「任意权威值子集和」
  *   会把凭空数字成批放过（任意目标值的 2~3 值子集和命中率实测 60.77%），故不做无名称关系的凑数；
- * - 硬门禁：三桶任一非零 → authorityAuditIssues 产出 blocker（fact_consistency + llm_repairable
- *   直通 isHardExportBlockingIssue）——审计失败不可进交付；缺口由修复轮（numeric-verification
- *   同源权威+分类器）与链尾 demote 确定性改定性收敛至 0。
+ * - 4.55.34 A 具名分项和候选（观测，**不改桶口径**）：两类覆盖缺口（推导/投影、工艺库）的 finding
+ *   附 `closureCandidates`——该值恰为**语境中具名权威分项之和**（namedTotalClosure 单源，只是不要求
+ *   「自称合计」词）。此前该候选只在自称合计时才被看见（B2），实机 424.2m 这类「写手自算之和」在报告
+ *   里只剩一个裸 token，读者与修复轮都无法判断它是编造还是自算 → 候选把「合法观测」显性化：
+ *   其正确归宿是**权威投影扩展**（transform/specBreakdown/groups 扩容，数据侧）或在正文按 D4.5
+ *   还原为具名分项+合计的分解表述；**不得**改写成定性表述或删除（那会丢信息——值本身合法）。
+ *   候选仅对两类覆盖缺口计算：unattributed（疑似编造）是红线，不给出任何「可闭合」暗示。
+ * - 硬门禁（4.55.34 口径复核）：三桶任一非零 → authorityAuditIssues 产出 blocker（fact_consistency +
+ *   llm_repairable 直通 isHardExportBlockingIssue）——审计失败不可进交付。
+ *   **链尾不存在「确定性改定性/删除」收敛器，且不得恢复**：原 demoteUnsourcedNumericTokens 已按
+ *   G 线 P2-2 停用（用删除通过门禁＝把「缺权威值」从交付物里抹掉，与「说清缺什么」的验收基准冲突），
+ *   其调用点亦已整块移除（postReviewSurface）。本注释此前宣称的「链尾 demote 确定性改定性收敛至 0」
+ *   是**已失效的承诺**（实测 doc-1790141547504 / doc-1790132484476 该 blocker 每轮残留）——现口径：
+ *   两类覆盖缺口由**收编流程**（投影/分类器/登记表扩容，数据侧）收敛；正文侧唯一非破坏性收敛动作是
+ *   按具名分项和还原分解（供修复轮消费，见 numericVerification 的候选提示）。unattributed 必须报出，
+ *   不得以任何链尾改写「消掉」。
  *
  * 收编流程（防"以后还会遇到"的机制保证，非人肉白名单）：
  * - 无主项不被静默放过，而是每次生成系统性暴露、分类、收编；
@@ -64,6 +77,11 @@ export interface AuthorityAuditFinding {
   occurrences: number;
   /** 合计闭包分项明细（仅 totalClaimClosed 桶：`名称 值 单位` 逐项，观测/验收定位用） */
   closure?: string[];
+  /** 具名分项和候选（4.55.34 A；仅 derivation-gap / process-gap 两类覆盖缺口，**观测字段不改桶口径**）：
+   * 该值恰为语境中具名权威分项之和（`名称 值 单位` 逐项）。存在候选 = 该值极可能是写手对权威分项的自算
+   * 聚合（合法观测），其归宿是权威投影扩展或正文还原为具名分项+合计分解，**不是**改写/删除。
+   * unattributed（疑似编造红线）不计算本字段：不得为红线值提供「可闭合」暗示。 */
+  closureCandidates?: string[];
 }
 
 export type AuthorityAuditBucket = 'derivation-gap' | 'process-gap' | 'unattributed';
@@ -130,8 +148,11 @@ const AUDIT_CONTEXT_WINDOW = 16;
  * 目录行「…1.23 工伤保险与劳动保障\n 1.24 项目管理机构与岗位职责…」的 token「1.24 项」窗口左界落在
  * 「1.23」中间（截成「.23」），R17 同形邻号判据的前置数字边界断言因缺整数段不成立 → 真编号被判无主、
  * 进未登记桶直通硬门禁（假编造）。截断污染所有以 context 为输入的判据（分流桶 / R16 / R17 / C-T2 各族），
- * 故在构造处根治：左右边界各自向外吸附，直到不再紧邻数字/小数点——数字不得被切半。 */
-function auditContextWindow(markdown: string, index: number, tokenLength: number, size = AUDIT_CONTEXT_WINDOW): string {
+ * 故在构造处根治：左右边界各自向外吸附，直到不再紧邻数字/小数点——数字不得被切半。
+ * 导出单源（4.55.34 A）：修复轮的自称合计豁免（numericVerification.selfDeclaredClosedTotalTokens）
+ * 必须与本审计同窗口算法——窗口差一个字就可能让审计判「合法自算合计」而修复轮判「疑似无来源」，
+ * 收敛压力随即落到删除动作上（丢信息），故窗口构造只此一处。 */
+export function auditContextWindow(markdown: string, index: number, tokenLength: number, size = AUDIT_CONTEXT_WINDOW): string {
   let from = Math.max(0, index - size);
   let to = Math.min(markdown.length, index + tokenLength + size);
   while (from > 0 && /[\d.]/u.test(markdown[from - 1] ?? '')) from -= 1;
@@ -141,21 +162,40 @@ function auditContextWindow(markdown: string, index: number, tokenLength: number
 
 /** 合计闭包窗口（4.55.31 B2）：名称锚定需要比 16 字分流窗口更宽的语境——D4.5 合计句窗口同宽（±40 字）。
  * 实机：「防水工程按施工段划分检验批并做蓄水（淋水）试验（总量6403.78m²）」的归属名「防水」在
- * 数值前 31 字处，16 字窗口取不到，闭包分项（墙面涂膜防水/天棚涂膜防水）便无从锚定。 */
-const TOTAL_CLAIM_WINDOW = 40;
+ * 数值前 31 字处，16 字窗口取不到，闭包分项（墙面涂膜防水/天棚涂膜防水）便无从锚定。
+ * 导出单源（4.55.34）：修复轮的自称合计闭包豁免（numericVerification.selfDeclaredClosedTotalTokens）
+ * 必须与本审计同窗口——窗口比本处更宽会把审计仍报缺口的数值从修复轮豁免出去（门禁残留）。 */
+export const TOTAL_CLAIM_WINDOW = 40;
 
 /** 合计闭包收编（4.55.31 B2）：自称合计（数值前紧邻合计/总量/小计…）的数值走具名分项和闭合判定
  * （factReconciliation.namedTotalClosure 单源：名称锚定 + 单位同族 + 恰为其和）。
  * 命中 = 该数值是权威分项的和（合法自算合计）→ 收编观测桶，不落三桶缺口、不计 unregistered。
  * 未自称合计的分项/单项数值不适用（单值溯源必须逐条命中权威核）——实机 424.2m 是系统级分项值
  * （语境「覆盖复合管350.6m、塑料管424.2m」无合计词），保持推导缺口不动。 */
-function totalClaimClosure(markdown: string, index: number, token: string, value: string, values: readonly NamedAuthorityValue[]): NamedAuthorityValue[] | null {
+function closureOverContext(markdown: string, index: number, token: string, value: string, values: readonly NamedAuthorityValue[]): NamedAuthorityValue[] | null {
   if (values.length === 0) return null;
-  const prefix = markdown.slice(Math.max(0, index - 24), index);
-  if (!TOTAL_CLAIM_PREFIX_RE.test(prefix.replace(/\s+/gu, ' '))) return null;
   const unit = /^[\d,，.]+(.*)$/u.exec(token)?.[1]?.trim() ?? '';
   const context = auditContextWindow(markdown, index, token.length, TOTAL_CLAIM_WINDOW).replace(/\s+/gu, ' ');
   return namedTotalClosure({ total: Number(value), unit, context, values });
+}
+
+function totalClaimClosure(markdown: string, index: number, token: string, value: string, values: readonly NamedAuthorityValue[]): NamedAuthorityValue[] | null {
+  const prefix = markdown.slice(Math.max(0, index - 24), index);
+  if (!TOTAL_CLAIM_PREFIX_RE.test(prefix.replace(/\s+/gu, ' '))) return null;
+  return closureOverContext(markdown, index, token, value, values);
+}
+
+/** 具名分项和候选（4.55.34 A；**观测/修复提示，不是豁免判据**）：与 B2 合计闭包**同判据同单源**
+ * （namedTotalClosure：名称锚定 ≥2 字 + 单位同族 + 恰为其和），唯一差别是**不要求**「自称合计」前缀。
+ * 为什么：不自称合计的聚合值（实机「覆盖复合管350.6m、塑料管424.2m」的 424.2m = 350.6 + 73.6）既可能
+ * 是写手对权威分项的自算聚合（合法观测——其归宿是**权威投影扩展**，或正文按 D4.5 还原为具名分项+合计
+ * 的分解表述），也可能是编造；报告此前只给一个裸 token，读者与修复轮都无法判断，于是修复轮唯一可执行
+ * 的动作是删除（= 丢信息）。候选把「可闭合」这一事实显性化，桶口径与硬门禁**完全不改**：值仍在
+ * derivation-gap/process-gap 桶内、仍进 blocker，只是多了一条可核的算术线索。
+ * 只对两类**覆盖缺口**计算：unattributed（疑似编造红线）不计算——不得为红线值提供「看似可闭合」的
+ * 台阶（任意权威值子集和不做名称锚定时命中率实测 60.77%，红线桶不能沾这条路径）。 */
+function aggregateClosureCandidate(markdown: string, index: number, token: string, value: string, values: readonly NamedAuthorityValue[]): NamedAuthorityValue[] | null {
+  return closureOverContext(markdown, index, token, value, values);
 }
 
 /** 补全提取（审计口径 = 扫描全部数值，必须比修复轮「宁漏勿错」更全）：
@@ -209,37 +249,46 @@ function isTableLineAt(markdown: string, index: number): boolean {
   return /^\s*\|/u.test(line.trim());
 }
 
+/** 具名值池（蓝图权威投影的「名称+值+单位」层）：合计闭包（4.55.31 B2）与 4.55.34 A 具名分项和候选
+ * 共用；导出供修复轮（numericVerification 合计自称豁免）消费——两链同一份具名权威，判据不漂移。
+ * 口径：条目级/明细级数值 + 名称 + 单位；**不含**规格与标签内嵌数字（C20/100W 之类不是数量口径）。 */
+export function buildNamedAuthorityValues(data: BlueprintData): NamedAuthorityValue[] {
+  const values: NamedAuthorityValue[] = [];
+  for (const entry of buildAuthorityIndex(data).entries) {
+    if (typeof entry.value === 'number' && Number.isFinite(entry.value)) {
+      values.push({ name: entry.label, value: entry.value, unit: entry.unit, kind: 'entry' });
+    }
+    for (const group of entry.groups ?? []) {
+      if (Number.isFinite(group.value)) values.push({ name: entry.label, value: group.value, unit: entry.unit, kind: 'group' });
+    }
+    // R20 规格-数量拆分（「100W 109套 + 120W 9套」小计）：写作层与权重链同源的合法值
+    for (const split of entry.specBreakdown ?? []) {
+      if (Number.isFinite(split.value)) values.push({ name: entry.label, value: split.value, unit: entry.unit, kind: 'split' });
+    }
+  }
+  return values;
+}
+
 /** 权威投影（核匹配与合计闭包共用**一次**遍历，防两消费者口径漂移）：
  * - cores：数值核心集合——条目值 / 分工程明细 groups / 规格-数量拆分 specBreakdown / 规格与标签
  *   内嵌数字（如 C20、100W）。匹配按数值核心（忽略单位与大小写差异），尾零规约双侧归一
  *  （1.500 ↔ 1.5，与 normalizeQuantityZeros 单源）；与数值提取器的比对口径一致；
- * - values：具名值池（合计闭包输入，4.55.31 B2）——条目级/明细级数值 + 名称 + 单位，
- *   不含规格与标签内嵌数字（C20/100W 之类不是数量口径）。 */
+ * - values：具名值池（合计闭包输入，4.55.31 B2；4.55.34 起构造函数导出单源）。 */
 function authorityProjection(data: BlueprintData): { cores: Set<string>; values: NamedAuthorityValue[] } {
   const cores = new Set<string>();
-  const values: NamedAuthorityValue[] = [];
+  const values = buildNamedAuthorityValues(data);
   const addCore = (raw: string) => {
     const trimmed = normalizeQuantityZeros(raw);
     if (trimmed) cores.add(trimmed);
   };
   for (const entry of buildAuthorityIndex(data).entries) {
-    if (typeof entry.value === 'number' && Number.isFinite(entry.value)) {
-      addCore(String(entry.value));
-      values.push({ name: entry.label, value: entry.value, unit: entry.unit, kind: 'entry' });
-    }
+    if (typeof entry.value === 'number' && Number.isFinite(entry.value)) addCore(String(entry.value));
     for (const text of [String(entry.value), entry.spec, entry.label]) {
       if (!text) continue;
       for (const core of text.match(/\d+(?:\.\d+)?/gu) ?? []) addCore(core);
     }
-    for (const group of entry.groups ?? []) {
-      addCore(String(group.value));
-      if (Number.isFinite(group.value)) values.push({ name: entry.label, value: group.value, unit: entry.unit, kind: 'group' });
-    }
-    // R20 规格-数量拆分（「100W 109套 + 120W 9套」小计）：写作层与权重链同源的合法值
-    for (const split of entry.specBreakdown ?? []) {
-      addCore(String(split.value));
-      if (Number.isFinite(split.value)) values.push({ name: entry.label, value: split.value, unit: entry.unit, kind: 'split' });
-    }
+    for (const group of entry.groups ?? []) addCore(String(group.value));
+    for (const split of entry.specBreakdown ?? []) addCore(String(split.value));
   }
   return { cores, values };
 }
@@ -320,19 +369,32 @@ export function auditAuthorityCoverage(markdown: string, data?: BlueprintData, e
       continue;
     }
     const bucket = classifyBucket(context);
-    if (bucket === 'derivation-gap') derivationGaps.push(finding);
-    else if (bucket === 'process-gap') processGaps.push(finding);
-    else unattributed.push(finding);
+    if (bucket === 'unattributed') {
+      // 疑似编造红线：不给「具名分项和候选」——见 aggregateClosureCandidate 注释（红线桶不沾凑数路径）
+      unattributed.push(finding);
+      continue;
+    }
+    // 覆盖缺口（推导/投影、工艺库）：附具名分项和候选（观测字段，不改桶与门禁口径）
+    const candidates = aggregateClosureCandidate(markdown, index, token, value, namedValues);
+    const gapFinding: AuthorityAuditFinding = candidates
+      ? { ...finding, closureCandidates: candidates.map(item => `${item.name} ${item.value}${item.unit}`) }
+      : finding;
+    if (bucket === 'derivation-gap') derivationGaps.push(gapFinding);
+    else processGaps.push(gapFinding);
   }
   return { scanned, matched, registered, conventionExempt, totalClaimClosed, derivationGaps, processGaps, unattributed, contextualMatches, unregisteredCount: unattributed.length };
 }
 
 /** 审计摘要单点文案（执行阶段 message 消费）。contextualMatches 为观测字段不计入摘要（matched 口径不变）；
- * totalClaimClosed（合计闭包，4.55.31 B2）同属观测口径——纳入摘要可核，但不计缺口不计未登记。 */
+ * totalClaimClosed（合计闭包，4.55.31 B2）同属观测口径——纳入摘要可核，但不计缺口不计未登记。
+ * 覆盖缺口的处置文案是「扩权威投影/工艺库登记 + 正文可还原为具名分项分解」——**不是**「改定性」：
+ * 链尾不存在删除/改定性收敛器（G 线 P2-2 停用），缺口只能由收编（数据侧）或非破坏性分解收敛。 */
 export function authorityAuditSummary(report: AuthorityAuditReport): string {
   const base = `无主数值审计：扫描数值 ${report.scanned} 个（命中权威 ${report.matched}，登记豁免 ${report.registered}，规范/管理豁免 ${report.conventionExempt}，合计闭包 ${report.totalClaimClosed?.length ?? 0}，推导/投影缺口 ${report.derivationGaps.length}，工艺库缺口 ${report.processGaps.length}，未登记 ${report.unregisteredCount}）`;
-  if (report.unregisteredCount > 0) return `${base}；存在疑似编造数值，须核查`;
-  if (report.derivationGaps.length + report.processGaps.length > 0) return `${base}；存在收编缺口，须补齐或改定性`;
+  const candidateCount = [...report.derivationGaps, ...report.processGaps].filter(finding => (finding.closureCandidates?.length ?? 0) > 0).length;
+  const candidateNote = candidateCount > 0 ? `（覆盖缺口中有 ${candidateCount} 项可由具名权威分项和闭合：属投影覆盖缺口，应扩投影或按分项还原，不得删除）` : '';
+  if (report.unregisteredCount > 0) return `${base}；存在疑似编造数值，须核查${candidateNote}`;
+  if (report.derivationGaps.length + report.processGaps.length > 0) return `${base}；存在收编缺口，须扩权威投影/工艺库登记（链尾不做删除式收敛）${candidateNote}`;
   return base;
 }
 
@@ -340,7 +402,13 @@ export function authorityAuditSummary(report: AuthorityAuditReport): string {
 export function authorityAuditDetails(report: AuthorityAuditReport, limit = 24): string[] {
   const rows = (label: string, findings: AuthorityAuditFinding[]) => findings.length === 0
     ? []
-    : [label, ...findings.slice(0, limit).map(finding => `${finding.token}（×${finding.occurrences}）— ${finding.context}`)];
+    : [label, ...findings.slice(0, limit).map(finding => {
+      // 4.55.34 A：覆盖缺口行附具名分项和候选（「值 ＝ 分项 + 分项」）——收编/投影扩展与
+      // 正文还原分解都据此进行，验收可核算术而非只看「疑似」字样
+      const candidates = finding.closureCandidates ?? [];
+      const candidateText = candidates.length > 0 ? `；可闭合：＝ ${candidates.join(' + ')}` : '';
+      return `${finding.token}（×${finding.occurrences}）— ${finding.context}${candidateText}`;
+    })];
   const lines = [
     ...rows('未登记（疑似编造，须核查或收编）：', report.unattributed),
     ...rows('推导器/投影覆盖缺口（进收编清单）：', report.derivationGaps),
@@ -358,8 +426,15 @@ export function authorityAuditDetails(report: AuthorityAuditReport, limit = 24):
 /**
  * F-T4 审计失败硬门禁检测器（AUXILIARY：由 recordAuthorityAudit 独立消费）：三桶（未登记·推导/投影
  * 缺口·工艺库缺口）任一非零即审计失败——blocker + category=fact_consistency + llm_repairable，
- * isHardExportBlockingIssue 直通硬阻断（审计失败不可进交付）。缺口由修复轮（numeric-verification
- * 同源权威/分类器定向修复）与链尾 demote 确定性改定性收敛至 0 后本检测器自动静默。
+ * isHardExportBlockingIssue 直通硬阻断（审计失败不可进交付）。
+ *
+ * 收敛路径（4.55.34 A 口径复核，替换此前失效的「链尾 demote 确定性改定性」承诺）：
+ * ① **覆盖缺口（推导/投影、工艺库）**——由**收编流程**收敛（新对象 → authorityIndex transform 扩容；
+ *    新工艺参数 → PROCESS_GAP_CONTEXT_RE / C-T2 分类器族；合法固定形态 → AUDIT_REGISTERED_TOKEN_RES），
+ *    属数据/配置侧动作；正文侧唯一非破坏性动作是按具名分项和还原为分项+合计分解（修复轮据
+ *    finding.closureCandidates 提示执行）。**不得**以删除/改定性收敛（G 线 P2-2：那是把「缺权威值」
+ *    从交付物里抹掉，与「要么 95+ 要么说清缺什么」的验收基准冲突）——链尾不存在该收敛器，且不恢复。
+ * ② **未登记（疑似编造）**——必须报出、必须由写作侧改（回归资料原文/改为不带数值的表述），不得 demote。
  * 消息锚「无主数值审计失败」不得与既有「生成后事实反查失败」豁免规则（不硬阻断）混同。
  */
 export function authorityAuditIssues(report: AuthorityAuditReport): ValidationIssue[] {
@@ -377,6 +452,6 @@ export function authorityAuditIssues(report: AuthorityAuditReport): ValidationIs
     owner: 'llm',
     repairability: 'llm_repairable',
     message: `无主数值审计失败：${sections.join('；')}`,
-    suggestion: '未登记数值（疑似编造）必须改为定性表述或回归资料原文；推导/投影缺口数值应补权威投影（transform/specBreakdown 扩容）或改定性；工艺库缺口数值应补规范常数/管理数字分类（C-T2 分类器）或改定性。修复后重跑生成复核清零。',
+    suggestion: '未登记数值（疑似编造）必须回归资料原文或改为不带具体数值的表述；推导/投影缺口数值应补权威投影（transform/specBreakdown/groups 扩容）——若该值可由具名权威分项和闭合（见审计明细「可闭合」），应在正文按分项显式还原为「分项名 值 + …，合计 值」的分解表述（还原后即由合计闭包收编）；工艺库缺口数值应补规范常数/管理数字分类（C-T2 分类器）或工艺库登记。**禁止以删除数值或改定性表述消除缺口**（链尾无删除式收敛器，理由见 authorityAudit 模块头）。修复后重跑生成复核清零。',
   }];
 }

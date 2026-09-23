@@ -303,6 +303,17 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
       }, { subtitle: '链尾编制依据回补' }));
     }
   }
+  // 4.55.35 链尾蓝图引用数值**最终消费**（巢湖 doc-1790132484476 实机归因：终检只检不修）：
+  // 本行以上全部 markdown-only 收口（目录重建/超长段落切分/句模剥离/句级复读坍塌/templating 重放/
+  // 标点收口/编制依据引用回补）都会改写候选所在句——判定层对同一处引用的结论随判定输入而变
+  //（缓存键含句上下文稳定哈希），链尾任一文本变动即击穿缓存、触发重新判定。实测三条真冲突
+  //（工厂灯 1179→1222、A型应急照明集中 1→4、等电位端子箱、测试板 1→27）正是「重判后才报出」：
+  // 其锚点在最后一次 recompute 的终检里生成，却无任何修复器再消费（终检只报不改，交付物残留），
+  // 而此前的 citation 重放已在其上游。本行是**真正的链尾**（其后只有终门禁与健康诊断）：以同一
+  // 判定器 + 同一输入（session.finalMarkdown）重放「判定→锚点→替换」收敛环，替换后即 recompute
+  //——终门禁读到的就是本次判定（同源结论，缓存命中），保证「终门禁所检 = 交付所存」；
+  // 零锚/零处时零成本静默（幂等可重放），非相似度猜值改写（检测放过时无锚点即无替换）。
+  await replayBlueprintCitationNumericFixes(session);
   await stageFinalGate(session);
   // P18 自动健康诊断：finalize 末尾纯读 telemetry 产出显性告警（零 LLM 成本），
   // 告警写回 telemetry.healthAlerts 随 reviewMetadata 归档（导出时进入 exportReports 历史对比存储）

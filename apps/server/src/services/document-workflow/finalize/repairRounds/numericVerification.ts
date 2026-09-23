@@ -19,6 +19,8 @@ import { cleanEvidenceText } from '../../evidence';
 import { extractSpecTokens } from '../../billFactLock';
 import { stringifyFactValue } from '../../utils';
 import { classifyNumericTraceToken, CELL_NUMBER_RE, CELL_UNIT_RE } from '../../documentFactTrace';
+import { auditContextWindow, buildNamedAuthorityValues, TOTAL_CLAIM_WINDOW, type AuthorityAuditReport } from '../../authorityAudit';
+import { namedTotalClosure, TOTAL_CLAIM_PREFIX_RE, type NamedAuthorityValue } from '../../factReconciliation';
 import type { DocumentFact } from '../../types';
 import type { FinalizeSession } from '../finalizeSession';
 
@@ -129,10 +131,63 @@ export function buildNumericAuthority(session: FinalizeSession): Set<string> {
 /** V5 P4.2 收敛修复：每章定向修复轮上限（残留数下降才继续下一轮；不降/回滚/达上限即停止，转 warning 兜底） */
 const MAX_NUMERIC_REPAIR_ROUNDS = 2;
 
+/** 自称合计闭包豁免（4.55.34 A）：句内「自称合计」且可由具名权威分项闭合的数值 token。
+ *
+ * **两链判据漂移根治**：无主数值审计（authorityAudit.totalClaimClosure，4.55.31 B2）已把
+ * 「自称合计 + 具名分项恰为其和」收编为合法观测（totalClaimClosed，不进三桶、不进硬门禁），
+ * 但本修复轮此前只做「权威 token 匹配 + C-T2 分类」，**没有**这道豁免——于是同一个 6403.78m²
+ * 在审计侧是合法自算合计、在本轮却是「疑似无来源」，而本轮的收敛动作只有「删除该数值/改定性」
+ * （指令第 3 条）⇒ 修复轮把审计已判定合法的自算合计当成编造删掉，审计缺口不但不收敛，
+ * 正文还丢了信息（与 G 线 P2-2《不得以删除通过门禁》正面冲突）。
+ * 判据与审计**完全单源**：TOTAL_CLAIM_PREFIX_RE（自称合计）+ namedTotalClosure（名称锚定/单位同族/
+ * 恰为其和）+ buildNamedAuthorityValues（同一份具名权威池）+ auditContextWindow（同一窗口构造，
+ * 含边界吸附；窗口口径 ±TOTAL_CLAIM_WINDOW 字）。
+ * 与审计的偏差只允许一个方向：本判据**不得**比对审计更宽（否则审计仍报缺口而本轮不再修 → 门禁残留）。 */
+export function selfDeclaredClosedTotalTokens(
+  sentence: string,
+  tokens: readonly string[],
+  values: readonly NamedAuthorityValue[],
+): Set<string> {
+  const closed = new Set<string>();
+  if (values.length === 0) return closed;
+  for (const token of tokens) {
+    const at = sentence.indexOf(token);
+    if (at < 0) continue;
+    const prefix = sentence.slice(Math.max(0, at - 24), at).replace(/\s+/gu, ' ');
+    if (!TOTAL_CLAIM_PREFIX_RE.test(prefix)) continue;
+    const core = /\d+(?:\.\d+)?/u.exec(token);
+    if (!core) continue;
+    const unit = /^[\d,，.]+(.*)$/u.exec(token)?.[1]?.trim() ?? '';
+    // 窗口算法与审计单源（auditContextWindow：左右边界吸附，数字不被切半）——两链同窗同判据
+    const context = auditContextWindow(sentence, at, token.length, TOTAL_CLAIM_WINDOW).replace(/\s+/gu, ' ');
+    if (namedTotalClosure({ total: Number(core[0]), unit, context, values })) closed.add(token);
+  }
+  return closed;
+}
+
+/** 具名分项和候选提示（4.55.34 A）：审计报告（derivation-gap / process-gap 的 closureCandidates）
+ * → token → 提示文案（「＝ 分项 + 分项」）。审计所检 = 修复轮所见：候选只把**非破坏性**收敛动作
+ * （按 D4.5 还原为具名分项 + 合计分解）交到 LLM 手上——此前该值在指令里只是一个「疑似无来源」裸
+ * token，可选动作只剩删除。**不改变判据**：值仍是缺口、仍进硬门禁，还原分解后由审计的合计闭包收编。 */
+export function auditGapClosureHints(report: AuthorityAuditReport | undefined): Map<string, string> {
+  const hints = new Map<string, string>();
+  if (!report) return hints;
+  for (const finding of [...report.derivationGaps, ...report.processGaps]) {
+    const candidates = finding.closureCandidates ?? [];
+    if (candidates.length === 0) continue;
+    const key = normToken(finding.token);
+    if (!hints.has(key)) hints.set(key, `${candidates.join(' + ')} ＝ ${finding.token.replace(/\s+/gu, '')}`);
+  }
+  return hints;
+}
+
 export async function stageNumericVerification(session: FinalizeSession): Promise<void> {
   const authority = buildNumericAuthority(session);
   // 权威库为空（无证据/无清单/无蓝图）时跳过本轮：没有权威可对，修复轮只会引入新的编造风险
   if (authority.size === 0) return;
+  // 具名权威池（与审计合计闭包/分项和候选同源单源）与分项和候选提示（审计报告 → token → 提示）
+  const namedValues = session.blueprintData ? buildNamedAuthorityValues(session.blueprintData) : [];
+  const closureHints = auditGapClosureHints(session.authorityAuditReport);
   // 章级疑似数值句提取（全量计数口径：与收敛判定/recheck 同源，每轮修复后重算残留）
   const collectSuspects = (content: string): Array<{ sentence: string; tokens: string[] }> => {
     const suspects: Array<{ sentence: string; tokens: string[] }> = [];
@@ -144,7 +199,12 @@ export async function stageNumericVerification(session: FinalizeSession): Promis
       // C-T2 三分类豁免（实测归因）：规范常数（标准编号/养护龄期/试块留置/检测频次/温度阈值/
       // 质量指标/工艺公差）与管理数字（管理频次/组织编排/配置/合同条款/过程指标/日期表述）
       // 不进修复轮——修复轮只处理真未溯源数字，避免「规范数字保留后 recheck 仍检出」的不收敛空转
-      const missingTokens = tokens.filter(token => !authority.has(token) && classifyNumericTraceToken({ token, context: sentence }).kind === 'unsourced');
+      const unsourced = tokens.filter(token => !authority.has(token) && classifyNumericTraceToken({ token, context: sentence }).kind === 'unsourced');
+      // 自称合计闭包同源豁免（4.55.34 A）：审计侧已收编的合法自算合计（自称合计 + 具名分项恰为其和）
+      // 不再进修复轮——否则本轮会把审计判定为合法的值当编造删除（两链判据漂移 + 丢信息），
+      // 而审计缺口照旧残留。判据与审计单源（见 selfDeclaredClosedTotalTokens）。
+      const closedTotals = selfDeclaredClosedTotalTokens(sentence, unsourced, namedValues);
+      const missingTokens = unsourced.filter(token => !closedTotals.has(token));
       if (missingTokens.length > 0) suspects.push({ sentence, tokens: missingTokens });
     }
     return suspects;
@@ -186,15 +246,26 @@ export async function stageNumericVerification(session: FinalizeSession): Promis
       upsertProgressStage(session.progressStages, runningStage);
       upsertProgressStage(session.finalGateRepairStages, runningStage);
       session.emitProgress(session.finalChapterDrafts, session.progressStages);
+      // 分项和候选提示（4.55.34 A）：仅当本章存在带候选的缺口 token 时追加第 3 条与候选行——
+      // 无候选时指令与历史逐字一致（避免给 LLM 新的改写自由度）
+      const hintLines = pending
+        .flatMap(item => item.tokens.map(token => ({ token, hint: closureHints.get(normToken(token)) })))
+        .filter((entry): entry is { token: string; hint: string } => Boolean(entry.hint));
       const numericInstruction = [
         '【正文数值定向核对修复】',
         ...(rounds > 1 ? [`本轮为第 ${rounds} 轮（最多 ${MAX_NUMERIC_REPAIR_ROUNDS} 轮）：上一轮修复后仍有残留，无法确认来源的数值必须直接删除，禁止保留或替换为其他无来源数值。`] : []),
         '下列句子中的数值（标注「缺来源 token」）在项目绑定材料、工程量清单与蓝图中均找不到同值来源，属于疑似编造数值。请逐句核对并修复：',
         '1. 若该数值在本章绑定证据中确实存在（仅表述口径不同），保持数值原样，只修正单位或表述；',
         '2. 若该数值确属规范/标准常数（如试块留置、养护龄期、检测频次），保留数值并显性标注规范名称与编号（如「按《混凝土结构工程施工质量验收规范》GB 50204 规定，每100m³留置一组试块」）——显性标注后即视为已溯源；',
-        '3. 其余情况必须删除该数值，改写为不带具体数值的过程控制表述（如「按设计要求」「分层碾压至压实度满足设计及规范要求」）；',
+        ...(hintLines.length > 0
+          ? ['3. 若该数值已给出「具名分项和候选」（该值恰为若干具名权威分项之和），说明它是写手对权威分项的自算合计，**不得删除**：按分项显式还原为「分项名 数值+单位、…，合计 数值+单位」的分解表述（分项值必须取候选值原样，禁止改动候选数值），还原后即为可溯源的合法合计；']
+          : []),
+        `${hintLines.length > 0 ? '4' : '3'}. 其余情况必须删除该数值，改写为不带具体数值的过程控制表述（如「按设计要求」「分层碾压至压实度满足设计及规范要求」）；`,
         '禁止把疑似数值替换为另一个同样无来源的数值；禁止改动句子的非数值部分；只做局部修改，不得新增、删除或合并小节。',
         pending.map(item => `- 疑似句：${item.sentence}（缺来源 token：${item.tokens.join('、')}）`).join('\n'),
+        ...(hintLines.length > 0
+          ? ['具名分项和候选（按第 3 条还原分解，不得删除）：', ...hintLines.map(entry => `- ${entry.token.replace(/\s+/gu, '')}：${entry.hint}`)]
+          : []),
       ].join('\n');
       const numericOutcome = await withPatchRollback({
         originalContent: chapterContent,

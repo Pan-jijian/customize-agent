@@ -570,4 +570,84 @@ describe('V5 P5 无主数值审计（M6）', () => {
     expect(namedTotalClosure({ total: 1052.8, unit: 'm²', context: '挖淤泥合计', values })).toBeNull();
     expect(namedTotalClosure({ total: 1847.8, unit: 'm³', context: '土石方合计', values })).toBeNull();
   });
+
+  // ═══ 4.55.34 A 具名分项和候选观测（实机 424.2m / 0.529t 归因：覆盖缺口的收敛归宿是收编/投影，
+  //        不是链尾删除——候选把「可闭合」这一算术事实显性化给修复轮，桶口径与硬门禁一律不动） ═══
+
+  it('4.55.34 A：推导缺口值恰为具名权威分项之和（424.2m = 复合管350.6 + 塑料管73.6）→ 记候选、桶与门禁不变', () => {
+    const data = withQuantities({
+      复合管: { value: 350.6, unit: 'm', sourceFile: '清单.xls' },
+      塑料管: { value: 73.6, unit: 'm', sourceFile: '清单.xls' },
+    });
+    const report = auditAuthorityCoverage('作业对象为1#厂房室内给水系统，覆盖复合管350.6m、塑料管424.2m、管道消毒冲洗773.8m。', data);
+    const gap = report.derivationGaps.find(finding => finding.token === '424.2m');
+    expect(gap).toBeDefined();
+    // 候选＝具名分项和（顺序随权威值池，判值集合不比顺序）
+    expect([...(gap?.closureCandidates ?? [])].sort()).toEqual(['复合管 350.6m', '塑料管 73.6m'].sort());
+    // 桶口径与硬门禁完全不变：值仍在缺口桶，仍进 blocker（候选是观测不是豁免）
+    expect(report.totalClaimClosed ?? []).toEqual([]);
+    expect(authorityAuditIssues(report)[0]?.message).toContain('424.2m');
+    expect(authorityAuditIssues(report)[0]).toMatchObject({ level: 'error', severity: 'blocker', repairability: 'llm_repairable' });
+    // 报告文案：摘要给计数与归宿提示（扩投影/按分项还原，不得删除），明细给候选算式
+    expect(authorityAuditSummary(report)).toContain('可由具名权威分项和闭合');
+    expect(authorityAuditDetails(report).join('\n')).toContain('可闭合：＝');
+    expect(authorityAuditDetails(report).join('\n')).toContain('复合管 350.6m');
+  });
+
+  it('4.55.34 A 反例：分项名未锚定（语境只有一项）→ 不记候选（防无名称关系的子集和凑数）', () => {
+    // 350.6 + 73.6 = 424.2 仍成立，但语境里没有「塑料管」→ 无名称锚定，不得给「可闭合」台阶
+    const data = withQuantities({
+      复合管: { value: 350.6, unit: 'm', sourceFile: '清单.xls' },
+      塑料管: { value: 73.6, unit: 'm', sourceFile: '清单.xls' },
+    });
+    const report = auditAuthorityCoverage('作业对象为1#厂房室内给水系统，覆盖复合管350.6m、管道消毒冲洗424.2m。', data);
+    const gap = report.derivationGaps.find(finding => finding.token === '424.2m');
+    expect(gap).toBeDefined();
+    expect(gap?.closureCandidates ?? []).toEqual([]);
+  });
+
+  it('4.55.34 A 反例：未登记（疑似编造红线）不计算候选——即使算术上恰可闭合', () => {
+    // 现场核对语境不属于推导/工艺桶 → unattributed；1.5 + 0.9 = 2.4 且两名都在语境中，仍不得给候选
+    const data = withQuantities({
+      甲类构件: { value: 1.5, unit: 'm', sourceFile: '清单.xls' },
+      乙类构件: { value: 0.9, unit: 'm', sourceFile: '清单.xls' },
+    });
+    const report = auditAuthorityCoverage('现场核对甲类构件1.5m与乙类构件2.4m。', data);
+    const red = report.unattributed.find(finding => finding.token === '2.4m');
+    expect(red).toBeDefined();
+    expect(red?.closureCandidates).toBeUndefined();
+    expect(authorityAuditIssues(report)[0]?.message).toContain('疑似编造（未登记）1 项 2.4m');
+    expect(authorityAuditSummary(report)).not.toContain('可由具名权威分项和闭合');
+  });
+
+  it('4.55.34 A：工艺缺口同样记候选（两类覆盖缺口同判据），但候选不得越桶收编', () => {
+    const data = withQuantities({
+      墙面涂膜防水: { value: 2.1, unit: 'm2', sourceFile: '清单.xls' },
+      天棚涂膜防水: { value: 0.4, unit: 'm2', sourceFile: '清单.xls' },
+    });
+    const report = auditAuthorityCoverage('防水层施工完成经蓄水试验合格，实测渗水量2.5m2。', data);
+    const gap = report.processGaps.find(finding => finding.token === '2.5m2');
+    expect(gap).toBeDefined();
+    expect([...(gap?.closureCandidates ?? [])].sort()).toEqual(['墙面涂膜防水 2.1m2', '天棚涂膜防水 0.4m2'].sort());
+    // 候选是观测不是豁免：未自称合计 → 不进合计闭包桶，值仍在工艺缺口桶、仍进 blocker
+    expect(report.totalClaimClosed ?? []).toEqual([]);
+    expect(authorityAuditIssues(report)[0]?.message).toContain('工艺库缺口 1 项 2.5m2');
+  });
+
+  it('4.55.34 A 归宿文案：建议明示「扩投影/按分项还原」，且禁止以删除或改定性消除缺口', () => {
+    const data = withQuantities({
+      复合管: { value: 350.6, unit: 'm', sourceFile: '清单.xls' },
+      塑料管: { value: 73.6, unit: 'm', sourceFile: '清单.xls' },
+    });
+    const report = auditAuthorityCoverage('作业对象为1#厂房室内给水系统，覆盖复合管350.6m、塑料管424.2m、管道消毒冲洗773.8m。', data);
+    const issue = authorityAuditIssues(report)[0];
+    expect(issue.message).toContain('推导/投影缺口 2 项');
+    expect(issue.suggestion).toContain('禁止以删除数值或改定性表述消除缺口');
+    expect(issue.suggestion).toContain('补权威投影');
+    expect(issue.suggestion).toContain('分项名 值');
+    // 未登记仍是红线：建议文本要求回归资料原文，不得改桶、不得以链尾收敛器静默
+    const red = auditAuthorityCoverage('走廊净宽 2.4m 处设装饰条。', makeBlueprintData());
+    expect(authorityAuditIssues(red)[0]?.suggestion).toContain('未登记数值（疑似编造）必须回归资料原文');
+    expect(authorityAuditIssues(red)[0]?.message).toContain('疑似编造（未登记）1 项 2.4m');
+  });
 });

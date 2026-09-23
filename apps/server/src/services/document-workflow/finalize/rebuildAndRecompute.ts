@@ -492,7 +492,12 @@ const AUTHORITY_AUDIT_ISSUE_ANCHOR = '无主数值审计失败';
  * 三分类（一致 / 登记豁免 / 无主→推导缺口·工艺缺口·未登记），报告随执行阶段与 reviewMetadata 交付；
  * 修复轮每次重算校验组后重跑（upsert 幂等），报告始终基于最新 finalMarkdown。
  * F-T4：三桶任一非零即审计失败——authorityAuditIssues 产出 blocker 并入校验组（硬门禁，审计失败
- * 不可进交付）；旧审计 issue 按消息锚去除后重加（幂等）；缺口由修复轮/链尾 demote 收敛后自动静默。 */
+ * 不可进交付）；旧审计 issue 按消息锚去除后重加（幂等）。
+ * 4.55.34 A 归因更正：此前此处宣称「缺口由修复轮/链尾 demote 收敛后自动静默」——链尾 demote
+ *（demoteUnsourcedNumericTokens）已按 G 线 P2-2 停用（用删除通过门禁＝抹掉「缺权威值」这一事实），
+ * 覆盖缺口现由**收编流程**（投影/分类器/登记表扩容，数据侧）+ 正文侧非破坏性还原（具名分项分解）
+ * 收敛；未登记（疑似编造）必须报出，不得 demote。审计 blocker 不被任何链尾改写「消掉」，
+ * 残留即交付失败（「说清缺什么」），这是本检测器的设计口径而非缺陷。 */
 function recordAuthorityAudit(session: FinalizeSession): void {
   const report = auditAuthorityCoverage(session.finalMarkdown, session.blueprintData, buildNumericAuthority(session));
   session.authorityAuditReport = report;

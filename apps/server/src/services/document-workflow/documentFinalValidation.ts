@@ -323,7 +323,9 @@ export async function buildStandardFinalValidationIssues(input: {
     ...det('document-delivery-score', () => documentDeliveryScoreIssues(input.markdown, input.chapters, input.factsModel, analyses)),
     ...det('generated-fact-verification', () => factVerification),
     // C-T2 未溯源数值验收（扫描口径与分类器/修复器单源）：终稿未溯源数字 = 0（规范常数/管理数字
-    // 已豁免；真未溯源由 llm_repairable 进修复链，链尾 demote 确定性改定性兜底；不硬阻断导出）
+    // 已豁免；真未溯源由 llm_repairable 进修复链并经 numeric-verification 轮的「自称合计闭包」同源
+    // 豁免复核。**链尾无删除/改定性兜底**：原 demoteUnsourcedNumericTokens 已按 G 线 P2-2 停用
+    // （删除通过门禁＝抹掉「缺权威值」这一事实），残留即按「未达交付标准」呈现）
     ...det('numeric-traceability', () => numericTraceabilityIssues(input.markdown, input.factsModel)),
     // C-T3 表内算术自洽验收（含显性合计标记的表格：分项和=合计；与修复轮 stageTableArithmeticRepair
     // 同源重扫，检测定位=修复定位；llm_repairable 进修复链，不硬阻断导出）

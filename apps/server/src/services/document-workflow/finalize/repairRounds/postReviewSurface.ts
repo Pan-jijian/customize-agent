@@ -10,7 +10,7 @@ import { blueprintCitationVerdict } from '../../integratedBlueprint';
 import { buildAuthorityIndex } from '../../authorityIndex';
 import { repairTableBlocksInMarkdownDeterministically } from '../../tableRepairHelpers';
 import { stripInternalTerminologySentences } from '../../internalTerminologyAnchors';
-import { fixUnsupportedTotalClaims, fixUnsourcedNameBindings } from '../../factReconciliation';
+import { fixUnsupportedTotalClaims, fixUnsourcedNameBindings, fixMislocatedNameBindings } from '../../factReconciliation';
 import { fixWorkInjuryInsuranceStatement } from '../../utils';
 import { fixPreliminaryActionTimingDeterministically, fixEquipmentEntryTimingDeterministically } from '../../integrity/detectors/detectors';
 import { fixListingJargonInCriticalPackageSections } from '../../constructionOrgQualityRules';
@@ -28,6 +28,7 @@ import { stageDangerousApplicabilityRepair } from './dangerousApplicabilityRepai
 import { stageQuotationBalanceRepair } from './quotationBalanceRepair';
 import { stripDuplicateParagraphs } from '../../integrity/fixers/fixers';
 import { replayRequirementTailClosure, stageRequirementResponseRepair } from './requirementResponseRepair';
+import type { CitationAdjudicator } from '../../semanticAdjudication';
 import type { FinalizeSession } from '../finalizeSession';
 
 export async function stagePostReviewSurface(session: FinalizeSession): Promise<void> {
@@ -140,31 +141,63 @@ export async function stagePostReviewSurface(session: FinalizeSession): Promise<
   await replayRequirementTailClosure(session);
 }
 
+/** 判定-替换收敛环上限：每轮替换都会改写候选所在句（判定缓存键含句上下文哈希），新报冲突在同一
+ *  重放内被再次消费；替换值恒为条目权威值（同一处不会二次入锚），故两轮内必收敛，3 轮为防线
+ *  （第 3 轮仍在产出新锚点时说明存在跨候选互相改写的病态句，交由终检如实报出）。 */
+const CITATION_REPLAY_MAX_PASSES = 3;
+
 /** r15 链尾蓝图引用数值收口重放（B1 实机归因：stageFactDistribution 修改章 drafts 后的
  * rebuildFinalMarkdown 从章 drafts 重拼成稿，把本修复的字符串级替换回退——实测「金属扶手、
  * 栏杆、栏板 22m→224m」在 postReviewSurface 内替换成功（阶段记录 1 处），终态仍残留 22m
  * 且 gate 报 B1）。封装为可重放函数：由 documentPipeline 在最后一次净变更点
  * （runSurfaceDeterministicCleans 重放）之后、终门禁之前再调用一次；
- * 无蓝图/判定零锚/替换零处时零成本静默（幂等可重放）。 */
-export async function replayBlueprintCitationNumericFixes(session: FinalizeSession): Promise<void> {
+ * 无蓝图/判定零锚/替换零处时零成本静默（幂等可重放）。
+ *
+ * 4.55.35 判定-替换收敛环（巢湖 doc-1790132484476 实机归因：终检只检不修）：
+ * 单轮「判定 → 锚点 → 替换」只在**该轮输入的 markdown** 上成立。判定层对同一处引用的结论随
+ * 判定输入（候选所在句上下文，缓存键含其稳定哈希）而变：① 本轮的替换本身改写句内数字 →
+ * 同句其他候选下一轮才重新判定；② 链尾任一 markdown 变动（超长段落切分 / 句模剥离 / 复读
+ * 坍塌 / 编制依据引用回补，均在引用重放之后）同样击穿缓存触发重判。两类「重判后才报出」的
+ * 冲突若无人再消费，其锚点只能落到最后一次 recompute 的终检里——实测三条真冲突（工厂灯
+ * 1179→1222、A型应急照明集中 1→4、等电位端子箱、测试板 1→27）正是如此：终检 blocker 报出
+ * 而交付物零改动（终检只检不修）。本环在**同源判定**（同一裁决器 + 同一输入 markdown）下重复
+ * 消费直到零锚点或零处落地，且替换后即 recompute——终检读到的是本环最后一次判定（同一缓存
+ * 结论），保证「终门禁所检 = 交付所存」，不会出现「重放改完、终检又变」的空转。
+ * 幂等：无蓝图/判定零锚/替换零处 → 零成本静默（不写事件、不 recompute、markdown 不变）。
+ * adjudicate 仅供单测注入确定性裁决器（生产缺省 = defaultCitationAdjudicator，与终检检测器同源）。 */
+export async function replayBlueprintCitationNumericFixes(
+  session: FinalizeSession,
+  options: { adjudicate?: CitationAdjudicator } = {},
+): Promise<void> {
   if (!session.blueprintData) return;
-  const citationReplayVerdict = await blueprintCitationVerdict(session.finalMarkdown, session.blueprintData, {
-    diagnostics: session.generationDiagnostics,
-    signal: session.signal,
-  });
-  if (citationReplayVerdict.anchors.length === 0) return;
-  const numericReplayFix = applyNumericConsistencyDeterministicFixes(session.finalMarkdown, {
-    authorityIndex: buildAuthorityIndex(session.blueprintData),
-    scheduleAuthority: session.scheduleAuthority,
-    assemblyRateAuthority: session.assemblyRateAuthority,
-    supportAuthority: session.supportAuthority,
-    quantityAnchors: citationReplayVerdict.anchors,
-  });
-  if (numericReplayFix.fixedCount === 0) return;
-    recordRepairActions(session.generationDiagnostics, numericReplayFix.fixedCount);
-  session.finalMarkdown = numericReplayFix.markdown;
+  let markdown = session.finalMarkdown;
+  let fixedCount = 0;
+  const details: string[] = [];
+  for (let pass = 0; pass < CITATION_REPLAY_MAX_PASSES; pass += 1) {
+    const citationReplayVerdict = await blueprintCitationVerdict(markdown, session.blueprintData, {
+      diagnostics: session.generationDiagnostics,
+      signal: session.signal,
+      ...(options.adjudicate ? { adjudicate: options.adjudicate } : {}),
+    });
+    if (citationReplayVerdict.anchors.length === 0) break;
+    const numericReplayFix = applyNumericConsistencyDeterministicFixes(markdown, {
+      authorityIndex: buildAuthorityIndex(session.blueprintData),
+      scheduleAuthority: session.scheduleAuthority,
+      assemblyRateAuthority: session.assemblyRateAuthority,
+      supportAuthority: session.supportAuthority,
+      quantityAnchors: citationReplayVerdict.anchors,
+    });
+    // 判定报锚点而修复器零落地（坐标切片校验未命中）时不空转：交由终检如实报出
+    if (numericReplayFix.fixedCount === 0 || numericReplayFix.markdown === markdown) break;
+    markdown = numericReplayFix.markdown;
+    fixedCount += numericReplayFix.fixedCount;
+    details.push(...numericReplayFix.details);
+  }
+  if (fixedCount === 0) return;
+  recordRepairActions(session.generationDiagnostics, fixedCount);
+  session.finalMarkdown = markdown;
   await session.recomputeFinalValidationBundle();
-  const citationReplayStage = displayStage({ type: 'validation', roleId: 'citation-numeric-replay', status: 'success', message: `链尾蓝图引用数值收口重放：${numericReplayFix.fixedCount} 处（${[...new Set(numericReplayFix.details)].slice(0, 4).join('、')}）` }, { subtitle: '评审后兜底' });
+  const citationReplayStage = displayStage({ type: 'validation', roleId: 'citation-numeric-replay', status: 'success', message: `链尾蓝图引用数值收口重放：${fixedCount} 处（${[...new Set(details)].slice(0, 4).join('、')}）` }, { subtitle: '评审后兜底' });
   upsertProgressStage(session.progressStages, citationReplayStage);
   upsertProgressStage(session.finalGateRepairStages, citationReplayStage);
 }
@@ -189,7 +222,7 @@ export async function replayStage5FactsModelNumericFixes(session: FinalizeSessio
 /**
  * 交付前确定性清洗组（r6 从 stagePostReviewSurface 抽取：语义逐字保持，仅增加可重放性）。
  * 处理块顺序固定：商务条款数据行清洗 → 表格空单元格确定性修复 → 无源合计句确定性删除 →
- * 无源名称绑定确定性删除 → 前期动作时限确定性改写 → 设备进场时序确定性改写 → 工伤保险表述
+ * 无源名称绑定确定性删除 → 错位名称绑定确定性删除 → 前期动作时限确定性改写 → 设备进场时序确定性改写 → 工伤保险表述
  * 确定性改写 → 关键小节清单口径词去词 → SURFACE_FIX_STEPS round-2 链（残行合并/叠词收敛/
  * 骨架复读/内部术语标题等）→ 内部术语句子整句删除 → 法规文号残缺收口 → 规格错位清单权威
  * 确定性收口 → 清单分部覆盖链尾兜底 → 规范术语显性落位链尾兜底 → 五要素闭合补强 →
@@ -264,6 +297,26 @@ export async function runSurfaceDeterministicCleans(session: FinalizeSession): P
     const unsourcedBindingStage = displayStage({ type: 'validation', roleId: 'unsourced-binding-clean', status: 'success', message: `无源名称绑定确定性删除：${unsourcedBindingFix.fixedCount} 处（${unsourcedBindingFix.details.slice(0, 4).join('、')}）` }, { subtitle: '评审后兜底' });
     upsertProgressStage(session.progressStages, unsourcedBindingStage);
     upsertProgressStage(session.finalGateRepairStages, unsourcedBindingStage);
+  }
+  // 错位名称绑定确定性删除（4.55.34 实机归因，见 factReconciliation.fixMislocatedNameBindings 块注释）：
+  // 终检 fact-reconciliation 的「名称-数值绑定错位」变体（值恰属另一清单条目）此前**既无确定性修复器
+  // 覆盖**（原修复器只按「无源」前缀筛选）、**也无定向修复轮消费**（轮内确定性集
+  // runDeterministicConsistencyCheck 不含本检测器）——实测 doc-1790141547504 的「复合管 11m 属
+  // 塑料管」全稿 LLM 轮后仍残留、直坠终门禁。与无源变体同引擎同边界口径（检测定位=修复定位），
+  // 置于本组内 → 随 runSurfaceDeterministicCleans 在链尾最后一次净变更点被重放，
+  // 保证「终门禁所检 = 交付所存 = 收口后成稿」。无清单权威/无命中时零变更静默（幂等零成本）。
+  const mislocatedBindingFix = fixMislocatedNameBindings(session.finalMarkdown, {
+    billFactLock: session.billFactLock,
+    blueprintData: session.blueprintData,
+    factsModel: session.factsModel,
+  });
+  if (mislocatedBindingFix.fixedCount > 0) {
+    recordRepairActions(session.generationDiagnostics, mislocatedBindingFix.fixedCount);
+    session.finalMarkdown = mislocatedBindingFix.markdown;
+    await session.recomputeFinalValidationBundle();
+    const mislocatedBindingStage = displayStage({ type: 'validation', roleId: 'mislocated-binding-clean', status: 'success', message: `错位名称绑定确定性删除：${mislocatedBindingFix.fixedCount} 处（${mislocatedBindingFix.details.slice(0, 4).join('、')}）` }, { subtitle: '评审后兜底' });
+    upsertProgressStage(session.progressStages, mislocatedBindingStage);
+    upsertProgressStage(session.finalGateRepairStages, mislocatedBindingStage);
   }
   // 前期动作时限矛盾确定性改写（r12 丰乐镇门禁 #5 归因）：「开工令下发后第90日完成劳动力进场登记」
   //（第 90 日 = 总工期 90 日竣工日）全稿 LLM 修复轮后仍残留——终检只报不修直坠门禁；时限表述无
