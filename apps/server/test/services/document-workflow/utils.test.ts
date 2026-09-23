@@ -132,6 +132,28 @@ describe('normalizeSubsectionTitleForDedup', () => {
     expect(normalizeSubsectionTitleForDedup('1. 主体结构工程')).toBe('主体结构');
     expect(normalizeSubsectionTitleForDedup('土方外运及基坑支护工程')).toBe('土方外运及基坑支护');
   });
+
+  /**
+   * 4.58 R1 实测修：**单段编号后必须跟分隔符才剥**，否则 `1#厂房…` 的 `1` 会被当成小节号剥掉。
+   *
+   * 旧判据以 `^\d+(?:\.\d+)*[.．]?` 开头、以 `\s*` 收尾（允许零空白），于是：
+   * 规划名「`1#厂房土建专项工程`」→「`#厂房土建专项`」，
+   * 而正文 H3「`1.22 1#厂房土建专项工程`」→ 先剥 `1.22 ` 得「`1#厂房土建专项`」——两侧不等，
+   * 导致**每个以「N#」开头的小节都被判「规划小节未落位」**（巢湖实测该章 14 条里 5 条是这个假报）。
+   */
+  it('单体编号「N#」不被当作小节号剥离（实测假报根治）', () => {
+    expect(normalizeSubsectionTitleForDedup('1.22 1#厂房土建专项工程'))
+      .toBe(normalizeSubsectionTitleForDedup('1#厂房土建专项工程'));
+    expect(normalizeSubsectionTitleForDedup('1.26 2#门卫土建装饰装修工程'))
+      .toBe(normalizeSubsectionTitleForDedup('2#门卫土建装饰装修工程'));
+    expect(normalizeSubsectionTitleForDedup('1#厂房土建专项工程')).toBe('1#厂房土建专项');
+  });
+
+  it('既有编号形态仍可剥（单段需分隔符、多段直接剥）', () => {
+    for (const titled of ['1 主体结构工程', '1. 主体结构工程', '1.2 主体结构工程', '1.2.3主体结构工程']) {
+      expect(normalizeSubsectionTitleForDedup(titled), titled).toBe('主体结构');
+    }
+  });
 });
 
 describe('alignSimilarHeadingsToPlan / nearSubsectionTitleMatch', () => {

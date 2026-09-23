@@ -1,5 +1,6 @@
 import { getLocalSemanticProvider } from './semanticSimilarity';
 import { longestCommonHanSubstringSpan } from './numericalConsistency';
+import { MEASURE_UNIT_ALTERNATION, collapseObjectWindowEnd, collapseObjectWindowStart, findTruncationSource, hasTruncatedBracketFragment } from './factValueNoise';
 import type { BillFactLock, BillFactLockEntry } from './billFactLock';
 import type { BlueprintQuantity } from './integratedBlueprint';
 import type { ValidationIssue } from './types';
@@ -21,8 +22,10 @@ import type { ValidationIssue } from './types';
 
 /** r18 丰乐镇 B2 归因：单位交替补 m²/m³/㎡（原表只有 m，上标 ² 不可被 suffix 字符类消费而丢失——
  * 实测「工具式脚手架76.62m²」提取为 raw="…76.62m"（²截断）→ rawUnitOf 归一回 "m"，与清单条目
- * 单位 "m2" 不兼容 → 本可精确命中清单的两值坠入无锚冲突误报）；上标单位排 m 前防「m」先匹配截断。 */
-const PARAM_TOKEN_RE = /([\u4e00-\u9fa5A-Za-z0-9（）()]{1,12}?)(\d+(?:\.\d+)?)\s*(m²|m³|㎡|mm|cm|m|米|MPa|kN|kV|kW|℃|°C|万元|元|人|天|日|个|层|樘|处|套|台|t|吨)([\u4e00-\u9fa5A-Za-z0-9（）()]{0,8})/gu;
+ * 单位 "m2" 不兼容 → 本可精确命中清单的两值坠入无锚冲突误报）；上标单位排 m 前防「m」先匹配截断。
+ * 4.58 R5 ③：单位表改由判据单源模块 `factValueNoise.MEASURE_UNIT_ALTERNATION` 提供
+ *（与「连接词左侧是否已有另一处取值」的判定同源），不在本地再手抄一份。 */
+const PARAM_TOKEN_RE = new RegExp(String.raw`([\u4e00-\u9fa5A-Za-z0-9（）()]{1,12}?)(\d+(?:\.\d+)?)\s*(${MEASURE_UNIT_ALTERNATION})([\u4e00-\u9fa5A-Za-z0-9（）()]{0,8})`, 'gu');
 
 /** 纯通用量词表：概念归一化后仅为量词本身（无具体对象）时退出聚类——
  * 不同对象的「直径22mm」「直径48.3mm」（锚杆 vs 钢管）同词形不同对象，聚同簇必误报（合肥师范实测）。
@@ -179,16 +182,39 @@ function extractParamTokens(markdown: string): ParamToken[] {
       if (/月\s*$/u.test(prefix)) continue;
       const value = Number(valueText);
       const unit = match[3] || '';
-      const suffixRaw = (match[4] || '').trim();
+      /**
+       * 4.58 R5 ③ 对象名窗口收拢（判据单源 `factValueNoise.collapseObjectWindow*`）。
+       *
+       * 定宽窗口（前缀 ≤12 字、后缀 ≤8 字）在含规格编号的对象名上必然切错：实测
+       * `粗粒式沥青混凝土(AC-25C)6cm厚与细粒式改性沥青混凝土面层(AC-13C)4cm厚各13898.51m²`
+       * 抽成 `25C)厚与细粒式改性沥` 与 `13C)厚各13898` 两个**残片**——前者丢掉了整个对象名
+       * 「粗粒式沥青混凝土」（`AC-` 的连字符不在字符类内，匹配只能从 `25C)` 起），
+       * 后者把下一处的「细粒式…」粘了进来；两个不同对象（粗粒式 AC-25C 6cm / 细粒式 AC-13C 4cm）
+       * 因此被当成"同一概念"，数值 6/4 自然"冲突"。
+       *
+       * 收拢只作用于**对象名**：`raw`、`occurrences`（值定位）仍由正则组给出，
+       * 「检测定位 = 修复定位」不变量与硬替换路径（numericConflictArbiter）逐处定位均不受影响。
+       */
+      const matchStart = match.index || 0;
+      const windowStart = collapseObjectWindowStart(line, matchStart);
+      const objectWindow = line.slice(windowStart, collapseObjectWindowEnd(line, matchStart + match[0].length));
+      // 值文本在收拢窗口内的偏移：由正则组精确给出（前缀字符类不含空白，trim 不改偏移）
+      const valueOffsetInWindow = matchStart - windowStart + (match[1] || '').length - (trailingDigits ? trailingDigits[0].length : 0);
+      const afterValue = objectWindow.slice(valueOffsetInWindow + valueText.length);
+      // 值与单位之间正则只允许空白（`\s*`），>2 字的间隔说明匹配错位，此时整段按后缀处理（宁可多留语境）
+      const unitAt = afterValue.indexOf(unit);
+      const windowSuffix = unitAt >= 0 && unitAt <= 2 ? afterValue.slice(unitAt + unit.length) : afterValue;
       // r28f B2 归因（r28e 实测）：「健身器材17个与石桌石凳8个基础采用…」的后缀把相邻枚举项
       // 连同其数值吞入本 token（concept=「健身器材与石桌石凳8个基」）→ bge 桥接聚类把健身器材
-      // （17个）与石桌石凳（8个）误聚同簇误报多口径——后缀在「连接词（与/和/及）+≤12字+数字」
-      // 处截断：该段是下一枚举项（自带数值）的开头，不是本值的对象语境；连接词后无数字的语境
-      // 后缀（「…与石桌石凳基础采用」）保留，避免误削概念信息
-      const embeddedItem = /[与和及][^与和及]{0,12}?\d/u.exec(suffixRaw);
-      const suffix = embeddedItem ? suffixRaw.slice(0, embeddedItem.index) : suffixRaw;
+      // （17个）与石桌石凳（8个）误聚同簇误报多口径——后缀在「连接词（与/和/及）+数字」处截断：
+      // 该段是下一枚举项（自带数值）的开头，不是本值的对象语境；连接词后无数字的语境
+      // 后缀（「…与石桌石凳基础采用」）保留，避免误削概念信息。
+      // 4.58 R5 ③ 跨度放宽 12→24：窗口收拢后连接词与下一个数值之间隔着完整对象名 + 规格编号
+      //（「与细粒式改性沥青混凝土面层(AC-13C)4cm」= 17 字），12 字量不到便会把下一对象粘进本项。
+      const embeddedItem = /[与和及][^与和及]{0,24}?\d/u.exec(windowSuffix);
+      const suffix = embeddedItem ? windowSuffix.slice(0, embeddedItem.index) : windowSuffix;
       // 概念语境 = 数值前后短语去空白；语境过短（纯标点/无概念词）不参与聚类
-      const rawConcept = `${prefix}${suffix}`.replace(/[\s,，、；;：:]/gu, '');
+      const rawConcept = `${objectWindow.slice(0, valueOffsetInWindow)}${suffix}`.replace(/[\s,，、；;：:]/gu, '');
       // r15 B1 归因：剥离「主要作业对象为」类引导语后再聚类（防跨对象共享引导语误聚，见 CONCEPT_LEAD_IN_RE）；
       // r16 B2 归因：同源剥离「由责任X在内完成」任务时限管理模板框架（见 CONCEPT_TASK_DEADLINE_RE）
       const strippedConcept = rawConcept.replace(CONCEPT_LEAD_IN_RE, '').replace(CONCEPT_TASK_DEADLINE_RE, '');
@@ -206,6 +232,18 @@ function extractParamTokens(markdown: string): ParamToken[] {
       if (CONCEPT_BLACKLIST_RE.test(concept)) continue;
       // 变体限定词退聚（r28m M24a F2）：带「局部/个别/少数/多数/大部分」限定词的子集口径不参与互斥
       if (VARIANT_QUALIFIER_RE.test(concept)) continue;
+      /**
+       * 4.58 R5 ③-b 残片兜底（**降级可见，不静默**）：窗口收拢**修不好**的残片——对象名里仍有
+       * 未配对闭括号（如 `AC-25C)6cm`：源文本本身缺开括号），说明它仍是某个括号组被切断的尾巴
+       *（`25C)` ← `(AC-25C)`）。残片没有独立对象身份，其数值与任何口径都不可互比 ⇒ 退出聚类，
+       * 并由**包含关系判定**指名截断源（`findTruncationSource`：同一行里包含它的完整括号组）
+       * 写进可见记录，供人工复核源文本。
+       */
+      if (hasTruncatedBracketFragment(objectWindow)) {
+        const truncationSource = findTruncationSource(line, objectWindow);
+        console.warn(`[gen] parameter-concept-conflict 残片跳过：对象名窗口「${objectWindow.trim()}」${truncationSource ? `是「${truncationSource}」的截断` : '含未配对闭括号且本行找不到截断源'}，数值 ${valueText}${unit} 不参与口径互斥`);
+        continue;
+      }
       // 同一表述的全部出现合并为 occurrences（4.27.0 A1）：判定仍按「同 raw 只算一个口径」去重，
       // 但硬替换须逐处定位全部出现位置——历史缺陷：同值多处出现只改首处的替换残留
       const occurrence = {

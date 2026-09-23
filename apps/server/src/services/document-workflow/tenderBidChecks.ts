@@ -625,3 +625,287 @@ export function crossProjectResidueHits(markdown: string): string[] {
   const cleaned = markdown.replace(/及其他项目/gu, '及〔清单列举项〕');
   return CROSS_PROJECT_RES.filter(pattern => pattern.test(cleaned)).map(pattern => pattern.source.replace(/\\u/gu, ''));
 }
+
+// ══════════════════ 10. R9 表达质量族（短语级套话 / 条款体复述 / 表格内容泄漏成散文） ══════════════════
+/**
+ * 实测依据（非推断）：doc-1790168542563-ea526b1b（巢湖施工组织设计，68113 字）全文字面扫描
+ * + 段落级人工抽样（合格 3/5）——三类缺陷穿透了既有**三层齐备**的套话治理
+ * （写作期约束 taskCardPrompt 第 3 条 / 块质检 scanBlockTemplating 占比 >10% 阻断 /
+ * 二轮定向反馈携带命中句原文），根因是判据的**粒度**与**语体**覆盖缺口，不是纪律问题：
+ * ① 整句判定 + 阈值 0.80 → 短语级套话被实质内容稀释（整句主题由主体内容主导，余弦不足）；
+ * ② 14 条原型全是**口号体** → 法律/条款语体（“我方应…”“承包人必须…”）不在覆盖内；
+ * ③ 无“书名号枚举散文段”判据 → 表格内容泄漏成散文残句（末尾规范号年份被切掉）。
+ * 本族三项判据只产出**检测事实**（命中原文 + 观测值），供修复端定点改写；删除判定仍归既有整句通道。
+ */
+
+// ── 10.1 短语级套话扫描（R9-a：判定粒度从整句下沉到子句）──
+/**
+ * 为什么需要下沉：套话嵌在实质句中时整句 embedding 由主体内容主导，整句余弦不足。
+ * 实测句（行90）：「塘渣石垫层、水泥稳定碎（砾）石各分项施工质量验收统一以“精心组织施工”为总控目标，
+ * 检验批验收逐级对照核验」——整句主题是“垫层与级配碎石验收”，“精心组织施工”只占一个短语。
+ * 本层命中只产出“套话短语”（短语原文 + 所属整句），供**定点改写该短语**；
+ * **不进删除判定**（整句删除仍由 isZeroInfoSloganSentence 承接——按短语删整句会连带删除句中实质信息）。
+ */
+
+/** 子句长度下限（6 字，自定）：实测缺陷短语「精心组织施工」恰为 6 字，下限必须 ≤6 才覆盖得住；
+ * 4 字以下是「满足要求」「符合规范」类合法短短语密集区（误伤源），且 bge 对 ≤4 字短语与长原型的
+ * 余弦噪声显著（长短失配），故取 6 字。更短的纯口号子句不会漏——它们由整句通道（整句即套话）承接。 */
+export const FILLER_PHRASE_MIN_CHARS = 6;
+
+/**
+ * 子句切分（单源）：先取**引号显式短语**，再把剩余部分按顿号/逗号切分。
+ * 为什么要取引号片段：实测缺陷形态是 `统一以“精心组织施工”为总控目标`——套话被引号显式括起，
+ * 引号即天然短语边界；只有取出引号内片段才能得到**正确的改写锚点**（“精心组织施工”），
+ * 而不是把“水泥稳定碎（砾）石各分项施工质量验收统一以”这类带框架词的残段交给修复端（改不动）。
+ */
+export function splitFillerPhrases(sentence: string): string[] {
+  const quoted: string[] = [];
+  const rest = sentence.replace(/["“”'']([^"“”'']{2,40})["“”'']/gu, (_all, inner: string) => {
+    quoted.push(inner);
+    return '，';
+  });
+  return [...rest.split(/[，,、]/u).map(part => part.trim()), ...quoted]
+    .filter(phrase => phrase.replace(/\s+/gu, '').length >= FILLER_PHRASE_MIN_CHARS);
+}
+
+/** 词面命中的“程度修饰保护”（实测误伤源）：FORBIDDEN_EMPTY_PHRASES 是词表，存在合法词**包含子串**的误伤
+ * ——实测「标准之间要求不一致时按最高标准执行」因“最高标准”含“高标准”被词面召回（该句是实质规则句）。
+ * 命中词左侧紧邻程度/比较修饰字即视为该处的合法组合（最高标准/更高标准/较高标准），不计本次命中。 */
+const FORBIDDEN_PHRASE_MODIFIER_CHARS = '最更较尤极超过偏';
+
+/** 空话短语词面命中（FORBIDDEN_EMPTY_PHRASES **单源词表** + isZeroInfoSloganSentence **单源零信息判据**）：
+ * 为什么不另造词表/判据——空话词表与零信息判据在本仓均已单源（生成侧禁写词库 / 整句删除安全前置），
+ * 本层只做**粒度下沉**（同一判据作用于子句），不造第二份标尺（C8-U 教训：双轨口径必然漂移）。 */
+function hitsForbiddenEmptyPhrase(phrase: string): boolean {
+  return FORBIDDEN_EMPTY_PHRASES.some(word => {
+    for (let index = phrase.indexOf(word); index >= 0; index = phrase.indexOf(word, index + 1)) {
+      const previous = index > 0 ? phrase[index - 1] : '';
+      if (!previous || !FORBIDDEN_PHRASE_MODIFIER_CHARS.includes(previous)) return true;
+    }
+    return false;
+  });
+}
+
+export interface FillerPhraseHit {
+  /** 套话短语原文（改写锚点：只改这一处，不删整句） */
+  phrase: string;
+  /** 所属整句原文（供修复端定位与提供上下文） */
+  sentence: string;
+  /** 与套话语义原型的最高余弦（观测与校准用：子句粒度下的分布见 judgeFillerPhrases 注释） */
+  similarity: number;
+  /** 命中通道：semantic=套话原型余弦命中；zero-info=空话词面 + 零信息判据（子句粒度）命中 */
+  channel: 'semantic' | 'zero-info';
+}
+
+/**
+ * 短语级套话判定（句数组入口：块质检/修复锚点端可按块或按章复用；markdown 级入口见 scanFillerPhrases）。
+ *
+ * **判据单源**：语义通道复用 `FILLER_SEMANTIC_QUERIES` 与 `FILLER_SENTENCE_THRESHOLD`（不另造原型库、
+ * 不另造阈值）；不修改整句判定的语义（judgeFillerSentences 仍是“整句即套话”的删除判定）。
+ *
+ * 离线实测（真实文档 878 句 → 3906 子句，bge-small-zh-v1.5）：
+ * - 子句最高余弦 **0.794**，≥0.80 命中 **0 条**——0.80 是**整句粒度**的校准点（14 条原型均为多分句长口号），
+ *   子句粒度下同一原型分数整体下移（实测缺陷短语「精心组织施工」= **0.673**，被稀释的子句 = 0.588）。
+ *   故语义通道照单源保留但**不在本语料开火**；短语级召回由 zero-info 通道承接
+ *   （该通道实测命中 3 条：真套话 2 条 + 词表子串误伤 1 条，加程度修饰保护后误伤归零）。
+ * - similarity 字段即为此留痕：后续若按子句粒度重新校准（需先做人工标注集），取证用本字段。
+ * 模糊应答（vague）通道**不下沉到子句**：其处置是“整句具体化”而非“短语改写”，且模糊词根
+ * （力争/尽量/基本）在子句粒度下的合法性高度依赖语境，下沉即误伤。
+ */
+export async function judgeFillerPhrases(
+  sentences: string[],
+  embedDocuments?: (texts: string[]) => Promise<number[][]>,
+): Promise<FillerPhraseHit[]> {
+  const entries: Array<{ phrase: string; sentence: string }> = [];
+  for (const sentence of sentences) {
+    for (const phrase of splitFillerPhrases(sentence)) entries.push({ phrase, sentence });
+  }
+  if (entries.length === 0) return [];
+  const similarity = await buildSemanticSimilarity(entries.map(entry => entry.phrase), [...FILLER_SEMANTIC_QUERIES], embedDocuments);
+  const hits: FillerPhraseHit[] = [];
+  for (const entry of entries) {
+    const score = Math.max(...FILLER_SEMANTIC_QUERIES.map(query => similarity(entry.phrase, query)));
+    if (score >= FILLER_SENTENCE_THRESHOLD) {
+      hits.push({ ...entry, similarity: score, channel: 'semantic' });
+    } else if (hitsForbiddenEmptyPhrase(entry.phrase) && isZeroInfoSloganSentence(entry.phrase)) {
+      hits.push({ ...entry, similarity: score, channel: 'zero-info' });
+    }
+  }
+  return hits;
+}
+
+/** markdown 级短语扫描（句池单源：buildFillerSentencePool 的过滤/切分口径与整句判定完全一致） */
+export async function scanFillerPhrases(
+  markdown: string,
+  embedDocuments?: (texts: string[]) => Promise<number[][]>,
+): Promise<FillerPhraseHit[]> {
+  return judgeFillerPhrases(buildFillerSentencePool(markdown), embedDocuments);
+}
+
+// ── 10.2 条款体复述（R9-b：法律/条款语体，零本项目信息的义务复述）──
+/**
+ * 缺口：既有 14 条套话原型全是**口号体**（精心组织/严格执行/加强管理…），条款语体不在覆盖内。
+ * 实测缺陷（行623，整段 202 字来自招标文件条款、零本项目信息、未被任何一层拦住）：
+ * 「我方在任何时候都应采取各种合理的预防措施，防止其员工发生任何违法、违禁、暴力或妨碍治安的行为…」
+ *
+ * 判据（确定性，主判据）：含**招标义务词** ∧ 不含**本项目实体** ∧ 不含**可核查承诺**
+ * ∧ 无**项目自指/岗位/手续/专业做法**锚点 → 判“条款复述”。
+ * 后四类闸门是**防过度**（实测：只用“义务词 ∧ 无实体”两条时全文命中 38/878，其中
+ * 「给水排水构筑物底板砼强度等级应采用C30」（材料牌号=量化参数）、
+ * 「凡在与已交工工程有关联的部位施工时，必须提前向甲方提出书面联系单」（手续锚点）、
+ * 「项目部编制生产安全事故应急救援预案…项目经理任组长，安全员负责日常应急管理」（岗位锚点）
+ * 等**有项目信息的技术句/措施句**被误判；逐闸补齐后 6/878，逐条人工复核为零项目信息的义务复述）。
+ */
+
+/** 招标义务词（条款语体标志词）：应/应当/应负责/必须/不得/须。
+ * 边界修正（实测误报源）：裸“应”会命中非义务子串用法——相应/响应/适应/对应/供应/反应/感应/顺应的
+ * **前字**与 应用/应急/应对/应诉 的**后字**均须排除，否则「采取相应的保护措施」「应急物资」
+ * 这类技术句会被判为义务表述（实测占误判大头）。 */
+export const CLAUSE_OBLIGATION_RE = /(?<![相响适对供感反效因顺])(?:应负责|应当|应(?!用|急|对|酬|诉|邀|允|聘|试|考)|必须|不得|须)/u;
+
+/** 本项目实体（判“零本项目信息”的反向锚点，四类）：单体名（1#厂房、2#门卫）/ 清单条目与条款引用 /
+ * 量化参数（数字 + 计量或计数单位，含 万/亿 级与材料牌号 C30、MU20）/ 图纸要素（轴线、标高、构件…）。
+ * 命中任一即**不判**条款复述（删掉项目信息的代价高于漏判一句套话）。 */
+export const PROJECT_ENTITY_RES = [
+  /[0-9０-９]\s*[#＃号]\s*[厂栋楼座幢区段]/u,
+  /(?:工程量清单|清单)(?:序号|编号|条目|项)|第[0-9]+(?:项|条)|[0-9]+(?:\.[0-9]+)+条/u,
+  /[0-9０-９](?:\.[0-9]+)?\s*(?:万|亿)?(?:mm|cm|m2|m²|m3|m³|km|kW|kV|MPa|kN|kPa|℃|°|t|吨|kg|%|平方米|立方米|米|天|日历天|小时|min|分钟|次|遍|台|套|根|处|个|户|座|层|栋|区|名|位|人|项|份|道|组)/iu,
+  /(?<![A-Za-z0-9])(?:MU|HRB|HPB|HRBF|Q|C|M)\s?[0-9]{1,4}(?:[.．][0-9]+)?(?![A-Za-z0-9])/iu,
+  /[一二三四五六七八九十百千两](?:次|遍|台|套|人|名|天|小时|分钟|米|平方米|立方米|层|栋|座|处|个|根|道|户|份|项|条|级)/u,
+  /轴线|标高|层高|跨度|断面|大样|节点|预埋|构件/u,
+] as const;
+
+/** 可核查承诺（防过度闸）：承诺/义务类动词 + 可核查客体（费用/工期/数量/人员/责任…），
+ * 或审批链（报…确认/认可/审核/同意/签字）——含则一律**不判**复述。
+ * 实测依据：规格给出的边界样例「我方承担整个工程的安全保卫等的费用」正是“承诺了费用承担”，
+ * 判复述会误导修复端删除可核查承诺（实质响应）——这类句子必须放行。 */
+const VERIFIABLE_COMMITMENT_RE = /(?:承担|承诺|保证|确保|负责|配备|投入|设置|提供|办理|填报|报送|报审|报验|完成|按期|保修|维护|满足|服从)[^。；;]{0,24}(?:费用|金额|价款|工期|日历天|质量目标|数量|台|套|份|人|名|次|项|手续|资料|责任|要求|内容|进度|义务)|(?:报|经|由)[^。；;]{0,10}(?:确认|认可|审核|批准|同意|签字|备案)/u;
+
+/** 项目自指（防过度闸）：句中出现“本工程/本项目/本设计/本方案”即非“零本项目信息”——
+ * 实测被排除例：「本设计中未考虑冬季、雨季的施工措施，施工单位应根据有关施工验收规范采取相应措施」
+ * （前半句是项目信息，后半句才是条款语体；整句判复述会连带删除项目信息）。 */
+const PROJECT_SELF_REFERENCE_RE = /本(?:工程|项目|设计|方案|标段|项目部)/u;
+
+/** 岗位锚点（防过度闸，与 isZeroInfoSloganSentence 的岗位词表同族）：实测被排除例
+ * 「项目部编制生产安全事故应急救援预案，成立应急领导小组，项目经理任组长，安全员负责日常应急管理」
+ * ——虽为通用话术，但承载了项目组织机构（有信息）。 */
+const CLAUSE_DUTY_POST_RE = /项目经理|技术负责人|施工员|质检员|专职安全员|安全员|材料员|资料员|试验员|测量员|班组长|监理|责任人|岗位|班组/u;
+
+/** 手续锚点（防过度闸）：实测被排除例「外来人员进入现场须登记领证，由门卫值守人员核验后放行」
+ * ——登记/核验/台账/归档等可核查手续属项目做法，不是条款复述。 */
+const CLAUSE_PROCEDURE_RE = /登记|领证|核验|签认|签字|归档|留存|台账|记录|备案|报审|报验/u;
+
+/** 专业做法锚点（防过度闸）：实测被排除例「填土夯实应夯夯相连、不得漏夯」「当日回填应当日夯实」
+ * ——含具体施工动作的技术句即便无量化参数也不是条款复述。 */
+const CLAUSE_PRACTICE_ANCHOR_RE = /浇筑|养护|摊铺|碾压|回填|砌筑|焊接|绑扎|安装|调试|试压|打压|涂装|降水|开挖|支模|振捣|张拉|防腐|保温|导流|闭水|夯实|铺设|铺贴|抹灰|吊装|测量|放线|取样|送检|检验批|隐蔽验收/u;
+
+/** 条款体复述判定（确定性单源：检测端与修复锚点端同入口）——先放行闸后判定，任一门命中即不判。 */
+export function isClauseRecitationSentence(sentence: string): boolean {
+  const compact = sentence.replace(/[\u200b-\u200f\u2060\ufeff]/gu, '').replace(/\s+/gu, '');
+  if (compact.length < 12) return false;
+  if (!CLAUSE_OBLIGATION_RE.test(compact)) return false;
+  if (PROJECT_ENTITY_RES.some(pattern => pattern.test(compact))) return false;
+  if (VERIFIABLE_COMMITMENT_RE.test(compact)) return false;
+  if (PROJECT_SELF_REFERENCE_RE.test(compact)) return false;
+  if (CLAUSE_DUTY_POST_RE.test(compact)) return false;
+  if (CLAUSE_PROCEDURE_RE.test(compact)) return false;
+  return !CLAUSE_PRACTICE_ANCHOR_RE.test(compact);
+}
+
+/** 条款复述全文扫描（句池单源，无需嵌入；修复锚点端逐章同口径） */
+export function scanClauseRecitationSentences(markdown: string): string[] {
+  return buildFillerSentencePool(markdown).filter(sentence => isClauseRecitationSentence(sentence));
+}
+
+/**
+ * 条款体语义原型（**与口号体原型互补**的寄存器基准）：口号体原型测“鼓动/管理空话”
+ * （精心组织、严格执行、加强管理——无义务主体、无权利义务结构），条款体原型测“权利义务复述”
+ * （主语为条款主体，谓语为 应/必须/不得 + 义务）。两者覆盖**不同语体**，单一原型库任一方都无法
+ * 同时覆盖（实测：202 字条款段对口号体原型最高余弦 0.691、对条款体 0.608——同一句两簇分数同量级，
+ * 说明 bge 把两者都读作“泛化义务/口号”）。
+ *
+ * 因此本原型库的角色是**观测与校准通道**（judgeClauseRecitations.clauseSimilarity），
+ * **不是开火判据**：实测零项目信息句池 92 句中 88 句口号体原型分数更高（条款原型未形成可分离簇），
+ * 拿它开火要么假阴性（AND 口径丢掉实测缺陷句）要么误伤（OR 口径引入“模板材质由投标人自行选择”类
+ * 实质句）。开火判据由确定性判据承接；本原型库为后续扩充/换模型时的重校准留基准。
+ */
+export const CLAUSE_RECITATION_SEMANTIC_PROTOTYPES = [
+  '我方应按照招标文件及合同约定履行义务',
+  '承包人必须服从发包人及监理人的管理',
+  '应按国家现行规范标准执行',
+  '我方应遵守招标文件的规定并承担相应责任',
+  '承包人应严格按照招标文件及合同约定组织实施并服从监理人的指令',
+] as const;
+
+export interface ClauseRecitationJudgement {
+  sentence: string;
+  /** 确定性判据命中（开火口径，见 isClauseRecitationSentence） */
+  clauseRecitation: boolean;
+  /** 条款体原型最高余弦（**观测与校准用**，不参与开火——理由见原型库注释） */
+  clauseSimilarity: number;
+}
+
+/** 条款复述句级判定器（clauseRecitation 由确定性判据决定，clauseSimilarity 仅留痕观测） */
+export async function judgeClauseRecitations(
+  sentences: string[],
+  embedDocuments?: (texts: string[]) => Promise<number[][]>,
+): Promise<ClauseRecitationJudgement[]> {
+  if (sentences.length === 0) return [];
+  const similarClause = await buildSemanticSimilarity(sentences, [...CLAUSE_RECITATION_SEMANTIC_PROTOTYPES], embedDocuments);
+  return sentences.map(sentence => ({
+    sentence,
+    clauseRecitation: isClauseRecitationSentence(sentence),
+    clauseSimilarity: Math.max(...CLAUSE_RECITATION_SEMANTIC_PROTOTYPES.map(prototype => similarClause(sentence, prototype))),
+  }));
+}
+
+// ── 10.3 表格内容泄漏成散文（R9-d：书名号枚举段无主谓）──
+/**
+ * 实测形态（行557）：「编制依据表」的条目被倒成一段散文——整段仅由书名号枚举构成、无主谓，
+ * 且末尾《建筑工程冬期施工规程》（JGJ/T 104）的年份被切掉：
+ * 「《建筑桩基技术规范》（JGJ 94-2008）、《建筑机电工程抗震设计规范》（GB 50981-2014）、…（JGJ/T 104）」
+ *
+ * 判据（纯形态，确定性）：书名号枚举 ≥3 处 ∧ 非书名号/非规范号残留占比 ≤35% ∧ 残留无谓语特征词。
+ * 阈值实测依据（同一真实文档）：
+ * - 泄漏段：书名号 7 处、残留占比 **0.029**（残留仅“、、、、、、”六个分隔符，无谓语）；
+ * - 合法依据引用段（含主谓：本工程执行《…》《…》等标准）：残留占比 **0.72~0.96**（谓语/宾语本身占字）；
+ * - 表格内的依据行（结构载体）：0.33~0.60，且带 `|` 标记 → 由“结构载体先剔除”规则直接放过。
+ * 故 0.35 在泄漏侧留 12 倍裕度、在合法侧留 2 倍裕度；结构载体（表格/列表/标题/引用行）是**正确载体**，
+ * 判泄漏会误伤，一律先剔除再判。
+ */
+export const TABLE_LEAK_MIN_BOOK_CITATIONS = 3;
+export const TABLE_LEAK_RESIDUAL_RATIO_LIMIT = 0.35;
+
+/** 书名号引用（《…》，限长 60 防跨段贪婪） */
+const TABLE_LEAK_BOOK_RE = /《[^《》]{1,60}》/gu;
+/** 规范/标准编号（GB 50202-2013、JGJ/T 104 式，含括号形态）：属“枚举构成”的一部分，不计入残留 */
+const TABLE_LEAK_STANDARD_CODE_RE = /[（(]?\s*(?:GB|JGJ|CJJ|CECS|JG|DB|JTG|SL|DL|TB|SH|HG|NB|YS)\s*\/?\s*T?\s*\d{2,5}(?:\s*[-—]\s*\d{2,4})?\s*[)）]?/giu;
+/** 谓语特征词（“无主谓”的确定性代理）：残留里出现任一谓语/谓词性成分即视为句子（不判泄漏） */
+const TABLE_LEAK_PREDICATE_RE = /执行|依据|按照|根据|采用|编制|组织|实施|施工|验收|安装|浇筑|检测|检查|管理|控制|负责|承担|落实|开展|进行|完成|建立|设置|确保|保证|满足|符合|规定|要求|参见|详见|遵照|遵守|结合|作为|包括|覆盖/u;
+
+/** 结构载体行判定（表格行/列表项/标题/引用）：这些是正确载体，不参与泄漏判定 */
+function isStructuralCarrierLine(line: string): boolean {
+  return /^(?:#{1,6}\s|[-*+]\s|>|\|)/u.test(line) || /[|｜]/u.test(line);
+}
+
+/** 表格内容泄漏段判定（单段：非书名号残留占比 + 无谓语 → 判泄漏） */
+export function isTableLeakParagraph(paragraph: string): boolean {
+  const compact = paragraph.replace(/[\u200b-\u200f\u2060\ufeff]/gu, '').replace(/\s+/gu, '');
+  if (!compact) return false;
+  const citations = compact.match(TABLE_LEAK_BOOK_RE)?.length ?? 0;
+  if (citations < TABLE_LEAK_MIN_BOOK_CITATIONS) return false;
+  const residual = compact.replace(TABLE_LEAK_BOOK_RE, '').replace(TABLE_LEAK_STANDARD_CODE_RE, '');
+  if (residual.length > compact.length * TABLE_LEAK_RESIDUAL_RATIO_LIMIT) return false;
+  return !TABLE_LEAK_PREDICATE_RE.test(residual);
+}
+
+/** 表格内容泄漏全文扫描（markdown 级）：按空行分块 → 剔除结构载体行（表格/列表/标题/引用）→ 逐段判定。
+ * 返回命中段原文，供修复端删段或改回表格（题注/编号由渲染层生成，不在本判据范围）。 */
+export function scanTableLeakParagraphs(markdown: string): string[] {
+  const paragraphs = markdown.split(/\n{2,}/u).map(block => block
+    .split('\n')
+    .map(line => line.replace(/[\u200b-\u200f\u2060\ufeff]/gu, '').trim())
+    .filter(line => line.length > 0 && !isStructuralCarrierLine(line))
+    .join('\n'));
+  return paragraphs.filter(paragraph => isTableLeakParagraph(paragraph));
+}

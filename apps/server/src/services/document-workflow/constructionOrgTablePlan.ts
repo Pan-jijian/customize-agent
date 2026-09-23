@@ -889,6 +889,154 @@ export function tableCaptionDefectIssues(markdown: string): TableCaptionDefectIs
  * 宁缺毋假）。无重复编号的章与附表区零改动；幂等（重放时旧=新，全静默）。
  * 判据全部为编号/结构形态，与具体项目无关。
  */
+/**
+ * 4.58 R9-e 连续多题注收敛（实测 `doc-1790168542563-ea526b1b`）。
+ *
+ * ## 现象
+ *
+ * ```
+ * #### 1.34.5 编制依据
+ * 本工程编制依据由…如下表所列。          ← 引导句
+ * 表1-34-1 本工程编制依据文件一览表      ← 题注①（模型按小节号 1.34 自编）
+ * 表1-3 依据文件一览表                   ← 题注②（模型按文档表序自编）
+ * | 类别 | 名称与文号 |                    ← 同一个表格
+ * ```
+ *
+ * ## 为什么注入器的幂等检查拦不住
+ *
+ * `injectTableCaptions` 的幂等判据是「表题行已带题注前缀 → 跳过注入」，而题注①②**都**带前缀，
+ * 于是注入器判定"该表已有题注"而跳过——**双题注原样进交付物**。这不是注入器失效，
+ * 而是"题注编号由模型决定"这一前提本身不成立：**编号是机械信息，不该由模型生成**。
+ *
+ * ## 口径
+ *
+ * 紧邻**同一张表**的连续题注行只保留**第一行**（其题名余文保留），其余删除；
+ * 编号随后由 `normalizeTableNumbering` 按当前表序统一重排——模型写下的编号一律不作数。
+ *
+ * 为何只删多余行而保留第一行的题名：题名是语义信息（可能比后续行更完整），
+ * 编号是机械信息；分离二者，各归其位。
+ *
+ * 安全性：连续 ≥2 行题注只可能出现在"同一张表被写了多个题注"的场景——两张不同的表之间
+ * 必然隔着表体（`|` 行），构不成连续。故本判据不会误删不同表的题注。
+ */
+export function collapseDuplicateTableCaptions(markdown: string): string {
+  const lines = markdown.replace(/\r/gu, '').split('\n');
+  const dropped = new Set<number>();
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!isTableCaptionLine(lines[index] || '')) continue;
+    // 收集从 index 起的连续题注行
+    let end = index;
+    while (end + 1 < lines.length && isTableCaptionLine(lines[end + 1] || '')) end += 1;
+    if (end === index) continue;
+    // 该批题注之后（跳过空行）必须是表格，否则不属"同一张表的多个题注"，原样保留
+    let probe = end + 1;
+    while (probe < lines.length && (lines[probe] || '').trim() === '') probe += 1;
+    if (!/^\s*\|/u.test(lines[probe] || '')) { index = end; continue; }
+    for (let drop = index + 1; drop <= end; drop += 1) dropped.add(drop);
+    index = end;
+  }
+  if (dropped.size === 0) return markdown;
+  return lines.filter((_, index) => !dropped.has(index)).join('\n');
+}
+
+/**
+ * 4.58 R9-e 脱位题注归位（实测 `doc-1790168542563-ea526b1b` 行266→269）。
+ *
+ * ## 现象
+ *
+ * ```
+ * 表1-2 可追溯的安装台账                    ← 题注
+ * 抗震支吊架安装完成后，由质检员…销项；      ← 模型继续写正文，把题注与表隔开
+ *
+ * | 工序节点 | 前置条件 | … |                ← 表格（因此无题注）
+ * ```
+ *
+ * 实测该文档 4 张无题注表格中，1 张属此形态（题注存在但与表格脱离，被终检判「缺少题注编号」）。
+ *
+ * ## 口径
+ *
+ * 题注行与其后**近距离**出现的表格之间若隔着**正文行**（≤2 行非空内容），把**题注下移到紧邻表格**
+ * （正文行保持原位）——题注属于表格，正文属于上下文，各归其位。
+ *
+ * 保守边界：只下移，不删除；间隔超过 2 行非空内容即视为"该题注属别处"，不作处理。
+ * 为何不下移表格：移动表体会影响正文引用位置与前后语义衔接，风险高于收益。
+ */
+const DETACHED_CAPTION_MAX_GAP_LINES = 2;
+
+/**
+ * 题注行判据（**多段编号**，R9-e 专用）。
+ *
+ * 为何不直接复用 `TABLE_CAPTION_PREFIX_RE`：后者以 `\s`（恰好一个空白）收尾，
+ * 且编号只允许一段破折号——实测模型写下的 `表1-34-1 本工程编制依据文件一览表`
+ *（按小节号 `1.34` 自编 + 表序）在它下面**不匹配**（`表1-34` 之后跟的是 `-` 不是空白），
+ * `MALFORMED_CAPTION_PREFIX_RE` 也不匹配（该判据要求破折号后为**非数字**，而这里是 `3`）。
+ * 两条判据的盲区叠加，使这类题注既不被认作题注、也不被认作残缺编号。
+ *
+ * 为何不直接放宽 `TABLE_CAPTION_PREFIX_RE`：它是**注入器的幂等判据**，
+ * 放宽会改变"是否跳过注入"的行为，波及面远大于本处所需。故 R9-e 用独立判据，
+ * 只服务于收敛与归位两个动作（语义是"这一行看起来是题注"）。
+ */
+const TABLE_CAPTION_LINE_RE = /^表\s*[\d一二三四五六七八九十]+(?:\s*[-－.．—]\s*[\d一二三四五六七八九十]+)*\s*[:：、.．]?\s*\S/u;
+
+/** 题注行判定（R9-e 专用；见 TABLE_CAPTION_LINE_RE 注释） */
+export function isTableCaptionLine(line: string): boolean {
+  return TABLE_CAPTION_LINE_RE.test((line || '').trim());
+}
+
+export function relocateDetachedTableCaptions(markdown: string): string {
+  const lines = markdown.replace(/\r/gu, '').split('\n');
+  const moves: Array<{ from: number; to: number }> = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!isTableCaptionLine(lines[index] || '')) continue;
+    // 向上/向下探：本行之后应紧跟表格才算"已就位"；否则在窗口内找表格
+    let probe = index + 1;
+    let intervening = 0;
+    let tableAt = -1;
+    while (probe < lines.length) {
+      const text = (lines[probe] || '').trim();
+      if (text === '') { probe += 1; continue; }
+      if (/^\s*\|/u.test(lines[probe] || '')) { tableAt = probe; break; }
+      if (/^#{1,6}\s/u.test(text) || isTableCaptionLine(text)) break;
+      intervening += 1;
+      if (intervening > DETACHED_CAPTION_MAX_GAP_LINES) break;
+      probe += 1;
+    }
+    if (tableAt < 0 || intervening === 0) continue;
+    moves.push({ from: index, to: tableAt });
+  }
+  if (moves.length === 0) return markdown;
+  // 自下而上处理，避免行号漂移
+  const byFrom = new Map(moves.map(move => [move.from, move.to]));
+  const removed = new Set(moves.map(move => move.from));
+  // 题注必须落在**表格行之前**（insertBefore），不是之后——否则题注会跑到表体下面（首版实测踩过）
+  const insertBefore = new Map<number, string[]>();
+  for (const move of moves) {
+    const list = insertBefore.get(move.to) || [];
+    list.push(lines[move.from] || '');
+    insertBefore.set(move.to, list);
+  }
+  const output: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const pending = insertBefore.get(index);
+    if (pending) output.push(...pending);
+    if (!removed.has(index)) output.push(lines[index]);
+  }
+  return output.join('\n');
+}
+
+/**
+ * 表格题注收口**单一入口**（4.58 R9-e）。
+ *
+ * 题注链此前在 4 处各自拼 `normalizeTableNumbering(injectTableCaptions(x))`——拼接方式一致但
+ * **没有任何机制保证后续新增步骤被各处同步**（本仓反复出现的"判据分裂"形态）。
+ * 收敛为单一入口后，新增/调整步骤只需改这一处。
+ */
+export function finalizeTableCaptions(markdown: string): string {
+  // 顺序有意：先归位脱位题注（让它们回到表格上方，注入器才能认出"已有题注"），
+  // 再收敛连续多题注（去重），再注入缺失的，最后统一重排编号。
+  return normalizeTableNumbering(collapseDuplicateTableCaptions(injectTableCaptions(relocateDetachedTableCaptions(markdown))));
+}
+
 export function normalizeTableNumbering(markdown: string): string {
   const split = relocateCaptionFollowUps(splitGluedTableCaptions(markdown));
   const lines = split.replace(/\r/gu, '').split('\n');

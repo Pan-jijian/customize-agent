@@ -44,7 +44,7 @@ import { displayStage, upsertProgressStage } from '../progress';
 import { buildValidationIssues } from '../chapterGeneration';
 import { chapterSectionFactUsageIssues } from '../chapterReview';
 import { factCoverageIssues, finalizeChapterContentQuality, finalizeFinalMarkdownStructure, removeDuplicateProjectBasicInfoBlocks, normalizeProjectBasicInfoTable, partialChapterStatus, criticalSectionBlockerLine, projectBasicPlaceholderIssues, validateDraft, vectorStatusLabel } from '../documentGeneratorHelpers';
-import { collectFigurePlaceholderSpecs, ensureFigureAsTables, injectTableCaptions, normalizeTableNumbering } from '../constructionOrgTablePlan';
+import { collectFigurePlaceholderSpecs, ensureFigureAsTables, finalizeTableCaptions } from '../constructionOrgTablePlan';
 import { figureSubstituteTableLines } from '../figureSubstituteTables';
 import { generatedRoot } from '../../document-core/generatedDocumentService';
 import * as fs from 'node:fs';
@@ -476,7 +476,7 @@ export function stageComposeFinal(session: FinalizeSession): void {
   // B-T1 图位链（与题注链同为链尾确定性注入）：图类要求规格补位（幂等）→ 图题编号归一化（章序-图序连续 + 引用同步）
   if (!bodyTableForbidden) {
     // 4.55.25 零图口径：图类要求一律以**数据表**落实（图题/图号/图件均已取消，无图号归一化步骤）
-    session.finalMarkdown = normalizeTableNumbering(injectTableCaptions(session.finalMarkdown));
+    session.finalMarkdown = finalizeTableCaptions(session.finalMarkdown);
     session.finalMarkdown = ensureFigureAsTables(session.finalMarkdown, figurePlaceholderSpecs(session), {
       substituteTable: name => figureSubstituteTableLines(session.blueprintData, name),
     }).markdown;
@@ -534,7 +534,7 @@ export async function stageRebuildAndRecompute(session: FinalizeSession): Promis
     // 该表重新无题注直坠终检；注入器幂等可重放，正文禁表跳过
     // B-T1 图位链（同口径）：规格补位 + 编号归一化，正文禁表跳过
     if (isBodyTableForbidden(session.bidComposition)) return rebuilt;
-    return ensureFigureAsTables(normalizeTableNumbering(injectTableCaptions(rebuilt)), figureSpecs, {
+    return ensureFigureAsTables(finalizeTableCaptions(rebuilt), figureSpecs, {
       substituteTable: name => figureSubstituteTableLines(session.blueprintData, name),
     }).markdown;
   };

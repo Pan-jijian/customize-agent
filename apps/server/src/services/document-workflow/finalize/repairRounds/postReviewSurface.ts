@@ -14,7 +14,7 @@ import { fixUnsupportedTotalClaims, fixUnsourcedNameBindings, fixMislocatedNameB
 import { fixWorkInjuryInsuranceStatement } from '../../utils';
 import { fixPreliminaryActionTimingDeterministically, fixEquipmentEntryTimingDeterministically } from '../../integrity/detectors/detectors';
 import { fixListingJargonInCriticalPackageSections } from '../../constructionOrgQualityRules';
-import { injectTableCaptions, normalizeTableNumbering, recoverTitlelessTableTitlesFromDrafts } from '../../constructionOrgTablePlan';
+import { finalizeTableCaptions, recoverTitlelessTableTitlesFromDrafts } from '../../constructionOrgTablePlan';
 import { cleanFormalSourcePhrases, normalizeInlineListBreaks } from '../../markdownComposer';
 import { isBodyTableForbidden } from '../../bidComposition';
 import { enforcePlannedSectionCompleteness, mergeNearDuplicateSectionHeadings } from '../../globalQualityGates';
@@ -496,7 +496,7 @@ export async function runSurfaceDeterministicCleans(session: FinalizeSession): P
   if (!isBodyTableForbidden(session.bidComposition)) {
     const titleRecovery = recoverTitlelessTableTitlesFromDrafts(session.finalMarkdown, session.finalChapterDrafts.map(chapter => chapter.content || ''));
     // B-T1 图题链同口径收口：章级 patch/重建可能使图题编号错位——重跑编号归一化（幂等，无图题零改动）
-    const captionChainMarkdown = normalizeTableNumbering(injectTableCaptions(titleRecovery.markdown));
+    const captionChainMarkdown = finalizeTableCaptions(titleRecovery.markdown);
     if (captionChainMarkdown !== session.finalMarkdown) {
       session.finalMarkdown = captionChainMarkdown;
       await session.recomputeFinalValidationBundle();
@@ -585,7 +585,7 @@ export async function replaySurfacePunctuationClosure(session: FinalizeSession):
   }
   if (!isBodyTableForbidden(session.bidComposition)) {
     const titleRecovery = recoverTitlelessTableTitlesFromDrafts(markdown, session.finalChapterDrafts.map(chapter => chapter.content || ''));
-    const captionChain = normalizeTableNumbering(injectTableCaptions(titleRecovery.markdown));
+    const captionChain = finalizeTableCaptions(titleRecovery.markdown);
     if (captionChain !== markdown) {
       markdown = captionChain;
       applied.push(titleRecovery.recovered > 0 ? `表格题名回填 ${titleRecovery.recovered} 张` : '表格题注编号链收口');
