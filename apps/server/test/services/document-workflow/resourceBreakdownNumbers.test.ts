@@ -22,8 +22,9 @@ function authorityOf(labor: unknown, equipment: unknown[] = [], materialsPlan: u
   return authority;
 }
 
-/** 清单事实锁（口径分层第二源）：条目名 + 工程量 + 规格-数量对（规格 token 照抄锁） */
-function lockOf(rows: Array<{ name: string; quantity: number; unit?: string; specs?: string[] }>): BillFactLock {
+/** 清单事实锁（口径分层第二源）：条目名 + 工程量 + 规格-数量对（规格 token 照抄锁）
+ *  village=该条目所属单体/分区标识（语句口径层级判定用；缺省为空 = 无单体语境） */
+function lockOf(rows: Array<{ name: string; quantity: number; unit?: string; specs?: string[]; village?: string }>): BillFactLock {
   const entries: BillFactLockEntry[] = rows.map((row, index) => ({
     seq: index + 1,
     name: row.name,
@@ -32,7 +33,7 @@ function lockOf(rows: Array<{ name: string; quantity: number; unit?: string; spe
     unit: row.unit || '',
     section: '',
     subsection: '',
-    villageGroup: '',
+    villageGroup: row.village || '',
     sourceFile: 'test-lock.xls',
     specQuantityPairs: (row.specs || []).map(spec => ({ spec, quantity: `${row.quantity}${row.unit || ''}` })),
   }));
@@ -237,5 +238,86 @@ describe('4.55.30 材料拆分口径分层（逐条口径优先于项目级汇�
     expect(result.residualCount).toBe(0);
     expect(result.markdown).toContain('管道消毒冲洗DN400.6m');
     expect(result.markdown).not.toContain('140.4');
+  });
+});
+
+// ═══════ 4.55.32 材料拆分口径层级对齐（巢湖真实 draft 五条疑似误报归因，机制口径） ═══════
+// ① 量词口径闸：抽取量词必须属该材料权威量词集（蓝图单位 ∪ 清单逐条单位）；
+// ② 项目级语句合法口径 = 各逐条值 ∪ 逐条值合计（组和）∪ 蓝图汇总；
+// ③ 单体语句（逐条口径含 ≥2 个单体/分区标识且本句点名其一）合法口径 = 该单体逐条值。
+describe('4.55.32 材料拆分量词口径闸（跨量词取值不参与比对）', () => {
+  // 巢湖模板原文形态：水表（组）与 井室/砌筑检查井（座）同句，且后者列表紧邻水表规格
+  const materialsPlan = [
+    { name: '水表', spec: 'DN65', quantity: 2, unit: '组', basis: '' },
+    { name: '水表', spec: 'DN40', quantity: 1, unit: '组', basis: '' },
+    { name: '砌筑检查井', spec: 'DN65', quantity: 4, unit: '座', basis: '' },
+    { name: '砌筑检查井', spec: 'DN100', quantity: 17, unit: '座', basis: '' },
+  ];
+  const lock = lockOf([
+    { name: '水表', quantity: 2, unit: '组', specs: ['DN65'] },
+    { name: '水表', quantity: 1, unit: '组', specs: ['DN40'] },
+    { name: '砌筑检查井', quantity: 4, unit: '座', specs: ['DN65', 'DN100'] },
+    { name: '砌筑检查井', quantity: 17, unit: '座', specs: ['DN100', 'DN150'] },
+  ]);
+  /** 原文：水表 7 组按 DNxx N组…；井室 54 座按 DNxx N座…（座值曾按「组」报出：水表（DN40）正文 29组） */
+  const markdown = '室外给水水表2组按DN65 2组、DN40 1组安装于砌筑检查井内，井室50座按DN40 29座、DN65 4座、DN100 21座砌筑。';
+
+  it('井室列表的座值不再按组抽到水表名下（零claim）', () => {
+    expect(scanResourceBreakdownClaims(markdown, authorityOf({ composition: [] }, [], materialsPlan, lock))).toEqual([]);
+  });
+
+  it('砌筑检查井 DN100 组和（4+17=21）属项目级汇总明细 → 不判偏离（对照：25 照报蓝图权威 17）', () => {
+    const authority = authorityOf({ composition: [] }, [], materialsPlan, lock);
+    const drifted = scanResourceBreakdownClaims('水表2组安装于砌筑检查井内，井室50座按DN40 29座、DN65 4座、DN100 25座砌筑。', authority);
+    expect(drifted).toHaveLength(1);
+    expect(drifted[0]).toMatchObject({ label: '材料拆分 砌筑检查井（DN100）', actual: 25, expected: 17 });
+    expect(drifted[0]?.message).toContain('蓝图权威 17座');
+  });
+
+  it('同量词真漂移照报，且逐条=汇总时报文不带「跨单体总量」提示（防自相矛盾报文）', () => {
+    const claims = scanResourceBreakdownClaims('室外给水水表2组按DN65 5组、DN40 1组安装于砌筑检查井内。', authorityOf({ composition: [] }, [], materialsPlan, lock));
+    expect(claims).toHaveLength(1);
+    expect(claims[0]).toMatchObject({ label: '材料拆分 水表（DN65）', actual: 5, expected: 2 });
+    expect(claims[0]?.message).toContain('清单逐条口径 2组');
+    expect(claims[0]?.message).not.toContain('跨单体总量');
+  });
+});
+
+describe('4.55.32 语句口径层级 ↔ 权威口径层级（单体语句比逐条、项目级语句比汇总）', () => {
+  const materialsPlan = [
+    { name: '管道消毒冲洗', spec: 'DN25', quantity: 229.2, unit: 'm', basis: '' },
+    { name: '管道消毒冲洗', spec: 'DN40', quantity: 140.4, unit: 'm', basis: '' },
+  ];
+  const lock = lockOf([
+    { name: '管道消毒冲洗', quantity: 0.6, unit: 'm', specs: ['DN40'], village: '3#门卫' },
+    { name: '管道消毒冲洗', quantity: 139.8, unit: 'm', specs: ['DN40'], village: '室外管网' },
+  ]);
+
+  it('项目级语句写汇总值（跨单体总量）→ 放行', () => {
+    const authority = authorityOf({ composition: [] }, [], materialsPlan, lock);
+    expect(scanResourceBreakdownClaims('全项目管道消毒冲洗DN40 140.4m。', authority)).toEqual([]);
+  });
+
+  it('单体语句写汇总值 → 报出并以该单体逐条口径为期望值（不得把跨单体总量写进单体语句）', () => {
+    const claims = scanResourceBreakdownClaims('3#门卫给水系统管道消毒冲洗DN40 140.4m。', authorityOf({ composition: [] }, [], materialsPlan, lock));
+    expect(claims).toHaveLength(1);
+    expect(claims[0]).toMatchObject({ actual: 140.4, expected: 0.6 });
+    expect(claims[0]?.message).toContain('清单逐条口径 0.6m');
+    expect(claims[0]?.message).toContain('蓝图汇总 140.4m 为跨单体总量');
+  });
+
+  it('单体语句写本单体逐条口径 → 放行；无单体语境且值不属任一层口径 → 照报', () => {
+    const authority = authorityOf({ composition: [] }, [], materialsPlan, lock);
+    expect(scanResourceBreakdownClaims('3#门卫给水系统管道消毒冲洗DN40 0.6m。', authority)).toEqual([]);
+    const stray = scanResourceBreakdownClaims('全项目管道消毒冲洗DN40 1m。', authority);
+    expect(stray).toHaveLength(1);
+    expect(stray[0]).toMatchObject({ actual: 1, expected: 140.4 });
+  });
+
+  it('修复器在单体语句上按该单体逐条口径收敛（写汇总值被改写为 0.6m 且复检零残留）', () => {
+    const result = fixResourceBreakdownNumbers('3#门卫给水系统管道消毒冲洗DN40 140.4m。', authorityOf({ composition: [] }, [], materialsPlan, lock));
+    expect(result.fixedCount).toBe(1);
+    expect(result.residualCount).toBe(0);
+    expect(result.markdown).toContain('管道消毒冲洗DN40 0.6m');
   });
 });

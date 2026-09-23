@@ -14,6 +14,9 @@
  * 2. 机械台数：单条目锚定「名称后 ≤2 桥接字 + 数字+台」（禁 12 字无锚定搜索——基线实测
  *    「其中3台」「1台转入」分配语境被误采）；同名多条目按规格词语境单独比对（不互串）。
  * 3. 材料拆分：同名多规格 + 同族单位 + 合计行豁免。
+ *    + 4.55.30 归属锚定（分句内最近权威材料名）+ 口径分层（蓝图汇总 vs 清单逐条）；
+ *    + 4.55.32 量词口径闸（抽取量词须属该材料权威量词集，座≠组不得互当）+ 语句口径层级对齐
+ *      （单体语句比该单体逐条口径，项目级语句比汇总/逐条合计，报文只在逐条确实窄于汇总时提示跨单体总量）。
  *
  * + C-T4 跨章机械矩阵共用抽取（scanEquipmentCountClaims / normalizeEquipmentClaimName /
  *   equipmentNameAtEndOf）：constructionOrgConsistency 机械数量型号规则（资料事实对账）与
@@ -32,8 +35,9 @@ export interface ResourceBreakdownAuthority {
   /** 口径分层（4.55.30）：同名同规格材料的**清单逐条口径**集（键 `${name}\u0000${SPEC}`，规格去空白大写归一）。
    *  materials 的 quantity 是蓝图**项目级汇总**（跨单体求和），本表是**逐条口径**（单体/条目级）——
    *  正文在单体语境引用逐条口径属正常，不得拿汇总值比对/改写（详见 scanResourceBreakdownClaims §3）。
+   *  scope=该清单条目所属单体/分区标识（villageGroup→section 回退），供语句口径层级判定（4.55.32）。
    *  无清单事实锁时为空表（行为与既有逐字一致）。 */
-  scopedQuantities: Map<string, Array<{ value: number; unit: string }>>;
+  scopedQuantities: Map<string, Array<{ value: number; unit: string; scope: string }>>;
 }
 
 export interface ResourceBreakdownClaim {
@@ -178,6 +182,7 @@ function buildScopedQuantities(lock?: BillFactLock): ResourceBreakdownAuthority[
   for (const entry of lock.entries) {
     const name = (entry.name || '').trim();
     if (!name || !Number.isFinite(entry.quantity)) continue;
+    const scope = (entry.villageGroup || entry.section || '').trim();
     for (const pair of entry.specQuantityPairs || []) {
       const spec = (pair.spec || '').trim();
       if (!spec) continue;
@@ -187,11 +192,76 @@ function buildScopedQuantities(lock?: BillFactLock): ResourceBreakdownAuthority[
       if (!Number.isFinite(value)) continue;
       const key = `${name}\u0000${normalizeSpecLookupKey(spec)}`;
       const list = map.get(key) || [];
-      list.push({ value, unit: parsed[2] || '' });
+      list.push({ value, unit: parsed[2] || '', scope });
       map.set(key, list);
     }
   }
   return map;
+}
+
+// ═══════ 4.55.32 口径层级对齐辅助（量词口径闸 / 语句层级判定，机制化无材料名与数值白名单） ═══════
+
+/** 量词等价组（同维度词面别名；**不含同族不同量词**——座/组/个/套是不同计数口径，不得互当） */
+const QUANTITY_UNIT_ALIAS_GROUPS: readonly (readonly string[])[] = [
+  ['m3', 'm³', '立方米', '方'],
+  ['m2', 'm²', '㎡', '平方米'],
+  ['m', '米', '延长米'],
+  ['t', '吨'],
+  ['kg', '千克', '公斤'],
+];
+
+/** 权威单位串 → 量词 token 集：「组（个）」双记 组/个；空串视为不设闸 */
+function quantityUnitTokens(unit: string): string[] {
+  const trimmed = (unit || '').trim().toLowerCase();
+  if (!trimmed) return [];
+  const tokens = new Set<string>([trimmed.replace(/[（(][^）)]*[)）]/gu, '').trim()]);
+  for (const match of trimmed.matchAll(/[（(]([^）)]*)[)）]/gu)) tokens.add((match[1] || '').trim());
+  return [...tokens].filter(token => token.length > 0);
+}
+
+function quantityUnitTokenEquivalent(left: string, right: string): boolean {
+  const a = left.trim().toLowerCase();
+  const b = right.trim().toLowerCase();
+  if (!a || !b) return true;
+  if (a === b) return true;
+  return QUANTITY_UNIT_ALIAS_GROUPS.some(group => group.includes(a) && group.includes(b));
+}
+
+/** 量词口径闸（4.55.32，机制）：正文抽取到的量词必须属该材料的权威量词集
+ *  （蓝图汇总单位 + 清单逐条单位，别名组等价）。量词不同 = 计数口径不同：
+ *  巢湖实测「井室54座按DN40 29座…」的 29（座）被抽到 水表（DN40，组）名下 →
+ *  假冲突「水表（DN40）正文 29组，清单逐条口径 1组」——数值与单位皆错位。 */
+function quantityCaliberMatches(actualToken: string, item: { unit: string }, scoped: Array<{ unit: string }>): boolean {
+  const tokens = [...quantityUnitTokens(item.unit), ...scoped.flatMap(entry => quantityUnitTokens(entry.unit))];
+  if (tokens.length === 0) return true; // 权威侧无量词 → 不设闸（保持既有行为）
+  return tokens.some(token => quantityUnitTokenEquivalent(actualToken, token));
+}
+
+/** 单体/分区标识 → 文本可比 token 集（全文 + 顿号/括号切段 + `N#单体` 短形）：
+ *  「3#门卫」「公厕」「室外安装工程」「白水塘、双塘」均可与正文点名比对，无硬编码词表。 */
+function scopeMarkerTokens(scope: string): string[] {
+  const trimmed = (scope || '').trim();
+  if (trimmed.length < 2) return [];
+  const tokens = new Set<string>([trimmed]);
+  for (const part of trimmed.split(/[、，,;；/（）()\s]+/u)) {
+    const seg = part.trim();
+    if (seg.length >= 2) tokens.add(seg);
+  }
+  for (const match of trimmed.matchAll(/\d+#[\p{Script=Han}]{2}/gu)) tokens.add(match[0]);
+  return [...tokens].filter(token => token.length >= 2);
+}
+
+/** 语句层级判定（4.55.32，机制）：逐条口径集含 ≥2 个不同单体/分区标识、且本句**恰点名其一** →
+ *  返回该单体的逐条值集（多值附该单体明细合计）——此即**单体语句**，比对基准=该单体逐条口径；
+ *  未点名 / 多标识并现 / 逐条口径本就同属一个单体 → undefined（**项目级语句**，按项目级口径比对）。 */
+function statementScopeValues(scoped: Array<{ value: number; scope: string }>, statement: string): number[] | undefined {
+  const markers = [...new Set(scoped.map(entry => entry.scope).filter(scope => scope.length > 0))];
+  if (markers.length < 2) return undefined;
+  const named = markers.filter(marker => scopeMarkerTokens(marker).some(token => statement.includes(token)));
+  if (named.length !== 1) return undefined;
+  const values = [...new Set(scoped.filter(entry => entry.scope === named[0]).map(entry => entry.value))];
+  if (values.length === 0) return undefined;
+  return values.length === 1 ? values : [...values, values.reduce((sum, value) => sum + value, 0)];
 }
 
 /** 蓝图 → 权威口径（无蓝图返回 undefined，检测/修复一致静默跳过）；
@@ -467,27 +537,40 @@ export function scanResourceBreakdownClaims(markdown: string, authority: Resourc
       const after = markdown.slice(afterStart, afterStart + 16);
       const match = MATERIAL_SPLIT_QUANTITY_RE.exec(after);
       if (!match) continue;
-      if (materialUnitFamily(match[2]) !== item.family) continue;
+      const unitToken = match[2]!;
+      if (materialUnitFamily(unitToken) !== item.family) continue;
       const actual = Number(match[1]);
-      // 4.55.30 口径分层（机制，无材料名/数值白名单）：同名同规格材料的数量有两层口径——
-      // 蓝图 materialsPlan 是**项目级汇总**（跨单体求和），清单事实锁是**逐条口径**（单体/条目级）。
-      // 正文在单体语境引用逐条口径属正常：拿汇总值比对会把合规引用判成偏离，并会把汇总值硬写进
-      // 单体语句（巢湖实测：3#门卫「管道消毒冲洗 DN40 1m」被判「蓝图权威 140.4m」——140.4m 是
-      // 1#厂房+室外+门卫的消毒冲洗总量，3#门卫逐条口径 0.600m）。逐条口径集非空时以其为准：
-      // ① 正文值 ∈ 逐条口径集 → 该语句与某条清单口径一致 → 不判偏离；
-      // ② 逐条口径唯一 → 机器可裁决的期望值取该逐条口径（message 与硬替换目标同步修正）；
-      // ③ 逐条口径多值 → 无唯一裁决依据，维持蓝图汇总口径（交 LLM/人工）。
+      // 4.55.32 量词口径闸：抽取量词必须属该材料权威量词集（防跨量词取值——「…按DN40 29座…」的
+      // 29（座）被抽到 水表（组）名下，见 quantityCaliberMatches 注解）
       const scoped = (authority.scopedQuantities.get(`${item.name}\u0000${normalizeSpecLookupKey(item.spec)}`) || [])
         .filter(entry => materialUnitFamily(entry.unit) === item.family);
+      if (!quantityCaliberMatches(unitToken, item, scoped)) continue;
+      // 4.55.30/4.55.32 口径分层（机制，无材料名/数值白名单）：同名同规格材料的数量有两层口径——
+      // 蓝图 materialsPlan 是**项目级汇总**（跨单体求和），清单事实锁是**逐条口径**（单体/条目级）。
+      // 正文在任一层口径内引用均属正常：拿汇总值比对会把合规引用判成偏离，并会把汇总值硬写进
+      // 单体语句（巢湖实测：3#门卫「管道消毒冲洗 DN40 1m」被判「蓝图权威 140.4m」——140.4m 是
+      // 1#厂房+室外+门卫的消毒冲洗总量，3#门卫逐条口径 0.600m）。
+      // 4.55.32 口径层级对齐（语句层级 ↔ 权威口径层级）：
+      // ① **单体语句**（逐条口径集含 ≥2 个单体/分区标识且本句点名其一）：合法口径 = 该单体的逐条值集
+      //    ——正文写跨单体汇总值/其它单体值 → 报出，期望值取该单体逐条口径（硬替换不得写汇总值）；
+      // ② **项目级语句**：合法口径 = 各逐条值 ∪ 逐条值合计（项目级汇总明细）∪ 蓝图汇总
+      //    ——正文写项目级汇总值 → 放行（项目级语句本就应该用汇总）；
+      // ③ 逐条口径唯一 → 机器可裁决的期望值取该逐条口径（message 与硬替换目标同步修正）；
+      //    多值且无单体语境 → 无唯一裁决依据，维持蓝图汇总口径（交 LLM/人工）。
+      const scopeValues = statementScopeValues(scoped, markdown.slice(sentenceStart, lineStart + nextBreak));
+      const scopedValues = [...new Set(scoped.map(entry => entry.value))];
+      const scopedAggregate = scopedValues.length > 1 ? scopedValues.reduce((sum, value) => sum + value, 0) : undefined;
+      const legalValues = scopeValues ?? [...scopedValues, ...(scopedAggregate === undefined ? [] : [scopedAggregate]), item.quantity];
+      if (legalValues.some(value => Math.abs(value - actual) < 1e-9)) continue;
       let expected = item.quantity;
       let authorityLabel = '蓝图权威';
-      if (scoped.length > 0) {
-        if (scoped.some(entry => Math.abs(entry.value - actual) < 1e-9)) continue;
-        const distinct = [...new Set(scoped.map(entry => entry.value))];
-        if (distinct.length === 1) {
-          expected = distinct[0]!;
-          authorityLabel = '清单逐条口径';
-        }
+      const singleScopeValue = scopeValues && scopeValues.length === 1 ? scopeValues[0] : undefined;
+      if (singleScopeValue !== undefined) {
+        expected = singleScopeValue;
+        authorityLabel = '清单逐条口径';
+      } else if (scopedValues.length === 1) {
+        expected = scopedValues[0]!;
+        authorityLabel = '清单逐条口径';
       }
       if (actual === expected) continue;
       const numStart = afterStart + match[0].indexOf(match[1]);
@@ -498,9 +581,11 @@ export function scanResourceBreakdownClaims(markdown: string, authority: Resourc
         end: numStart + match[1].length,
         actual,
         expected,
+        // 4.55.32 报文口径同步：仅当逐条口径确实窄于汇总（两层口径不等）时才提示「汇总为跨单体总量」，
+        // 防「清单逐条口径 1组（蓝图汇总 1组…）」类自相矛盾报文（巢湖实测 4 条）
         message: authorityLabel === '蓝图权威'
           ? `材料规格拆分数量与蓝图权威不一致：${item.name}（${item.spec}）正文 ${actual}${item.unit}，蓝图权威 ${item.quantity}${item.unit}`
-          : `材料规格拆分数量与清单逐条口径不一致：${item.name}（${item.spec}）正文 ${actual}${item.unit}，清单逐条口径 ${expected}${item.unit}（蓝图汇总 ${item.quantity}${item.unit} 为跨单体总量，不得直接引用到单体语句）`,
+          : `材料规格拆分数量与清单逐条口径不一致：${item.name}（${item.spec}）正文 ${actual}${item.unit}，清单逐条口径 ${expected}${item.unit}${Math.abs(item.quantity - expected) < 1e-9 ? '' : `（蓝图汇总 ${item.quantity}${item.unit} 为跨单体总量，不得直接引用到单体语句）`}`,
         suggestion: '同名多规格材料的拆分数量必须与清单逐项一致，不得自行分配；单体语句的数量按该单体的清单逐条口径引用，不得引用跨单体汇总值。',
       });
     }
