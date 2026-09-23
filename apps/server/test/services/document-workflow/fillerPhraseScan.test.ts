@@ -217,7 +217,13 @@ describe('R9-b 防过度：实体/承诺/锚点任一命中即不判复述', () 
     expect(isClauseRecitationSentence('本工程2#门卫、3#门卫为框架结构，抗震设防烈度7度')).toBe(false);
   });
 
-  it('含量化参数（数字+单位）的进度句 → 不判', () => {
+  it('含量化参数（数字/中文数字 + 单位，量词单源 MEASURE_UNIT_SOURCE）→ 不判', () => {
+    expect(isClauseRecitationSentence('锚栓抗拔承载力须满足设计要求，斜撑角度偏差不超过5°')).toBe(false);
+    expect(isClauseRecitationSentence('填土压实度不得低于93%，每层虚铺厚度不超过300mm')).toBe(false);
+    expect(isClauseRecitationSentence('混凝土试块应按每100m³留置一组，养护不少于三组')).toBe(false);
+  });
+
+  it('含可核查承诺（承诺动词 + 客体：报送…进度报表）→ 不判', () => {
     expect(isClauseRecitationSentence('承包人必须按批准的施工总进度计划组织施工，每周五17时前报送周进度报表')).toBe(false);
   });
 

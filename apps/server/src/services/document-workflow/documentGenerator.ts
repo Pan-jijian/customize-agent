@@ -95,13 +95,22 @@ export async function generateDocumentDraft(input: { templateId: string; require
   }
 
   // F1 缺规划小节补写收口（不依赖全局一致性审查开关，与骨架收口同口径）：写作侧小节留空
-  // （分节管线质检拒/空响应）时章节节点 failed 但达标契约下无章级补写循环，此处单轮兑底补写
-  await enforcePlannedSectionCompleteness({
-    chapterDraftsFinal: session.chapterLoop.chapterDraftsFinal, template: session.prepare.template, repairPromptTexts: session.prepare.repairPromptTexts,
-    requirement: session.global.input.requirement, signal: session.global.input.signal,
-    generationDiagnostics: session.planning.generationDiagnostics, progressStages: session.global.progressStages, emitProgress: session.global.emitProgress, withProgressHeartbeat: session.global.withProgressHeartbeat,
-    bidComposition: session.understanding.bidComposition,
-  });
+  // （分节管线质检拒/空响应）时章节节点 failed 但达标契约下无章级补写循环，此处兑底补写。
+  //
+  // 4.58 R1-c **迭代到收敛**：本函数是「尽力而为」实现——单次调用只按**当次**入口重算的缺口下达补写，
+  // 而 LLM 一次未必补齐全部（实测 `doc-1790168542563-ea526b1b`：`planned-section-repair` 阶段报
+  // 「补写完成：补写 2 章」，终稿仍缺 `钢筋加工绑扎与代换管理`、`1#/2#/3#门卫土建结构与基础工程`）。
+  // 现循环调用：函数入口每次重算缺口，缺口清零或本次无 patch 落地即自然退出（不会空转），
+  // 上限 3 轮防死循环——每轮仅在上一轮确有 patch 落地时才继续。
+  for (let plannedSectionPass = 0; plannedSectionPass < 3; plannedSectionPass += 1) {
+    const plannedSectionPassResult = await enforcePlannedSectionCompleteness({
+      chapterDraftsFinal: session.chapterLoop.chapterDraftsFinal, template: session.prepare.template, repairPromptTexts: session.prepare.repairPromptTexts,
+      requirement: session.global.input.requirement, signal: session.global.input.signal,
+      generationDiagnostics: session.planning.generationDiagnostics, progressStages: session.global.progressStages, emitProgress: session.global.emitProgress, withProgressHeartbeat: session.global.withProgressHeartbeat,
+      bidComposition: session.understanding.bidComposition,
+    });
+    if (!plannedSectionPassResult.plannedSectionFixApplied) break;
+  }
 
   // 表格执行率确定性核验已提取至 globalQualityGates.repairTableExecutionGaps（单轮定向补表修复闭环，失败即放弃）
   const { tableFixApplied } = await repairTableExecutionGaps({
