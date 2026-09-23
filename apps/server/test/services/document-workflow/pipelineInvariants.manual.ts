@@ -41,6 +41,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { collectSectionContentGaps, emptySectionSpans } from '@/services/document-workflow/qualityValidation';
 import { normalizeSubsectionTitleForDedup } from '@/services/document-workflow/utils';
+import { dropEmptyShellHeadings } from '@/services/document-workflow/finalize/repairRounds/deliveryStructureClosure';
 
 const PROJECT_ID = process.env.PROJECT_ID || '3c3f04667c69';
 const DRAFT_DIR = path.join(os.homedir(), '.customize-agent', 'projects', PROJECT_ID, 'generatedDocuments', 'drafts');
@@ -198,6 +199,32 @@ describe(`4.59 M4 流水线跨判据一致性回放（真实归档 ${LIMIT} 份�
     }
     if (violations.length > 0) console.log(`[replay] INV-4 违反 ${violations.length} 项：\n  ${violations.slice(0, 8).join('\n  ')}`);
     expectInvariant(violations, '缺口数超过规划小节数说明判据整体失守');
+  });
+
+  /**
+   * **真实业务流水线回放**：把 4.59 A2 的链尾修复跑在全部真实归档上，验证不变量成立。
+   *
+   * 这是「用真实业务数据测整条流水线」的直接落地——不复现整条生成（成本不允许），
+   * 而是把**修复所作用的那一步**跑在**真实产出的终稿**上，断言其可达目标状态。
+   * 同时交叉验证：修复前 INV-1 违反数应 > 0（否则本套件没测到东西）。
+   */
+  it('A2 修复回放：真实终稿经链尾清除后，空壳标题归零（且修复前确实存在）', () => {
+    const rows: string[] = [];
+    let beforeTotal = 0;
+    let afterTotal = 0;
+    for (const { file, record } of drafts) {
+      const before = emptySectionTitlesInMarkdown(record.markdown || '').length;
+      const after = emptySectionTitlesInMarkdown(dropEmptyShellHeadings(record.markdown || '').markdown).length;
+      beforeTotal += before;
+      afterTotal += after;
+      rows.push(`${file.slice(0, 22)}：修复前 ${before} → 修复后 ${after}`);
+    }
+    console.log(`[replay] A2 修复回放：${rows.join('｜')}`);
+    console.log(`[replay] A2 合计：修复前 ${beforeTotal} → 修复后 ${afterTotal}`);
+    // ① 修复可达目标状态（这是本修复的验收口径）
+    expect(afterTotal, '链尾清除后终稿不得再有空壳标题').toBe(0);
+    // ② 修复前确实存在（防「本套件测了空气」——若真实产物本就无空壳，该用例失去意义需重审）
+    if (drafts.length > 0) expect(beforeTotal, '真实归档中应存在空壳标题（否则本用例失去意义）').toBeGreaterThan(0);
   });
 
   /** 参照项：`emptySectionSpans` 与终稿判据的差异（只打印，不判红——两者口径本可不同，但差异需可见） */

@@ -23,6 +23,63 @@ import { displayStage, upsertProgressStage } from '../../progress';
 import { recordRepairActions } from '../../rolePipeline';
 import type { FinalizeSession } from '../finalizeSession';
 
+/**
+ * 4.59 A2 空壳规划标题**链尾强制清除**（不变量强制，判据复用不另造）。
+ *
+ * ## 实测（7/7 份真实归档 100% 复现，`pipelineInvariants.manual.ts` INV-1 跟踪）
+ *
+ * | 文档 | 草稿级空壳 | 终稿级空节 |
+ * |---|---|---|
+ * | cfb0 / ea38 / ea52 | 0 | 3 |
+ * | 4456 | 0 | 4 |
+ *
+ * **草稿阶段一个空壳都没有、终稿却有 3~4 个**——即**装配/收口步骤把父标题掏空**，而缺节补写轮
+ * 跑在**草稿**阶段，结构上就看不到它们，因此永远补不到、必然残留到终稿。
+ * 典型形态（真实终稿）：
+ * ```
+ * ### 1.2 作业面勘察与条件核实      ← 空
+ * ### 1.3 现场踏勘                 ← 有正文（草稿里它本是 1.2 的 H4 子节）
+ * ```
+ *
+ * ## 为什么在这里清除而不去补写
+ *
+ * 补写轮只能作用于**章草稿**，而问题出现在**终稿 markdown**（草稿里父标题下有 H4 子节、判据认为"有内容"）。
+ * 要把补写前移需要把 markdown 结构差异写回草稿——改动面远大于本处所需，且该差异的产生点
+ *（装配层把 H3 父 + H4 子展开为同级 H3）尚未定位到可安全修改的单点。
+ *
+ * 故按本仓**既定口径**处理（4.55.25：*「没有内容就不要出现该标题」*）：
+ * **清除空壳标题行**——文档不再出现幻影标题与幻影目录项；终检随后报出的
+ * 「规划小节未落位」是**准确**表述（该小节确实没有内容），且属缺节补写轮可消费的类别，
+ * 下一轮即可定向补写。**这不是把 blocker 藏起来**：blocker 由「空小节」变为「规划小节未落位」，
+ * 数量不变、语义更准确、且**可被修复链消费**（空小节原本消费不了）。
+ *
+ * ## 判据单源
+ *
+ * 判空口径与 `structureIntegrityRules.scanEmptySubsections` **逐字同源**（下一非空行为同级/更高级标题
+ * 即空），不另造第四套判据——本仓已有三套口径不一致的空节判据（见 `plan-4.59-complete.md` §二 A2），
+ * 再造一套只会加深分裂。
+ */
+export function dropEmptyShellHeadings(markdown: string): { markdown: string; dropped: string[] } {
+  const lines = markdown.replace(/\r/gu, '').split('\n');
+  const dropped: string[] = [];
+  const keep: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const heading = /^(#{3,6})\s+(\S.*)$/u.exec((lines[index] || '').trim());
+    if (!heading) { keep.push(lines[index] ?? ''); continue; }
+    const level = heading[1]!.length;
+    let next = index + 1;
+    while (next < lines.length && (lines[next] || '').trim() === '') next += 1;
+    const nextHeading = next < lines.length ? /^(#{1,6})\s+\S/u.exec((lines[next] || '').trim()) : null;
+    const isEmpty = next >= lines.length || Boolean(nextHeading && nextHeading[1]!.length <= level);
+    if (!isEmpty) { keep.push(lines[index] ?? ''); continue; }
+    dropped.push(heading[2]!.trim());
+    // 连同该标题行之后的空行一并吞掉，避免留下连续空行
+    while (index + 1 < lines.length && (lines[index + 1] || '').trim() === '') index += 1;
+  }
+  if (dropped.length === 0) return { markdown, dropped };
+  return { markdown: keep.join('\n').replace(/\n{3,}/gu, '\n\n'), dropped };
+}
+
 export async function stageDeliveryStructureClosure(session: FinalizeSession): Promise<void> {
   const details: string[] = [];
   // C2 D4 兜底复洗：附表区内部推导话术确定性中性化（幂等；源头已在 composeTenderAppendixMarkdown 出口净版，
@@ -71,6 +128,17 @@ export async function stageDeliveryStructureClosure(session: FinalizeSession): P
       if (missingAll.length > 0) details.push(`规划小节未落位（交终门禁复核）：${missingAll.join('；')}`);
     }
   }
+  // 4.59 A2 空壳规划标题链尾清除（**必须在层级提升之后**：提升正是掏空父标题的动作之一；
+  // **必须在目录重建之前**：否则幻影标题会被写进目录，目录与正文再度不一致）
+  {
+    const shellResult = dropEmptyShellHeadings(session.finalMarkdown);
+    if (shellResult.dropped.length > 0) {
+      session.finalMarkdown = shellResult.markdown;
+      repairActions += shellResult.dropped.length;
+      details.push(`空壳标题清除（无直接正文且下一行为同级/更高级标题）：${shellResult.dropped.slice(0, 8).join('、')}${shellResult.dropped.length > 8 ? ` 等 ${shellResult.dropped.length} 处` : ''}——按 4.55.25 口径「没有内容就不要出现该标题」，规划小节缺节由终检「规划小节未落位」如实报出并交缺节补写轮`);
+    }
+  }
+
   // ③ 超长段落切分先于目录重建：切分不改标题行，目录重建基于切分后正文（同一次 recompute 收口）
   const split = splitOverlengthBodyParagraphs(session.finalMarkdown);
   if (split.markdown !== session.finalMarkdown) {
