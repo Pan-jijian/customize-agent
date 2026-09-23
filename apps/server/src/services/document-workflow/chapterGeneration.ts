@@ -1833,6 +1833,45 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           }
           return withBlockShell;
         }
+        /**
+         * 4.59 R-A1：**仅数值冲突**的块在**末轮不再丢弃**（接受 + 交数值修复链）。
+         *
+         * ## 为什么改（实测证据）
+         *
+         * 三轮真实自测中「章级显式降级」**恒为 1**（不是波动），失败块都是 `主要施工内容`，
+         * 失败原因连续三轮为「篇幅超产、**数值一致性缺陷**」。
+         * 块被丢弃后，它承载的**计划表格（2 条 blocker）与小节一并丢失**——
+         * 即「为修 1 处数值，损失整块正文」。
+         *
+         * ## 与 G 线 P1-2 的关系（推翻的前提，必须写明）
+         *
+         * P1-2 当年取消「二轮放行」的理由是：*「下游并不存在能兜住它的校验」*。
+         * **该前提已不成立**——其后加入的 `numeric-verification`（正文数值 vs 资料原文确定性核对轮，
+         * 逐处定向替换 + 收敛复检）与 `numericConflictArbiter`（单锚锁值/名称-数值绑定逐处替换）
+         * 正是能兜住它的校验；终检另有 `无主数值审计` / `factReconciliation`「无据不写」独立把关。
+         * 且 R0-a 已就篇幅确立同一原则：**丢内容严格劣于内容有缺陷**——数值此前是唯一未放开的族。
+         *
+         * ## 口径（比"直接放行"更严）
+         *
+         * - **首轮仍阻断**：带正确值定向重试（这是真正修好的机会，只花一次调用）；
+         * - **末轮接受**：仅当**唯一**缺陷族是数值（其余 11 个阻断族全清）才接受；
+         *   结构性缺陷（缺标题/清单外标题/截断）、套话、密度、归因、格式、工作包要素、
+         *   关键小节深度、篇幅失守——**任一存在即照旧判失败**（那类问题确定性修复链收敛不了）；
+         * - **零静默降级**：接受时写 `console.warn` 与 `diagnostics.llm.lastInfo`，
+         *   明确记录「已接受 N 处数值冲突，交数值修复链」；数值问题未收敛时终检照常报 blocker。
+         */
+        const numericOnlyFailure = attempt === blockMaxAttempts - 1
+          && numericBlocking
+          && !underProduceBlocking && !overProduceBlocking && !criticalDepthBlocking && !elementBlocking
+          && missing.length === 0 && duplicates.length === 0 && extraneous.length === 0
+          && !flowFormBlocking && !fillerBlocking && !structureBlocking && !densityBlocking
+          && !attributionBlocking && !formatBlocking;
+        if (numericOnlyFailure) {
+          const mismatchCount = numericReconciliation.mismatched.length;
+          console.warn(`[gen][block-qc] 块仅数值冲突，末轮接受该块并交数值修复链（冲突 ${mismatchCount} 处）: ${block.title}`);
+          if (input.diagnostics) input.diagnostics.llm.lastInfo = `块仅数值冲突已接受（不丢弃整块）：${block.title}（冲突 ${mismatchCount} 处，交 numeric-verification / numericConflictArbiter 定向替换；未收敛由终检照常报出）`;
+          return withBlockShell;
+        }
         lastMissing = missing;
         lastDuplicates = duplicates;
         lastExtraneous = extraneous;

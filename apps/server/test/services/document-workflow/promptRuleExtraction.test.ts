@@ -5,7 +5,7 @@
  *   首章概况确定性置首、剩余撞名不阻断。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { planChapterSectionsWithLlm } from '@/services/document-workflow/promptRuleExtraction';
+import { extractOutlineHeadings, planChapterSectionsWithLlm } from '@/services/document-workflow/promptRuleExtraction';
 import { DIVERSITY_PLANNING_TEMPERATURE } from '@/services/document-workflow/diversityProfile';
 import type { DocumentEvidence, DocumentTemplate, DocumentTemplateChapter } from '@/services/document-workflow/types';
 
@@ -135,5 +135,45 @@ describe('planChapterSectionsWithLlm 多样性治理接入', () => {
     llmState.pushResult({ sections: ['施工总体部署', '资源配置计划'] });
     await planChapterSectionsWithLlm(baseInput({ chapter: chapter({ title: '编制说明', sections: [] }), chapterIndex: 0 }));
     expect(llmState.calls.length).toBe(1);
+  });
+});
+
+/**
+ * 4.58 实测修：`<OUTLINE>` 里 `N.M.` 行是**二级小节**，不是一级章节。
+ *
+ * 实测巢湖提示词 OUTLINE 的 `1.1.编制依据与说明` / `1.2.工程概况` 被旧判据剥一段编号后
+ * 当成一级章节 → 与 `^##` 契约比对必然"缺失" → 误报
+ * 「正文缺少提示词指定一级章节：1.编制依据与说明、2.工程概况」（正文里它们是 `### 1.1 …`，都在）。
+ */
+describe('4.58 OUTLINE 一级章节提取（两级布局）', () => {
+  const prompt = [
+    '## 1. 一级章节结构',
+    '<OUTLINE>',
+    '1.主要施工方法与技术措施',
+    '1.1.编制依据与说明',
+    '1.2.工程概况',
+    '2.确保工期与质量的保障体系与措施、确保安全文明生产的管理体系与措施',
+    '3.工程重难点及危大工程的保障体系与措施',
+    '</OUTLINE>',
+  ].join('\n');
+
+  it('只收录一级条目（3 章），二级小节被跳过', () => {
+    const headings = extractOutlineHeadings(prompt);
+    expect(headings).toEqual([
+      '主要施工方法与技术措施',
+      '确保工期与质量的保障体系与措施、确保安全文明生产的管理体系与措施',
+      '工程重难点及危大工程的保障体系与措施',
+    ]);
+    expect(headings).not.toContain('编制依据与说明');
+    expect(headings).not.toContain('工程概况');
+  });
+
+  it('章标题内的「、」不被当作分隔（原文写法，非拼接）', () => {
+    expect(extractOutlineHeadings(prompt)[1]).toContain('确保工期与质量的保障体系与措施、确保安全文明生产的管理体系与措施');
+  });
+
+  it('**防漏判**：OUTLINE 只有 `N.M` 形态（无一级层）时照常全部收录', () => {
+    const onlySecond = ['<OUTLINE>', '1.1 编制依据', '1.2 工程概况', '</OUTLINE>'].join('\n');
+    expect(extractOutlineHeadings(onlySecond)).toEqual(['编制依据', '工程概况']);
   });
 });

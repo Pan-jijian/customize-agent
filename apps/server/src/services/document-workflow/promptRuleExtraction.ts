@@ -151,11 +151,47 @@ function simpleHashText(text: string) {
   return (hash >>> 0).toString(16);
 }
 
-function extractOutlineHeadings(text: string) {
+/**
+ * OUTLINE 一级章节提取（提示词一级章节契约的判据来源）。
+ *
+ * ## 4.58 实测修：`N.M.` 行是**二级小节**，不是一级章节
+ *
+ * 旧实现用 `^\s*(?:\d+[.、．]|[-*])\s*` 只剥**一段**编号，于是
+ * `1.1.编制依据与说明` 被剥成 `1.编制依据与说明` 后**也进了一级章节清单**；
+ * 而正文中它是 `### 1.1 编制依据与说明`（三级标题），与 `^##` 契约比对必然"缺失"——
+ * 产出误报 blocker：
+ *
+ * ```
+ * 正文缺少提示词指定一级章节：1.编制依据与说明、2.工程概况
+ * ```
+ *
+ * 实测巢湖提示词 `<OUTLINE>`：
+ * ```
+ * 1.主要施工方法与技术措施
+ * 1.1.编制依据与说明      ← 第 1 章的二级小节
+ * 1.2.工程概况           ← 同上
+ * 2.确保工期与质量的保障体系与措施、确保安全文明生产的管理体系与措施
+ * 3.工程重难点及危大工程的保障体系与措施
+ * ```
+ * 一级章节是 **3 章**（第 2 章标题内的「、」是原文写法，不是拼接），
+ * 正文 `### 1.1 工程概况` / `### 1.2 编制依据与说明` 都在——本条 blocker 是纯误报。
+ *
+ * **判据分裂**：同一份 OUTLINE 的两条通道口径不一致——章节抽取器
+ * （`extractExplicitOutlineFromSources`）有正确的两级解析（`sectionCandidate` 挂靠最近章），
+ * 本处没有。现对齐：**两级布局下（存在 `N.` 一级条目）跳过 `N.M.` 行**。
+ *
+ * 为何不无条件跳过 `N.M.`：若某提示词的 OUTLINE **只有** `1.1`/`1.2` 形态（无一级层），
+ * 那它们就是章节本身；此时 `hasTopLevel` 为假，照常全部收录（fail-open，不制造新的漏判）。
+ */
+export function extractOutlineHeadings(text: string) {
   const headings: string[] = [];
   const outline = /<OUTLINE>([\s\S]*?)<\/OUTLINE>/u.exec(text)?.[1] || '';
-  for (const line of outline.split(/\r?\n/u)) {
-    const title = line.replace(/^\s*(?:\d+[.、．]|[-*])\s*/u, '').trim();
+  const lines = outline.split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
+  const hasTopLevel = lines.some(line => /^\s*\d+\s*[.、．]\s*(?!\s*\d)/u.test(line));
+  for (const line of lines) {
+    if (hasTopLevel && /^\s*\d+\s*[.、．]\s*\d+/u.test(line)) continue;
+    // 剥编号：多段（`1.1.`）与单段（`1.`）都要剥净，title 才是纯章节名
+    const title = line.replace(/^\s*(?:\d+(?:[.、．]\d+)*[.、．]?|[-*])\s*/u, '').trim();
     if (title.length >= 2 && title.length <= 80 && !isInstructionLikeSectionTitle(title)) headings.push(title);
   }
   return [...new Set(headings)];
