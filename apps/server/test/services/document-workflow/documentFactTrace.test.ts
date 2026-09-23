@@ -756,6 +756,20 @@ describe('C-T2 classifyNumericTraceToken 三分类（r28f 实测合法数字全�
     expect(isSectionNumberingToken({ token: '1.24 项', context: '钢筋Φ25.23、1.24 项目管理' })).toBe(false);
     expect(isSectionNumberingToken({ token: '1.24 项', context: '1.24 项目管理机构与岗位职责' })).toBe(false);
   });
+
+  it('4.55.31 R17 扩形：一位小数小节编号（「3.8 周」＝3.8 小节 + 标题首字周）按**同形**邻号豁免', () => {
+    // 实机 doc-1790125123717：目录「3.7 现场设施与计量装置保护 / 3.8 周边管线与建筑保护措施 / 3.9 …」
+    expect(isSectionNumberingToken({ token: '3.8 周', context: '3.7 现场设施与计量装置保护 3.8 周边管线与建筑保护措施 3.9' })).toBe(true);
+    // 同小数段邻号方向（2.8 ↔ 3.8）同样成立；两位小数族（1.22 ↔ 1.23）不受扩形影响
+    expect(isSectionNumberingToken({ token: '3.8 周', context: '2.8 材料检验试验计划 3.8 周边管线保护' })).toBe(true);
+    expect(isSectionNumberingToken({ token: '2.4 月', context: '2.3 总进度网络图与横道图控制 2.4 月周日进度计划报审管理 2.5' })).toBe(true);
+    expect(isSectionNumberingToken({ token: '1.22 周', context: '总进度计划 1.22 周月计划报送 1.23' })).toBe(true);
+    // 反例（扩形不得吞真实时量）：无同形邻号；邻号**不同形**（小数段位数不同）不成立
+    expect(isSectionNumberingToken({ token: '1.5 月', context: '养护历时 1.5 月后进入下道工序' })).toBe(false);
+    expect(isSectionNumberingToken({ token: '1.5 月', context: '养护历时 1.5 月，含水率 2.05% 控制' })).toBe(false);
+    expect(isSectionNumberingToken({ token: '3.8 天', context: '… 3.75 … 3.8 天 …' })).toBe(false);
+    expect(isSectionNumberingToken({ token: '1.22 周', context: '总进度计划 1.22 周月计划报送 1.2 结束' })).toBe(false);
+  });
 });
 
 describe('C-T2 scanNumericTrace 扫描口径（表格行/章节号/裸数过滤）', () => {

@@ -1770,29 +1770,80 @@ export async function crossChapterConsistencyIssues(markdown: string, factsModel
    * 不取通用名词——「门卫」「厂房」这类类别词不构成对象区分。
    */
   const OBJECT_MARKER_RE = /(?:\d+\s*[#＃号]|[一二三四五六七八九十]\s*[区栋座幢]|[A-Za-z]\s*[栋座幢区])/gu;
-  const objectMarkers = (context: string) => new Set([...context.matchAll(OBJECT_MARKER_RE)].map(match => match[0].replace(/\s+/gu, '')));
-  const differentObjects = (left: string, right: string) => {
-    const leftMarkers = objectMarkers(left);
-    const rightMarkers = objectMarkers(right);
-    if (leftMarkers.size === 0 || rightMarkers.size === 0) return false;
-    return [...leftMarkers].every(marker => !rightMarkers.has(marker));
+  /**
+   * 对象作用域：命中所在的**小节标题行 + 取值所在句 + 前一句**。
+   * 24 字前置语境不够——4.55.31 巢湖实测（doc-1790125123717-ce5cc107）：三处挖沟槽土方取值
+   * ①「#### 1.5.2 2#门卫」标题 + 前一句「2#门卫为单层框架结构…C25商品混凝土。」+ 本句
+   *   「作业对象含场地平整241.71m²、挖沟槽土方346.88m³」——标识既在**标题行**也在**前一句**，
+   *   距取值 60+ 字，24 字窗口取不到 → 旧判据退化成「共享 ≥6 连续汉字」，与 3#门卫 的 37.51
+   *   共享「门卫按平整场地」7 字而误报；②「#### 1.27.2 土石方工程」段落中
+   *   「2#门卫基础土方按…场地平整241.71m²，挖沟槽土方346.88m³」——标识在本句但距取值 30+ 字。
+   * 标题行必须取：小节即对象的文档里标识只出现于标题（对象标识标在章节名上）。
+   */
+  const hitScopeStart = (index: number) => {
+    const boundaryBefore = (position: number) => Math.max(
+      markdown.lastIndexOf('\n', position - 1),
+      markdown.lastIndexOf('。', position - 1),
+      markdown.lastIndexOf('；', position - 1),
+      markdown.lastIndexOf(';', position - 1),
+      markdown.lastIndexOf('！', position - 1),
+      markdown.lastIndexOf('？', position - 1),
+    );
+    const sentenceStart = boundaryBefore(index) + 1;
+    const previousSentenceStart = boundaryBefore(sentenceStart - 1) + 1;
+    const heading = [...markdown.slice(0, index).matchAll(/^#{1,6}[^\n]*/gmu)].pop();
+    // 有标题时取「本句前一句 + 所属标题行」的更早者（标识可能落在标题行或前一句）；**无标题时只回退到前一句**，
+    // 不得回退到全文句首——否则未标注取值会继承前文无标题段落中的对象标识（4.55.29 L0-8 实测：第三行
+    // 「室外附属工程挖沟槽土方9926.65m³」在无标题文本里会把前两行的 2#/3# 一并收入，误判与 346.88 同对象）。
+    return heading ? Math.max(0, Math.min(previousSentenceStart, heading.index)) : Math.max(0, previousSentenceStart);
+  };
+  /**
+   * 对象签名：作用域内**距取值最近**的对象标识（取值前/后皆可，同距并列全取）。
+   * 「同一句里既提到 2#门卫又提到 3#门卫」（如「2#门卫挖沟槽土方346.88m³、3#门卫挖沟槽土方37.51m³」）
+   * 时近者胜：取值与其所属对象的标识通常相邻，更远的那个标识属另一个对象的从句；
+   * 若两标识与取值等距（如「2#、3#门卫合计…」）则两个都取，该取值同时归属两个对象组。
+   * 目录/章节编号（`1.22`、`3.8`）不构成本正则的任何形态（无 #/号/区/栋/座/幢 后缀），
+   * 因此「1.22 周」这类编号+标题首字不会被读成对象标识。
+   */
+  const objectSignature = (scope: string, scopeStart: number, index: number): string[] => {
+    const markers = [...scope.matchAll(OBJECT_MARKER_RE)].map(match => ({ marker: match[0].replace(/\s+/gu, ''), at: scopeStart + (match.index || 0) }));
+    if (markers.length === 0) return [];
+    const distances = markers.map(item => Math.abs(item.at - index));
+    const nearest = Math.min(...distances);
+    return [...new Set(markers.filter((_, position) => distances[position] === nearest).map(item => item.marker))].sort();
   };
   for (const { label, re, contextAware } of quantityScopeEntries) {
-    const entries: Array<{ value: string; context: string }> = [];
+    const entries: Array<{ value: string; context: string; markers: string[] }> = [];
     for (const match of markdown.matchAll(re)) {
       const value = match[1].replace(/,/gu, '');
       if (entries.some(entry => entry.value === value)) continue;
-      entries.push({ value, context: markdown.slice(Math.max(0, (match.index || 0) - 24), match.index || 0) });
+      const index = match.index || 0;
+      const scopeStart = hitScopeStart(index);
+      entries.push({
+        value,
+        context: markdown.slice(Math.max(0, index - 24), index),
+        markers: objectSignature(markdown.slice(scopeStart, index + match[0].length), scopeStart, index),
+      });
     }
     if (entries.length >= 2) {
-      // 4.55.29 对象维度（方案 L0-8）：同对象同属性多值才是缺陷。前置语境共享判据在**单体并列列举**
-      // 下会误判——「2#门卫按平整场地241.71m²、挖沟槽土方346.88m³」与「3#门卫按平整场地16.07m²、
-      // 挖沟槽土方37.51m³」共享 7 字连续汉字「门卫按平整场地」，但两条分属**不同单体**，
-      // 各单体工程量天然不同（巢湖实测 5 条 blocker：2#门卫 346.88 / 3#门卫 37.51 / 室外 9926.65 等）。
-      // 判据：两侧语境各带对象标识（`2#`/`三区`/`B栋`…）且互不相交 → 分属不同对象，不判冲突。
-      // 标识缺失（两侧都取不到）时维持原判据，真冲突零放松。
-      if (contextAware && entries.every((left, index) => entries.slice(index + 1)
-        .every(right => differentObjects(left.context, right.context) || longestCommonHanSubstring(left.context, right.context) < 6))) continue;
+      // 4.55.31 对象分组口径（4.55.29 判据的完整版）：同对象同属性多值才是缺陷——按「语境中的对象
+      // 标识」把命中分组，**只在同组内比较取值，跨组不判**；无标识的归入「未标注」组。
+      // 分组判据（任取两条命中）：
+      //   ① 两条各取到对象标识（`2#`/`三区`/`B栋`…）：交集非空 = 同组（同一对象）→ 多值即冲突；
+      //      交集为空 = 跨组（不同对象）→ **不判**（巢湖实测 2#门卫 346.88 / 3#门卫 37.51 /
+      //      室外 9926.65 / 室外安装 1900.8 四条即四组，各单体工程量天然不同）。
+      //   ② 任一条取不到标识（未标注组）——「未标注」不等于「同一对象」（4.55.31 巢湖实测：
+      //      未标注的 9926.65 属室外附属土方、1900.8 属室外安装管道沟槽，分属不同部位），
+      //      不能因组内多值即判冲突，故退化为**同源语境证据**：24 字前置语境共享 ≥6 字连续汉字
+      //      成分（同句/同列表并列）才算同一对象的同一工程量。阈值 6：单条锚点前缀「挖沟槽土方」
+      //      仅 5 字，不至把纯锚点共享误判为同语境。
+      // contextAware 条目（部位/单体分列成量是常态）用上述证据判据；其余条目（隔油池数量，
+      // 窗口已阻断标点）维持原判据——多值即冲突，零放松（仅跨对象标识互斥时豁免）。
+      if (!entries.some((left, index) => entries.slice(index + 1).some(right => (
+        left.markers.length > 0 && right.markers.length > 0
+          ? left.markers.some(marker => right.markers.includes(marker))
+          : !contextAware || longestCommonHanSubstring(left.context, right.context) >= 6
+      )))) continue;
       const values = entries.map(entry => entry.value).join('、');
       issues.push({ level: 'error', severity: 'blocker', category: 'fact_consistency', owner: 'llm', repairability: 'llm_repairable', message: `跨章一致性冲突：正文${label}出现互相矛盾的取值 ${values}`, suggestion: `${label}必须全文唯一：以工程量清单为最高优先级裁定正确值，将正文全部相关表述统一为该值，并删除其余矛盾口径。` });
     }

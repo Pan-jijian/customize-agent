@@ -707,6 +707,51 @@ describe('巢湖实测口径收口：阈值分档 / 位置高度量 / 零值（�
   });
 });
 
+describe('4.55.31 区间端点闸（巢湖实测 #1：清单特征枚举内的区间端点不是数量声明）', () => {
+  // 真实 draft doc-1790125123717：「侧缘石垫层、水泥混凝土（C15、15cm、4~6米分仓跳格浇筑、Φ12@200
+  // 单层双向配筋）」的 6米 是分仓跳格**间距区间的上端点**（「4~6米」，间隙「、15cm、4~」无中文、
+  // 枚举换项豁免不覆盖），恰与清单「电力电缆头」（1KV 6个）的数值 6 相等 → 被判「C15 6米 属规格 1KV」
+  const rangeLock = lockOf([
+    lockEntry({ name: '电力电缆头', quantity: 6, unit: '个', specQuantityPairs: [{ spec: '1KV', quantity: '6个' }] }),
+    lockEntry({ name: '水泥混凝土', quantity: 152.4, unit: 'm3', specQuantityPairs: [{ spec: 'C15', quantity: '152.4m3' }] }),
+  ]);
+
+  it('实测：「C15、15cm、4~6米分仓跳格浇筑」的 6米 → 不报（区间端点非数量声明）', () => {
+    const issues = factReconciliationIssues({
+      markdown: '侧缘石垫层、水泥混凝土（C15、15cm、4~6米分仓跳格浇筑、Φ12@200单层双向配筋）、传力杆制作安装14.622t。',
+      billFactLock: rangeLock,
+    });
+    expect(issues.filter(issue => issue.message.includes('C15'))).toEqual([]);
+  });
+
+  it('区间连接符族（4至6米 / 4-6米 / 4～6米）→ 同类放过', () => {
+    for (const range of ['4至6米', '4-6米', '4～6米', '4—6米']) {
+      const issues = factReconciliationIssues({
+        markdown: `水泥混凝土（C15、15cm、${range}分仓跳格浇筑）。`,
+        billFactLock: rangeLock,
+      });
+      expect(issues.filter(issue => issue.message.includes('C15'))).toEqual([]);
+    }
+  });
+
+  it('对照：C15 6米（无区间连接符）→ 绑定错位仍报（区间闸未放宽）', () => {
+    const issues = factReconciliationIssues({
+      markdown: '水泥混凝土按C15 6米组织施工。',
+      billFactLock: rangeLock,
+    });
+    expect(issues.some(issue => issue.message.includes('C15'))).toBe(true);
+  });
+
+  it('对照：非区间数值仍按原口径判（DN110 15米 撞垫层 15m³ → 张冠李戴照报）', () => {
+    const lock = lockOf([
+      lockEntry({ name: '塑料管', quantity: 7525.01, unit: 'm', specQuantityPairs: [{ spec: 'DN110', quantity: '7525.01m' }] }),
+      lockEntry({ name: '人行道混凝土垫层', quantity: 15, unit: 'm3', specQuantityPairs: [{ spec: '10cm', quantity: '15m3' }] }),
+    ]);
+    const issues = factReconciliationIssues({ markdown: 'DN110 UPVC排水管15米，管沟开挖深度按设计图纸确定。', billFactLock: lock });
+    expect(issues.some(issue => issue.message.includes('DN110'))).toBe(true);
+  });
+});
+
 describe('4.55.20 钢筋配料表句式豁免（图纸钢筋表根数 ≠ 清单工程量）', () => {
   const lock = lockOf([
     lockEntry({ name: '塑料管', quantity: 168, unit: 'm', specQuantityPairs: [{ spec: 'Φ14', quantity: '168m' }] }),

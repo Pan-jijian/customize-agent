@@ -739,11 +739,26 @@ export function buildAuthoritativeValues(input: {
  */
 export function renderTruthConstraintBlock(audit: AuthoritativeValueAudit): string {
   const rows = audit.resolved.filter(item => item.superseded.length > 0);
-  if (rows.length === 0) return '';
-  return [
-    '【现行口径（真值层裁决，硬约束）】下列属性已按资料优先级与变更链裁决出**唯一现行值**；全文（正文、表格、信息表、进度计划、节点）必须一致使用，被取代值仅在引用变更过程时可出现（如「招标文件原为 X，经答疑澄清变更为 Y」），不得单独陈述现状：',
-    ...rows.map(item => `- ${item.attribute}：现行为「${item.value}」；被取代（不得作为现行口径）：${item.superseded.join('、')}`),
-  ].join('\n');
+  // 4.55.32 口径须落位清单（与口径终检**读写同源**）：口径终检要求「正文逐字含该值」，
+  // 而写手此前只被告知**发生过变更**的属性（本块原有唯一内容），未被告知**必须出现**的口径集
+  //（`caliber === true` 的项目级口径，如开工日期/合同金额）——写手没被要求写，终检却按"未落位"阻断
+  //（实测：开工日期 2026年10月10日 真值层有值、正文零次）。
+  // 两者同源：终检判什么，写手就被要求写什么；清单只含项目级口径（非口径属性不入，避免约束膨胀）。
+  const mustState = audit.resolved.filter(item => item.caliber && item.superseded.length === 0);
+  const blocks: string[] = [];
+  if (rows.length > 0) {
+    blocks.push([
+      '【现行口径（真值层裁决，硬约束）】下列属性已按资料优先级与变更链裁决出**唯一现行值**；全文（正文、表格、信息表、进度计划、节点）必须一致使用，被取代值仅在引用变更过程时可出现（如「招标文件原为 X，经答疑澄清变更为 Y」），不得单独陈述现状：',
+      ...rows.map(item => `- ${item.attribute}：现行为「${item.value}」；被取代（不得作为现行口径）：${item.superseded.join('、')}`),
+    ].join('\n'));
+  }
+  if (mustState.length > 0) {
+    blocks.push([
+      '【项目级口径（必须在正文出现）】下列口径是本项目的唯一现行值，必须在正文相应位置（工程概况／编制说明／工期与进度等）**逐字写出**（数值、单位、日期形态均不得改写或省略）：',
+      ...mustState.map(item => `- ${item.attribute}：${item.value}`),
+    ].join('\n'));
+  }
+  return blocks.join('\n\n');
 }
 
 /** 口径账本（交付报告可展开：属性/生效值/裁决规则/依据/被取代值） */

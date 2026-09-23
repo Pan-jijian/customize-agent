@@ -9,6 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import { auditAuthorityCoverage, authorityAuditDetails, authorityAuditIssues, authorityAuditSummary } from '@/services/document-workflow/authorityAudit';
 import { buildBillFactLock, stripUnitCountPrefix } from '@/services/document-workflow/billFactLock';
+import { namedTotalClosure, type NamedAuthorityValue } from '@/services/document-workflow/factReconciliation';
 import { buildNumericAuthority } from '@/services/document-workflow/finalize/repairRounds/numericVerification';
 import type { FinalizeSession } from '@/services/document-workflow/finalize/finalizeSession';
 import type { BlueprintData } from '@/services/document-workflow/integratedBlueprint';
@@ -486,5 +487,87 @@ describe('V5 P5 无主数值审计（M6）', () => {
     for (const unit of ['m2', '10m', '100m3', '个', '座', 'm', '棵', '㎡', 't', '项目']) {
       expect(stripUnitCountPrefix(unit)).toBe(unit);
     }
+  });
+
+  // ═══ 4.55.31 B1 章节编号扩形（实机 doc-1790125123717 的「3.8 周」） ═══
+
+  it('4.55.31 B1：一位小数小节编号（3.8 周＝3.8 小节 + 标题首字周）按同形邻号豁免；真实时量无同形邻号照报', () => {
+    // 实机目录：「3.7 现场设施与计量装置保护 / 3.8 周边管线与建筑保护措施 / 3.9 …」
+    const numbering = auditAuthorityCoverage('3.7 现场设施与计量装置保护 3.8 周边管线与建筑保护措施 3.9 其他管理措施');
+    expect(numbering.scanned).toBe(1);
+    expect(numbering.conventionExempt).toBe(1);
+    expect(reportedTokens(numbering)).toEqual([]);
+    // 反例：真实时量「1.5 月」无同形邻号 → 不得被扩形吞掉（照落缺口）
+    const duration = auditAuthorityCoverage('首段养护历时 1.5 月后进入下道工序。');
+    expect(duration.scanned).toBe(1);
+    expect(duration.conventionExempt).toBe(0);
+    expect(reportedTokens(duration)).toContain('1.5 月');
+  });
+
+  // ═══ 4.55.31 B2 合计闭包（实机 doc-1790125123717 的 6403.78m² 归因） ═══
+
+  const withQuantities = (quantities: BlueprintData['quantities']): BlueprintData => ({ ...makeBlueprintData(), quantities });
+
+  it('4.55.31 B2：自称合计且可由具名权威分项闭合（总量6403.78m²＝墙面涂膜防水5764.81＋天棚涂膜防水638.97）→ 收编不落缺口', () => {
+    const data = withQuantities({
+      墙面涂膜防水: { value: 5764.81, unit: 'm2', sourceFile: '清单.xls' },
+      天棚涂膜防水: { value: 638.97, unit: 'm2', sourceFile: '清单.xls' },
+    });
+    // 实机原文形态：归属名「防水」在数值前 31 字处（16 字分流窗口取不到，闭包窗口 ±40 字可见）
+    const report = auditAuthorityCoverage('防水工程按施工段划分检验批并做蓄水（淋水）试验（总量6403.78m²）。', data);
+    expect(report.totalClaimClosed?.map(finding => finding.token)).toEqual(['6403.78m²']);
+    expect(report.totalClaimClosed?.[0]?.closure).toEqual(['墙面涂膜防水 5764.81m2', '天棚涂膜防水 638.97m2']);
+    expect([...report.derivationGaps, ...report.processGaps, ...report.unattributed]).toEqual([]);
+    expect(authorityAuditIssues(report)).toEqual([]);
+    expect(authorityAuditSummary(report)).toContain('合计闭包 1');
+    expect(authorityAuditDetails(report).join('\n')).toContain('合计闭包收编（权威分项和，不计缺口）');
+  });
+
+  it('4.55.31 B2 反例：凭空合计值（7777.77m²）无可闭合分项 → 照落缺口 + 硬门禁', () => {
+    const data = withQuantities({
+      墙面涂膜防水: { value: 5764.81, unit: 'm2', sourceFile: '清单.xls' },
+      天棚涂膜防水: { value: 638.97, unit: 'm2', sourceFile: '清单.xls' },
+    });
+    const report = auditAuthorityCoverage('防水工程按施工段划分检验批并做蓄水（淋水）试验（总量7777.77m²）。', data);
+    expect(report.totalClaimClosed ?? []).toEqual([]);
+    expect(report.processGaps.map(finding => finding.token)).toEqual(['7777.77m²']);
+    expect(authorityAuditIssues(report)[0]?.message).toContain('工艺库缺口 1 项 7777.77m²');
+  });
+
+  it('4.55.31 B2 反例：无名称锚定的凑数不成立（两项权威值和恰等于合计值也不闭合）', () => {
+    // 3000 + 3403.78 = 6403.78，但分项名与合计句语境无任何 ≥2 字连续汉字关系 → 不构成分项和
+    const data = withQuantities({
+      甲类构件: { value: 3000, unit: 'm2', sourceFile: '清单.xls' },
+      乙类构件: { value: 3403.78, unit: 'm2', sourceFile: '清单.xls' },
+    });
+    const report = auditAuthorityCoverage('防水工程按施工段划分检验批并做蓄水（淋水）试验（总量6403.78m²）。', data);
+    expect(report.totalClaimClosed ?? []).toEqual([]);
+    expect(reportedTokens(report)).toContain('6403.78m²');
+  });
+
+  it('4.55.31 B2 反例：非合计自称的分项值不收编（实机 424.2m 保持推导缺口，即使恰等于权威两项之和）', () => {
+    // 350.6 + 73.6 = 424.2，且两名都在语境中——但「塑料管424.2m」是分项值列举，非自称合计
+    const data = withQuantities({
+      复合管: { value: 350.6, unit: 'm', sourceFile: '清单.xls' },
+      塑料管: { value: 73.6, unit: 'm', sourceFile: '清单.xls' },
+    });
+    const report = auditAuthorityCoverage('作业对象为1#厂房室内给水系统，覆盖复合管350.6m、塑料管424.2m、管道消毒冲洗773.8m。', data);
+    expect(report.totalClaimClosed ?? []).toEqual([]);
+    expect(report.derivationGaps.map(finding => finding.token)).toContain('424.2m');
+  });
+
+  it('4.55.31 B2 单源：同名多值分项组和闭合（分村/分工程 groups），且同名组和只在同层聚合（防条目值与其明细重复计入）', () => {
+    const values: NamedAuthorityValue[] = [
+      { name: '挖淤泥', value: 838.81, unit: 'm3', kind: 'group' },
+      { name: '挖淤泥', value: 213.99, unit: 'm3', kind: 'group' },
+      { name: '挖淤泥', value: 1052.8, unit: 'm3', kind: 'entry' },
+      { name: '流砂', value: 999, unit: 'm3', kind: 'entry' },
+    ];
+    expect(namedTotalClosure({ total: 1052.8, unit: 'm³', context: '挖淤泥、流砂合计', values })?.map(item => item.value)).toEqual([838.81, 213.99]);
+    // 2×1052.8 = 条目值 + 其两组明细（跨层重复计入）→ 不闭合
+    expect(namedTotalClosure({ total: 2105.6, unit: 'm³', context: '挖淤泥合计', values })).toBeNull();
+    // 单位不同族 / 无名称锚定 → 不闭合
+    expect(namedTotalClosure({ total: 1052.8, unit: 'm²', context: '挖淤泥合计', values })).toBeNull();
+    expect(namedTotalClosure({ total: 1847.8, unit: 'm³', context: '土石方合计', values })).toBeNull();
   });
 });

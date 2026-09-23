@@ -289,6 +289,79 @@ function findBreakdownComponents(candidates: ReconciliationEntry[], total: numbe
   return [];
 }
 
+/** 具名权威值（4.55.31 B2 无主数值审计「合计闭包」输入：蓝图 quantities / 清单条目的同构投影）。
+ * kind 区分口径层级：'entry' 条目值 / 'group' 分工程明细 / 'split' 规格拆分小计——同名组和只在**同层**
+ * 内聚合，防「条目值 + 其自身明细」重复计入凑出 2 倍值（假闭合）。 */
+export interface NamedAuthorityValue {
+  name: string;
+  value: number;
+  unit: string;
+  kind?: 'entry' | 'group' | 'split';
+}
+
+/** 合计自称形态（与 TOTAL_CLAIM_RE 同族词表，只判「自称合计」语义，不重复提取数值/单位）：
+ * token 数值前紧邻「合计/总量/共计/小计…」（可带为/达/约/共/计 与空白）。 */
+export const TOTAL_CLAIM_PREFIX_RE = /(?:合计|共计|总计|总共|总量|总数|总长|全长|总长度|总数量|总面积|总重量|小计)(?:为|达|约|共|计)?\s*$/u;
+
+/**
+ * 合计闭包判定（4.55.31 B2；D4.5 分项和判据的导出单源）：正文中**自称合计**的数值若可由若干
+ * **具名权威值**闭合，则视为已溯源——它是权威条目的分项和（合法自算合计），不是编造值。
+ * 判据（全部满足，零放松）：
+ * ① 名称锚定：每个参与闭合的分项名与其语境重叠 ≥2 字连续汉字（nameOverlapsText 单源）——
+ *    「防水工程…（总量6403.78m²）」的 6403.78 由「墙面涂膜防水 5764.81」「天棚涂膜防水 638.97」闭合；
+ * ② 单位同族：分项单位与合计单位归一后相等（normalizeUnit 单源）；
+ * ③ 恰为其和：两项分项和 ≈ 合计值（nearlyEqual 单源），或**同名多值分项**（分村/分工程 groups、
+ *    同名跨规格行）之和 ≈ 合计值（与 D4.5/4.31 同名组和口径同源）。
+ * 判据必须三项同时成立：不做名称锚定、只按「若干权威值凑出目标值」的子集和判定会放过凭空数字
+ * （实测：任意目标值在权威值池中被 2~3 值子集和命中的比例 60.77%），故本函数不接受无名称关系
+ * 的凑数；同理**分项/单项数值**（未自称合计）不适用本判据——单值溯源必须逐条命中权威核。
+ * @returns 闭合的分项（≥2 项）或 null
+ */
+export function namedTotalClosure(input: {
+  total: number;
+  unit: string;
+  context: string;
+  values: readonly NamedAuthorityValue[];
+}): NamedAuthorityValue[] | null {
+  const unit = normalizeUnit(input.unit);
+  if (!(input.total > 0) || !unit || !input.context) return null;
+  const related = input.values.filter(item => item.value > 0 && item.name.length >= 2
+    && normalizeUnit(item.unit) === unit && nameOverlapsText(item.name, input.context));
+  if (related.length < 2) return null;
+  // 同名多值分项组和（分村/分工程明细 groups、同名跨规格行）：名称即其归属锚点。
+  // 只在同层（entry/group/split）内聚合——跨层会把条目值与其自身明细重复计入（假闭合 2 倍值）
+  const byName = new Map<string, NamedAuthorityValue[]>();
+  for (const item of related) {
+    const key = `${item.name}\u0000${item.kind ?? 'entry'}`;
+    const group = byName.get(key);
+    if (group) group.push(item);
+    else byName.set(key, [item]);
+  }
+  for (const group of byName.values()) {
+    if (group.length < 2) continue;
+    if (nearlyEqual(group.reduce((sum, item) => sum + item.value, 0), input.total)) return group;
+  }
+  // 两项分项和（D4.5 findBreakdownComponents 同判据：>2 项收紧为 2 项，防多项凑数）。
+  // 散列表查补项（O(n)，不设候选上限）：权威值池在真实工程下很大（289 条目/1541 具名值），
+  // 上限式截断会在名称重叠多的合计句上静默禁用闭包（实机 6403.78 的 防水 系条目被挤掉）。
+  const byValue = new Map<string, NamedAuthorityValue[]>();
+  for (const item of related) {
+    const key = item.value.toFixed(4);
+    const bucket = byValue.get(key);
+    if (bucket) bucket.push(item);
+    else byValue.set(key, [item]);
+  }
+  for (const item of related) {
+    for (const other of byValue.get((input.total - item.value).toFixed(4)) ?? []) {
+      if (other === item) continue;
+      // 同名（含同层重复）交上面的同名组和规则，不在此重复判定
+      if (other.name === item.name) continue;
+      if (nearlyEqual(item.value + other.value, input.total)) return [item, other];
+    }
+  }
+  return null;
+}
+
 /**
  * 合计聚合闭包：total 可被"与合计句上下文名称相关的组和"（多村组同名聚合 / 跨类别合分项）闭合：
  * - 相关组和 1~2 项本身 ≈ total（案例：挖淤泥、流砂 21273 = 6 村组同名条目之和）；
@@ -669,6 +742,13 @@ function scanSpecBindingHits(markdown: string, authority: ReconciliationAuthorit
     // 末段含合计/用量类连接语（「120W合计」）或为空时维持原绑定（R20 合计挂单项/「混凝土，300m³」
     // 常规形态仍照检，防假阴性）。
     const bindingGap = valueMatch[1];
+    // 区间端点闸（4.55.31 巢湖实测 #1）：「水泥混凝土（C15、15cm、4~6米分仓跳格浇筑、Φ12@200
+    // 单层双向配筋）」的 6米 是分仓跳格**间距区间的上端点**（「4~6米」），不是任何条目的数量声明——
+    // 数值前紧邻区间连接符（~～-—–至）且连接符前是数值时，该值是厚度/间距/宽度类区间的边界，
+    // 与「以上/以下」阈值同类，不作数量归属比对（判据为数值构成，不含条目名/数值白名单）。
+    // 同句 24247/43666 处「按4~6米」靠枚举换项豁免（间隙带中文）过人，本闸补无中文的纯数值区间。
+    const rangeTail = markdown.slice(Math.max(0, matchEnd + bindingGap.length - 8), matchEnd + bindingGap.length);
+    if (/\d\s*[~～至\-—–]\s*$/u.test(rangeTail)) continue;
     if (/[、,，]/u.test(bindingGap)) {
       const tailItem = bindingGap.split(/[、,，]/u).pop() || '';
       if (/[\u4e00-\u9fa5]/u.test(tailItem) && !/合计|小计|共计|总计|总量|用量|总长|共/u.test(tailItem)) continue;

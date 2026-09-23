@@ -40,7 +40,8 @@ export const GENERIC_BODY_PART_SOURCE = '垫层|地面|楼面|地面|墙面|屋�
 
 const GENERIC_BODY_PART_RE = new RegExp(`^(?:${GENERIC_BODY_PART_SOURCE})$`, 'u');
 
-function numericPart(value: string): number | undefined {
+/** 取规格 token 内的数值（供同量级判据复用；4.55.31 起检测端属性维度闸同源调用） */
+export function numericPart(value: string): number | undefined {
   const match = /(\d+(?:\.\d+)?)/u.exec(String(value || ''));
   if (!match) return undefined;
   const number = Number(match[1]);

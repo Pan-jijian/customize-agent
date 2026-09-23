@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { caliberConsistencyIssues, crossChapterConsistencyIssues } from '@/services/document-workflow/qualityValidation';
-import { attributeValueShapeMismatch, rejectValueNoise } from '@/services/document-workflow/authoritativeValues';
+import { attributeValueShapeMismatch, rejectValueNoise, renderTruthConstraintBlock } from '@/services/document-workflow/authoritativeValues';
 import { detectFactConflicts } from '@/services/document-workflow/factsModel';
 import { splitScoringBlocks } from '@/services/document-workflow/tenderBidScoring';
 import { classifyValueShape } from '@/services/document-workflow/valueOverride';
@@ -182,5 +182,37 @@ describe('L0 事实冲突可比值（变更叙述取生效值 / 缺席声明不�
       fact('365日历天', '答疑文件/6招标澄清文件.pdf'),
     ], undefined, undefined, zeroEmbedding);
     expect(conflicts.filter(item => item.includes('计划工期'))).toHaveLength(1);
+  });
+});
+describe('L0 口径须落位清单（读写同源）', () => {
+  const resolved = (attribute: string, value: string, extra: Record<string, unknown> = {}) => ({
+    subject: '', attribute, value, rule: 'R7', evidence: [{ source: '招标文件.pdf', snippet: value }],
+    superseded: [], caliber: true, candidates: [], ...extra,
+  }) as never;
+
+  it('无变更的项目级口径也进入「必须在正文出现」清单', () => {
+    // 实测：开工日期 2026年10月10日 真值层有值、正文零次 → 终检按「未落位」阻断，
+    // 而写手此前只被告知「发生过变更」的属性（本块原有唯一内容）→ 没被要求写
+    const block = renderTruthConstraintBlock({ resolved: [resolved('开工日期', '2026年10月10日')], noiseRejected: [] });
+    expect(block).toContain('项目级口径（必须在正文出现）');
+    expect(block).toContain('开工日期：2026年10月10日');
+  });
+
+  it('已发生变更的口径仍走现行值/被取代块，不重复列入须落位清单', () => {
+    const block = renderTruthConstraintBlock({
+      resolved: [resolved('计划工期', '330日历天', { superseded: ['365日历天'] })],
+      noiseRejected: [],
+    });
+    expect(block).toContain('现行口径（真值层裁决，硬约束）');
+    expect(block).toContain('被取代（不得作为现行口径）：365日历天');
+    expect(block).not.toContain('项目级口径（必须在正文出现）');
+  });
+
+  it('非口径属性不入须落位清单（约束不得膨胀）', () => {
+    const block = renderTruthConstraintBlock({
+      resolved: [resolved('底坑垫层做法', 'C20', { caliber: false })],
+      noiseRejected: [],
+    });
+    expect(block).toBe('');
   });
 });

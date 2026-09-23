@@ -10,7 +10,7 @@ import { buildSemanticGate } from '../../semanticGate';
 import { isQualificationSectionTitle } from '../../evidenceContentSafety';
 import { LABOR_STAGE_LIMIT_WORDS, PEAK_LABOR_RE, PILE_SUPPORT_LITERAL_RE, TRADE_WORKER_WORD_RE, cnNumberToArabic, collectLaborTableBlocks, excavationDepthFromFacts, extractGreeningMaintenanceAuthority, extractStreetLightAuthority, flexNamePattern, laborPeakStageOf, quantityUnitVariants } from '../authorities/authorities';
 import { matchDecisionCategory } from '../../integratedBlueprint';
-import { authorityRewriteVerdict, GENERIC_BODY_PART_SOURCE } from '../../authorityRewriteGuard';
+import { AUTHORITY_REWRITE_MAX_MAGNITUDE_RATIO, authorityRewriteVerdict, GENERIC_BODY_PART_SOURCE, numericPart } from '../../authorityRewriteGuard';
 import { extractObjectAnchor, isLegalConcreteGradeToken } from '../../factsModel';
 import { buildCitationSentenceContext, defaultCitationAdjudicator } from '../../semanticAdjudication';
 import type { CitationAdjudicationCandidate, CitationAdjudicator } from '../../semanticAdjudication';
@@ -2538,6 +2538,32 @@ function resolveQualifiedSpecTarget(markdown: string, location: string, location
   return targets.size === 1 ? [...targets][0] : undefined;
 }
 
+/** mm 尺寸 token：厚度/高度/宽度/长度等**不同属性维度**共用同一书写形态（权威映射不记录属性维度） */
+const MM_SIZE_TOKEN_RE = /^\d+(?:\.\d+)?\s*mm$/u;
+
+/**
+ * 属性维度闸（4.55.31 巢湖实测 #4）。
+ *
+ * 规格错位只在**同一对象同一属性**上成立，而 SpecAuthorityMap 只记录「条目 × token 类型」，
+ * 不记录 token 来自清单特征的哪个属性：实测「玻璃栏板」权威 1250mm 出自清单特征「2．栏杆高度：
+ * 1250mm」，正文「玻璃栏板选用12mm钢化玻璃」的 12mm 是玻璃板厚——同对象不同属性被当成同一规格
+ * 比对（120mm 那处同理：栏板板规格 120mm vs 钢板/玻璃厚度）。判据用**量级**：mm 尺寸类 token 比值
+ * 超过同量级阈值即说明两者不是同一属性维度的量（板厚 10~30mm vs 构件高度/长度 1000mm 级），
+ * 机器不得据此断言规格冲突 → 降级告警（可见但不阻断、不给替换）。
+ *
+ * 只对 mm 尺寸类 token 生效，且与全闸门②同量级判据**同一常量、同一取数**（单源）：
+ * 强度等级（C15 vs C80 = 5.3 倍仍属真冲突）、DN 管径、配合比等一律不适用，必须照报。
+ * 返回跨量级比值（>阈值时），同量级/非 mm token 返回 undefined。
+ */
+function crossAttributeMagnitude(found: string, authority: string): number | undefined {
+  if (!MM_SIZE_TOKEN_RE.test(found.trim()) || !MM_SIZE_TOKEN_RE.test(authority.trim())) return undefined;
+  const foundNumber = numericPart(found);
+  const authorityNumber = numericPart(authority);
+  if (foundNumber === undefined || authorityNumber === undefined) return undefined;
+  const ratio = Math.max(foundNumber, authorityNumber) / Math.min(foundNumber, authorityNumber);
+  return ratio > AUTHORITY_REWRITE_MAX_MAGNITUDE_RATIO ? ratio : undefined;
+}
+
 export function scanSpecLocationMismatchHits(markdown: string, specAuthorityMap?: SpecAuthorityMap, limit = 8): SpecLocationMismatchHit[] {
   const hits: SpecLocationMismatchHit[] = [];
   let blockerHits = 0;
@@ -2648,6 +2674,12 @@ export function scanSpecLocationMismatchHits(markdown: string, specAuthorityMap?
       if (collisionLocation) {
         const collisionSpecs = new Set(placements.filter(item => item.location === collisionLocation && specTokenPattern(item.spec)?.source === pattern.source).map(item => item.spec));
         if (collisionSpecs.has(found)) continue;
+        // 4.55.31 对象维度闸（巢湖实测 #3）：命中处对象是表内更长条目名（如上「玻璃栏板」）时，
+        // 短名条目（「栏板」= 混凝土构件，权威 120mm 板规格）对该处**无管辖权**——不同对象的规格
+        // 不可互比（与 4.55.29 specObjectScope 同一口径）。仅当长名条目对本 pattern 类型**确有权威**
+        //（collisionSpecs 非空）时让位；否则保留原报法（长名权威缺失时不得静默）。该处的规格冲突
+        // 由长名条目自己的 placement 扫描判定，不会漏报（只是报在正确对象名下）。
+        if (collisionSpecs.size > 0) continue;
       }
       if (authoritySpecs.has(found)) continue;
       // 4.55.24 值域闸（与 factsModel 同源）：正文侧 token 也须是合法强度等级——
@@ -2679,8 +2711,11 @@ export function scanSpecLocationMismatchHits(markdown: string, specAuthorityMap?
       const valueClause = /([^。；;，、|\n]*)$/u.exec(markdown.slice(0, valueStart))?.[1] || '';
       const subjectAnchor = extractObjectAnchor(`${valueClause}${found}`, found);
       const objectGrounded = Boolean(subjectAnchor && subjectAnchor.includes(location));
+      // 4.55.31 属性维度闸（见 crossAttributeMagnitude）：mm 尺寸类 token 跨量级 ⇒ 同对象不同属性
+      //（玻璃板厚 12mm vs 清单特征「栏杆高度」1250mm）⇒ 不得硬判、不得替换，降级告警保留可观测
+      const crossAttributeRatio = qualifiedAuthority ? crossAttributeMagnitude(found, qualifiedAuthority) : undefined;
       // 硬判（blocker）：有可比权威口径（唯一值 / 正文自证消歧）且对象维度成立（主语覆盖本部位词）
-      const hardJudge = Boolean(qualifiedAuthority) && (Boolean(selfQualifiedAuthority) || objectGrounded);
+      const hardJudge = Boolean(qualifiedAuthority) && (Boolean(selfQualifiedAuthority) || objectGrounded) && crossAttributeRatio === undefined;
       // 4.55.26 统一闸门（单源 authorityRewriteGuard）：对象限定 / 同量级 / 异义语境 / 形态合法 /
       // 权威标识充分性——不通过则**不改写**（仍照常报出交修复轮/人工），与其余 B 类路径同源
       const rewriteVerdict = authorityRewriteVerdict({
@@ -2714,8 +2749,10 @@ export function scanSpecLocationMismatchHits(markdown: string, specAuthorityMap?
               owner: 'system',
               repairability: 'not_repair_needed',
               message: `规格错位：“${location}”使用的规格 ${found} 与工程量清单权威（${authorityText}）不一致`,
-              // 降级理由上屏：对象维度不足时机器没有唯一口径可比，不得硬判、更不得改写
-              suggestion: `按工程量清单将“${location}”的规格统一为 ${authorityText}；同一材料不同部位允许不同规格，但同一部位不得混用其他部位的规格。（本条已降级为告警：正文该处未能绑定到清单条目的具体对象${uniqueAuthority === undefined ? '或权威本身逐项多值无唯一口径' : ''}，不作机器改写，交人工复核）`,
+              // 降级理由上屏：对象维度/属性维度不足时机器没有唯一口径可比，不得硬判、更不得改写
+              suggestion: `按工程量清单将“${location}”的规格统一为 ${authorityText}；同一材料不同部位允许不同规格，但同一部位不得混用其他部位的规格。（本条已降级为告警：${crossAttributeRatio === undefined
+                ? `正文该处未能绑定到清单条目的具体对象${uniqueAuthority === undefined ? '或权威本身逐项多值无唯一口径' : ''}`
+                : `正文该处尺寸与清单权威跨量级（${found} vs ${qualifiedAuthority}，${crossAttributeRatio.toFixed(1)} 倍），不是同一属性维度的量（如板材厚度 vs 构件高度/长度）`}，不作机器改写，交人工复核）`,
             },
         location,
         replacement: replacementAllowed

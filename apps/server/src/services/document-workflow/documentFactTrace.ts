@@ -729,27 +729,36 @@ function corpusContainsQuantity(corpus: string, normalizedToken: string): boolea
   return variants.some(variant => new RegExp(`(?<![\\d.])${escapeRegExp(variant)}(?![\\d.])`, 'u').test(corpus));
 }
 
-/** 章节/目录编号形态（「1.22」：1~2 位整数段 + 2 位小数段）——目录与标题编号的书写口径。 */
-const SECTION_NUMBERING_SHAPE_RE = /^(?:\d{1,2})\.\d{2}$/u;
+/** 章节/目录编号形态（「1.22」「3.8」：1~2 位整数段 + 1~2 位小数段）——目录与标题编号的书写口径。
+ * 4.55.31 扩形：巢湖实测「3.8 周边管线与建筑保护措施」的 token「3.8 周」——3.8 是小节编号、周是
+ * 标题首字，旧形态只认两位小数段（`\d{1,2}\.\d{2}`）→ 漏判落未登记桶直通硬门禁。扩形**不放宽判据**：
+ * 仍必须命中同形邻号（见下），单凭形态不豁免——否则会吞掉「1.5 月」这类真实时量。 */
+const SECTION_NUMBERING_SHAPE_RE = /^(?:\d{1,2})\.\d{1,2}$/u;
 
-/** 语境内的同形邻号（前后带数字边界，防从 251.941 里抠出无关小数）。 */
-const SECTION_NUMBERING_SIBLING_RE = /(?<![\d.])(\d{1,2})\.(\d{2})(?![\d])/gu;
+/** 语境内的同形邻号（前后带数字边界，防从 251.941 里抠出无关小数）。小数段须与 token **同形**
+ * （位数一致）：「3.8」的邻号是「3.7」，不是「1.23」或「2.05」。 */
+const SECTION_NUMBERING_SIBLING_RE = /(?<![\d.])(\d{1,2})\.(\d{1,2})(?![\d])/gu;
 
-/** 被截断的同层邻号形态：小数点前无数字（前置数字边界断言不成立）、小数段 2 位——「1.23」被语境窗口
- * 从中间截成「.23」后的残余。语境提供方（审计窗口/调用方窗口）若仍截断数字，本形态是最后一道防线。 */
-const SECTION_NUMBERING_TRUNCATED_SIBLING_RE = /(?<![\d.])\.(\d{2})(?![\d])/gu;
+/** 被截断的同层邻号形态：小数点前无数字（前置数字边界断言不成立）、小数段 1~2 位——「1.23」/「3.7」
+ * 被语境窗口从中间截成「.23」/「.7」后的残余。语境提供方（审计窗口/调用方窗口）若仍截断数字，
+ * 本形态是最后一道防线。 */
+const SECTION_NUMBERING_TRUNCATED_SIBLING_RE = /(?<![\d.])\.(\d{1,2})(?![\d])/gu;
 
 /**
  * 章节编号误报单源判定（L0-7；无主数值审计与 C-T2 溯源链共用——两处各写一套必漂移）：
  * 目录/标题里的编号被提取器连同标题首字吞成「数值 token」——真实成稿
  * 「1.22 周月计划报送与纠偏」的 token「1.22 周」中 1.22 是小节编号、周是标题首字，
  * 其相邻小节「1.21 / 1.23」即编号序列本身。
- * 判据（机制，不写死具体值）：token 数值核为编号形态 `\d{1,2}.\d{2}`，且语境中出现**同形邻号**
- * ——整数段相同且小数段相差 1（1.22 ↔ 1.23），或小数段相同且整数段相差 1（1.22 ↔ 2.22）。
+ * 判据（机制，不写死具体值）：token 数值核为编号形态 `\d{1,2}.\d{1,2}`（4.55.31 扩形：巢湖实测
+ * 「3.8 周」——「3.8 周边管线与建筑保护措施」的小节编号 3.8 + 标题首字 周，一位小数段；旧形态只认
+ * `\d{1,2}.\d{2}` 故漏判，落未登记桶直通硬门禁），且语境中出现**同形邻号**（同形 = 小数段位数一致）
+ * ——整数段相同且小数段相差 1（1.22 ↔ 1.23、3.8 ↔ 3.7/3.9），或小数段相同且整数段相差 1
+ * （1.22 ↔ 2.22、2.8 ↔ 3.8）。
  * 连续邻号是目录/标题编号的机制特征：正文量值不会以这种「同层 +1」序列成串出现。
- * 邻号被语境窗口截断（「1.23」→「.23」）时按截断残余形态同判（doc-1790115927170 实机：
- * 截断使前置数字边界断言不成立，真编号落未登记桶直通硬门禁）。
- * 反例（仍按未溯源处理）：无同形邻号的「1.22 周」类时量表述——不得因本族被静默放过。
+ * 同形是必要约束：不加同形则「1.5 月」这类真实时量会被「2.05」等异形数顺带豁免。
+ * 邻号被语境窗口截断（「1.23」→「.23」、「3.7」→「.7」）时按截断残余形态同判
+ * （doc-1790115927170 实机：截断使前置数字边界断言不成立，真编号落未登记桶直通硬门禁）。
+ * 反例（仍按未溯源处理）：无同形邻号的「1.22 周」/「1.5 月」类时量表述——不得因本族被静默放过。
  */
 export function isSectionNumberingToken(input: { token: string; context: string }): boolean {
   const numericPart = /^\d+(?:\.\d+)?/u.exec(input.token.replace(/\s+/gu, ''))?.[0] ?? '';
@@ -761,14 +770,17 @@ export function isSectionNumberingToken(input: { token: string; context: string 
   for (const match of context.matchAll(SECTION_NUMBERING_SIBLING_RE)) {
     const sibling = match[0];
     if (sibling === numericPart) continue;
+    // 同形邻号：小数段位数与 token 一致（「3.8」的邻号是「3.7」，不是「1.23」/「2.05」）
+    if (match[2].length !== decimalText.length) continue;
     const siblingInteger = Number(match[1]);
     const siblingDecimal = Number(match[2]);
     if (siblingInteger === integerPart && Math.abs(siblingDecimal - decimalPart) === 1) return true;
     if (siblingDecimal === decimalPart && Math.abs(siblingInteger - integerPart) === 1) return true;
   }
   // 截断邻号（实机 doc-1790115927170）：「1.23」被语境窗口从中间截成「.23」，整数段缺失使上面的
-  // 前置数字边界断言不成立——小数点前无数字的 2 位小数段即同整数段邻号的截断残余，仍算同层邻号。
+  // 前置数字边界断言不成立——小数点前无数字的小数段即同整数段邻号的截断残余，仍算同层邻号（同形同判）。
   for (const match of context.matchAll(SECTION_NUMBERING_TRUNCATED_SIBLING_RE)) {
+    if (match[1].length !== decimalText.length) continue;
     if (Math.abs(Number(match[1]) - decimalPart) === 1) return true;
   }
   return false;

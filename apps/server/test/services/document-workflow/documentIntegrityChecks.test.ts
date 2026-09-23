@@ -1602,6 +1602,86 @@ describe('4.55.29 反向验证：同一对象同一属性写成清单外规格 �
   });
 });
 
+// ═══════ 4.55.31 对象维度（更长条目名碰撞）+ 属性维度（mm 尺寸跨量级）闸（巢湖实测 draft doc-1790125123717 两条 blocker 归因） ═══════
+// 实测两条：
+// ③ 「玻璃栏板选用12mm钢化玻璃」被判「规格错位：“栏板”使用的规格 12mm 与权威（120mm）不一致」——命中处对象是表内
+//    **更长条目名「玻璃栏板」**，短名条目「栏板」（混凝土构件，权威 120mm 板规格）对该处无管辖权（不同对象规格不可互比）→ 静默；
+// ④ 同处「玻璃栏板」权威 1250mm 出自清单特征「2．栏杆高度：1250mm」，正文 12mm 是玻璃板厚——同对象**不同属性**
+//    被当成同一规格比对；mm 尺寸类 token 跨量级即非同属性维度的量 → 降级 warning（不阻断、不给替换 span）。
+// 反向守护：长名条目自身真错位（1100mm vs 1250mm）、C 标号真错位（C25 vs C30）、DN 管径跨量级真错位（DN40 vs DN400）照报 blocker。
+
+describe('4.55.31 规格错位对象维度闸（更长条目名碰撞）：短名条目对长名对象无管辖权', () => {
+  /** 真实 draft 的权威形状：栏板（混凝土构件 板规格 120mm）与玻璃栏板（清单特征 栏杆高度 1250mm）同厚度维度 */
+  function glassRailingMap(): SpecAuthorityMap {
+    return {
+      厚度规格: [
+        { location: '栏板', spec: '120mm', quantity: '40.630m3', sourceFile: '清单.xls' },
+        { location: '玻璃栏板', spec: '1250mm', quantity: '561.920m', sourceFile: '清单.xls' },
+      ],
+    };
+  }
+
+  it('实测：「玻璃栏板选用12mm钢化玻璃」→ 短名「栏板」不再报（命中处对象是长名条目）', () => {
+    const hits = scanSpecLocationMismatchHits('玻璃栏板选用12mm钢化玻璃，采用不锈钢立柱固定。', glassRailingMap());
+    expect(hits.filter(hit => hit.issue.message.startsWith('规格错位：“栏板”'))).toEqual([]);
+  });
+
+  it('实测：「玻璃栏板」权威 1250mm vs 正文 12mm（同为 mm 尺寸类、跨量级）→ 降级 warning，不给替换 span', () => {
+    const hits = scanSpecLocationMismatchHits('玻璃栏板选用12mm钢化玻璃，采用不锈钢立柱固定。', glassRailingMap());
+    const longHits = hits.filter(hit => hit.issue.message.startsWith('规格错位：“玻璃栏板”'));
+    expect(longHits).toHaveLength(1);
+    expect(longHits[0]!.issue.severity).toBe('warning');
+    expect(longHits[0]!.issue.level).toBe('warning');
+    expect(longHits[0]!.replacement).toBeUndefined();
+    // 降级理由上屏（可观测：属性维度不足，机器无唯一口径可比）
+    expect(longHits[0]!.issue.suggestion).toContain('跨量级');
+  });
+
+  it('对照：mm 尺寸同类同量级真错位（玻璃栏板 1100mm vs 1250mm）→ 仍报 blocker（两道闸未放过真冲突）', () => {
+    const hits = scanSpecLocationMismatchHits('玻璃栏板栏杆高度按1100mm控制，立柱材质为不锈钢。', glassRailingMap());
+    const blockers = hits.filter(hit => hit.issue.severity === 'blocker');
+    expect(blockers.map(hit => hit.issue.message)).toEqual(['规格错位：“玻璃栏板”使用的规格 1100mm 与工程量清单权威（1250mm）不一致']);
+    expect(hits.filter(hit => hit.issue.message.startsWith('规格错位：“栏板”'))).toEqual([]);
+  });
+
+  it('对照：C 标号跨量级不适用属性闸（垫层 C25 vs 权威 C20 同量级 / 承台垫层 C80 vs C15 跨量级）→ 仍报 blocker', () => {
+    const map: SpecAuthorityMap = {
+      混凝土强度等级: [
+        { location: '垫层', spec: 'C15', quantity: '100m3', sourceFile: '清单.xls' },
+        { location: '承台垫层', spec: 'C15', quantity: '200m3', sourceFile: '清单.xls' },
+      ],
+    };
+    // C80（合法值域内）与 C15 比值 5.3 > 同量级阈值，但强度等级不是 mm 尺寸类 token：跨量级仍属真错位
+    const issues = specLocationMismatchIssues('承台垫层采用C80混凝土，分层振捣密实。', map);
+    expect(issues.some(issue => issue.severity === 'blocker' && issue.message.includes('C80'))).toBe(true);
+  });
+
+  it('对照：同类同量级 mm 真错位（地面 150mm vs 权威 180mm）→ 仍报 blocker（属性闸只跨量级时降级）', () => {
+    const map: SpecAuthorityMap = {
+      厚度规格: [
+        { location: '地面', spec: '180mm', quantity: '13.350m2', sourceFile: '清单.xls' },
+        { location: '垫层', spec: '100mm', quantity: '5466.840m3', sourceFile: '清单.xls' },
+      ],
+    };
+    const issues = specLocationMismatchIssues('地面厚度为150mm，随打随抹平。', map);
+    expect(issues.some(issue => issue.severity === 'blocker' && issue.message.includes('150mm'))).toBe(true);
+  });
+
+  it('边界：长名条目无本类权威（玻璃栏板仅 mm 权威，正文写 C25）→ 短名照报（权威缺失不静默）', () => {
+    const map: SpecAuthorityMap = {
+      厚度规格: [
+        { location: '玻璃栏板', spec: '1250mm', quantity: '561.920m', sourceFile: '清单.xls' },
+      ],
+      混凝土强度等级: [
+        { location: '栏板', spec: 'C30', quantity: '40.630m3', sourceFile: '清单.xls' },
+        { location: '垫层', spec: 'C15', quantity: '100m3', sourceFile: '清单.xls' },
+      ],
+    };
+    const issues = specLocationMismatchIssues('玻璃栏板C25现浇混凝土，配筋按图。', map);
+    expect(issues.some(issue => issue.message.startsWith('规格错位：“栏板”'))).toBe(true);
+  });
+});
+
 // ═══════ 4.55.30 口径池抽取边界 + 对象维度（巢湖实测「垫层混凝土强度等级 C35 与 C15 与 C20 两套口径」归因） ═══════
 // 真实 draft doc-1790119909475-7ea5c969 的三条命中：
 // ① 「第二步，承台与基础梁土方开挖、垫层浇筑、钢筋绑扎、模板支设，采用C35商品混凝土分层振捣」——垫层是工序
