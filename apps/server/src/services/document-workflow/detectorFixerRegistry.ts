@@ -118,6 +118,262 @@ export const PENDING_FIXER_DISPOSITION: readonly string[] = [
   // 若将来确需临时挂账，请连同 gLineWiringLock 的长度/指纹断言一并修改（可复核）。
 ];
 
+// ═══════════════════════ 写作期处置声明（4.58 P0：根治的机制保证） ═══════════════════════
+
+/**
+ * 写作期处置：**每条检测器必须声明它在写作期有没有对应动作**。
+ *
+ * ## 为什么需要这道门（实测数据）
+ *
+ * 4.58 把一轮真实生成的 30 条阻断按「最早在哪一阶段被发现」归类：
+ *
+ * | 最早发现阶段 | 条数 | 占比 |
+ * |---|---|---|
+ * | **终检 / 修复链之后** | **29** | **96.7%** |
+ * | 写作期已阻止 | 1 | 3.3% |
+ *
+ * 且修复链净增字数 **+66%**——它在**补写**而非**改写**，补写又产生次生缺陷
+ *（段落近重复、句式模板复读、口径漂移），全部出现在同一轮阻断里。
+ *
+ * 根因是结构性的：**写作期只受提示词软约束，所有硬判据都在终检**。
+ * 于是每发现一个新缺陷形态，只能「再加一个检测器 + 再加一条修复规则」——
+ * 这正是「打补丁」的成因，不是纪律问题。
+ *
+ * 本仓已有姊妹门 `detectorCallSiteErrors`（管「检测器接没接线」）；
+ * 本表是它的**姊妹约束**：管「接线之后，写作期有没有对应落点」。
+ */
+export type WritingTimeDisposition =
+  /** ① 能在写作提示词/任务卡里表达 → 必须提供约束 */
+  | { kind: 'constraint'; channel: '块任务卡' | '章约束' | '全局约束' }
+  /** ② 无法在提示词里表达，但能在成稿后**当场检查并补写** */
+  | { kind: 'self-check'; stage: '块成稿后' | '章成稿后' }
+  /** ③ 只能终检（依赖跨章/全文信息）→ **必须书面写明理由** */
+  | { kind: 'terminal-only'; reason: string };
+
+/**
+ * 检测器 → 写作期处置（**唯一声明点**；与 `DetectorEntry` 分表以便集中审查）。
+ *
+ * 覆盖规则：`assertRegistryConsistency` 强制「每个已登记检测器要么在本表、要么在
+ * `PENDING_WRITING_TIME_DISPOSITION`」，两者都没有即报错——新检测器上线时两条路都进不去
+ *（欠账表由快照锁死，见 gLineWiringLock 用例），因此**必须当场给出处置**。
+ *
+ * 三态裁定口径（本次全量分类的规则，供后续复核）：
+ * - `category` 为事实/证据/专业链 → `constraint`（权威值清单与资料事实清单本就在任务卡通道里）；
+ * - `category` 为格式/范围 → `constraint`（全局约束：禁写项、口径词表）；
+ * - `category` 为样式/结构/表格/控制环 → `self-check`（成稿后机械可判，缺项当场补写）；
+ * - 依赖**跨章/全文**信息者 → `terminal-only` 并逐条写明理由（27 条，见下）。
+ *
+ * 同表内不允许出现两份相反的处置——单源。
+ */
+export const DETECTOR_WRITING_TIME_DISPOSITIONS: Readonly<Record<string, WritingTimeDisposition>> = {
+  'ambiguous-either-or': { kind: 'constraint', channel: '块任务卡' },
+  'area-arithmetic': { kind: 'constraint', channel: '块任务卡' },
+  'atlas-reference-phrase': { kind: 'constraint', channel: '全局约束' },
+  'authority-audit-gap': { kind: 'constraint', channel: '块任务卡' },
+  'auto-spec-validation': { kind: 'self-check', stage: '章成稿后' },
+  'basic-info-schedule-field': { kind: 'constraint', channel: '块任务卡' },
+  'basis-regulations-coverage': { kind: 'constraint', channel: '块任务卡' },
+  'basis-regulations-cross': { kind: 'terminal-only', reason: '编制依据的跨章比对需全文依据清单集合（单章成稿时其余章的依据尚未产生）' },
+  'bid-composition-body-figure': { kind: 'self-check', stage: '章成稿后' },
+  'bid-composition-body-table': { kind: 'self-check', stage: '章成稿后' },
+  'bidder-qualification-section': { kind: 'constraint', channel: '全局约束' },
+  'block-attribution-quantification': { kind: 'constraint', channel: '块任务卡' },
+  'block-fact-density': { kind: 'constraint', channel: '块任务卡' },
+  'block-format-constraints': { kind: 'constraint', channel: '全局约束' },
+  'block-numeric-reconciliation': { kind: 'constraint', channel: '块任务卡' },
+  'block-structure-contract': { kind: 'self-check', stage: '章成稿后' },
+  'block-templating': { kind: 'self-check', stage: '块成稿后' },
+  'blueprint-citation-consistency': { kind: 'constraint', channel: '块任务卡' },
+  'blueprint-value-placement': { kind: 'constraint', channel: '块任务卡' },
+  'boq-division-coverage': { kind: 'constraint', channel: '块任务卡' },
+  'boq-placement': { kind: 'constraint', channel: '块任务卡' },
+  'boq-row-trace': { kind: 'constraint', channel: '块任务卡' },
+  'caliber-consistency': { kind: 'constraint', channel: '块任务卡' },
+  'chapter-dependency': { kind: 'terminal-only', reason: '章间依赖关系是全文拓扑性质' },
+  'chapter-fact-density': { kind: 'constraint', channel: '块任务卡' },
+  'closed-loop-density': { kind: 'self-check', stage: '章成稿后' },
+  'closure-phrase-density-cap': { kind: 'self-check', stage: '块成稿后' },
+  'collision-numbered-heading': { kind: 'terminal-only', reason: '编号冲突需全文标题集合，跨章同名编号在单章内不可见' },
+  'commercial-data-in-body': { kind: 'constraint', channel: '全局约束' },
+  'construction-org-bonus-module': { kind: 'constraint', channel: '块任务卡' },
+  'construction-org-chapter-data-coverage': { kind: 'constraint', channel: '块任务卡' },
+  'construction-org-consistency': { kind: 'terminal-only', reason: '施工组织一致性跨章比对' },
+  'construction-org-control-loop': { kind: 'self-check', stage: '章成稿后' },
+  'construction-org-division-section': { kind: 'self-check', stage: '章成稿后' },
+  'construction-org-generic-language': { kind: 'self-check', stage: '块成稿后' },
+  'construction-org-major-content': { kind: 'constraint', channel: '块任务卡' },
+  'construction-org-professional-audit': { kind: 'constraint', channel: '块任务卡' },
+  'construction-org-professional-chain': { kind: 'constraint', channel: '块任务卡' },
+  'construction-system-coverage': { kind: 'constraint', channel: '块任务卡' },
+  'critical-section-depth': { kind: 'self-check', stage: '章成稿后' },
+  'critical-section-fact-density': { kind: 'constraint', channel: '块任务卡' },
+  'cross-chapter-consistency': { kind: 'terminal-only', reason: '跨章口径一致性本质依赖全章文本' },
+  'cross-chapter-duplicate-section': { kind: 'terminal-only', reason: '跨章重复小节需全文小节集合' },
+  'cross-project-value-copy': { kind: 'terminal-only', reason: '跨项目值拷贝需与其它项目产物比对' },
+  'cross-section-numeric-conflict': { kind: 'terminal-only', reason: '跨小节数值冲突需小节集合比对' },
+  'dangerous-applicability': { kind: 'constraint', channel: '块任务卡' },
+  'dangerous-list-consistency': { kind: 'constraint', channel: '块任务卡' },
+  'dangling-conjunction': { kind: 'self-check', stage: '章成稿后' },
+  'degenerate-content': { kind: 'self-check', stage: '块成稿后' },
+  'document-budget': { kind: 'terminal-only', reason: '篇幅为全文度量，由预算层与压缩轮收敛' },
+  'document-delivery-score': { kind: 'terminal-only', reason: '交付置信度是全文派生评分，不指向具体文本缺陷' },
+  'drawing-pointer-phrase': { kind: 'constraint', channel: '块任务卡' },
+  'drawing-reference': { kind: 'constraint', channel: '块任务卡' },
+  'duplicate-basic-info': { kind: 'terminal-only', reason: '同一基础信息在全文多处出现，需全文扫描' },
+  'duplicate-paragraph': { kind: 'terminal-only', reason: '重复段落需全文段落集合' },
+  'duplicate-table': { kind: 'terminal-only', reason: '重复表格需全文表格集合' },
+  'emergency-section-depth': { kind: 'self-check', stage: '章成稿后' },
+  'equipment-batch-conflict': { kind: 'constraint', channel: '块任务卡' },
+  'equipment-entry-timing': { kind: 'constraint', channel: '块任务卡' },
+  'evaluation-criteria-coverage': { kind: 'constraint', channel: '块任务卡' },
+  'evidence-usage-coverage': { kind: 'constraint', channel: '块任务卡' },
+  'excavation-depth-lock': { kind: 'constraint', channel: '块任务卡' },
+  'excavation-hazard-classification': { kind: 'constraint', channel: '块任务卡' },
+  'fabricated-award': { kind: 'constraint', channel: '块任务卡' },
+  'fabricated-start-date': { kind: 'constraint', channel: '块任务卡' },
+  'fact-consistency': { kind: 'constraint', channel: '块任务卡' },
+  'fact-coverage': { kind: 'constraint', channel: '块任务卡' },
+  'fact-reconciliation': { kind: 'constraint', channel: '块任务卡' },
+  'field-value-mismatch': { kind: 'constraint', channel: '块任务卡' },
+  'figure-substitute-table': { kind: 'self-check', stage: '章成稿后' },
+  'finish-thickness': { kind: 'constraint', channel: '块任务卡' },
+  'flow-form-repeat': { kind: 'self-check', stage: '块成稿后' },
+  'formal-content-integrity': { kind: 'constraint', channel: '全局约束' },
+  'formal-heading-hierarchy': { kind: 'self-check', stage: '章成稿后' },
+  'formal-placeholder': { kind: 'constraint', channel: '全局约束' },
+  'formal-style': { kind: 'self-check', stage: '块成稿后' },
+  'formal-text-gate': { kind: 'constraint', channel: '全局约束' },
+  'formula-residue': { kind: 'constraint', channel: '全局约束' },
+  'foundation-form-residue': { kind: 'constraint', channel: '块任务卡' },
+  'generated-fact-verification': { kind: 'constraint', channel: '块任务卡' },
+  'generic-professional-content': { kind: 'constraint', channel: '块任务卡' },
+  'greening-maintenance-mismatch': { kind: 'constraint', channel: '块任务卡' },
+  'hazard-exclusion-contradiction': { kind: 'constraint', channel: '块任务卡' },
+  'hazard-parameter-binding': { kind: 'constraint', channel: '块任务卡' },
+  'heading-duplicate': { kind: 'terminal-only', reason: '同名标题需全文标题集合比对' },
+  'heading-uncovered-engineering-items': { kind: 'self-check', stage: '章成稿后' },
+  'hollow-table-cell': { kind: 'self-check', stage: '章成稿后' },
+  'identity-marks-forbidden': { kind: 'constraint', channel: '全局约束' },
+  'innovation-tech-coverage': { kind: 'constraint', channel: '块任务卡' },
+  'instruction-like-heading': { kind: 'self-check', stage: '章成稿后' },
+  'internal-terminology-anchor': { kind: 'self-check', stage: '块成稿后' },
+  'inverted-date-range': { kind: 'constraint', channel: '块任务卡' },
+  'local-adaptation-keyword': { kind: 'constraint', channel: '块任务卡' },
+  'major-content-governance': { kind: 'self-check', stage: '章成稿后' },
+  'management-measure-number': { kind: 'constraint', channel: '块任务卡' },
+  'meta-discourse-declaration': { kind: 'self-check', stage: '块成稿后' },
+  'min-chapter-section': { kind: 'terminal-only', reason: '章间小节数均衡属全文结构度量' },
+  'node-schedule-consistency': { kind: 'constraint', channel: '块任务卡' },
+  'numeric-traceability': { kind: 'constraint', channel: '块任务卡' },
+  'overview-recap': { kind: 'terminal-only', reason: '概况段跨章复述需全文概况段集合与位置关系' },
+  'page-target': { kind: 'terminal-only', reason: '页数为全文估算度量信号（永远 warning）' },
+  'paragraph-generic': { kind: 'self-check', stage: '块成稿后' },
+  'paragraph-near-duplicate': { kind: 'terminal-only', reason: '近重复需全文段落集合两两比对' },
+  'paragraph-opening-repeat': { kind: 'self-check', stage: '块成稿后' },
+  'paragraph-tail-repeat': { kind: 'self-check', stage: '块成稿后' },
+  'parameter-concept-conflict': { kind: 'constraint', channel: '块任务卡' },
+  'parameter-obligation-usage': { kind: 'constraint', channel: '块任务卡' },
+  'phase-labor-mixing': { kind: 'constraint', channel: '块任务卡' },
+  'planned-auto-spec-gate': { kind: 'self-check', stage: '章成稿后' },
+  'planned-section-placement': { kind: 'self-check', stage: '章成稿后' },
+  'planned-structure': { kind: 'self-check', stage: '章成稿后' },
+  'precise-fact-usage': { kind: 'constraint', channel: '块任务卡' },
+  'preliminary-action-timing': { kind: 'constraint', channel: '块任务卡' },
+  'process-spec-conflict': { kind: 'constraint', channel: '块任务卡' },
+  'professional-content': { kind: 'constraint', channel: '块任务卡' },
+  'professional-score': { kind: 'terminal-only', reason: '专业评分是全文派生评分' },
+  'project-basic-placeholder': { kind: 'constraint', channel: '全局约束' },
+  'project-contamination': { kind: 'constraint', channel: '全局约束' },
+  'project-type-consistency': { kind: 'constraint', channel: '全局约束' },
+  'prompt-document-rule': { kind: 'constraint', channel: '全局约束' },
+  'prompt-example-leak': { kind: 'constraint', channel: '全局约束' },
+  'punctuation-artifact': { kind: 'constraint', channel: '全局约束' },
+  'repeated-word': { kind: 'terminal-only', reason: '重复词需全文词频统计（单块内低频也构成全文高频）' },
+  'requirements-coverage': { kind: 'constraint', channel: '块任务卡' },
+  'resource-breakdown-consistency': { kind: 'terminal-only', reason: '资源分解与蓝图权威比对，需全章资源陈述集合' },
+  'resource-consistency': { kind: 'terminal-only', reason: '资源总量一致性需跨章资源口径比对' },
+  'resource-triad-section-hierarchy': { kind: 'terminal-only', reason: '资源三要素章节层级属全文结构' },
+  'schedule-duration-overrun': { kind: 'constraint', channel: '块任务卡' },
+  'section-content-integrity': { kind: 'self-check', stage: '章成稿后' },
+  'section-count-overflow': { kind: 'self-check', stage: '章成稿后' },
+  'section-numbering': { kind: 'terminal-only', reason: '章节编号连续性依赖全文标题序列（后续章未写时无法判定编号是否断档）' },
+  'self-undermining-candidate': { kind: 'self-check', stage: '块成稿后' },
+  'sentence-pattern-repeat': { kind: 'self-check', stage: '块成稿后' },
+  'six-hundred-percent-coverage': { kind: 'constraint', channel: '块任务卡' },
+  'skeleton-fingerprint': { kind: 'terminal-only', reason: '骨架指纹是跨段/跨章相似度度量' },
+  'source-enumeration': { kind: 'self-check', stage: '块成稿后' },
+  'spec-gate-rules': { kind: 'self-check', stage: '章成稿后' },
+  'spec-location-mismatch': { kind: 'constraint', channel: '块任务卡' },
+  'stage-phrasing': { kind: 'terminal-only', reason: '阶段表述一致性需跨章比对阶段划分' },
+  'standard-final': { kind: 'self-check', stage: '章成稿后' },
+  'street-light-count-mismatch': { kind: 'constraint', channel: '块任务卡' },
+  'structure-integrity': { kind: 'self-check', stage: '章成稿后' },
+  'support-form-fact-consistency': { kind: 'constraint', channel: '块任务卡' },
+  'support-system-conflict': { kind: 'constraint', channel: '块任务卡' },
+  'table-arithmetic-consistency': { kind: 'constraint', channel: '块任务卡' },
+  'table-caption': { kind: 'constraint', channel: '全局约束' },
+  'table-quality': { kind: 'self-check', stage: '章成稿后' },
+  'table-spam': { kind: 'self-check', stage: '章成稿后' },
+  'templated-label': { kind: 'self-check', stage: '章成稿后' },
+  'tertiary-heading': { kind: 'self-check', stage: '章成稿后' },
+  'title-integrity': { kind: 'self-check', stage: '章成稿后' },
+  'toc-consistency': { kind: 'terminal-only', reason: '目录与正文标题需全文双向比对，单章成稿时正文其余部分尚未产生' },
+  'truncated-sentence': { kind: 'constraint', channel: '全局约束' },
+  'web-evidence-leakage': { kind: 'constraint', channel: '全局约束' },
+  'writer-missing-section': { kind: 'self-check', stage: '章成稿后' },
+};
+
+/**
+ * 尚未完成写作期分类的检测器（**只会缩小的欠账**）。
+ *
+ * 本次（4.58 P0）已对全部 155 个检测器完成分类，本表为空。
+ * 保留空表的用意与 `PENDING_FIXER_DISPOSITION` 一致：它是「只减不增」的机制本体——
+ * 新检测器既进不了这里（快照锁死），又必须当场声明处置，故不会再产生沉默孤儿。
+ */
+export const PENDING_WRITING_TIME_DISPOSITION: readonly string[] = [
+  // 空表：155 个检测器已全部分类（27 terminal-only / 84 constraint / 44 self-check）。
+];
+
+/** 写作期处置覆盖检查（纯函数；输入检测器声明表与欠账表，返回错误清单，空数组即通过） */
+export function writingTimeDispositionErrors(input: {
+  detectors: readonly DetectorEntry[];
+  dispositions: Readonly<Record<string, WritingTimeDisposition>>;
+  pending: readonly string[];
+}): string[] {
+  const errors: string[] = [];
+  const pendingSet = new Set(input.pending);
+  if (pendingSet.size !== input.pending.length) {
+    errors.push('PENDING_WRITING_TIME_DISPOSITION 存在重复 id（欠账清单须唯一）');
+  }
+  const declaredIds = new Set(input.detectors.map(detector => detector.id));
+  for (const pendingId of pendingSet) {
+    if (!declaredIds.has(pendingId)) {
+      errors.push(`PENDING_WRITING_TIME_DISPOSITION 声明了未登记的检测器 ${pendingId}（已改名或已删除，请同步移出欠账清单）`);
+    }
+  }
+  for (const [id, disposition] of Object.entries(input.dispositions)) {
+    if (!declaredIds.has(id)) {
+      errors.push(`写作期处置表声明了未登记的检测器 ${id}（已改名或已删除，请同步删除该条）`);
+    }
+    if (disposition.kind === 'terminal-only' && !disposition.reason.trim()) {
+      errors.push(`检测器 ${id} 声明 terminal-only 但 reason 为空——「只能终检」必须书面写明理由，否则与沉默缺省无异`);
+    }
+  }
+  for (const detector of input.detectors) {
+    const declared = input.dispositions[detector.id];
+    if (declared) {
+      if (pendingSet.has(detector.id)) {
+        errors.push(`检测器 ${detector.id} 已声明写作期处置（${declared.kind}）却仍在欠账清单中——请从欠账清单移出`);
+      }
+      continue;
+    }
+    if (!pendingSet.has(detector.id)) {
+      errors.push(`检测器 ${detector.id} 既未声明 writingTimeDisposition 也未进欠账清单——新增检测器必须当场给出写作期处置（constraint / self-check / terminal-only+理由）`);
+    }
+  }
+  return errors;
+}
+
 /**
  * 检测器 category 合法值全集（V2 批3 门禁升级 L3）：与 ValidationIssue.category 联合类型单源对齐。
  * 门禁硬阻断按 category 判定（buildExportGate 黑名单式全量阻断），缺卡/错卡的声明会使检测器
@@ -912,7 +1168,7 @@ export function resetDetectorUsage(): void {
   degradedDetectorIds.clear();
 }
 
-const ALL_DETECTORS: readonly DetectorEntry[] = [
+export const ALL_DETECTORS: readonly DetectorEntry[] = [
   ...FULL_VALIDATION_DETECTORS,
   ...STANDARD_FINAL_DETECTORS,
   ...AUXILIARY_DETECTORS,
@@ -1093,6 +1349,11 @@ export function assertRegistryConsistency(): void {
   //    本项直接对应 P0-12 记为全局单点的同一函数——故判定只做「集合归属」这一确定性比对，
   //    不做任何推断；分类欠账由显式清单 PENDING_FIXER_DISPOSITION 承载并只允许缩小。
   errors.push(...fixerDispositionErrors({ detectors: ALL_DETECTORS, fixers, pending: PENDING_FIXER_DISPOSITION }));
+  // 9. 写作期处置声明（4.58 P0）：把「检测器有没有写作期落点」从沉默缺省改为必须签字的声明。
+  //    与第 8 项同款纪律（集合归属的确定性比对，不做推断；欠账表只允许缩小）。
+  //    动机见 DETECTOR_WRITING_TIME_DISPOSITIONS 的文件头注释：实测 30 条阻断里 29 条（96.7%）
+  //    是终检才发现，写作期无对应落点——这是「打补丁」的结构性成因。
+  errors.push(...writingTimeDispositionErrors({ detectors: ALL_DETECTORS, dispositions: DETECTOR_WRITING_TIME_DISPOSITIONS, pending: PENDING_WRITING_TIME_DISPOSITION }));
   if (errors.length > 0) {
     throw new Error(`检测器/修复器注册表一致性校验失败（${errors.length} 项）：\n${errors.map(error => `- ${error}`).join('\n')}`);
   }
