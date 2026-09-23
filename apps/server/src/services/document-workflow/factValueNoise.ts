@@ -284,7 +284,7 @@ export function collapseObjectWindowStart(text: string, start: number): number {
   return at;
 }
 
-export function collapseObjectWindowEnd(text: string, end: number): number {
+export function collapseObjectWindowEnd(text: string, end: number, floor = 0): number {
   let at = Math.max(0, Math.min(end, text.length));
   for (let step = 0; step < OBJECT_WINDOW_MAX_STEPS && at < text.length; step += 1) {
     const next = text[at]!;
@@ -300,9 +300,12 @@ export function collapseObjectWindowEnd(text: string, end: number): number {
       continue;
     }
     if (next === ')' || next === '）') {
-      // 闭括号左侧须有配对开括号（该括号组在本窗口内）才纳入，否则以它为边界停下
+      // 闭括号须与本窗口内的开括号配对才纳入，否则以它为边界停下——`floor` 是窗口起点，
+      // 少了它会把窗口**之外**（左侧另一处括号组）的开括号当成配对：实测
+      // `粗粒式沥青混凝土(AC-25C)6cm与细粒式改性沥青混凝土AC-13C)4cm` 的第二个 token
+      // （源文本自身缺开括号）会因此把裸露的 `)` 收进窗口，把一个正常 token 判成残片丢弃。
       const open = next === ')' ? '(' : '（';
-      if (!text.slice(0, at).includes(open)) break;
+      if (!text.slice(Math.max(0, floor), at).includes(open)) break;
       at += 1;
       continue;
     }
@@ -343,11 +346,13 @@ export function isTruncationFragmentOf(fragment: string, source: string): boolea
   return long.includes(short);
 }
 
-/** 在**同一行**文本里为残片找截断源：哪个完整括号组包含它（如 `25C)` ← `(AC-25C)`）。
+/** 在**同一行**文本里为残片找截断源：哪个完整括号组与它同源（如 `25C)` ← `(AC-25C)`）。
+ *  包含关系**双向都试**：残片窗口常把数值与单位一并带上（`面层(AC-13C)4cm)`），
+ *  此时窗口比括号组长——单向的「残片 ⊂ 括号组」永远不成立，记录就指不出截断源了。
  *  找不到返回 undefined（源文本本身就没写全，记录里如实说明）。 */
 export function findTruncationSource(text: string, fragment: string): string | undefined {
   for (const match of String(text || '').matchAll(/[（(][^（()）]{1,20}[）)]/gu)) {
-    if (isTruncationFragmentOf(fragment, match[0])) return match[0];
+    if (isTruncationFragmentOf(fragment, match[0]) || isTruncationFragmentOf(match[0], fragment)) return match[0];
   }
   return undefined;
 }

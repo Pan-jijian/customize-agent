@@ -197,7 +197,7 @@ function extractParamTokens(markdown: string): ParamToken[] {
        */
       const matchStart = match.index || 0;
       const windowStart = collapseObjectWindowStart(line, matchStart);
-      const objectWindow = line.slice(windowStart, collapseObjectWindowEnd(line, matchStart + match[0].length));
+      const objectWindow = line.slice(windowStart, collapseObjectWindowEnd(line, matchStart + match[0].length, windowStart));
       // 值文本在收拢窗口内的偏移：由正则组精确给出（前缀字符类不含空白，trim 不改偏移）
       const valueOffsetInWindow = matchStart - windowStart + (match[1] || '').length - (trailingDigits ? trailingDigits[0].length : 0);
       const afterValue = objectWindow.slice(valueOffsetInWindow + valueText.length);

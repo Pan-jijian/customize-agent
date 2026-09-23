@@ -11,7 +11,7 @@ import { arbitrateNumericConflicts } from './numericConflictArbiter';
 import type { BillFactLock } from './billFactLock';
 import { blueprintCitationVerdict, rebaseCitationAnchorsForChapters, type BlueprintCitationAdjudicationSummary, type BlueprintData, type QuantityConflictAnchor } from './integratedBlueprint';
 import { blueprintEquipmentAuthorities, blueprintLaborPeakAuthority, blueprintPhaseLaborAuthorities, blueprintQuantityGroupAuthorities, buildAuthorityIndex } from './authorityIndex';
-import { applyDeterministicConsistencyFixes, classifyThematicSectionKey, collectSectionContentGaps, crossChapterConsistencyIssues, emptySectionSpans, normalizeSectionTitleForGap, processSpecConflictIssues } from './qualityValidation';
+import { applyDeterministicConsistencyFixes, classifyThematicSectionKey, collectSectionContentGaps, crossChapterConsistencyIssues, emptySectionSpans, normalizeSectionTitleForGap, processSpecConflictIssues, sameSectionTitle } from './qualityValidation';
 import { professionalSectionTaskCard } from './promptRuleExtraction';
 import { reviewGlobalConsistency } from './chapterReview';
 import { dataConsistencyConflictIssue, reviewDataConsistency } from './dataConsistencyReview';
@@ -1246,15 +1246,58 @@ export async function enforcePlannedSectionCompleteness(input: {
   //  不可修。它正是本补写轮该处理的形态（内容不足 → 扩写），故纳入补写目标。
   const gaps = collectSectionContentGaps('', chapterDraftsFinal).filter(gap =>
     gap.reason === 'missing_planned_section' || (gap.reason === 'empty' && gap.planned) || (gap.reason === 'too_short' && gap.planned));
+  /**
+   * 4.58 R1 修：**`empty`/`too_short` 与 `missing` 必须用不同的插入方式**。
+   *
+   * 原实现把三类缺口合成一批、统一用「章末追加」锚点（`appendAt: 'chapter-end'`），
+   * 但 `empty` 缺口的提示词写的是「必须在**既有小节标题下**补写正文」——**指令与插入方式互相矛盾**：
+   * 补写内容被追加到章末，原空标题**仍然空着**，于是终检「空小节」blocker 反复不清零
+   * （实测 `doc-1790168542563-ea526b1b` 3 条：`机电管线预埋与系统调试` 等，标题行紧邻下一个标题行、无正文）。
+   *
+   * 现按缺口性质分流：
+   * - **empty / too_short** → 锚点取**该小节标题行原文**、**就地补写**（锚点行下本无正文，
+   *   不存在 r28j B8「在位插入把标题行切成空壳」的风险——那条风险的成立前提是锚点行后**已有**正文）；
+   * - **missing** → 保持章末追加（新增小节落章末，锚点仅作存在性校验）。
+   */
   const targets = chapterDraftsFinal.flatMap(chapter => {
     const chapterGaps = gaps.filter(gap => gap.chapterTitle === chapter.title);
     if (chapterGaps.length === 0) return [];
-    const sectionTitles = chapterGaps.map(gap => ({ title: gap.sectionTitle, emptyOnly: gap.reason === 'empty', tooShort: gap.reason === 'too_short' }));
-    // 章末标题行作为补写锚点（章末追加模式：锚点仅作存在性校验，补写小节落章末——锚点行后
-    // 仍有其正文时在位插入会把标题行切成空壳触发回滚，r28j B8 实测 s28i 第五章）
-    const lastHeadingLine = chapter.content.split('\n').map(line => line.trim()).filter(line => /^#{2,4}\s/u.test(line)).pop();
-    if (!lastHeadingLine) return [];
-    return [{ chapter, sectionTitles, lastHeadingLine }];
+    const chapterLines = chapter.content.split('\n');
+    const result: Array<{
+      chapter: typeof chapter;
+      sectionTitles: Array<{ title: string; emptyOnly: boolean; tooShort: boolean }>;
+      anchorLine: string;
+      /** undefined = 补写定位（锚点行后就地补写）；'chapter-end' = 章末追加（rolePipeline 同源语义） */
+      appendAt: 'chapter-end' | undefined;
+    }> = [];
+    // ① 就地补写：逐个空/过短小节，锚点取其标题行原文
+    for (const gap of chapterGaps.filter(item => item.reason !== 'missing_planned_section')) {
+      const headingLine = chapterLines
+        .map(line => line.trim())
+        .reverse()
+        .find(line => /^#{3,4}\s/u.test(line) && sameSectionTitle(line.replace(/^#{3,4}\s+/u, ''), gap.sectionTitle));
+      if (!headingLine) continue;
+      result.push({
+        chapter,
+        sectionTitles: [{ title: gap.sectionTitle, emptyOnly: true, tooShort: gap.reason === 'too_short' }],
+        anchorLine: headingLine,
+        appendAt: undefined,
+      });
+    }
+    // ② 章末追加：整节缺失者合并为一批（一次 LLM 调用产多个小节）
+    const missingGaps = chapterGaps.filter(item => item.reason === 'missing_planned_section');
+    if (missingGaps.length > 0) {
+      const lastHeadingLine = chapterLines.map(line => line.trim()).filter(line => /^#{2,4}\s/u.test(line)).pop();
+      if (lastHeadingLine) {
+        result.push({
+          chapter,
+          sectionTitles: missingGaps.map(gap => ({ title: gap.sectionTitle, emptyOnly: false, tooShort: false })),
+          anchorLine: lastHeadingLine,
+          appendAt: 'chapter-end',
+        });
+      }
+    }
+    return result;
   });
   if (targets.length === 0) return { plannedSectionFixApplied: false };
   const plannedSectionRunningStage = displayStage({ type: 'llm_review', roleId: 'planned-section-repair', status: 'running', message: `缺规划小节补写（${targets.length} 章缺失）` }, { subtitle: '缺节补写收口' });
@@ -1288,7 +1331,7 @@ export async function enforcePlannedSectionCompleteness(input: {
         ? Math.max(...existingOrdinals) + 1
         : (((target.chapter.sections || []).findIndex(section => section === sectionTitle) + 1) || ((target.chapter.sections || []).length + 1));
       const heading = `### ${chapterIndex + 1}.${sectionOrdinal} ${sectionTitle}`;
-      if (emptyOnly) return `本章小节「${sectionTitle}」只有标题或表格无正式正文：必须在既有小节标题下补写正式正文段落（正文写在表格前后均可），不得新增同名小节标题、不得删除或改动已有表格与数值。\n${professionalSectionTaskCard(target.chapter.title, sectionTitle)}`;
+      if (emptyOnly) return `本章小节「${sectionTitle}」只有标题或表格无正式正文：**保留该小节标题行原文不动**，在其后补写正式正文段落（正文写在表格前后均可），不得新增同名小节标题、不得删除或改动已有表格与数值。\n${professionalSectionTaskCard(target.chapter.title, sectionTitle)}`;
       return `本章正文缺少规划小节「${sectionTitle}」：必须在章末新增小节标题「${heading}」（标题一字不差）并写入正式正文。\n${professionalSectionTaskCard(target.chapter.title, sectionTitle)}`;
     });
     // P12 回滚保护：补写后同源复检该章缺规划小节数（collectSectionContentGaps 同口径）与空标题
@@ -1313,7 +1356,9 @@ export async function enforcePlannedSectionCompleteness(input: {
           patchGuard: repairPatchGuard('planned-section-repair', generationDiagnostics),
           // 章末追加锚点 = 章末标题行：锚点仅作存在性校验，replacement 追加到章末，锚点原文原位不动
           // （历史缺陷 r28j B8：锚点行后仍有其正文，原位插入切出空壳标题 → emptyHeadingCount 上升 → P12 回滚误杀）
-          anchorTexts: [{ text: target.lastHeadingLine, append: true, appendAt: 'chapter-end' }],
+          // 4.58 R1：就地补写（empty/too_short）走原位锚点——锚点行下本无正文，安全；
+          // 章末追加（missing）保持原行为
+          anchorTexts: [{ text: target.anchorLine, append: true, appendAt: target.appendAt }],
           maxTokens: 6000,
         })));
         return repaired.content && repaired.content !== target.chapter.content ? repaired.content : target.chapter.content;

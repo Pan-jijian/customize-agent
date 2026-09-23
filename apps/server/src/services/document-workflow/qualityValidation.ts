@@ -1177,7 +1177,7 @@ export function normalizeSectionTitleForGap(title: string) {
   return normalizeStructureTitle(title);
 }
 
-function sameSectionTitle(left: string, right: string) {
+export function sameSectionTitle(left: string, right: string) {
   const leftKey = normalizeSectionTitleForGap(left);
   const rightKey = normalizeSectionTitleForGap(right);
   if (!leftKey || !rightKey) return false;

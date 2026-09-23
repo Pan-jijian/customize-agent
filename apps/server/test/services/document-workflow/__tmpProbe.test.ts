@@ -1,26 +1,27 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { parameterConceptConflictIssues } from '@/services/document-workflow/parameterConceptConflicts';
+import { describe, expect, it } from 'vitest';
+import { MEASURE_UNIT_ALTERNATION, collapseObjectWindowEnd, collapseObjectWindowStart, findTruncationSource, hasTruncatedBracketFragment } from '@/services/document-workflow/factValueNoise';
 
-vi.mock('@/services/document-workflow/semanticSimilarity', () => ({ getLocalSemanticProvider: vi.fn() }));
-import { getLocalSemanticProvider } from '@/services/document-workflow/semanticSimilarity';
+const TOKEN_RE = new RegExp(String.raw`([一-龥A-Za-z0-9（）()]{1,12}?)(\d+(?:\.\d+)?)\s*(${MEASURE_UNIT_ALTERNATION})([一-龥A-Za-z0-9（）()]{0,8})`, 'gu');
 
-const providerMock = vi.mocked(getLocalSemanticProvider);
-const embedMock = vi.fn<(texts: string[]) => Promise<number[][]>>();
+const SAMPLES = [
+  '粗粒式沥青混凝土(AC-25C)6cm厚与细粒式改性沥青混凝土面层(AC-13C)4cm厚各13898.51m²',
+  '粗粒式沥青混凝土(AC-25C)6cm与细粒式改性沥青混凝土AC-13C)4cm',
+  '基层6cm与面层(AC-13C)4cm)',
+  '上面层（AC-13C）4cm与AC-25C)6cm厚',
+  '基层厚6cm，面层AC-13C)4cm',
+];
 
-beforeEach(() => {
-  vi.clearAllMocks();
-  providerMock.mockReturnValue({ embedDocuments: embedMock } as never);
-});
-
-describe('probe', () => {
-  it('real doc sentences: all concepts in one cluster', async () => {
-    embedMock.mockImplementation(async (texts: string[]) => texts.map(() => [1, 0]));
-    const markdown = [
-      '路面结构层按“路床碾压检验→塘渣石垫层摊铺→水泥稳定碎（砾）石基层摊铺→透层与粘层喷洒→沥青混凝土面层铺筑→侧平石安砌→绿化种植”的顺序推进，路床碾压检验、塘渣石垫层、水泥稳定碎（砾）石按5%厂拌水泥含量控制、洒水车养护不少于7天，粗粒式沥青混凝土(AC-25C)6cm厚与细粒式改性沥青混凝土面层(AC-13C)4cm厚各13898.51m²，压实度不小于95%、顶面容许回弹弯沉值不大于1.1mm；侧平石安砌前先浇筑C15侧缘石垫层。',
-      '基层验收后依次喷洒透层13898.51m²（慢裂型乳化沥青，喷油量1.0L/m²）与粘层（快裂型乳化沥青，喷油量0.5L/m²），再铺筑粗粒式普通沥青混凝土(AC-25C)6cm厚13898.51m²、细粒式改性沥青混凝土面层(AC-13C)4cm，压实度按不小于95%控制，顶面容许回弹弯沉值不大于1.1mm。',
-    ].join('\n');
-    const issues = await parameterConceptConflictIssues(markdown);
-    console.log(JSON.stringify(issues, null, 2));
-    expect(issues).toBeDefined();
+describe('probe window', () => {
+  it('windows', () => {
+    for (const line of SAMPLES) {
+      for (const match of line.matchAll(new RegExp(TOKEN_RE.source, 'gu'))) {
+        const matchStart = match.index || 0;
+        const windowStart = collapseObjectWindowStart(line, matchStart);
+        const objectWindow = line.slice(windowStart, collapseObjectWindowEnd(line, matchStart + match[0].length, windowStart));
+        const fragment = hasTruncatedBracketFragment(objectWindow);
+        console.log(JSON.stringify(match[0]), '=>', JSON.stringify(objectWindow), fragment ? `FRAGMENT source=${JSON.stringify(findTruncationSource(line, objectWindow))}` : '');
+      }
+    }
+    expect(true).toBe(true);
   });
 });

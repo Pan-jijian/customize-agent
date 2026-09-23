@@ -1,6 +1,6 @@
 import { DEFAULT_DOCUMENT_DOMAIN_PROFILE, factFieldForLabel, isDiagnosticFactValue, isForbiddenFactValue, type DocumentDomainProfile } from '../document-core/documentDomainProfileService';
 import { rejectValueNoise } from '../document-workflow/authoritativeValues';
-import { TEMPORAL_DATE_VALUE_RE, foldAdminNameAbbreviation, foldHomoglyphVariants, hasCorruptTextMarkers, isTableScrapeFragment, stripFactLabelPrefix, stripTrailingFormAnnotation, temporalValueKind, valueAfterChangeConnector } from '../document-workflow/factValueNoise';
+import { TEMPORAL_DATE_VALUE_RE, foldAdminNameAbbreviation, foldHomoglyphVariants, hasCorruptTextMarkers, isComplianceCitationValue, isTableScrapeFragment, stripFactLabelPrefix, stripTrailingFormAnnotation, temporalValueKind, valueAfterChangeConnector } from '../document-workflow/factValueNoise';
 import type { DocumentFact, ValidationIssue } from '../document-workflow/types';
 import type { ProjectMaterialSummary } from '../document-core/projectMaterialService';
 
@@ -41,6 +41,18 @@ function comparableValue(value: string, profile: DocumentDomainProfile, label?: 
   // 变更叙述：生效值在连接语之后（连接语之前是旧值）——必须在后续形态判定**之前**取
   const trimmed = valueAfterChangeConnector(value.trim()).trim();
   if (trimmed !== value.trim() && rejectValueNoise(trimmed)) return '';
+  /**
+   * 4.58 ① 合规引用句当值（实测 `doc-1790168542563-ea526b1b` 的 `计划工期`）。
+   *
+   * 该组三个"值"是：`330日历天`、`计划开工日期：2026年10月10日（…）`、
+   * **`符合第二章“投标人须知”第1.3.2项规定`**——第三个是**引用**（指向别处的条款），不是工期取值，
+   * 却因形态为 plain 打掉了时长/日期分桶（见下方 ②），把前两者拉回全量互比 → 多值冲突。
+   *
+   * 判据在单源模块 `isComplianceCitationValue`（形态三连：合规动词开头 + 含条款编号 + 以规定/要求收尾），
+   * 此处只做转接，不复制判据。真值自检：`330日历天`/`2026年10月10日`/`框架结构` 均不满足三连，
+   * `符合国家现行验收规范合格标准`（无条款编号）、`满足GB50204-2015要求`（无条款编号）同样不满足。
+   */
+  if (isComplianceCitationValue(trimmed)) return '';
   if (isDiagnosticFactValue(profile, trimmed) || isForbiddenFactValue(profile, trimmed)) return '';
   if (/签章|盖章|联系人|联系电话|电话|邮箱|解密|开标|评标|保证金|交易系统|空白|填写|上传|下载|递交|投标文件制作|电子服务系统|交易平台/u.test(trimmed)) return '';
   if (/\|/u.test(trimmed) || /^#+\s*/u.test(trimmed)) return '';
@@ -197,28 +209,32 @@ export function validateFactConsistency(input: { markdown: string; facts: Docume
       for (const key of absorbed) grouped.delete(key);
     }
     /**
-     * 4.56.4 时间槽位分桶（判据单源：与真值层 `temporalValueKind` 同源）。
+     * 4.58 ② 时间槽位**三分桶**（修正 4.56.4 分桶的「一个 plain 值即失效」缺口）。
      *
-     * 实测 `计划工期` 被判「存在多个值」：`330日历天` vs `计划开工日期：2026年10月10日（具体开工日期
-     * 以招标人出具的书面开工通知为准）`——**时长与日期是不同槽位**，同一份答疑文件的相邻两句本来就同时成立。
-     * 真值层早已按形态分桶（`factsModel` 的 D-T4 ④），对账侧没有 → 又是一处判据分裂。
-     * 口径与真值层一致：组内值**全部**可判形态且时长/日期并存时按形态分桶各自比对；
-     * 含 plain 值时维持全量互比（防真冲突被静默）。
+     * 4.56.4 口径（判据单源 `temporalValueKind`，与真值层 D-T4 ④ 同源）要求组内值**全部**可判形态
+     *（`kinds.size === 2 && !kinds.has('plain')`）才分桶，否则整组回到全量互比。实测
+     * `doc-1790168542563-ea526b1b` 的 `计划工期` 组：`330日历天`（时长）+ `计划开工日期：2026年10月10日…`
+     * （日期）+ `符合第二章“投标人须知”第1.3.2项规定`（合规引用句，形态 plain）——第三个值令分桶整体失效，
+     * 时长与日期被拉回互比 → 多值冲突；同一族的 `标段工程工期`（表格行标题）等标签类 plain 值同理。
+     *
+     * 现口径：duration / date / plain **各自独立判定**（仍是同源 `temporalValueKind`，只是不再要求全组可判形态），
+     * 桶内 ≥2 个分组键才报冲突，报文格式与全量互比分支完全一致（调用方零改动）。
+     * 实测语义（`factConsistencyService.test.ts` 回放）：`330日历天` + `2026年10月10日` → 不报；
+     * `330日历天` + `400日历天` → 报；plain 甲 + plain 乙 → 报；两个不同日期 → 报。
+     *
+     * 已知代价（可见记录，不静默）：跨形态的真冲突不再互比——典型是数字工期与中文数字工期
+     *（`330日历天` vs `三百三十天`，后者形态判为 plain）同组时不再报出。取舍依据：plain 桶同时装着
+     * 「引用句/标签值」这类噪声值（数量上占绝对多数）与真实取值，形态上无法区分；一旦让 plain 参与
+     * 跨形态互比，就等于回到本次要根治的误报族（引用句与真实值几乎必同组）。
      */
     if (grouped.size > 1) {
-      const kinds = new Set([...grouped.keys()].map(temporalValueKind));
-      if (kinds.size === 2 && !kinds.has('plain')) {
-        for (const kind of ['duration', 'date'] as const) {
-          const bucket = new Map([...grouped].filter(([key]) => temporalValueKind(key) === kind));
-          if (bucket.size > 1) {
-            const detail = [...bucket.values()].map(group => `${group[0]!.value}（${group.map(item => item.source).filter(Boolean).join('、') || '未知来源'}）`).join(' vs ');
-            issues.push({ level: 'error', message: `事实一致性冲突：${label} 存在多个值：${detail}`, suggestion: '请确认当前绑定材料组，或在模板绑定中只绑定当前文档所需材料。' });
-          }
+      for (const kind of ['duration', 'date', 'plain'] as const) {
+        const bucket = new Map([...grouped].filter(([key]) => temporalValueKind(key) === kind));
+        if (bucket.size > 1) {
+          const detail = [...bucket.values()].map(group => `${group[0]!.value}（${group.map(item => item.source).filter(Boolean).join('、') || '未知来源'}）`).join(' vs ');
+          issues.push({ level: 'error', message: `事实一致性冲突：${label} 存在多个值：${detail}`, suggestion: '请确认当前绑定材料组，或在模板绑定中只绑定当前文档所需材料。' });
         }
-        continue;
       }
-      const detail = [...grouped.values()].map(group => `${group[0]!.value}（${group.map(item => item.source).filter(Boolean).join('、') || '未知来源'}）`).join(' vs ');
-      issues.push({ level: 'error', message: `事实一致性冲突：${label} 存在多个值：${detail}`, suggestion: '请确认当前绑定材料组，或在模板绑定中只绑定当前文档所需材料。' });
     }
   }
   const projectName = input.summary.facts.projectName;
