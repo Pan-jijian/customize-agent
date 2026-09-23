@@ -78,12 +78,17 @@ export async function stageFinalGate(session: FinalizeSession): Promise<void> {
   const blockLedger = session.generationDiagnostics.blockLedger || [];
   const blockLengthSummary = (() => {
     if (blockLedger.length === 0) return '';
-    const firstPass = blockLedger.filter(item => item.firstAttempt && item.passed).length;
-    const firstAttempts = blockLedger.filter(item => item.firstAttempt).length || 1;
+    /**
+     * 一次通过率 = **首轮即通过（attempt=0 且 passed）的块数 / 总块数**。
+     * 首版写成 `首轮通过 / 首轮记录的块数`——分母只含 attempt=0 的记录，恒为 100%，是**错的度量**
+     * （实测首版打印「100%（11/11）」而真实首轮通过率只有 11/32＝34%）。
+     */
+    const firstPass = blockLedger.filter(item => item.attempt === 0 && item.passed).length;
+    const total = blockLedger.length || 1;
     const inWindow = blockLedger.filter(item => item.target > 0 && item.actual / item.target >= 0.85 && item.actual / item.target <= 1.15).length;
     const ratios = blockLedger.filter(item => item.target > 0).map(item => item.actual / item.target).sort((left, right) => left - right);
     const median = ratios.length > 0 ? ratios[Math.floor(ratios.length / 2)] : 0;
-    return `块级篇幅账：${blockLedger.length} 块，写作一次通过率 ${Math.round((firstPass / firstAttempts) * 100)}%（${firstPass}/${firstAttempts}），块目标命中率 ${Math.round((inWindow / blockLedger.length) * 100)}%，实际/目标 中位 ${median.toFixed(2)}`;
+    return `块级篇幅账：${blockLedger.length} 块，写作一次通过率 ${Math.round((firstPass / total) * 100)}%（${firstPass}/${total}），块目标命中率 ${Math.round((inWindow / total) * 100)}%，实际/目标 中位 ${median.toFixed(2)}`;
   })();
   session.finalStages.push(displayStage({ type: 'validation', roleId: 'document-block-length-ledger', status: 'success', message: blockLengthSummary || '块级篇幅账：无块记录（本次未走块写作通道）', details: blockLedger.slice(0, 40).map(item => `${item.chapter.slice(0, 10)}｜${item.block}｜目标 ${item.target} 实际 ${item.actual}（${(item.actual / Math.max(1, item.target)).toFixed(2)}×）attempt=${item.attempt}${item.passed ? ' 通过' : ' 失败'}${item.failureKinds?.length ? ` 【${item.failureKinds.join('、')}】` : ''}`) }, { subtitle: '块级篇幅账' }));
   session.finalStages.push(displayStage({ type: 'validation', roleId: 'document-diagnostics', status: 'success', message: `性能统计：LLM ${session.generationDiagnostics.llm.calls} 次，失败 ${session.generationDiagnostics.llm.failures} 次，瞬态重试 ${session.generationDiagnostics.llm.retries} 次，schema 校验失败 ${session.generationDiagnostics.llm.schemaFailures} 次，峰值并行 ${session.generationDiagnostics.llm.maxActive}，检索 ${session.generationDiagnostics.evidence.searchQueries} 次/${Math.round(session.generationDiagnostics.evidence.searchMs / 1000)} 秒，证据上下文 ${session.generationDiagnostics.evidence.contextChars} 字，噪声过滤 ${session.generationDiagnostics.evidence.filteredNoise} 条，预算裁剪 ${session.generationDiagnostics.evidence.budgetDropped} 条，质量问题 阻断${session.generationDiagnostics.quality.blockingCount}/重要${session.generationDiagnostics.quality.importantCount}/轻微${session.generationDiagnostics.quality.minorCount}${factSanitizeMessage}${retrievalFailureMessage}${pinnedMissedMessage}${slowMetrics ? `，Top耗时：${slowMetrics}` : ''}${callTopSummary ? `，调用输入Top5：${callTopSummary}` : ''}`, details: [...phaseWaterfallDetails(session.generationDiagnostics.metrics), ...callBreakdownTopDetails(session.generationDiagnostics.llm.callBreakdown)] }, { subtitle: '后台诊断' }));

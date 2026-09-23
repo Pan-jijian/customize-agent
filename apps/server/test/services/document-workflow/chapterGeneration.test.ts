@@ -214,7 +214,8 @@ describe('4.42 小节篇幅计划守恒配额（520 固定地板移除回归）'
       { title: '现场存量控制', words: 280 },
     ]);
     expect(text).toContain('本节小节篇幅上限');
-    expect(text).toContain('- 到货节奏安排：不超过 465 字'); // 620 × 0.75 显示校准
+    // 显示值由校准系数导出（4.60 I2 重标定 0.75→0.9）——**从常数推导**而非硬编码，防再次重标定时碎
+    expect(text).toContain(`- 到货节奏安排：不超过 ${displayWordCap(620)} 字`);
     expect(text).not.toContain('至少达到');
     expect(text).not.toContain('520');
     expect(text).not.toContain('尽量一次达成');
@@ -249,14 +250,22 @@ describe('4.42 小节篇幅计划守恒配额（520 固定地板移除回归）'
 });
 
 describe('4.43 篇幅上限语义 + 显示校准（根治字数控不住）', () => {
-  it('合同行渲染：上限语义（不超过）、显示值=真实目标×0.75、不得超限；旧目标语义措辞已删', () => {
-    expect(BLOCK_LENGTH_DISPLAY_SCALE).toBe(0.75);
-    expect(displayWordCap(1500)).toBe(1125);
-    expect(displayWordCap(1800)).toBe(1350);
+  it('合同行渲染：上限语义（不超过）、显示值=真实目标×校准系数、不得超限；旧目标语义措辞已删', () => {
+    /**
+     * 4.60 I2 重标定：系数由 0.75 提到 0.9（无偏块级篇幅账实测产出中位 0.85×T，
+     * 正好压在达标区下沿；反解得 s≈0.885）。
+     *
+     * 本用例**从常数推导**期望值而非硬编码——上一次重标定（v13 定 0.75）就是靠硬编码锁死的，
+     * 结果常数一改用例即碎，而"用例碎"与"常数错"是两件不同的事，硬编码会让二者不可分。
+     */
+    expect(BLOCK_LENGTH_DISPLAY_SCALE).toBeGreaterThan(0.75);
+    expect(displayWordCap(1500)).toBe(Math.round(1500 * BLOCK_LENGTH_DISPLAY_SCALE));
+    expect(displayWordCap(1800)).toBe(Math.round(1800 * BLOCK_LENGTH_DISPLAY_SCALE));
     expect(displayWordCap(1)).toBe(1);
     const line = renderLengthContractLine(1500);
-    expect(line).toContain('本节正文总字数不超过 1125 字');
-    expect(line).toContain('（控制在 956~1125 字之间）');
+    const cap1500 = displayWordCap(1500);
+    expect(line).toContain(`本节正文总字数不超过 ${cap1500} 字`);
+    expect(line).toContain(`（控制在 ${Math.round(cap1500 * 0.85)}~${cap1500} 字之间）`);
     expect(line).toContain('超出即不合格');
     expect(line).not.toContain('篇幅目标');
     expect(line).not.toContain('1500');
