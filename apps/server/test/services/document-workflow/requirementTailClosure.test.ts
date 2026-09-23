@@ -258,9 +258,14 @@ describe('C8 S1 · 链尾插入物质量闸（签名查重 + 形态拒插 + 跨�
     expect(result.insertedCount).toBe(0);
     expect(result.rejectedCount).toBe(0);
     expect(result.markdown).toBe(markdown);
-    // 命中查重路径（而非「已满足」跳过）：等价形态签名已入 attempted（已满足路径不触达本集合）
-    expect(attempted.has(insertionSignature(entry.text))).toBe(true);
-    expect(attempted.size).toBe(1);
+    /**
+     * 4.56.3 口径升级：本用例原断言 `attempted.has(insertionSignature(entry.text))` ——
+     * 彼时 `4000*3200` 与正文 `4000×3200` 在**覆盖判定**上不等价，条款被判「残留」，
+     * 靠签名查重兜住重复插入。4.56.3 把尺寸分隔符族归一 (`normalizeAnchorCompareText`) 补上后，
+     * 二者在上游即判**等价**、条款直接判「已满足」，**根本不存在残留**——比"防重复插入"更强。
+     * 因此签名集合为空才是正确终态：`attempted` 非空反而意味着覆盖判定又漏了字形差。
+     */
+    expect(attempted.size).toBe(0);
   });
 
   it('跨轮幂等：形态闸拒插素材显性记录且跨轮不重试（attemptedSignatures 传递）', async () => {
