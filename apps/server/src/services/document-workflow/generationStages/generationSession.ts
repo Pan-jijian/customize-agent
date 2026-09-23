@@ -56,6 +56,7 @@ import type { buildChapterIntentClassifier } from '../chapterIntentClassifier';
 import type { kbIndexHealth } from '../documentGeneratorHelpers';
 import type { buildWritingTaskBrief } from '../documentWritingTaskBrief';
 import type { extractClarificationOverrides } from '../clarificationOverrides';
+import type { extractClarificationAmendmentLedger } from '../clarificationAmendments';
 import type { buildBidProcedureJudge } from '../evidenceContentSafety';
 import type { buildFactTokenScopeClassifier } from '../factTokenClassifier';
 import type { extractLocalFactPool } from '../factsModel';
@@ -210,6 +211,12 @@ export interface GenerationSessionPlanning {
   writingTaskBrief: ReturnType<typeof buildWritingTaskBrief>;
   /** 4.55.17 答疑澄清生效口径（未变更项目为空数组） */
   clarificationOverrides?: ReturnType<typeof extractClarificationOverrides>;
+  /**
+   * 4.55.36 批次 2 答疑技术性修正账本（非单值口径）：写作注入与终检检测的**同一份**输入。
+   * 在 stageChapterLoop 序言抽取一次（章级并发，惰性 memo 会竞态），写作按章渲染约束块，
+   * 终检按同一账本报残留/未落位——读写同源，杜绝两份账本漂移。
+   */
+  clarificationAmendments?: ReturnType<typeof extractClarificationAmendmentLedger>;
   /** 4.55.19 真值层出口：写作硬约束块与口径账本（切写侧消费） */
   truthConstraint?: string;
   /** 4.55.20 写作前的真值层裁决结果（现行口径前置：事实池/证据已就地替换） */

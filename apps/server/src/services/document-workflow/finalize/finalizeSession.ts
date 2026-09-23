@@ -10,6 +10,7 @@
 import type { AgentWorkflowContext } from '../agentWorkflow';
 import type { ResolvedValue } from '../authoritativeValues';
 import type { ClarificationOverride } from '../clarificationOverrides';
+import type { ClarificationAmendmentLedger } from '../clarificationAmendments';
 import type {
   DocumentAsset,
   DocumentDraftChapter,
@@ -71,6 +72,8 @@ export interface FinalizeGenerationInput {
   template: DocumentTemplate; allEvidence: DocumentEvidence[];
   /** 4.55.17 答疑澄清生效口径（生成阶段产出，终检 superseded-value-usage 消费） */
   clarificationOverrides?: ClarificationOverride[];
+  /** 4.55.36 批次 2 答疑技术性修正账本（生成阶段产出，终检 clarification-amendment 消费；与写作注入同一份） */
+  clarificationAmendments?: ClarificationAmendmentLedger;
   // ── 进度与基础设施 ──
   progressStages: DocumentExecutionStage[];
   input: { requirement?: string; signal?: AbortSignal; onProgress?: (stages: DocumentExecutionStage[], checkpoint?: { chapters?: DocumentDraftChapter[] }) => void };
@@ -191,6 +194,8 @@ export interface FinalizeSession {
   writingTaskBrief?: WritingTaskBrief;
   /** 4.55.17 答疑澄清生效口径（招标与答疑不一致时以答疑为准；终检 superseded-value-usage 消费） */
   clarificationOverrides?: ClarificationOverride[];
+  /** 4.55.36 批次 2 答疑技术性修正账本（非单值口径；与写作注入同一份，终检 clarification-amendment 消费） */
+  clarificationAmendments?: ClarificationAmendmentLedger;
   /** 4.55.19 口径账本（真值层读侧产出：属性/生效值/裁决规则/依据/被取代值） */
   caliberLedger?: string[];
   /** 4.55.19 真值层结构化裁决结果（终检口径一致性自检消费） */
@@ -288,6 +293,7 @@ export function createFinalizeSession(input: FinalizeGenerationInput): FinalizeS
     retrievalCoverageReports: input.retrievalCoverageReports,
     writingTaskBrief: input.writingTaskBrief,
     clarificationOverrides: input.clarificationOverrides,
+    clarificationAmendments: input.clarificationAmendments,
     globalConsistencyIssues: input.globalConsistencyIssues,
     agentWorkflow: input.agentWorkflow,
     factExtractionPromptTexts: input.factExtractionPromptTexts,

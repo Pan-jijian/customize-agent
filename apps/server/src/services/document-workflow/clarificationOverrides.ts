@@ -129,6 +129,17 @@ export function renderClarificationConstraintBlock(overrides: ClarificationOverr
 }
 
 /**
+ * 变更过程陈述语境（豁免判据单源，4.55.36 批次 2 起外引）：
+ * 「原为 X，经答疑澄清变更为 Y」这类**如实说明变更过程**的句子出现旧值/修正前形态是合法的，
+ * 若判残留，则每次正确叙述变更都会被判 blocker。
+ * 单源消费方：
+ *   · 本模块 `supersededValueIssues`（值级被取代值残留）；
+ *   · clarificationAmendments（技术性修正的「被取代形态残留」——同族判据必须同措辞，
+ *     两份各抄一份正则即漂移根源）。
+ */
+export const CHANGE_REFERENCE_CONTEXT_RE = /(?:澄清|变更|修改|调整为|更正|原(?:为|值)?|原招标|此前)/u;
+
+/**
  * 被取代值现行表述检测（终检兜底）：正文把**已被答疑取代的旧值**当作现行口径陈述即 blocker。
  * 例外：旧值出现在「澄清/变更/原…现…」引用语境（说明变更过程）时合法——用户看到的正是
  * 「招标原文 365，现澄清为 330」这类必要说明；判据按句内是否含变更标记词豁免。
@@ -137,7 +148,7 @@ export function renderClarificationConstraintBlock(overrides: ClarificationOverr
 export function supersededValueIssues(markdown: string, overrides: ClarificationOverride[]): Array<{ level: 'error'; severity: 'blocker'; category: 'fact_consistency'; owner: 'llm'; repairability: 'llm_repairable'; provenance: { detectorId: string; fingerprint: string }; message: string; suggestion: string }> {
   const issues: ReturnType<typeof supersededValueIssues> = [];
   if (!markdown || overrides.length === 0) return issues;
-  const CHANGE_CONTEXT_RE = /(?:澄清|变更|修改|调整为|更正|原(?:为|值)?|原招标|此前)/u;
+  const CHANGE_CONTEXT_RE = CHANGE_REFERENCE_CONTEXT_RE;
   for (const override of overrides) {
     for (const value of override.superseded) {
       const escaped = value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');

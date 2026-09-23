@@ -4,7 +4,9 @@ import type { FactTokenScopeClassifier } from './factTokenClassifier';
 import type { ProfessionalDepthAnalysis, ProfessionalDepthClassifier } from './professionalDepthClassifier';
 import { boqDivisionCoverageIssues, boqRowTraceIssues, buildBoqRowTraces, numericTraceabilityIssues } from './documentFactTrace';
 import { chapterDependencyIssues, documentDeliveryScoreIssues, evidenceUsageCoverageIssues, paragraphGenericIssues } from './documentDeliveryReport';
-import { bodyCompositionFigureIssues, bodyCompositionTableIssues, plannedStructureIssues, promptDocumentRuleIssues, tableCaptionIssues, tertiaryHeadingIssues } from './markdownComposer';
+import { bodyCompositionFigureIssues, bodyCompositionTableIssues, plannedStructureIssues, promptDocumentRuleIssues, sourcePhraseIssues, tableCaptionIssues, tertiaryHeadingIssues } from './markdownComposer';
+import { finishThicknessIssues, formulaResidueIssues, metaDiscourseDeclarationIssues } from './integrity/detectors/detectors';
+import { atlasPointerPhraseHits } from './materialResidue';
 import { webEvidenceLeakageIssues } from './webResearchService';
 import { constructionOrgChapterDataCoverageIssues, constructionOrgConsistencyIssues } from './constructionOrgConsistency';
 import { constructionOrgBonusModuleIssues, constructionOrgControlLoopIssues, constructionOrgDivisionSectionIssues, constructionOrgGenericLanguageIssues, constructionOrgMajorContentIssues, constructionOrgProfessionalChainIssues } from './constructionOrgQualityRules';
@@ -16,6 +18,8 @@ import { parameterConceptConflictIssues } from './parameterConceptConflicts';
 import { normalizeEngineeringTextForFactMatch } from './engineeringUnits';
 import { parameterObligationUsageIssues } from './chapterParameterFacts';
 import type { BillFactLock } from './billFactLock';
+import { clarificationAmendmentIssues } from './clarificationAmendments';
+import type { ClarificationAmendment } from './clarificationAmendments';
 import type { DrawingFactLock } from './drawingFactLock';
 import { constructionSystemCoverageIssues } from './constructionSystemCoverage';
 import { dangerousApplicabilityIssues } from './dangerousApplicability';
@@ -26,7 +30,7 @@ import { blueprintCitationConsistencyIssues } from './integratedBlueprint';
 import type { BlueprintData } from './integratedBlueprint';
 import { blueprintEquipmentAuthorities, blueprintLaborPeakAuthority, blueprintPhaseLaborAuthorities, blueprintQuantityGroupAuthorities } from './authorityIndex';
 import { det, detSafe } from './detectorFixerRegistry';
-import { structureIntegrityIssues } from './structureIntegrityRules';
+import { structureIntegrityIssues, truncatedSentenceIssues } from './structureIntegrityRules';
 import { flowFormRepeatIssues, sentencePatternRepeatIssues, skeletonFingerprintIssues, templatedLabelIssues, titleIntegrityIssues } from './templatingGovernance';
 import { factReconciliationIssues } from './factReconciliation';
 import { basisRegulationsCrossIssues } from './basisRegulationsCross';
@@ -144,6 +148,13 @@ export async function buildStandardFinalValidationIssues(input: {
   drawingFactLock?: DrawingFactLock;
   /** 绑定资料证据池：日期溯源检测用（资料里出现过的日期视为可溯源）——传数组本体而非拷贝，便于检测器按身份记忆化 */
   materialEvidence?: readonly { content?: string }[];
+  /**
+   * 4.55.36 批次 2 答疑技术性修正账本：与写作注入**同一份**账本（session.planning.clarificationAmendments），
+   * 在此按章归属报「被取代形态残留 / 修正未落位 / 明确对立」。挂在既有 det('caliber-consistency') 容器内
+   *（provenance.detectorId = 'clarification-amendment'，与值级被取代口径同族），由 issueProvenance
+   * 的失效机制在每个修复轮重算时按 id 剔除旧快照并实时重跑。
+   */
+  clarificationAmendments?: readonly ClarificationAmendment[];
 }): Promise<ValidationIssue[]> {
   const factVerification = await generatedFactVerificationIssuesAsync(input.markdown, input.factsModel, { scopeClassifier: input.factTokenScopeClassifier });
   // 招标要求正文级语义检测（终局全量对账）：要求条目 ↔（章节标题 + 正文句）同闭包 embedding，
@@ -175,7 +186,12 @@ export async function buildStandardFinalValidationIssues(input: {
     // V2 批1 结构完整性终检（安全网，与写时质检/确定性清理器同源单扫描）：编号跳号/孤立编号/孤立
     // 单项列表/重复表头/表内重复行/完全重复行/相邻重复句（cleanable——确定性清理器 structure-integrity
     // 步收口，残留即暴露不静默）+ 句尾截断/空小节/表名混入表头/空表/标点断裂（blocking——须重写，宁缺毋假）
-    ...det('structure-integrity', () => structureIntegrityIssues(input.markdown)),
+    // 截断族让位给 truncated-sentence（4.55.36 §L3-11）：同一扫描源、族分工不重复报出
+    ...det('structure-integrity', () => structureIntegrityIssues(input.markdown, { excludeKinds: ['truncated-line'] })),
+    // 4.55.36 §L3-11 接线：截断句终检（与 structure-integrity 同源 scanTruncatedLines，只报 format 类）。
+    // 判据扩围（段末无终止标点形态）+ 收敛：boundary 形态由链尾 cleanStructureDefects 确定性闭合；
+    // tail 形态只报不删（尾段是可读正文，确定性删除即信息丢失），由修复轮补全
+    ...det('truncated-sentence', () => truncatedSentenceIssues(input.markdown)),
     // WS1 结构标签残留终检（templatedLabelIssues）：标签标题/段首标签前缀——确定性修复器
     // fixTemplatedLabels（SURFACE_FIX_STEPS templated-labels 步）先行动作，此处兜底报告残留
     ...det('templated-label', () => templatedLabelIssues(input.markdown)),
@@ -339,7 +355,12 @@ export async function buildStandardFinalValidationIssues(input: {
     // 4.55.17 进度计划超声明工期（巢湖实测：声明 330、进度表排到 348——招标 365/答疑 330 双口径残留）
     ...det('schedule-duration-overrun', () => scheduleDurationOverrunIssues(input.markdown)),
     // 4.55.19 口径一致性（真值层 vs 正文声明口径；方案 §4 判定唯一性自检）
-    ...det('caliber-consistency', () => caliberConsistencyIssues(input.markdown, input.truthValues || [])),
+    // 4.55.36 批次 2 并入答疑技术性修正检测（同族口径：修正后=生效形态、修正前=被取代形态；
+    // 新检测器 id 无法在 detectorFixerRegistry 外登记，故挂在本容器下，provenance 仍为自身 id）
+    ...det('caliber-consistency', () => [
+      ...caliberConsistencyIssues(input.markdown, input.truthValues || []),
+      ...clarificationAmendmentIssues(input.markdown, input.clarificationAmendments),
+    ]),
     // 4.55.19 危险源参数—判定绑定（危大工程须写本项目实参 + 阈值对照 + 结论）
     ...det('hazard-parameter-binding', () => hazardParameterBindingIssues(input.markdown, input.truthValues || [])),
     // 4.55.20 蓝图权威值落位（劳动力峰值/机械台数等由蓝图裁决，正文必须以具体数值写出）
@@ -365,6 +386,18 @@ export async function buildStandardFinalValidationIssues(input: {
     ...det('boq-row-trace', () => boqRowTraceIssues(buildBoqRowTraces(input.markdown, input.factsModel))),
     ...det('drawing-reference', () => drawingReferenceIssues(input.markdown, input.drawingFactLock)),
     ...det('drawing-pointer-phrase', () => drawingPointerPhraseIssues(input.markdown)),
+    // 4.55.36 §L3-11 接线：图集/标准图指向终检（判据与链上清洗器 stripDrawingPointerPhrases 同源单一实现，
+    // 含 §L3-8 ASCII 尖括号等价、§L3-9 逗号容忍、§L3-10 规范引用豁免）。收敛：formal-source-residue
+    // 链步确定性小句级删除（stage5 + round-2 双链）——本检测器是其终检复核（残留即未收敛）
+    ...det('atlas-reference-phrase', () => atlasReferencePhraseIssues(input.markdown)),
+    // 4.55.36 §L3-11 接线：资料来源罗列话术（cleanFormalSourcePhrases 确定性清理器的终检复核；
+    // 只取来源罗列族，粗体充当表名族由 format 类检测器承载）
+    ...det('source-enumeration', () => sourcePhraseIssues(input.markdown).filter(issue => issue.message.includes('资料来源罗列话术'))),
+    // 4.55.36 §L3-11 接线：元话语声明/饰面层厚度/公式残留（三者确定性修复器已在 SURFACE_FIX_STEPS 上，
+    // 此处为终检复核——修复链 MISS 时兜底报出，不静默）
+    ...det('meta-discourse-declaration', () => metaDiscourseDeclarationIssues(input.markdown)),
+    ...det('finish-thickness', () => finishThicknessIssues(input.markdown)),
+    ...det('formula-residue', () => formulaResidueIssues(input.markdown)),
     ...det('web-evidence-leakage', () => webEvidenceLeakageIssues(input.markdown)),
     ...det('formal-placeholder', () => formalPlaceholderIssues(input.markdown)),
     ...det('prompt-example-leak', () => promptExampleLeakIssues(input.markdown, input.promptBindings)),
@@ -396,4 +429,34 @@ export async function buildStandardFinalValidationIssues(input: {
     // 排在末位与 E11 同原则——让位高优先级 blocker，修复循环截断时不被优先处理
     ...det('boq-division-coverage', () => boqDivisionCoverageIssues(input.markdown, input.chapters, input.factsModel)),
   ];
+}
+
+/**
+ * 图集/标准图指向终检（id=`atlas-reference-phrase`，4.55.36 §L3-11 接线）。
+ *
+ * **用户口径**：「做法详见<混凝土排水管道基础及接口>23S5166/21页」这类**指向替代**在交付物里不能出现——
+ * 评标人拿不到做法，等同没写（实测：巢湖终稿 ASCII 尖括号 + 图集页码形态，既有检测器 0 命中）。
+ *
+ * **判据**：materialResidue.atlasPointerPhraseHits —— 与链上清洗器 stripDrawingPointerPhrases
+ * **同一实现**（检测定位=修复定位），只取图集族（标题记号《…》/ASCII `<…>`、图集号、大样图/详图）；
+ * 图纸指向（按设计图纸/以图纸为准）与缺资料搪塞（未提供…/待补充）两族由既有 `drawing-pointer-phrase`
+ * 检测器同词面覆盖，不重复报出。§L3-10 规范引用豁免（书名号内为规范/法规名，或标题后紧跟 GB/JGJ/CJJ
+ * 类代号）已在判据内部生效，正当规范引用不判。
+ *
+ * **收敛**：`formal-source-residue` 链步（deterministicStage5 → fixFormalSourceResidue →
+ * stripDrawingPointerPhrases）确定性小句级删除，本检测器即其终检复核——残留即未收敛，报 blocker。
+ * 定位=确定性删除定位（删除只损失指向话术本身，句子其余内容原样保留）。
+ */
+function atlasReferencePhraseIssues(markdown: string): ValidationIssue[] {
+  const hits = atlasPointerPhraseHits(markdown);
+  if (hits.length === 0) return [];
+  return [{
+    level: 'error',
+    severity: 'blocker',
+    category: 'format',
+    owner: 'system',
+    repairability: 'local_deterministic',
+    message: `正文出现图集/标准图指向替代做法 ${hits.length} 处（如「${[...new Set(hits)].slice(0, 3).join('」「')}」）：做法必须写进正文，不得让评标人回查图集`,
+    suggestion: '写出具体做法（尺寸/材料/构造参数/工艺要求）替代指向短语；规范/法规引用（书名号内为规范名，或标题后紧跟 GB/JGJ/CJJ 类标准代号）不属本判据范围，保留不动。',
+  }];
 }

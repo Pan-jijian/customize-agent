@@ -94,15 +94,18 @@ export function semanticEvidenceText(item: Pick<DocumentEvidence, 'sectionTitle'
   return `${item.sectionTitle || ''}${item.content}`.slice(0, 600);
 }
 
-export function optimizeChapterEvidence(chapter: DocumentTemplateChapter, evidence: DocumentEvidence[], options: { maxChars?: number; maxItems?: number; preservePinned?: boolean; semantic?: { similarity: (leftText: string, rightText: string) => number; queryText: string } }, diagnostics?: DocumentGenerationDiagnostics) {
+export function optimizeChapterEvidence(chapter: DocumentTemplateChapter, evidence: DocumentEvidence[], options: { maxChars?: number; maxItems?: number; preservePinned?: boolean; semantic?: { similarity: (leftText: string, rightText: string) => number; queryText: string }; carrierBoost?: (filePath: string) => number }, diagnostics?: DocumentGenerationDiagnostics) {
   const scored = evidence.map(item => {
     // 注入排序统一为 evidencePromptImportance 口径（量化值 +8 / 项目基础事实 +10 / requiredFacts +6 / 标准编号 +3），
     // 证据全量保留（无预算截断），重要性/语义分数只决定注入顺序，不决定去留
     const baseScore = evidencePromptImportance(item, chapter.requiredFacts) * processingTypeWeightForChapter(chapter, item.processingType) + chapterTextScore(chapter, item);
+    // 载体档加权（4.55.36 批次 2-5）：答疑/补疑（变更优先）等载体在**同语义分**下排前；
+    // 只影响排序不影响去留（证据全量保留口径不变）
+    const carrier = options.carrierBoost ? options.carrierBoost(item.filePath || '') : 1;
     // 语义相关性（本地 bge-small 余弦）作排序主键（×10 压过词面/重要性分数），词面与重要性分数保留作第二键；
     // 闭包缓存未命中的条目（候选池外）语义分为 0，退回 baseScore 口径
     const semanticScore = options.semantic ? options.semantic.similarity(options.semantic.queryText, semanticEvidenceText(item)) : 0;
-    return { ...item, score: baseScore * 0.5 + semanticScore * 10 };
+    return { ...item, score: baseScore * 0.5 * carrier + semanticScore * 10 };
   });
   return selectEvidenceByBudget(scored, options, diagnostics);
 }
@@ -114,11 +117,12 @@ export function optimizeChapterEvidence(chapter: DocumentTemplateChapter, eviden
  * 仅候选池进入嵌入；未入池条目语义分为 0 退回 baseScore 口径，证据全量保留不丢。
  * 默认 3000（注入预算上限 ~300 条切片的 10 倍冗余），env DOCUMENT_SEMANTIC_TOP_CANDIDATES 可调。
  */
-export function preselectSemanticCandidates(chapter: DocumentTemplateChapter, evidence: DocumentEvidence[], topN: number): DocumentEvidence[] {
+export function preselectSemanticCandidates(chapter: DocumentTemplateChapter, evidence: DocumentEvidence[], topN: number, carrierBoost?: (filePath: string) => number): DocumentEvidence[] {
   if (topN <= 0 || evidence.length <= topN) return evidence;
   const scored = evidence.map(item => ({
     item,
-    lexical: evidencePromptImportance(item, chapter.requiredFacts) * processingTypeWeightForChapter(chapter, item.processingType) + chapterTextScore(chapter, item),
+    // 载体档加权与 optimizeChapterEvidence 同口径（答疑/补疑优先进入候选池，避免在词面粗筛处被挤出）
+    lexical: (evidencePromptImportance(item, chapter.requiredFacts) * processingTypeWeightForChapter(chapter, item.processingType) + chapterTextScore(chapter, item)) * (carrierBoost ? carrierBoost(item.filePath || '') : 1),
   }));
   scored.sort((left, right) => right.lexical - left.lexical);
   return scored.slice(0, topN).map(entry => entry.item);

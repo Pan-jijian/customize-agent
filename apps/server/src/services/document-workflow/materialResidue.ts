@@ -139,7 +139,7 @@ export function stripClarificationNarrative(text: string): { text: string; remov
  * - §L3-9 **逗号容忍**：指向短语内部可出现一个逗号（「做法，详见《…》」「详见《…》，20S515/29」）——
  *   小句级切分在逗号处断开，判据看不见跨逗号的指向短语，故增加**句级先行扫描**变体；
  * - §L3-10 **规范引用豁免（存量误伤根修）**：书名号内为**规范/法规名**（以 法/条例/办法/规定/规则/
- *   决定/细则/标准/规范/规程/导则/准则/通则/技术要求 等命名惯例收尾或含之），或标题后**紧跟标准代号**
+ *   决定/细则/标准/规范/规程/导则/准则/通则/技术要求 等命名惯例**收尾**），或标题后**紧跟标准代号**
  *   （GB/JGJ/CJJ… 的「字母前缀＋数字」形态，与图集号「数字＋字母＋数字」形态互补）时**不删**——
  *   历史事故：`按《绿色建筑评价标准》（GB/T 50378-2019）执行` 整句被删致**正文数据丢失**，
  *   只能靠链尾回插（basisRegulationsCrossRepair.replayTailStrippedBasisCitations）补救。
@@ -150,17 +150,29 @@ export function stripClarificationNarrative(text: string): { text: string; remov
 /** 指向型标题记号（书名号与 ASCII 尖括号等价，§L3-8） */
 const POINTER_TITLE_SOURCE = '(?:《[^》]{2,40}》|<[^<>]{2,40}>)';
 
-/** §L3-10 规范/法规名命名惯例（法规：法/条例/办法/规定/规则/决定/细则；标准：标准/规范/规程/
- *  导则/准则/通则/技术要求/技术条件）——标题内含上述词即判「规范引用」不删 */
-const REGULATION_TITLE_INNER_RE = /(?:法|条例|办法|规定|规则|决定|细则|标准|规范|规程|导则|准则|通则|技术要求|技术条件)$|(?:标准|规范|规程|导则|条例|办法|规定|技术要求)/u;
+/** §L3-10 规范/法规名命名惯例（法规：法/条例/办法/规定/规则/决定/细则/条文；
+ *  标准：标准/规范/规程/导则/准则/通则/技术要求/技术条件）——标题**以**上述词收尾即判「规范引用」不删。
+ *  只判收尾（不判包含）：`《给水排水标准图集》` 这类图集名含「标准」但收尾是「图集」，仍属图集指向须删；
+ *  而 `《绿色建筑评价标准》`（历史误伤事故主角）收尾为「标准」，判规范引用保留。 */
+const REGULATION_TITLE_INNER_RE = /(?:法|条例|办法|规定|规则|决定|细则|条文|标准|规范|规程|导则|准则|通则|技术要求|技术条件)$/u;
 
-/** §L3-10 标准代号形态：字母前缀＋数字（GB 50204-2015／JGJ 18-2012／DB34/T 4289-2022／GB/T 50378-2019），
- *  可带括号包裹。与图集号形态（数字＋字母＋数字：20S515／12J201／23S5166）互补——
- *  这是「规范引用」与「图集指向」的机制化区分（前者不删，后者删）。 */
-const STANDARD_CODE_AFTER_TITLE_RE = /^\s*(?:[（(][^）)]{0,24}[）)]\s*)?[A-Z]{2,6}(?:\s*\/\s*[A-Z]{1,6})?\s*\d/u;
+/** §L3-10 标准代号形态：**字母前缀＋数字**（GB 50204-2015／JGJ 18-2012／DB34/T 4289-2022／GB/T 50378-2019），
+ *  允许整体被圆括号包裹（`按《绿色建筑评价标准》（GB/T 50378-2019）执行` 的历史误伤形态），也允许
+ *  与标题之间以顿号相连（`《…》、《建筑地基基础设计规范》GB 50007`）。与**图集号形态**（数字＋字母＋
+ *  数字：20S515／12J201／23S5166／皖2015S209）互补——这是「规范引用」与「图集指向」的机制化区分：
+ *  前者不删，后者删。 */
+const STANDARD_CODE_AFTER_TITLE_RE = /^\s*[（(]?\s*[A-Z]{2,6}(?:\s*\/\s*[A-Z]{1,6})?\s*\d/u;
 
-/** §L3-9 句级逗号容忍窗口：允许至多一个逗号，且不跨句界 */
-const COMMA_WINDOW = '(?:[^，,、；;。！？\\n]{0,6}[，,])?[^，,、；;。！？\\n]{0,8}';
+/** 标题记号之后允许一并清除的**代号尾串**（图集号/图集页码/标准编号/括号编号）：
+ *  仅限 ASCII 代号字符与「页」单位——不允许吞掉后续正文汉字（信息零丢失）。 */
+const TITLE_CODE_TAIL_SOURCE = '(?:[（(][^）)]{0,24}[）)])?(?:[0-9A-Za-z/／.\\-]{1,16})?(?:页|张)?';
+
+/** §L3-9 句级逗号容忍：逗号夹在指向短语内部时小句切分会把短语切断，故在小句切分前先做句级扫描。
+ *  **逗号两侧必须都是指向动词**（`具体做法，详见《…》`），不放开为任意内容窗口——
+ *  否则 `按建设单位要求，采用《…》20S515` 会被整段删除，属正文信息丢失。 */
+const POINTER_SENTENCE_SOURCES: readonly string[] = [
+  `(?:具体)?(?:做法|详见|参见|见|按|依据|参照)[^，,、；;。！？\\n]{0,6}(?:[，,]\\s*(?:具体)?(?:做法|详见|参见|见|依据|参照))?[^，,、；;。！？\\n]{0,8}?(${POINTER_TITLE_SOURCE})${TITLE_CODE_TAIL_SOURCE}`,
+];
 
 /** 指向型小句定位正则（只负责定位；§L3-10 豁免由 isProtectedTitleReference 裁决）：
  * 每条的**第一个捕获组**为标题记号（无捕获组的形态无豁免，按原口径判）。 */
@@ -172,22 +184,30 @@ const POINTER_TITLE_CLAUSE_SOURCES: readonly string[] = [
   `(?:参见|详见|参照|按|依照)[^，,、；;\\n]{0,6}?(?:(${POINTER_TITLE_SOURCE}))?[^，,、；;\\n]{0,6}?(?:[皖烷京沪苏浙粤鲁豫鄂湘川渝陕冀晋蒙辽吉黑闽赣桂黔滇甘青宁新藏]\\s?\\d{4}|\\d{2})\\s?[A-Z]{1,2}\\s?\\d{2,4}(?:[/／]\\d{1,3})?[^，,、；;\\n]{0,10}`,
 ];
 
-const POINTER_CLAUSE_PATTERNS: RegExp[] = [
-  ...POINTER_TITLE_CLAUSE_SOURCES.map(source => new RegExp(source, 'u')),
+/** 命中族：`atlas` = 图集/标准图指向（标题记号、图集号、大样图/详图），
+ *  `drawing` = 图纸指向与缺资料搪塞。检测端按族分工（既有 drawing-pointer-phrase 检测器
+ *  已用同一词面覆盖 drawing 族），修复端不分工——清洗器一律删。 */
+type PointerFamily = 'atlas' | 'drawing';
+
+/** 图集族定位正则（标题记号形态 + 大样图/详图形态） */
+const POINTER_ATLAS_CLAUSE_SOURCES: readonly string[] = [
+  ...POINTER_TITLE_CLAUSE_SOURCES,
   // 大样图/详图指向
-  /(?:详见|参见|见)[^，,、；;\n]{0,16}?(?:大样图|详图|节点图|工艺图|做法表)/u,
-  // 按设计图纸/按图纸/以图纸为准
-  /按(?:设计)?(?:施工)?图纸(?:控制|计量|要求|施工|确定|执行|进行|处理|设置|选用|计算|调整)?/u,
-  /以(?:设计)?图纸为准/u,
-  // 缺资料搪塞
-  /(?:资料|图纸|清单|设计文件)(?:中)?未(?:提供|明确|给出|注明)[^，,、；;\n]{0,12}(?:参数|数据|做法|要求|规格)?/u,
-  /(?:具体(?:参数|做法|数值))?待(?:补充|确认|核实|明确)/u,
+  `(?:详见|参见|见)[^，,、；;\\n]{0,16}?(?:大样图|详图|节点图|工艺图|做法表)`,
 ];
 
-/** §L3-9 句级逗号容忍变体（在小句切分之前扫描）：窗口内允许一个逗号 */
-const POINTER_SENTENCE_PATTERNS: RegExp[] = [
-  new RegExp(`(?:具体)?(?:做法|详见|参见|见|按|依据|参照)${COMMA_WINDOW}?(${POINTER_TITLE_SOURCE})(?:[^，,、；;。！？\\n]{0,6}[，,])?[^，,、；;。！？\\n]{0,8}`, 'u'),
+/** 图纸/缺资料族定位正则 */
+const POINTER_DRAWING_CLAUSE_SOURCES: readonly string[] = [
+  // 按设计图纸/按图纸/以图纸为准
+  `按(?:设计)?(?:施工)?图纸(?:控制|计量|要求|施工|确定|执行|进行|处理|设置|选用|计算|调整)?`,
+  `以(?:设计)?图纸为准`,
+  // 缺资料搪塞
+  `(?:资料|图纸|清单|设计文件)(?:中)?未(?:提供|明确|给出|注明)[^，,、；;\\n]{0,12}(?:参数|数据|做法|要求|规格)?`,
+  `(?:具体(?:参数|做法|数值))?待(?:补充|确认|核实|明确)`,
 ];
+
+/** §L3-9 句级逗号容忍变体（在小句切分之前扫描）：逗号两侧须都是指向动词 */
+const POINTER_SENTENCE_PATTERNS: RegExp[] = POINTER_SENTENCE_SOURCES.map(source => new RegExp(source, 'u'));
 
 function pointerTitleInner(token: string): string {
   return token.slice(1, -1);
@@ -200,45 +220,55 @@ function isProtectedTitleReference(token: string, tail: string): boolean {
 }
 
 /** 小句是否为指向型（含 §L3-10 豁免裁决）：任一非豁免命中即判指向型小句 */
-function isPointerClause(clause: string): boolean {
+function pointerClauseFamily(clause: string): PointerFamily | null {
   for (const source of POINTER_TITLE_CLAUSE_SOURCES) {
     for (const match of clause.matchAll(new RegExp(source, 'gu'))) {
       const title = match[1];
-      if (title === undefined) return true;
+      if (title === undefined) return 'atlas';
       const tail = match[0].slice(match[0].lastIndexOf(title) + title.length);
-      if (!isProtectedTitleReference(title, tail)) return true;
+      if (!isProtectedTitleReference(title, tail)) return 'atlas';
     }
   }
-  return POINTER_CLAUSE_PATTERNS.slice(POINTER_TITLE_CLAUSE_SOURCES.length).some(pattern => new RegExp(pattern.source, 'u').test(clause));
+  const atlas = POINTER_ATLAS_CLAUSE_SOURCES.slice(POINTER_TITLE_CLAUSE_SOURCES.length);
+  if (atlas.some(source => new RegExp(source, 'u').test(clause))) return 'atlas';
+  if (POINTER_DRAWING_CLAUSE_SOURCES.some(source => new RegExp(source, 'u').test(clause))) return 'drawing';
+  return null;
 }
 
 /** §L3-9 句级命中（返回命中跨度样本 + 去命中文本），与 stripDrawingPointerPhrases 同源同判据 */
-function stripSentenceLevelPointers(sentence: string): { text: string; hits: string[] } {
+function stripSentenceLevelPointers(sentence: string): { text: string; hits: PointerPhraseHit[] } {
   let result = sentence;
-  const hits: string[] = [];
+  const hits: PointerPhraseHit[] = [];
   for (const pattern of POINTER_SENTENCE_PATTERNS) {
     result = result.replace(new RegExp(pattern.source, 'gu'), (match: string, title?: string) => {
       if (title !== undefined) {
         const tail = match.slice(match.lastIndexOf(title) + title.length);
         if (isProtectedTitleReference(title, tail)) return match;
       }
-      hits.push(match.trim());
+      hits.push({ sample: match.trim(), family: 'atlas' });
       return '';
     });
   }
   return { text: result, hits };
 }
 
+export interface PointerPhraseHit {
+  /** 被清除的指向型小句样本 */
+  sample: string;
+  /** 命中族（检测端按族分工；修复端不分工） */
+  family: PointerFamily;
+}
+
 interface PointerStripResult {
   text: string;
   /** 被删的指向型小句样本（与 text 严格同源：hits 非空 ⇔ text 有删减） */
-  hits: string[];
+  hits: PointerPhraseHit[];
 }
 
 /** 指向型小句扫描/清除单一实现（检测端 drawingPointerPhraseHits 与清洗端 stripDrawingPointerPhrases 共用） */
 function scanPointerClauses(text: string): PointerStripResult {
   if (!text) return { text, hits: [] };
-  const hits: string[] = [];
+  const hits: PointerPhraseHit[] = [];
   const keptSentences: string[] = [];
   for (const sentence of String(text).split(/(?<=[。；])/u)) {
     if (!sentence.trim()) { keptSentences.push(sentence); continue; }
@@ -248,21 +278,19 @@ function scanPointerClauses(text: string): PointerStripResult {
     // 保留分隔符切分（小句级裁剪：只删指向型小句，句子其余内容原样保留）
     const pieces = sentenceLevel.text.split(/([，,、；;])/u);
     const kept: string[] = [];
-    let clauseRemoved = 0;
     for (let index = 0; index < pieces.length; index += 2) {
       const clause = pieces[index] ?? '';
-      if (clause.trim() && isPointerClause(clause)) { hits.push(clause.trim().slice(0, 60)); clauseRemoved += 1; continue; }
+      const family = clause.trim() ? pointerClauseFamily(clause) : null;
+      if (family) { hits.push({ sample: clause.trim().slice(0, 60), family }); continue; }
       kept.push(clause);
       const delimiter = pieces[index + 1];
       if (delimiter && index + 2 < pieces.length) kept.push(delimiter);
     }
     // 只剥**小句级分隔符**（逗号/顿号）；句末分号属句子边界，不得剥（否则「…；下一句」会被并成一句）
     const rebuilt = kept.join('').replace(/^[，,、]+/u, '').replace(/[，,、]+$/u, '');
-    // 整句被删空（句内只剩指向）→ 连句读一起收敛
-    if (!rebuilt.replace(/[。；;\s]/gu, '')) {
-      if (clauseRemoved === 0 && sentenceLevel.hits.length === 0) hits.push(sentence.trim().slice(0, 60));
-      continue;
-    }
+    // 整句被删空（句内只剩指向）→ 连句读一起收敛；此处**不计命中**（命中已在小句/句级扫描登记），
+    // 避免把「本就只有标点的残段」算成一次指向型删除（检测端命中数须与清洗端实际删除数同源）
+    if (!rebuilt.replace(/[。；;\s]/gu, '')) continue;
     // 不补句读：表格行/标题行/列表行本就不以句读结尾，补「。」会破坏 Markdown 结构
     //（句子的原有句读在拼接中已保留：句边界字符不是小句分隔符）
     keptSentences.push(rebuilt);
@@ -282,8 +310,20 @@ export function stripDrawingPointerPhrases(text: string): { text: string; remove
 /**
  * 指向型表述命中扫描（检测端，与 stripDrawingPointerPhrases **同一实现**：
  * 检测定位=修复定位，检测报出的每一处都是清洗器会删的那一处——两套判据不允许存在）。
- * 返回命中样本（空数组=无命中）。
+ * 返回全部命中样本（含族标注；空数组=无命中）。
  */
-export function drawingPointerPhraseHits(text: string): string[] {
+export function drawingPointerPhraseHits(text: string): PointerPhraseHit[] {
   return scanPointerClauses(text).hits;
+}
+
+/**
+ * 图集/标准图指向命中（`atlas-reference-phrase` 检测器判据，4.55.36 §L3-11 接入）。
+ *
+ * 与 `drawingPointerPhraseHits` **同一判据**（清洗器），只按**命中族**取图集族：
+ * 标题记号（`《…》`与 ASCII `<…>` 等价）＋图集号＋大样图/详图。图纸指向（按设计图纸/以图纸为准）
+ * 与缺资料搪塞（未提供…/待补充）两族由既有已接线的 `drawing-pointer-phrase` 检测器覆盖
+ * （同一词面），此处不重复报出、避免同一处缺陷在两个 id 下重复阻断。
+ */
+export function atlasPointerPhraseHits(text: string): string[] {
+  return scanPointerClauses(text).hits.filter(hit => hit.family === 'atlas').map(hit => hit.sample);
 }

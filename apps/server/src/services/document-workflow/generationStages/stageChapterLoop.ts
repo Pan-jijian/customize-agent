@@ -23,6 +23,7 @@ import { buildCrossChapterDutyDeclaration } from '../chapterDutyDeclaration';
 import { buildWriteTimeFixedBlocks, chapterFocusRule, WRITING_INTEGRITY_CONSTRAINTS } from '../documentWritingTaskBrief';
 import { extractHazardBindings, renderHazardBindingBlock } from '../hazardBinding';
 import { renderClarificationConstraintBlock } from '../clarificationOverrides';
+import { assignClarificationAmendmentChapters, clarificationEvidenceBoost, clarificationSourceTexts, extractClarificationAmendmentLedger, renderClarificationAmendmentBlock } from '../clarificationAmendments';
 import { chapterTaskPromptForPlannedStructure, planChapterTask } from '../agentPlanner';
 import { throttleAgentWorkflowNodes } from '../agentWorkflow';
 import { governEvidenceValues, renderScopeOverrideAnchors } from '../factGovernance';
@@ -65,6 +66,38 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     session.understanding.writerEvidence,
     { 基坑开挖深度: session.understanding.canonicalFacts?.byKey?.['excavation_depth']?.value },
   );
+  // 4.55.36 批次 2：答疑技术性修正账本（非单值口径：改为/取消/不涉及/按…执行）。
+  // 为什么在写作侧抽而不是检测侧各抽一份：
+  //   ① 抽取必须在**有序全文**上做（碎片证据池按分数排序，「最近邻配对」实测正确率不足半数，配错对象比不抽更糟），
+  //      有序全文只有理解期的 getCachedFileDetail 缓存可取；
+  //   ② 章级循环是 Promise.all 并发批次，惰性 memo 会竞态 —— 在并发之前一次抽完；
+  //   ③ 账本同时是写作注入与终检检测的**唯一输入**（session.planning.clarificationAmendments 随会话下传），
+  //      杜绝「写手被告知的账本」与「检测器比对的账本」两份漂移（4.55.22 两个单一真值源的教训）。
+  // 实测缺陷（巢湖补疑 11,115 字 / 54 问答）：文件已入库且被召回（草稿证据池出现 1483 次），
+  // 但「雨水口连接管混凝土满包 / 304 不锈钢防滑条 30*1.5mm / 以围墙为分界线（一期已完成）」
+  // 三类技术性修正终稿零落位——答疑短答与任何章节主题都无强相关，永远进不了检索窗口；
+  // 值级覆盖链只覆盖合同金额/工期等单值口径，技术性修正此前无通道。
+  const clarificationAmendmentLedger = extractClarificationAmendmentLedger({
+    texts: clarificationSourceTexts(
+      [...session.understanding.availableEvidenceScopePaths, ...session.prepare.materialFilePaths],
+      filePath => session.understanding.getCachedFileDetail(filePath),
+    ),
+  });
+  const clarificationAmendments = assignClarificationAmendmentChapters(
+    clarificationAmendmentLedger.amendments,
+    session.planning.effectiveChapters,
+  );
+  if (clarificationAmendmentLedger.sourceCount > 0 || clarificationAmendments.length > 0) {
+    session.planning.clarificationAmendments = { ...clarificationAmendmentLedger, amendments: clarificationAmendments };
+    // 缺口不静默（2-2 与验收「never silent」）：未解析短答 / 未覆盖平铺技术陈述逐条入日志，
+    // 抽取失败（如无问答结构的平铺条款）必须可被人工复核，而不是悄悄消失
+    const chaptered = clarificationAmendments.filter(item => item.chapterTitle).length;
+    console.warn(`[clarification] 答疑技术性修正账本：${clarificationAmendments.length} 条（按章归属 ${chaptered} / 全文适用 ${clarificationAmendments.length - chaptered}），源 ${clarificationAmendmentLedger.sourceCount} 份、问答对 ${clarificationAmendmentLedger.pairCount}；缺口：未解析短答 ${clarificationAmendmentLedger.unparsedAnswers.length} 条、未覆盖平铺技术陈述 ${clarificationAmendmentLedger.uncoveredStatements.count} 条`);
+    for (const gap of clarificationAmendmentLedger.unparsedAnswers.slice(0, 5)) console.warn(`[clarification] 未解析答句（人工复核）：Q「${gap.question}」→ A「${gap.answer}」`);
+    for (const gap of clarificationAmendmentLedger.uncoveredStatements.samples.slice(0, 5)) console.warn(`[clarification] 未覆盖平铺陈述（无问答结构，判据不抽）：${gap.text}`);
+  }
+  // 载体档加权（2-5 变更优先）：答疑/补疑切片在章证据排序中加权（与证据排序同口径，见 evidenceRetrieval）
+  const carrierBoost = (filePath: string) => clarificationEvidenceBoost(filePath);
   for (let chapterOffset = 0; chapterOffset < session.planning.effectiveChapters.length; chapterOffset += session.blueprint.chapterConcurrency) {
     const chapterBatch = session.planning.effectiveChapters.slice(chapterOffset, chapterOffset + session.blueprint.chapterConcurrency);
     const batchTasks = await Promise.all(chapterBatch.map(async (chapter, batchIndex): Promise<(() => Promise<void>) | undefined> => {
@@ -337,9 +370,9 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       const raw = Number(process.env.DOCUMENT_SEMANTIC_TOP_CANDIDATES);
       return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 3000;
     })();
-    const semanticPool = preselectSemanticCandidates(chapter, scopedEvidence, semanticTopCandidates);
+    const semanticPool = preselectSemanticCandidates(chapter, scopedEvidence, semanticTopCandidates, carrierBoost);
     const chapterSemanticSimilarity = await buildSemanticSimilarity([chapterCriteriaText(chapter)], semanticPool.map(semanticEvidenceText));
-    let evidence = optimizeChapterEvidence(chapter, scopedEvidence, { preservePinned: true, semantic: { similarity: chapterSemanticSimilarity, queryText: chapterCriteriaText(chapter) } }, session.planning.generationDiagnostics);
+    let evidence = optimizeChapterEvidence(chapter, scopedEvidence, { preservePinned: true, carrierBoost, semantic: { similarity: chapterSemanticSimilarity, queryText: chapterCriteriaText(chapter) } }, session.planning.generationDiagnostics);
     // 源级同口径裁决前置到证据切片：资料原文（如招标正文 4645㎡）被补疑修正后，进入写作 LLM 的切片必须先改写成裁决值，
     // 否则模型看到原文旧值会照抄（历史缺陷：第 3 章 checkpoint 混用 4645/4646），只能靠事后全局审查修复
     evidence = governEvidenceValues(evidence, session.understanding.canonicalFacts.scopeConflicts);
@@ -440,6 +473,9 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       clarificationConstraint: session.planning.clarificationOverrides?.length
         ? renderClarificationConstraintBlock(session.planning.clarificationOverrides)
         : undefined,
+      // 4.55.36 批次 2 答疑技术性修正（非单值口径）按章硬约束：本章归属条目 + 全文适用条目
+      //（归属失败的修正并入「全文适用」段，**不丢弃**——2-2 要求不可归属时进全局写作焦点）
+      amendmentConstraint: renderClarificationAmendmentBlock(clarificationAmendments, { chapterTitle: chapter.title }),
       globalWritingFocus: session.planning.writingTaskBrief?.globalWritingFocus,
       hazardBindingBlock: renderHazardBindingBlock(hazardBindings),
     });
@@ -505,7 +541,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
         // 不再对合并集先做一次 optimizeChapterEvidence 全量重排——下方 evidence 会统一重排一次
         //（历史冗余：同一输入同一参数连续重排两遍，optimizeChapterEvidence 为纯函数，中间结果随即被覆盖）
         scopedEvidence = assembleScopedEvidence([...scopedEvidence, ...deepEvidence]);
-        evidence = optimizeChapterEvidence(chapter, scopedEvidence, { preservePinned: true }, session.planning.generationDiagnostics);
+        evidence = optimizeChapterEvidence(chapter, scopedEvidence, { preservePinned: true, carrierBoost }, session.planning.generationDiagnostics);
         evidence = governEvidenceValues(evidence, session.understanding.canonicalFacts.scopeConflicts);
         missingFacts = chapter.requiredFacts.filter((fact: string) => !evidence.some(item => evidenceMatchesFact(item, fact)));
       }
@@ -536,7 +572,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       if (mergedSupplementalEvidence.length > 0) {
         // 补充证据由检索层 filters 双锁约束，直接合并后统一重排一次（同深召回路径，省一次全量重排）
         scopedEvidence = assembleScopedEvidence([...scopedEvidence, ...mergedSupplementalEvidence]);
-        evidence = optimizeChapterEvidence(chapter, scopedEvidence, { preservePinned: true }, session.planning.generationDiagnostics);
+        evidence = optimizeChapterEvidence(chapter, scopedEvidence, { preservePinned: true, carrierBoost }, session.planning.generationDiagnostics);
         evidence = governEvidenceValues(evidence, session.understanding.canonicalFacts.scopeConflicts);
         missingFacts = chapter.requiredFacts.filter((fact: string) => !evidence.some(item => evidenceMatchesFact(item, fact)));
         resolvedFactNeeds = resolveChapterFactNeeds({ needs: chapterFactNeeds, factsModel: session.understanding.preliminaryFactsModel, evidence: scopedEvidence, profile: session.prepare.domainProfile, excludedEvidenceKeys: session.understanding.excludedEvidenceKeys });

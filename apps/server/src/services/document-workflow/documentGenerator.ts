@@ -129,6 +129,8 @@ export async function generateDocumentDraft(input: { templateId: string; require
     chapterDrafts: session.chapterLoop.chapterDraftsFinal, chapterDraftsByOrder: session.understanding.chapterDraftsByOrder, chapterGenerationStagesByOrder: session.understanding.chapterGenerationStagesByOrder,
     // 4.55.17 答疑澄清生效口径随会话下传（终检 superseded-value-usage 消费）
     clarificationOverrides: session.planning.clarificationOverrides,
+    // 4.55.36 批次 2 答疑技术性修正账本随会话下传（与写作注入同一份，终检 clarification-amendment 消费）
+    clarificationAmendments: session.planning.clarificationAmendments,
     chapterGenerationStages: session.understanding.chapterGenerationStages, effectiveChapters: session.planning.effectiveChapters, template: session.prepare.template, allEvidence: session.understanding.allEvidence,
     progressStages: session.global.progressStages,
     documentSpec: session.prepare.documentSpec, projectMaterialProfile: session.prepare.projectMaterialProfile, projectMaterialSummary: session.prepare.projectMaterialSummary,

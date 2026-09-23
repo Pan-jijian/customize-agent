@@ -135,6 +135,9 @@ export function buildWriteTimeFixedBlocks(input: {
   truthConstraint?: string;
   /** 答疑澄清生效口径块（`renderClarificationConstraintBlock` 产物） */
   clarificationConstraint?: string;
+  /** 答疑技术性修正块（`clarificationAmendments.renderClarificationAmendmentBlock` 产物，
+   * 4.55.36 批次 2）：非单值口径的技术性修正（改为/取消/不涉及/按…执行）与值级口径块并列注入 */
+  amendmentConstraint?: string;
   /** 任务书全局写作焦点（取其「值/口径」类条目，单源引用，不复制字符串） */
   globalWritingFocus?: readonly string[];
   /** 危大判定块（`hazardBinding.renderHazardBindingBlock` 产物） */
@@ -149,7 +152,7 @@ export function buildWriteTimeFixedBlocks(input: {
     // 检测端与链尾插入器，即「写手从未被告知、检测器照抓、链尾用固定句补」的老路。
     // 现纳入写作前定死块（写入侧单源）。
     .filter(line => /^B[78]\s|^项目规模事实卡|^项目可信基础事实|^【规范术语显性落位】|^B5 属地创优目标/u.test(line));
-  return [input.truthConstraint, input.clarificationConstraint, ...valueRules, input.hazardBindingBlock]
+  return [input.truthConstraint, input.clarificationConstraint, input.amendmentConstraint, ...valueRules, input.hazardBindingBlock]
     .filter((block): block is string => Boolean(block && block.trim()));
 }
 

@@ -383,16 +383,18 @@ export const AUXILIARY_DETECTORS: readonly DetectorEntry[] = [
   // 工艺库缺口）任一非零即 blocker——由 recordAuthorityAudit（rebuildAndRecompute）独立消费，
   // 不参与两组哑火检查；审计失败不可进交付（fact_consistency + llm_repairable 直通硬阻断）
   { id: 'authority-audit-gap', scope: 'full-document', category: 'fact_consistency', fixerDisposition: 'fixed', fixerDispositionReason: 'numeric-verification 轮收敛（numericVerification.ts:131）。覆盖已被削弱：其确定性兜底 demoteUnsourcedNumericTokens 已按 P2-2 停用，只剩 LLM 一条路' },
-  { id: 'source-enumeration', scope: 'full-document', category: 'style', deterministicSafe: true, fixerDisposition: 'fixed', fixerDispositionReason: 'cleanFormalSourcePhrases（deterministicStage5.ts:161）与检测共用同一词表；该 id 从未经 det() 登记，属漏登记' },
-  { id: 'meta-discourse-declaration', scope: 'full-document', category: 'style', deterministicSafe: true },
-  { id: 'finish-thickness', scope: 'full-document', category: 'fact_consistency', deterministicSafe: true },
-  { id: 'formula-residue', scope: 'full-document', category: 'format', deterministicSafe: true },
-  { id: 'truncated-sentence', scope: 'full-document', category: 'format', deterministicSafe: true },
+  { id: 'source-enumeration', scope: 'full-document', category: 'style', deterministicSafe: true, fixerDisposition: 'fixed', fixerDispositionReason: 'cleanFormalSourcePhrases（deterministicStage5.ts:161）与检测共用同一词表。4.55.36 §L3-11 已接 det()（documentFinalValidation 终检复核）' },
+  { id: 'meta-discourse-declaration', scope: 'full-document', category: 'style', deterministicSafe: true, fixerDisposition: 'fixed', fixerDispositionReason: 'fixMetaDiscourseDeclarations（SURFACE_FIX_STEPS meta-discourse 步，与检测同词表 META_DECLARATION_RE）。4.55.36 §L3-11 已接 det() 终检复核' },
+  { id: 'finish-thickness', scope: 'full-document', category: 'fact_consistency', deterministicSafe: true, fixerDisposition: 'fixed', fixerDispositionReason: 'fixFinishThickness 除以 10（SURFACE_FIX_STEPS finish-thickness 步，与检测同判据 FINISH_THICKNESS_CONTEXT_WORD）。4.55.36 §L3-11 已接 det() 终检复核' },
+  { id: 'formula-residue', scope: 'full-document', category: 'format', deterministicSafe: true, fixerDisposition: 'fixed', fixerDispositionReason: 'fixFormulaResidues（SURFACE_FIX_STEPS formula-residue 步，与检测同判据 FORMULA_FORM_RE）。4.55.36 §L3-11 已接 det() 终检复核' },
+  { id: 'truncated-sentence', scope: 'full-document', category: 'format', deterministicSafe: true, fixerDisposition: 'fixed', fixerDispositionReason: '链尾 cleanStructureDefects→closeTruncatedLineTail 闭合 boundary 形态（SURFACE_FIX_STEPS structure-integrity 步 + truncated-sentence 步标点残片收敛）；tail 形态只报不删（尾段是可读正文）交修复轮。4.55.36 §L3-11 已接 det()' },
   // C3-6-4 图集引用短语检测（markdownCleanup.atlasReferencePhraseHits，与确定性删除链
   // stripAtlasReferencePhrases 同源词面 + 同行豁免）：修复器 atlas-reference 的锚定目标——
   // 历史错配：atlas-reference（删「做法执行XX图集」话术）曾锚定 drawing-reference（图纸引用率），
-  // 检测定位=修复定位名不符实，补救链锚定校验形同虚设
-  { id: 'atlas-reference-phrase', scope: 'full-document', category: 'format', deterministicSafe: true },
+  // 检测定位=修复定位名不符实，补救链锚定校验形同虚设。
+  // 4.55.36 §L3-11 接线：终检改锚 materialResidue.atlasPointerPhraseHits（与清洗器 stripDrawingPointerPhrases
+  // 同一实现，含 §L3-8 ASCII 尖括号/§L3-9 逗号容忍/§L3-10 规范引用豁免——ASCII 形态正是本条 0 命中的原因）
+  { id: 'atlas-reference-phrase', scope: 'full-document', category: 'format', deterministicSafe: true, fixerDisposition: 'fixed', fixerDispositionReason: 'stripDrawingPointerPhrases 经 fixFormalSourceResidue 在 SURFACE_FIX_STEPS formal-source-residue 步（stage5 + round-2 双链）确定性小句级删除。4.55.36 §L3-11 已接 det() 终检复核' },
   // ── 块级质量执行器（方案 2.2 六类，写作时阻断 + finalize 同源复核双职；实现单源 blockQualityExecutors）──
   // ① 结构（契约小节全覆盖/禁发明编号：writeBlock 内联判定，终检复核 section-content-integrity 族）
   { id: 'block-structure-contract', scope: 'chapter', category: 'structure', fixerDisposition: 'exempt', fixerDispositionReason: '写作期块级执行器门，返回计数不产出 ValidationIssue，无对象可被 FixerEntry 锚定（重写重试即其修复手段）' },
@@ -1102,5 +1104,118 @@ export function assertDetectorUsageCoverage(group: 'full-validation' | 'standard
   const unused = groupDetectors.filter(entry => !usedDetectorIds.has(entry.id));
   if (unused.length > 0) {
     throw new Error(`注册表 ${group} 组存在执行侧未引用的哑火条目：${unused.map(entry => entry.id).join('、')}（声明后必须经 det() 消费或从声明表删除）`);
+  }
+}
+
+/**
+ * 「登记 ⇔ 调用点」一致性检查（4.55.36 §L3-11 关键反复发措施）。
+ *
+ * 与 `assertDetectorUsageCoverage` 的分工：后者是**运行时**检查，只能覆盖「本次生成真的跑到的路径」
+ * （某一分支没进、某一章没写，哑火就被放过）；而「声明了却零调用点」正是**静态**事实——
+ * 4.55.36 的 6 个检测器就是这样：登记表里有、文档里可见缺陷、源码里 `det('<id>'` 一处都没有，
+ * 因为没有一次运行会去报「某个分支没跑」，于是长期无人察觉（用户可见缺陷直接漏进交付物）。
+ *
+ * 判定（双向、纯集合比对，不做推断）：
+ * ① 声明却无调用点 → 报错（哑火轮：要么接线，要么从声明表删除，不留空头承诺）；
+ * ② 调用点却未声明 → 报错（逃逸：det() 包装的 id 必须先登记）。
+ * 豁免：`DETECTOR_CALL_SITE_EXEMPTIONS` 只承载「消费方式不是 det()」的少数例外（如外部/门禁直调），
+ * 默认空表——空表意味着新登记条目必须当场接入调用点，不得沉默上线。
+ *
+ * 说明：本函数是纯函数（输入源码文本），源码树遍历放在单测里（运行时不做 fs 扫描）。
+ */
+export const DETECTOR_CALL_SITE_EXEMPTIONS: readonly string[] = [
+  // 默认空表：全部登记检测器都必须有 det()/detSafe() 调用点。
+  // 若将来确有「消费方式非 det()」的检测器，在此登记并书面说明其真实调用点（可复核）。
+];
+
+/**
+ * 剥离行注释与块注释（只用于调用点扫描）。
+ * 必要性：注释里写「本检测器已接 det('id')」是**文字**，不是接线——若把注释也算调用点，
+ * 本检查就退化成「写一句注释即可通过」，恰是它要防的哑火通道。故注释内容一律剔除。
+ * 保守取向：裁多了（把真调用点留下）只会让检查更严；裁少了才会漏判，故不做语法级解析，
+ * 只在 `//` 前引号成对（不在字符串内）时才按行注释截断。
+ */
+function stripSourceComments(source: string): string {
+  let out = '';
+  let inBlock = false;
+  for (const line of source.split('\n')) {
+    let rest = line;
+    let kept = '';
+    for (;;) {
+      if (inBlock) {
+        const end = rest.indexOf('*/');
+        if (end < 0) break;
+        inBlock = false;
+        rest = rest.slice(end + 2);
+        continue;
+      }
+      const blockStart = rest.indexOf('/*');
+      const lineComment = rest.indexOf('//');
+      if (lineComment >= 0 && (blockStart < 0 || lineComment < blockStart)) {
+        const before = rest.slice(0, lineComment);
+        const quoteOdd = (before.match(/'/gu) ?? []).length % 2 === 1 || (before.match(/"/gu) ?? []).length % 2 === 1;
+        kept += quoteOdd ? rest : before;
+        break;
+      }
+      if (blockStart >= 0) {
+        kept += rest.slice(0, blockStart);
+        inBlock = true;
+        rest = rest.slice(blockStart + 2);
+        continue;
+      }
+      kept += rest;
+      break;
+    }
+    out += `${kept}\n`;
+  }
+  return out;
+}
+
+/**
+ * 扫描源码文本中全部 `det('<id>'` / `detSafe('<id>'` 字面量 id（可前接 `...` 展开运算符）。
+ * 仅接受字面量：动态 id（变量/模板串）无法静态核对，会以「声明却无调用点」的形式暴露，属刻意保守。
+ */
+export function detectorCallSiteIds(sources: readonly string[]): string[] {
+  const ids = new Set<string>();
+  const pattern = /(?:^|[^A-Za-z0-9_$.]|\.\.\.)det(?:Safe)?\(\s*'([^']+)'/gmu;
+  for (const rawSource of sources) {
+    for (const match of stripSourceComments(String(rawSource)).matchAll(pattern)) {
+      ids.add(match[1]!);
+    }
+  }
+  return [...ids].sort();
+}
+
+/** 「登记 ⇔ 调用点」比对（纯函数；输入声明 id 集合与源码文本集合，返回错误清单，空数组即通过） */
+export function detectorCallSiteErrors(input: {
+  declaredIds: readonly string[];
+  sources: readonly string[];
+  exemptions?: readonly string[];
+}): string[] {
+  const errors: string[] = [];
+  const calledIds = new Set(detectorCallSiteIds(input.sources));
+  const exemptionIds = new Set(input.exemptions ?? DETECTOR_CALL_SITE_EXEMPTIONS);
+  const declaredIds = new Set(input.declaredIds);
+  for (const declaredId of declaredIds) {
+    if (calledIds.has(declaredId) || exemptionIds.has(declaredId)) continue;
+    errors.push(`检测器 ${declaredId} 已登记但源码中无 det()/detSafe() 调用点（登记即空头承诺：请接线，或从声明表删除，或在 DETECTOR_CALL_SITE_EXEMPTIONS 书面登记其真实消费点）`);
+  }
+  for (const calledId of calledIds) {
+    if (declaredIds.has(calledId)) continue;
+    errors.push(`det()/detSafe() 调用了未登记的检测器 ${calledId}（调用点必须先登记声明）`);
+  }
+  return errors;
+}
+
+/** 声明表全量 id（三组并集；调用点一致性检查的「登记侧」输入） */
+export function allDetectorIds(): string[] {
+  return ALL_DETECTORS.map(entry => entry.id);
+}
+
+/** 调用点一致性断言（供单测/CI 使用：传入源码树文本） */
+export function assertDetectorCallSites(sources: readonly string[]): void {
+  const errors = detectorCallSiteErrors({ declaredIds: allDetectorIds(), sources });
+  if (errors.length > 0) {
+    throw new Error(`检测器登记-调用点一致性校验失败（${errors.length} 项）：\n${errors.map(error => `- ${error}`).join('\n')}`);
   }
 }

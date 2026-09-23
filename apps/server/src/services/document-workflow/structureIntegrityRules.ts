@@ -45,6 +45,13 @@ export interface StructureDefect {
   excerpt: string;
   /** 人类可读问题描述 */
   message: string;
+  /** 截断形态（仅 kind='truncated-line'）：
+   *  `boundary` 边界截断（行尾无终止标点且后续为标题/表格/列表/文末）；
+   *  `tail` 段末截断（段落结尾无终止标点，4.55.36 §L3-11 扩围）。
+   *  清理器只闭合 boundary 形态（历史行为：句界后 ≤40 汉字残片属不可补的不完整内容）；
+   *  tail 形态**不得确定性删除**——其尾段常是可读正文（实测 `中粗砂基础外埔土工布`），
+   *  确定性删除即正文信息丢失，交写作侧/修复轮补全。 */
+  form?: 'boundary' | 'tail';
 }
 
 export interface StructureScanResult {
@@ -420,16 +427,46 @@ export function scanTableNumberingDefects(markdown: string): StructureDefect[] {
   return defects;
 }
 
+/** 句末终止标点（含省略号）；**尾随闭合引号/括号不算终止**——`…须在技术文件“其他内容”`
+ *  这类「引号收尾而句未收」形态仍是截断（实测漏网），故先剥闭合符再判句读 */
+const SENTENCE_END_RE = /[。；！？…]$/u;
+const TRAILING_CLOSER_RE = /[”’"』」）)\]】》]+$/u;
+
+function endsWithSentencePunct(line: string): boolean {
+  return SENTENCE_END_RE.test(line.replace(TRAILING_CLOSER_RE, ''));
+}
+
+/** 规范/图集代号收尾形态（机制化判据，非白名单）：
+ *  - 标准代号「字母前缀＋数字」：`GB 55037-2022`／`JGJ 18-2012`／`DB34/T4289-2022`／`GB/T 50378`；
+ *  - 图集号「数字＋字母＋数字」：`20S515`／`12J201`／`皖2015S209`。
+ *  与「数量收尾」（`C30`、`共 3 台`）的机制区分：前者以标准/图集代号命名惯例收尾，
+ *  后者是纯数量——规范罗列截断在裸代号上属真实漏网形态，不得被行尾数字闸门放过 */
+const STANDARD_OR_ATLAS_CODE_TAIL_RE = /(?:[A-Z]{2,6}\s*\/?\s*[A-Z]{0,6}\s*\d[\d.\-]*|\d{2,4}\s?[A-Z]{1,2}\s?\d{2,4}(?:[/／]\d{1,3})?|[皖烷京沪苏浙粤鲁豫鄂湘川渝陕冀晋蒙辽吉黑闽赣桂黔滇甘青宁新藏]\s?\d{4}\s?[A-Z]{1,2}\s?\d{1,4})$/u;
+
 function scanTruncatedLines(lines: string[], result: StructureScanResult): void {
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i].trim();
     if (!line) continue;
     if (isStructuralLine(line) || isOrderedItem(line) || isBulletItem(line)) continue;
     if (TOC_DOT_LEADER_RE.test(line)) continue;
-    if (/\d$/u.test(line)) continue;
+    // 段末形态（4.55.36 §L3-11 truncated-sentence 接入扩围）：段落以空行分隔，**段末行**（下一行为空行或文末）
+    // 无终止标点即截断——不依赖「下一行是边界」与「悬挂虚词收尾」两项证据。实测漏网三形态：
+    //   ① 下一行是普通正文段（`…及有关规定的配备专职安` + 空行 + `全生产管理人员…` 硬换行断裂）；
+    //   ② 行尾为闭合引号（`…须在技术文件“其他内容”`）；
+    //   ③ 行尾为不在悬挂虚词集的实词（`…建筑工地文明施工相关规定`）。
+    // 段末形态下两个既有闸门放宽：行尾数字（`…（JGJ 18-2012）、GB 55037-2022` 截断在标准代号）、
+    // 行尾须为汉字（闭合引号/ASCII 代号皆为断点形态）；其余豁免（标题/表格行/列表项/目录条目/引导句/
+    // 表题图题/题注行）一律保留。
+    const tailOpen = i + 1 >= lines.length || !lines[i + 1].trim();
+    // 行尾数字闸门（原判据：`混凝土强度等级 C30`、`共 3 台` 类以数量收尾的正常句不判截断）对
+    // **规范/图集代号收尾**不适用：`…（JGJ 18-2012）、GB 55037-2022` 是规范罗列被截断在裸代号上
+    //（实测漏网形态，见 §L3-11 表），代号形态与数量收尾的机制化区分=「字母前缀＋数字」或「图集号形态」
+    if (!tailOpen && /\d$/u.test(line) && !STANDARD_OR_ATLAS_CODE_TAIL_RE.test(line)) continue;
     if (hanCount(line) < 15) continue;
     const last = line[line.length - 1];
-    if (!/[\u4e00-\u9fa5]/u.test(last)) continue;
+    // 行尾须为汉字闸门（原判据：排除以标点/符号/外文收尾的非句子行）同样对代号收尾不适用——
+    // 代号尾字符是 ASCII 数字，但行本身是规范罗列正文（`…（JGJ 18-2012）、GB 55037-2022`）
+    if (!tailOpen && !/[\u4e00-\u9fa5]/u.test(last) && !STANDARD_OR_ATLAS_CODE_TAIL_RE.test(line)) continue;
     // 引导句（以冒号结尾）/ 表题图题（以表/图结尾）不判截断
     if (/[:：、]$/u.test(line) || /[表图]$/u.test(line)) continue;
     const next = nextContentLine(lines, i);
@@ -447,6 +484,19 @@ function scanTruncatedLines(lines: string[], result: StructureScanResult): void 
     if (next >= 0
       && (isOrderedItem(lines[next]) || isBulletItem(lines[next]))
       && /(?:完成后|完毕后|结束后|如下|以下)$/u.test(line)) continue;
+    // 段末截断（见上方 tailOpen 注释）：段末行无终止标点即判截断，与「边界截断」互斥（此处收口返回，
+    // 避免同一行在两种形态下重复报出）；有终止标点（剥尾随闭合符后判）则正常收束，不进阻断域
+    if (tailOpen) {
+      if (endsWithSentencePunct(line)) continue;
+      result.blocking.push({
+        kind: 'truncated-line',
+        line: i + 1,
+        excerpt: excerptOf(lines[i]),
+        message: '句尾截断（段末形态：段落结尾无终止标点，疑似生成截断/内容丢失）',
+        form: 'tail',
+      });
+      continue;
+    }
     const nextIsBoundary = next === -1
       || isHeading(lines[next])
       || isTableRow(lines[next])
@@ -472,6 +522,7 @@ function scanTruncatedLines(lines: string[], result: StructureScanResult): void 
       line: i + 1,
       excerpt: excerptOf(lines[i]),
       message: '句尾截断（行尾无终止标点且后续为标题/表格/列表/文末，疑似生成截断）',
+      form: 'boundary',
     });
   }
 }
@@ -629,7 +680,8 @@ export function cleanStructureDefects(markdown: string): { markdown: string; cle
     // 但「行内句界 + ≤40 汉字尾随残片」形态可零信息损失闭合（见 closeTruncatedLineTail）——
     // 该形态此前无任何修复轮消费直坠终门禁（truncated-sentence 修复器处理的是另一族形态），
     // 本步收口把可闭合的「结构性阻断」降为「内容略短」，不可闭合的仍留阻断域交门禁
-    const closableTruncations = scan.blocking.filter(defect => defect.kind === 'truncated-line');
+    // 只闭合 boundary 形态：tail 形态（段末截断）的尾段常是可读正文，确定性删除即信息丢失（见 StructureDefect.form）
+    const closableTruncations = scan.blocking.filter(defect => defect.kind === 'truncated-line' && defect.form !== 'tail');
     if (scan.cleanable.length === 0 && closableTruncations.length === 0) break;
     const deletions = new Set<number>();
     const replacements = new Map<number, string>();
@@ -735,21 +787,58 @@ const KIND_SUGGESTIONS: Record<StructureDefectKind, string> = {
   'punctuation-unbalanced': '全角括号/书名号不闭合须重写所在语句；成对性破坏是内容丢失信号，补齐或删除残缺部分，不得带病交付。',
 };
 
-/** 终检检测器包装：cleanable 默认也报（若残留说明清理器未收敛，暴露问题不静默） */
-export function structureIntegrityIssues(markdown: string, options?: { includeCleanable?: boolean }): StructureIntegrityIssue[] {
+/** 终检检测器包装：cleanable 默认也报（若残留说明清理器未收敛，暴露问题不静默）
+ *  `excludeKinds`：缺陷族按检测器分工时不重复报出（4.55.36 §L3-11：截断族由
+ *  `truncated-sentence` 检测器专报 format 类，本检测器让位，避免同一行两个 id 重复阻断） */
+export function structureIntegrityIssues(markdown: string, options?: { includeCleanable?: boolean; excludeKinds?: StructureDefectKind[] }): StructureIntegrityIssue[] {
   const includeCleanable = options?.includeCleanable ?? true;
+  const excluded = new Set(options?.excludeKinds ?? []);
   const result = scanStructureDefects(markdown);
   // A5b 表编号体系（全文档级专属：小节级/清理器不启用，防跨节引用误报）
   const numberingDefects = scanTableNumberingDefects(markdown);
-  const defects = includeCleanable
+  const defects = (includeCleanable
     ? [...result.blocking, ...numberingDefects, ...result.cleanable]
-    : [...result.blocking, ...numberingDefects];
+    : [...result.blocking, ...numberingDefects]).filter(defect => !excluded.has(defect.kind));
   return defects.map(defect => ({
     level: 'error' as const,
     severity: 'blocker' as const,
     category: 'structure' as const,
     message: `结构完整性缺陷：${defect.message}（第 ${defect.line} 行）`,
     suggestion: KIND_SUGGESTIONS[defect.kind],
+  }));
+}
+
+/** 截断句检测器输出（4.55.36 §L3-11 接线：id=truncated-sentence，category=format） */
+export interface TruncatedSentenceIssue {
+  level: 'error';
+  severity: 'blocker';
+  category: 'format';
+  owner: 'llm';
+  repairability: 'llm_repairable';
+  message: string;
+  suggestion: string;
+}
+
+/** 截断句终检（id=`truncated-sentence`）——与 `structure-integrity` **同一扫描源**（scanStructureDefects
+ *  的 truncated-line 族），只做族分工不另立判据（检测定位=修复定位）：
+ *  - `boundary` 形态：既有链尾确定性闭合（cleanStructureDefects → closeTruncatedLineTail，删句界后
+ *    ≤40 汉字残片、零生成）已消费；残留即清理器未收敛，仍报阻断；
+ *  - `tail` 形态：段末无终止标点，尾段多为可读正文，确定性删除即信息丢失 → 只报不删，
+ *    由修复轮补全该句（写全句子，不改动既有事实）。
+ *  本检测器与 `structure-integrity` 的截断族互斥（后者经 excludeKinds 让位），同一行不会重复报出。 */
+export function truncatedSentenceIssues(markdown: string): TruncatedSentenceIssue[] {
+  if (!String(markdown || '').trim()) return [];
+  const defects = scanStructureDefects(markdown).blocking.filter(defect => defect.kind === 'truncated-line');
+  return defects.map(defect => ({
+    level: 'error' as const,
+    severity: 'blocker' as const,
+    category: 'format' as const,
+    owner: 'llm' as const,
+    repairability: 'llm_repairable' as const,
+    message: `句尾截断：第 ${defect.line} 行「${defect.excerpt}」（${defect.message}）`,
+    suggestion: defect.form === 'tail'
+      ? '补全该句使其以句读收尾（只补足被截断的成分，不得改写既有事实与数值）；该形态禁止确定性删除整段——尾段是可读正文。'
+      : '补全该句后重写；句界后可确定性闭合的残片由链尾清理器处理，残留即未收敛。',
   }));
 }
 

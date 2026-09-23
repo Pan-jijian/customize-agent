@@ -69,8 +69,11 @@ describe('stripSnapshotIssues（P9）', () => {
 });
 
 describe('SNAPSHOT_DETECTOR_IDS 集合锁定（P9）', () => {
-  it('恰好 5 个快照检测器（与打标点一一对应，新增快照必须同步重算链注册）', () => {
+  it('恰好 6 个快照检测器（与打标点一一对应，新增快照必须同步重算链注册）', () => {
     expect([...SNAPSHOT_DETECTOR_IDS].sort()).toEqual([
+      // 4.55.36 批次 2 新增：clarification-amendment（答疑技术性修正检测，
+      // 挂 buildStandardFinalValidationIssues det('caliber-consistency') 容器内、每个修复轮按最新 finalMarkdown 重跑）
+      'clarification-amendment',
       'data-consistency-snapshot',
       'fact-coverage',
       'global-consistency-snapshot',
