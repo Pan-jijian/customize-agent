@@ -544,7 +544,7 @@ export async function exportDocument(input: { documentId?: string; title?: strin
   //（本模块保持零依赖约定，故此处为字面量镜像，服务端导出路由的契约由测试锁定）
   const notDeliverable = response.headers.get('X-Export-Not-Deliverable') === 'true';
   const gateIssueHeader = response.headers.get('X-Export-Gate-Issues') || '';
-  let gateIssues: string[] = [];
+  let gateIssues: string[];
   try { gateIssues = gateIssueHeader ? JSON.parse(decodeURIComponent(gateIssueHeader)) as string[] : []; } catch { gateIssues = []; }
   // 服务端下发的文件名（含非交付物后缀）；头缺失/不可解析时回退 undefined，由调用方按标题构造
   const disposition = response.headers.get('content-disposition') || '';

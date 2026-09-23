@@ -70,7 +70,7 @@ export function extractRegulationBookNames(text: string): string[] {
 function toHalfWidth(raw: string): string {
   return raw
     .replace(/[！-～]/gu, ch => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
-    .replace(/　/gu, ' ');
+    .replace(/\u3000/gu, ' ');
 }
 
 /** 编号归一：全角折半角、去空白与零宽字符、破折号统一为连字符、大写

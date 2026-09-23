@@ -3819,7 +3819,7 @@ function maskDigits(text: string): string {
 }
 
 function compressedNgrams(text: string, size: number): Set<string> {
-  const clean = text.replace(/[\s　|*`_]/gu, '');
+  const clean = text.replace(/[\s\u3000|*`_]/gu, '');
   const grams = new Set<string>();
   for (let index = 0; index + size <= clean.length; index += 1) grams.add(clean.slice(index, index + size));
   return grams;

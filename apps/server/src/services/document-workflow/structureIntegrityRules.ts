@@ -441,7 +441,7 @@ function endsWithSentencePunct(line: string): boolean {
  *  - 图集号「数字＋字母＋数字」：`20S515`／`12J201`／`皖2015S209`。
  *  与「数量收尾」（`C30`、`共 3 台`）的机制区分：前者以标准/图集代号命名惯例收尾，
  *  后者是纯数量——规范罗列截断在裸代号上属真实漏网形态，不得被行尾数字闸门放过 */
-const STANDARD_OR_ATLAS_CODE_TAIL_RE = /(?:[A-Z]{2,6}\s*\/?\s*[A-Z]{0,6}\s*\d[\d.\-]*|\d{2,4}\s?[A-Z]{1,2}\s?\d{2,4}(?:[/／]\d{1,3})?|[皖烷京沪苏浙粤鲁豫鄂湘川渝陕冀晋蒙辽吉黑闽赣桂黔滇甘青宁新藏]\s?\d{4}\s?[A-Z]{1,2}\s?\d{1,4})$/u;
+const STANDARD_OR_ATLAS_CODE_TAIL_RE = /(?:[A-Z]{2,6}\s*\/?\s*[A-Z]{0,6}\s*\d[\d.-]*|\d{2,4}\s?[A-Z]{1,2}\s?\d{2,4}(?:[/／]\d{1,3})?|[皖烷京沪苏浙粤鲁豫鄂湘川渝陕冀晋蒙辽吉黑闽赣桂黔滇甘青宁新藏]\s?\d{4}\s?[A-Z]{1,2}\s?\d{1,4})$/u;
 
 function scanTruncatedLines(lines: string[], result: StructureScanResult): void {
   for (let i = 0; i < lines.length; i += 1) {
