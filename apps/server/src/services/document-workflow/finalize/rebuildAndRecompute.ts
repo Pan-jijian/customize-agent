@@ -51,7 +51,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { supersededValueIssues } from '../clarificationOverrides';
 import type { ClarificationAmendment } from '../clarificationAmendments';
-import { buildAuthoritativeValues, renderCaliberLedger } from '../authoritativeValues';
+import { assertCaliberConsistency, buildAuthoritativeValues, renderCaliberLedger } from '../authoritativeValues';
 import { collapseOverrideChains, extractLabeledAuthorityValues, extractValueOverrides } from '../valueOverride';
 import { assignStructureRequirementsToChapters } from '../tenderRequirements';
 import { constructionOrgProfessionalAuditIssues } from '../constructionOrgAudit';
@@ -567,6 +567,18 @@ export async function stageRebuildAndRecompute(session: FinalizeSession): Promis
     const truthAudit = buildAuthoritativeValues({ facts: truthFacts, overrides, labeledValues: extractLabeledAuthorityValues(truthSources) });
     session.caliberLedger = renderCaliberLedger(truthAudit);
     session.truthValues = truthAudit.resolved;
+    // 4.56 L6-B 构建期自检：真值层自身不变量（唯一值 / 现行≠作废 / caliber 可溯源）。
+    // **不 throw**——判据是结构不变量而非内容对错，误报代价（整篇作废）高于收益；违规写进诊断使其可见。
+    const caliberViolations = assertCaliberConsistency(truthAudit);
+    if (caliberViolations.length > 0) {
+      console.error(`[caliber] 真值层自检发现 ${caliberViolations.length} 处不变量违规：${caliberViolations.slice(0, 5).join('；')}`);
+      session.executionStages.push(displayStage({
+        type: 'validation',
+        roleId: 'caliber-self-check',
+        status: 'partial',
+        message: `真值层自检：${caliberViolations.length} 处不变量违规（${caliberViolations.slice(0, 3).join('；')}）——已记录，不改写、不阻断`,
+      }, { subtitle: '真值层自检' }));
+    }
     // 4.55.25 P4：参数绑定审计（值必须携带对象；无对象的裸值不作为可改写权威，其正确数量为 0）
     const bindingAudit = buildBoundFactAudit(session.factsModel?.factIndex?.parameterFacts || []);
     const caliberStage = displayStage({

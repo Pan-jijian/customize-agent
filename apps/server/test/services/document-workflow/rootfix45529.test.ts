@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { caliberConsistencyIssues, crossChapterConsistencyIssues } from '@/services/document-workflow/qualityValidation';
-import { attributeValueShapeMismatch, backfillCaliberPlacements, rejectValueNoise, renderTruthConstraintBlock } from '@/services/document-workflow/authoritativeValues';
+import { assertCaliberConsistency, attributeValueShapeMismatch, backfillCaliberPlacements, rejectValueNoise, renderTruthConstraintBlock } from '@/services/document-workflow/authoritativeValues';
 import { detectFactConflicts } from '@/services/document-workflow/factsModel';
 import { splitScoringBlocks } from '@/services/document-workflow/tenderBidScoring';
 import { classifyValueShape } from '@/services/document-workflow/valueOverride';
@@ -261,5 +261,35 @@ describe('L0 口径链尾确定性回填', () => {
     const markdown = '第一章 概况\n机械设备计划见后。\n';
     expect(backfillCaliberPlacements(markdown, [caliber('机械设备计划', '模板材质由投标人自行选择')]).inserted).toHaveLength(0);
     expect(backfillCaliberPlacements(markdown, [caliber('底坑垫层做法', 'C20', { caliber: false })]).inserted).toHaveLength(0);
+  });
+});
+
+describe('L6-B 真值层构建期自检（不变量）', () => {
+  const item = (attribute: string, value: string, extra: Record<string, unknown> = {}) => ({
+    subject: '', attribute, value, rule: 'R7', evidence: [{ source: '招标文件.pdf', snippet: value }],
+    superseded: [], caliber: true, candidates: [], ...extra,
+  }) as never;
+
+  it('自洽账本 → 零违规', () => {
+    expect(assertCaliberConsistency({ resolved: [item('计划工期', '330日历天'), item('开工日期', '2026年10月10日')], noiseRejected: [] })).toEqual([]);
+  });
+
+  it('生效值同时出现在被取代值列表 → 违规（现行与作废同值）', () => {
+    const violations = assertCaliberConsistency({ resolved: [item('计划工期', '330日历天', { superseded: ['330日历天'] })], noiseRejected: [] });
+    expect(violations.join('')).toContain('同时出现在被取代值列表');
+  });
+
+  it('同属性多条生效值 → 违规（裁决链应保证唯一）', () => {
+    const violations = assertCaliberConsistency({ resolved: [item('计划工期', '330日历天'), item('计划工期', '365日历天')], noiseRejected: [] });
+    expect(violations.join('')).toContain('多条生效值');
+  });
+
+  it('项目级口径缺证据 → 违规（不可溯源的口径不得进账本）', () => {
+    const violations = assertCaliberConsistency({ resolved: [item('开工日期', '2026年10月10日', { evidence: [] })], noiseRejected: [] });
+    expect(violations.join('')).toContain('缺证据来源');
+  });
+
+  it('空值不变量：生效值为空 → 违规', () => {
+    expect(assertCaliberConsistency({ resolved: [item('开工日期', '  ')], noiseRejected: [] }).join('')).toContain('生效值为空');
   });
 });

@@ -817,6 +817,46 @@ export function backfillCaliberPlacements(markdown: string, ledger: readonly Res
   return { markdown: output, inserted };
 }
 
+/**
+ * 构建期自检（4.56 L6-B / 方案 L0-9）：真值层**自身**必须自洽——「宁停不猜」不能只停在注释里。
+ *
+ * 三条不变量（纯函数、零 LLM、零 IO）：
+ * ① 生效值不得同时出现在自己的被取代值列表（否则"现行值"与"已作废值"是同一个，下游必然自相矛盾）；
+ * ② 同一属性不得产出两条生效值（裁决链的契约是"唯一值"，重复即裁决回归）；
+ * ③ 生效值为空、或 caliber 属性缺证据来源（不可溯源的口径不得进账本）。
+ *
+ * **处置口径**：返回违规清单由调用侧记录（**不 throw**）——真值层的问题在生成期抛错会让整篇作废，
+ * 而本自检的判据是"结构不变量"而非"内容对错"，误报代价远高于收益。调用侧把违规写进
+ * diagnostics 与阶段事件，使其**可见可审计**；历史缺陷正是"承诺了构建期断言、实际不存在"。
+ */
+export function assertCaliberConsistency(audit: AuthoritativeValueAudit): string[] {
+  const violations: string[] = [];
+  const seen = new Map<string, string>();
+  for (const item of audit.resolved) {
+    const attribute = String(item.attribute || '').trim();
+    const value = String(item.value || '').trim();
+    if (!attribute) { violations.push('条目缺属性名'); continue; }
+    if (!value) { violations.push(`「${attribute}」生效值为空（空值不得进账本）`); continue; }
+    // ② 同属性唯一值
+    const previous = seen.get(attribute);
+    if (previous !== undefined) {
+      violations.push(`「${attribute}」产出多条生效值（${previous} / ${value}）——裁决链应保证唯一值`);
+    } else {
+      seen.set(attribute, value);
+    }
+    // ① 生效值不得与自身被取代值重合
+    const normalized = value.replace(/\s+/gu, '');
+    if (item.superseded.some(superseded => String(superseded).replace(/\s+/gu, '') === normalized)) {
+      violations.push(`「${attribute}」生效值「${value}」同时出现在被取代值列表——现行与作废不得同值`);
+    }
+    // ③ caliber 属性必须可溯源
+    if (item.caliber && item.evidence.length === 0) {
+      violations.push(`项目级口径「${attribute}」缺证据来源（不可溯源的口径不得进账本）`);
+    }
+  }
+  return violations;
+}
+
 /** 口径账本（交付报告可展开：属性/生效值/裁决规则/依据/被取代值） */
 export function renderCaliberLedger(audit: AuthoritativeValueAudit): string[] {
   return audit.resolved.map(item => {
