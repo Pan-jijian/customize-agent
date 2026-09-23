@@ -4,6 +4,7 @@
  * P6 追加：概念黑名单（对象计数类）/ 单位一致性（跨单位不互比）/ 倍数门 4（4~20 倍收口）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { collapseObjectWindowEnd, collapseObjectWindowStart, findTruncationSource, hasTruncatedBracketFragment } from '@/services/document-workflow/factValueNoise';
 import { parameterConceptConflictIssues } from '@/services/document-workflow/parameterConceptConflicts';
 
 vi.mock('@/services/document-workflow/semanticSimilarity', () => ({ getLocalSemanticProvider: vi.fn() }));
@@ -502,5 +503,74 @@ describe('4.55.32 异名成员枚举豁免（#4 概念边界：分对象列举�
     embedMock.mockImplementation(async (texts: string[]) => texts.map(text => (text === '混凝土输送泵' ? [1, 0] : [0, 0, 1])));
     const issues = await parameterConceptConflictIssues('混凝土输送泵2台、混凝土输送泵3台、电焊机2台。');
     expect(issues.some(issue => /混凝土输送泵/u.test(issue.message))).toBe(true);
+  });
+});
+
+/**
+ * 4.58 R5 ③ 对象名窗口收拢（实测 `doc-1790168542563-ea526b1b` 的实测报文：
+ * `同一参数概念出现多口径数值冲突：“25C)厚与细粒式改性沥”出现多个口径：25C)6cm厚与细粒式改性沥、13C)4cm厚各13898`）。
+ *
+ * 成因：对象名此前是**定宽窗口**产物（前缀 ≤12 字、后缀 ≤8 字的一次正则匹配），
+ * 而 `PARAM_TOKEN_RE` 的前缀字符类不含 `-`，于是
+ * `粗粒式沥青混凝土(AC-25C)6cm厚与细粒式改性沥青混凝土面层(AC-13C)4cm厚各13898.51m²`
+ * 只能从 `25C)` 起匹配——前半段丢掉整个对象名「粗粒式沥青混凝土」、后半段粘进下一个对象
+ * 「细粒式改性沥」，两个**不同对象**（粗粒式 AC-25C 6cm / 细粒式 AC-13C 4cm）被当成"同一概念"，
+ * 数值 6 与 4 自然"多口径冲突"。
+ */
+describe('4.58 R5 ③ 对象名窗口收拢与残片兜底（真实数据回放）', () => {
+  const SENTENCES = [
+    '路面结构层按塘渣石垫层摊铺、水泥稳定碎（砾）石基层摊铺、透层与粘层喷洒、沥青混凝土面层铺筑的顺序推进，洒水车养护不少于7天，粗粒式沥青混凝土(AC-25C)6cm厚与细粒式改性沥青混凝土面层(AC-13C)4cm厚各13898.51m²，压实度不小于95%；基层验收后依次喷洒透层与粘层，再铺筑粗粒式普通沥青混凝土(AC-25C)6cm厚13898.51m²、细粒式改性沥青混凝土面层(AC-13C)4cm，压实度按不小于95%控制。',
+  ].join('\n');
+
+  /** 复刻真实 bge 的聚簇结果：两个沥青混凝土对象的 token 落进同一簇（残片形态下正是它们误聚的来源），
+   *  其余概念各自成簇（真实语义模型下它们本就不同簇） */
+  const clusterConcrete = () => embedMock.mockImplementation(async (texts: string[]) => texts.map((text, index) => {
+    const vector = new Array(texts.length + 1).fill(0);
+    vector[text.includes('AC-25C') || text.includes('AC-13C') ? 0 : index + 1] = 1;
+    return vector;
+  }));
+
+  it('正样本：`(AC-25C)6cm` 与 `(AC-13C)4cm` 收拢出各自完整对象名 → 不再判同一概念多口径', async () => {
+    clusterConcrete();
+    const issues = await parameterConceptConflictIssues(SENTENCES);
+    expect(issues.map(issue => issue.message)).toEqual([]);
+  });
+
+  it('反例：同一对象的两个不同取值仍是真冲突 → 照报（窗口收拢零放松）', async () => {
+    embedMock.mockImplementation(async (texts: string[]) => texts.map(text => (text.includes('围挡') ? [1, 0] : [0, 0, 1])));
+    const issues = await parameterConceptConflictIssues('围挡高度2.5m。围挡高度1.8m。混凝土输送泵2台。');
+    expect(issues.some(issue => /围挡高度/u.test(issue.message))).toBe(true);
+  });
+
+  it('残片兜底（降级可见，不静默）：括号残缺的 token 退出互斥，可见记录指名截断源', async () => {
+    const warnings: string[] = [];
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(message => { warnings.push(String(message)); });
+    try {
+      // 源文本自身括号残缺（缺开括号）：`面层(AC-13C)4cm)`——若残片留在池内，它与写全的同对象
+      // `面层(AC-13C)6cm` 同簇同单位（4 vs 6），必被误判"同一概念多口径"
+      embedMock.mockImplementation(async (texts: string[]) => texts.map(text => (text.includes('AC-13C') ? [1, 0] : [0, 0, 1])));
+      const issues = await parameterConceptConflictIssues('面层(AC-13C)4cm)与面层(AC-13C)6cm，围挡高度2.5m。');
+      expect(issues.map(issue => issue.message)).toEqual([]);
+      expect(warnings.filter(line => /残片跳过/u.test(line)), '残片跳过必须留下可见记录').toHaveLength(1);
+      expect(warnings.some(line => /\(AC-13C\)/u.test(line)), '记录须指名截断源（同一行里的完整括号组）').toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('判据（单源模块）：括号组整体纳入窗口；不配对闭括号判残片并指名截断源', () => {
+    const line = '粗粒式沥青混凝土(AC-25C)6cm厚与细粒式改性沥青混凝土面层(AC-13C)4cm厚各13898.51m²';
+    const start = collapseObjectWindowStart(line, line.indexOf('25C'));
+    const end = collapseObjectWindowEnd(line, line.length, start);
+    // 定宽匹配的起点落在 `25C)`（`AC-` 的连字符不在前缀字符类内）——收拢后窗口须是整句对象名
+    expect(line.slice(start, end)).toBe(line);
+    expect(hasTruncatedBracketFragment(line.slice(start, end))).toBe(false);
+
+    const broken = '基层6cm与面层(AC-13C)4cm)';
+    const brokenStart = collapseObjectWindowStart(broken, broken.indexOf('13C'));
+    const brokenWindow = broken.slice(brokenStart, collapseObjectWindowEnd(broken, broken.length, brokenStart));
+    expect(brokenWindow).toBe('面层(AC-13C)4cm)');
+    expect(hasTruncatedBracketFragment(brokenWindow)).toBe(true);
+    expect(findTruncationSource(broken, brokenWindow)).toBe('(AC-13C)');
   });
 });

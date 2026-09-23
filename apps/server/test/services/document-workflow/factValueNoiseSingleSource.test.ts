@@ -14,7 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { foldHomoglyphVariants, isTableScrapeFragment, valueAfterChangeConnector } from '@/services/document-workflow/factValueNoise';
+import { foldHomoglyphVariants, isComplianceCitationValue, isTableScrapeFragment, valueAfterChangeConnector } from '@/services/document-workflow/factValueNoise';
 
 const SRC_DIR = path.resolve(__dirname, '../../../src/services');
 
@@ -48,6 +48,19 @@ describe('4.56.3 事实值噪声判据单源', () => {
     expect(foldHomoglyphVariants('一标段')).not.toBe(foldHomoglyphVariants('二标段'));
   });
 
+  it('4.58 ① 合规引用句判据：合规动词 + 条款编号 + 规定/要求收尾 三连才算引用', () => {
+    // 实测 `doc-1790168542563-ea526b1b`：`计划工期` 的值之一是这句引用，被判成与真值并列的口径
+    expect(isComplianceCitationValue('符合第二章“投标人须知”第1.3.2项规定')).toBe(true);
+    expect(isComplianceCitationValue('满足招标文件第五章“工期要求”第2.1条要求')).toBe(true);
+    // 反向：缺条款编号的合规句是**真实取值**（形态判据不误伤），一律不以引用滤掉
+    expect(isComplianceCitationValue('符合国家现行验收规范合格标准')).toBe(false);
+    expect(isComplianceCitationValue('满足GB50204-2015要求')).toBe(false);
+    // 反向：时间/对象类真实取值三形态均不受影响
+    expect(isComplianceCitationValue('330日历天')).toBe(false);
+    expect(isComplianceCitationValue('2026年10月10日')).toBe(false);
+    expect(isComplianceCitationValue('框架结构')).toBe(false);
+  });
+
   it('**反重复（硬约束）**：噪声判据只许有一份实现', () => {
     const offenders: string[] = [];
     for (const file of sourceFiles(SRC_DIR)) {
@@ -61,6 +74,9 @@ describe('4.56.3 事实值噪声判据单源', () => {
       if (/function\s+stripFactLabelPrefix\s*\(/u.test(text) || /function\s+stripFactLabelPrefix\s*\(value\s*:\s*string\)/u.test(text)) offenders.push(`${relative}：重复定义 stripFactLabelPrefix`);
       if (/function\s+stripTrailingFormAnnotation\s*\(/u.test(text)) offenders.push(`${relative}：重复定义 stripTrailingFormAnnotation`);
       if (/function\s+foldAdminNameAbbreviation\s*\(/u.test(text)) offenders.push(`${relative}：重复定义 foldAdminNameAbbreviation`);
+      if (/function\s+isComplianceCitationValue\s*\(/u.test(text)) offenders.push(`${relative}：重复定义 isComplianceCitationValue`);
+      // 对象名窗口收拢/残片判定（4.58 R5 ③）：写在 parameterConceptConflicts 里会同时被检测端与裁决端各写一份
+      if (/function\s+(?:collapseObjectWindowStart|collapseObjectWindowEnd|hasTruncatedBracketFragment|findTruncationSource)\s*\(/u.test(text)) offenders.push(`${relative}：重复定义对象名窗口收拢/残片判据`);
       // 手抄连接语正则（应 import valueAfterChangeConnector）
       if (/CHANGE_CONNECTORS\s*\}\s*\|\|/u.test(text) && /exec\(raw\)/u.test(text)) offenders.push(`${relative}：手抄变更连接语取值逻辑`);
     }
@@ -82,5 +98,7 @@ describe('4.56.3 事实值噪声判据单源', () => {
     expect(consistency).toContain('temporalValueKind(');
     expect(consistency).toContain('stripFactLabelPrefix(');
     expect(consistency).toContain('stripTrailingFormAnnotation(');
+    // 4.58 ①：合规引用句判据同样只许从单源模块取用
+    expect(consistency).toContain('isComplianceCitationValue(');
   });
 });

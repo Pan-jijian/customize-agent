@@ -510,3 +510,60 @@ describe('4.56.6 多值冲突残留族（真实数据回放）', () => {
     expect(placeConflict).toHaveLength(1);
   });
 });
+
+/**
+ * 4.58 第五轮实测（`doc-1790168542563-ea526b1b`）残留冲突回放。
+ * 两条都出在「同一个值池里混进了不同槽位 / 不同对象的东西」：
+ * ① 合规引用句（指向别处条款的**引用**）被当成工期取值；
+ * ② 一个 plain 值（引用句/表格行标题）打掉了时长与日期的槽位分桶。
+ */
+describe('4.58 多值冲突残留族（真实数据回放）', () => {
+  it('① 合规引用句不是取值：`符合第二章“投标人须知”第1.3.2项规定` 不构成 `计划工期` 的第二个值', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '计划工期', value: '330日历天', sourceFile: '招标文件.pdf' }),
+      makeFact({ key: 'b', fieldName: '计划工期', value: '计划开工日期：2026年10月10日（具体开工日期以招标人出具的书面开工通知为准）', sourceFile: '7招标答疑文件.pdf' }),
+      makeFact({ key: 'c', fieldName: '计划工期', value: '符合第二章“投标人须知”第1.3.2项规定', sourceFile: '招标文件.pdf' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+
+  it('① 判据不误伤真值：滤掉引用句后，同组的真冲突照样报出（引用句不出现在报文里）', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '计划工期', value: '330日历天', sourceFile: 'A.pdf' }),
+      makeFact({ key: 'b', fieldName: '计划工期', value: '400日历天', sourceFile: 'B.pdf' }),
+      makeFact({ key: 'c', fieldName: '计划工期', value: '符合第二章“投标人须知”第1.3.2项规定', sourceFile: 'C.pdf' }),
+    ]));
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.message).toContain('400日历天');
+    expect(issues[0]!.message, '引用句是引用，不是取值，不得进入值列表').not.toContain('第1.3.2项');
+  });
+
+  it('② 三分桶：plain 值不再打掉时长/日期分桶（旧口径要求全组可判形态）', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '计划工期', value: '330日历天', sourceFile: '招标文件.pdf' }),
+      makeFact({ key: 'b', fieldName: '计划工期', value: '2026年10月10日', sourceFile: '答疑文件.pdf' }),
+      makeFact({ key: 'c', fieldName: '计划工期', value: '按招标人书面开工通知起算', sourceFile: '合同条款.pdf' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+
+  it('② 三分桶不静默真冲突：时长/日期/plain **各自桶内**多值仍照报', () => {
+    const duration = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '计划工期', value: '330日历天', sourceFile: 'A.pdf' }),
+      makeFact({ key: 'b', fieldName: '计划工期', value: '400日历天', sourceFile: 'B.pdf' }),
+    ]));
+    expect(duration, '两个不同时长').toHaveLength(1);
+
+    const date = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '工期关键节点', value: '2026年10月10日', sourceFile: 'A.pdf' }),
+      makeFact({ key: 'b', fieldName: '工期关键节点', value: '2026年11月11日', sourceFile: 'B.pdf' }),
+    ]));
+    expect(date, '两个不同日期').toHaveLength(1);
+
+    const plain = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '结构形式', value: '框架结构', sourceFile: 'A.pdf' }),
+      makeFact({ key: 'b', fieldName: '结构形式', value: '剪力墙结构', sourceFile: 'B.pdf' }),
+    ]));
+    expect(plain, '两个不同 plain 值').toHaveLength(1);
+  });
+});
