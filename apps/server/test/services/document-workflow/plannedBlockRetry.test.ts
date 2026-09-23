@@ -1,7 +1,9 @@
 /**
  * buildPlannedChapterContent（块写作合同）单测：
- * 字数双向硬合同（4.40/4.51）：达标区 [0.85,1.15] 直通；欠产侧接受区 [0.7,0.85) 记录放行、<0.7 仅
- * 首轮阻断（二轮放行）；超产侧前轮 >1.15 一律阻断（携压缩指令），4.51 末轮容差线 1.2× 内微超产
+ * 字数双向硬合同（4.40/4.51；**4.56 R0-a 对称化**）：达标区 [0.85,1.15] 直通；欠产侧门线 = 反馈下限
+ * 0.85×（原 0.7× 且末轮不设门 → 欠产被系统性放行，写作完成率长期 79%、债转修复链补成 +66%）；
+ * 欠产块的出路是 **R0-b 续写**（保留已写内容 + 增量补足，≤2 轮、须严格增长、达门线才交回）；
+ * 超产侧前轮 >1.15 一律阻断（携压缩指令），4.51 末轮容差线 1.2× 内微超产
  * 接受（r28 实机：末轮 1.19× / 仅超合同线 1 字仍判块失败 → 单块章整章阻断、文档缺章，损失远大于
  * 微超产本身）；末轮仍 >1.2× → 块失败（严重超产零降级）——旧 4.35
  * 「接受区 [0.7,1.4] 放行 / 二轮一律放行」是超产进入成稿的最后失守环节（舒城 14 万目标产出 22 万字）。
@@ -142,24 +144,39 @@ describe('buildPlannedChapterContent（块字数分层验收 + 结构硬门 + �
     expect(retryPrompt).toContain('必须逐点展开补足');
   });
 
-  it('接受区（0.7~0.85×，结构齐全）→ 直通成稿、不耗二轮（微缺口重写收敛期望为负）', async () => {
-    // 420 字 vs 块目标 500（0.84×）：落在接受区 [350,700] 且结构齐全 → 首轮直通（旧实现 <0.85× 即阻断
-    // → 重写风暴；舒城实测重写对字数不收敛，微越界重写的收敛期望为负）
-    llmMock.mockResolvedValue(passingContent([H4A, H4B, H4C, H4D], 90));
+  it('4.56 R0-a：0.84× 不再直通（门线=反馈下限 0.85），续写无增长 → 块失败（不降标）', async () => {
+    // 420 字 vs 块目标 500（0.84×）：**旧口径**落在接受区 [350,425) 直通放行——而该区间的
+    // 下发反馈下限一直是 0.85×（"要求写 0.85、只验收 0.7"）。R0-a 把门线与反馈对齐后：
+    // 两轮均欠产 → R0-b 续写（第 3 次调用）→ 模型未增长 → 续写不收敛 → 块失败（维持原"块失败"语义）。
+    llmMock.mockResolvedValue(passingContent([H4A, H4B, H4C, H4D], 60));
+    const result = await buildPlannedChapterContent(makeInput(), makeStructure());
+    expect(result?.allSucceeded).toBe(false);
+    // 2 次写作尝试 + ≥1 次续写尝试（续写无增长即停，轮次有界）
+    expect(llmMock.mock.calls.length).toBeGreaterThan(2);
+  });
+
+  it('4.56 R0-b：欠产块续写补足后成稿（保留已写内容 + 增量，不整块重写）', async () => {
+    // 首两轮各 0.32×（160 字）→ 门线未达；第 3 次调用（续写）返回增量 → 合并后达标 → 块成功。
+    // 这是欠产的**正当出路**：不判死丢弃、也不放行给修复链（后者会把"欠"补成"过"）。
+    const short = `### 测量放线\n\n${[H4A, H4B, H4C, H4D].map((title, index) => `#### ${title}\n\n${bodyLine(25, index)}`).join('\n\n')}`;
+    llmMock.mockResolvedValueOnce(short).mockResolvedValueOnce(short)
+      .mockResolvedValueOnce([H4A, H4B, H4C, H4D].map((title, index) => `#### ${title}\n\n${bodyLine(90, index)}`).join('\n\n'));
     const result = await buildPlannedChapterContent(makeInput(), makeStructure());
     expect(result?.allSucceeded).toBe(true);
-    expect(llmMock).toHaveBeenCalledTimes(1);
+    expect(llmMock).toHaveBeenCalledTimes(3);
+    // 续写口令：只输出续写、不得重复已写正文
+    expect(String(llmMock.mock.calls[2][1])).toContain('只输出续写部分');
     expect(result?.markdown).toContain(H4D);
   });
 
-  it('两轮字数均严重不足但结构齐全 → 二轮放行成稿（欠产侧不构成块失败）', async () => {
-    // 160 字 vs 500（0.32×）两轮不变：首轮 <0.7× 阻断重写、二轮放行——欠产侧二轮放行（补足需新事实，
-    // 不可控；与超产侧压缩的确定性收敛不同）；块成功、章不被阻断
+  it('4.56 R0-a：两轮严重欠产（0.32×）且续写无增长 → 块失败（欠产不再放行）', async () => {
+    // 160 字 vs 500（0.32×）三轮不变：**旧口径**二轮放行（"欠产侧不构成块失败"）——这正是
+    // 写作完成率长期停在 79% 的来源。R0-a 对称化后欠产与超产同权：不达标即块失败，
+    // 由上层块失守处置（4.55.30 显式降级：保留成功块 + 点名失守块）承接。
     llmMock.mockResolvedValue(`### 测量放线\n\n${[H4A, H4B, H4C, H4D].map((title, index) => `#### ${title}\n\n${bodyLine(25, index)}`).join('\n\n')}`);
     const result = await buildPlannedChapterContent(makeInput(), makeStructure());
-    expect(result?.allSucceeded).toBe(true);
-    expect(llmMock).toHaveBeenCalledTimes(2);
-    expect(result?.markdown).toContain(H4A);
+    expect(result?.allSucceeded).toBe(false);
+    expect(result?.failedBlocks.length).toBeGreaterThan(0);
   });
 
   it('首轮严重超产（>1.15×）→ 二轮携压缩反馈重写；二轮仍超产 → 块失败（零降级）', async () => {

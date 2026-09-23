@@ -1302,6 +1302,12 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     let lastDepthFeedback = '';
     // 4.55.22 工作包节结构/要素门禁反馈（第二轮注入）：缺陷原文（要素不全/方法过弱/工序顺序缺失/污染）
     let lastElementFeedback = '';
+    /**
+     * R0-b（4.56）欠产块续写用的**末轮现场**：块内容 + 该轮是否除"篇幅欠产"外无其它缺陷。
+     * 只在"内容已可读、仅差篇幅"时启用续写——其余缺陷（事实/结构/密度/格式）不属于本机制职责。
+     */
+    let lastAttemptContent = '';
+    let lastAttemptOnlyUnderProduced = false;
     // 2.6 补写上限收紧：块级写作/反馈重试循环上限显式化（固化为 2，与既有行为一致）
     // ——上限超出即判失败转上层紧凑备用（原 DOCUMENT_BLOCK_MAX_ATTEMPTS 已固化删除）
     const blockMaxAttempts = 2;
@@ -1327,9 +1333,27 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
      *（见 lastDepthFeedback），终态那层已由终检 `critical-section-depth` + `content-depth-repair` 兜底——
      * 块级不得新增终局失败面（上一段注释本就写明该契约，此次是执行偏离了它）。
      */
-    const underProduceLine = Math.floor(block.targetWords * 0.7);
-    /** 首轮反馈下达的篇幅下限：可接受区下沿；绝对门槛作为**更高目标**只出现在反馈措辞中 */
+/** 首轮反馈下达的篇幅下限：可接受区下沿；绝对门槛作为**更高目标**只出现在反馈措辞中 */
     const charFloor = Math.max(Math.floor(block.targetWords * 0.85), criticalDepthFloor);
+    /**
+     * 欠产硬门线（4.56 R0-a：**与反馈口径对齐**，由 0.7× 提到 `charFloor`=0.85×）。
+     *
+     * **实测根因**（doc-1790144107028-aaba7ba3）：门线 0.7 而**下发给模型的反馈下限是 0.85**——
+     * 即"要求写 0.85、实际只验收 0.7"。配合"末轮不设欠产门"，欠产被系统性合法化：
+     * 写作完成率实测 87% / 65% / 69%（章），而**超产侧却有 1.15× 硬阻断 + 隔离重写 + 章级接纳**，
+     * 两侧处置严重不对称。欠产随即被各类检测器识别为缺陷，债转给修复链——而修复链无预算概念，
+     * 从"欠"补成"过"（终稿 +57%/83%/87%，合计 +66%），压缩轮又因守恒守卫压不回来。
+     *
+     * 对称化：**比例线**欠产门 = 反馈下限 = 0.85×，且**末轮同样保留**
+     *（原 `attempt === 0 && …` 是"二轮一律放行"的残留）。欠产块的正当出路是 **R0-b 续写**
+     *（保留已写内容、增量补足），而不是"判死丢弃"或"放行给修复链"。
+     *
+     * **刻意不并入 `criticalDepthFloor`**（4.55.22 的既有边界，回归实证）：绝对深度门槛一旦折进
+     * 接受线，会把可接受区间从 [0.85×,1.15×] 收窄到 [≈目标,1.15×]，模型一次写不到接近目标即被拒
+     * → 全部块失败 → 整章阻断。关键小节的绝对门槛保持**仅首轮**生效（其定向补足反馈见
+     * `lastDepthFeedback`），终态由终检 `critical-section-depth` + `content-depth-repair` 兜底。
+     */
+    const underProduceLine = Math.floor(block.targetWords * 0.85);
     // 4.55.22 工作包节结构与要素门禁（生成侧）：复用 sectionStructureIssue 单源（与终检
     // construction-org-major-content / construction-org-division-section 及 utils 三要素判定同源），
     // 把「工作包三要素不全 / 方法段过弱 / 工序顺序表达缺失 / 脏事实与流程污染 / 表格承载正文」
@@ -1389,6 +1413,76 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
             : `本节篇幅合同区间为 ${charFloor}~${Math.ceil(block.targetWords * 1.15)} 字（目标 ${block.targetWords} 字）。`)
           : '',
     ].filter(Boolean).join('');
+    /**
+     * R0-b 欠产块续写（4.56）——欠产不再只靠"整块重写"收敛。
+     *
+     * **实测根因**：写作完成率长期停在 79%（三章 87% / 65% / 69%），且完成率与块目标大小**反向**
+     *（块目标 ≈900 → 87%；≈1,900 → 65~69%）。这个形态是"单次调用的产出被某个上限截住"——
+     * 而整块重写只是**再要一次同规模的输出**，越过不了同一上限（实测每轮重写后仍落在 ~0.8×）。
+     *
+     * 续写把产出拆成两次调用：**原样保留已写正文**，只要模型接着上文补足缺口；
+     * 总产出 = 原文 + 增量，可越出单次调用的自然长度。
+     *
+     * 边界（宁缺不假）：
+     * - 仅当"除篇幅欠产外无任何缺陷"时启用（事实/结构/密度/格式缺陷不属本机制职责，交原失败路径）；
+     * - 模型若重写了全文（输出包含已写正文的尾段）→ **取更长的一份**，不做拼接（防重复）；
+     * - 有界：≤2 轮，每轮必须**严格增加字数**，否则立即停止（防空转）；
+     * - 只有达到 charFloor 才交回；否则保持原有"块失败"语义（**不降标**）。
+     */
+    const continueUnderProducedBlock = async (seeded: string, seedChars: number): Promise<string | undefined> => {
+      const maxRounds = 2;
+      let current = seeded;
+      let currentChars = seedChars;
+      let grew = 0;
+      for (let contRound = 0; contRound < maxRounds; contRound += 1) {
+        throwIfAborted(input.signal);
+        const gap = charFloor - currentChars;
+        if (gap <= 0) break;
+        const continuationContext = [
+          blockRoleContext,
+          `【本节欠产续写】本节已有正文如下（**不得重复、不得改写、不得重新输出**），请**只输出续写部分**，接着上文把未充分展开的要点继续写完。当前 ${currentChars} 字，篇幅下限 ${charFloor} 字，还缺约 ${gap} 字（上限 ${Math.ceil(block.targetWords * 1.15)} 字）。只输出新写的正文，不要重复已写内容、不要重写本节标题。`,
+          '【已有正文开始】',
+          current,
+          '【已有正文结束】',
+        ].join('\n\n');
+        const emitted = await buildLlmChapterContent(input.template, blockChapter, blockEvidence, input.missingFacts, input.promptTexts, input.projectContext, input.requirement, continuationContext, {
+          forbidDrawingImages: input.forbidDrawingImages,
+          bidComposition: input.bidComposition,
+          compactProjectContext: input.compactProjectContext,
+          scopedProjectContext: input.scopedProjectContext,
+          chapterLevelContext: input.roleContext || '',
+          minWords: block.targetWords,
+          targetWords: block.targetWords,
+          sectionQuotas: blockSectionQuotas,
+          maxTokens: Math.max(3200, Math.ceil(block.targetWords * 1.5)),
+          sharedFactLayerText,
+          evidenceRankBoost: blockRankBoost,
+          onlyRankBoosted: true,
+          signal: input.signal,
+          diagnostics: input.diagnostics,
+        });
+        if (!emitted) break;
+        const candidate = sanitizeFormalMarkdown(String(emitted).trim());
+        if (!candidate) break;
+        // 模型重写了全文（输出含已写正文的尾段）→ 取更长的一份，不拼接（防重复段）
+        const seedTail = current.replace(/\s+/gu, '').slice(-40);
+        const merged = seedTail && candidate.replace(/\s+/gu, '').includes(seedTail)
+          ? candidate
+          : `${current}\n\n${candidate}`;
+        const mergedChars = documentTextLength(merged);
+        if (mergedChars <= currentChars) break; // 未严格增长 → 停止（防空转）
+        current = merged;
+        currentChars = mergedChars;
+        grew += 1;
+      }
+      if (grew === 0 || currentChars < charFloor) return undefined;
+      const overLine = Math.ceil(block.targetWords * 1.15);
+      // 续写后越出上限的：溢出量在末轮容差（1.2×）内放行（与块合同既有末轮口径一致），否则判失败
+      if (currentChars > Math.ceil(block.targetWords * 1.2)) return undefined;
+      console.error(`[gen][block-qc] 欠产续写收敛（${seedChars} → ${currentChars} 字，下限 ${charFloor}，上限 ${overLine}）：${block.title}`);
+      if (input.diagnostics) input.diagnostics.llm.lastInfo = `欠产块续写收敛：${block.title}（${seedChars} → ${currentChars} 字）`;
+      return current;
+    };
     for (let attempt = 0; attempt < blockMaxAttempts; attempt += 1) {
       // 第二轮反馈针对性列出缺失/重复 H4 标题，让重试有的放矢，避免通用反馈反复缺失要点后整章失败；
       // C3 隔离重写（initialFeedback 注入）首轮即携带上一轮缺陷反馈——隔离重写是该块最后一次成稿
@@ -1489,6 +1583,8 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           console.error(`[gen][block-qc] 结构完整性阻断 attempt=${attempt}（${blockStructureScan.blocking.length} 处）: ${block.title}: ${blockStructureScan.blocking.slice(0, 3).map(defect => defect.message).join(' / ')}`);
         }
         const chars = documentTextLength(withBlockShell);
+        // R0-b：登记末轮现场——"仅欠产"判定在下方各 gate 计算完成后回填（此处先存内容）
+        lastAttemptContent = withBlockShell;
         lastChars = chars;
         // P4 落位数值一致性核验：块成稿与证据对账（注入证据=章级共享事实层+块级证据；完整证据池=全章证据）。
         // 只标记不删改：mismatched（同位置不同值）首轮阻断重试、第二轮放行交由后续审查链兜底；unsourced 仅观测
@@ -1649,7 +1745,8 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         const overProduceToleranceLine = Math.ceil(block.targetWords * 1.2);
         const effectiveOverLine = attempt === blockMaxAttempts - 1 ? overProduceToleranceLine : overProduceLine;
         // 欠产硬门线 = 比例线（0.7×块目标）与关键小节绝对深度门槛的严格者（4.55.22：绝对门槛并行追加）
-        const underProduceBlocking = attempt === 0 && chars < underProduceLine;
+        // R0-a：末轮同样保留欠产门（原 `attempt === 0 && …` 使末轮任何欠产都被放行）
+    const underProduceBlocking = chars < underProduceLine;
         const overProduceBlocking = chars > effectiveOverLine;
         // 关键小节绝对深度门槛阻断（仅首轮）：比例线内但未达绝对门槛（如块目标 2600 的关键小节
         // 首轮 1500 字）——与欠产线同族，仅触发二轮定向补足反馈，不改变末轮验收口径
@@ -1666,6 +1763,11 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         if (criticalDepthBlocking) {
           console.error(`[gen][block-qc] 关键小节深度门槛阻断 attempt=${attempt}（${chars} 字 vs 绝对门槛 ${criticalDepthFloor} 字，块目标 ${block.targetWords} 字）: ${block.title}`);
         }
+        // R0-b：除"篇幅欠产"外无任何缺陷时登记现场（续写仅用于补足篇幅，不承担其它缺陷的收敛）
+        lastAttemptOnlyUnderProduced = (underProduceBlocking || criticalDepthBlocking)
+          && !overProduceBlocking && !elementBlocking && missing.length === 0 && duplicates.length === 0
+          && extraneous.length === 0 && !numericBlocking && !flowFormBlocking && !fillerBlocking
+          && !structureBlocking && !densityBlocking && !attributionBlocking && !formatBlocking;
         if (!underProduceBlocking && !overProduceBlocking && !criticalDepthBlocking && !elementBlocking && missing.length === 0 && duplicates.length === 0 && extraneous.length === 0 && !numericBlocking && !flowFormBlocking && !fillerBlocking && !structureBlocking && !densityBlocking && !attributionBlocking && !formatBlocking) {
           return withBlockShell;
         }
@@ -1729,7 +1831,11 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           //（与直通路径同一口径）
           const repairedOverProduce = repairedChars > effectiveOverLine;
           const repairedUnderProduce = repairedChars < underProduceLine;
-          if (!repairedOverProduce && (attempt > 0 || !repairedUnderProduce)) {
+          // 4.56 R0-a **第二个欠产放行口**：原条件 `(attempt > 0 || !repairedUnderProduce)` 使
+          // **末轮无条件放行欠产块**——标题层修复（去重/剥清单外标题）只解决标题问题，不解决内容量，
+          // 却在末轮把 `< 0.85×` 的块直接放行成稿。这与直通路径的"末轮不设欠产门"是同一处不对称的两个出口。
+          // 现与直通路径同口径：修复后仍欠产 → 不放行（交 R0-b 续写或块失败处置）。
+          if (!repairedOverProduce && !repairedUnderProduce) {
             if (input.diagnostics && (extraneous.length > 0 || duplicates.length > 0)) input.diagnostics.llm.lastInfo = `块标题层已确定性修复：${block.title}（清单外 ${extraneous.length} 个、重复 H4 ${duplicates.length} 个；${chars}→${repairedChars} 字）`;
             return repaired;
           }
@@ -1766,6 +1872,11 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     }
     // C3 隔离重写反馈收集：质检判定出现过缺陷才携带（纯异常失败不套"质检未通过"话术）
     if (sawQcDefect) blockRetryFeedbacks.set(index, buildBlockDefectFeedback(false));
+    // R0-b：末轮"仅欠产"现场登记（供下方续写）
+    if (lastAttemptContent && lastAttemptOnlyUnderProduced) {
+      const continued = await continueUnderProducedBlock(lastAttemptContent, documentTextLength(lastAttemptContent));
+      if (continued) return continued;
+    }
     // （原「自愈拆半 + salvage 逐点兜底」已删除：拆半在写作层之后改结构——半块重设预算使父块合同失效，
     //  与写作、检测、修复三方口径互相冲突；容量规划已在规划层一次成型保证块预算可写性。
     //  块两次尝试仍越出字数合同 → 块失败 → 上层隔离重试 → 仍失败即章阻断、文档显式失败：零降级，宁缺毋假）
