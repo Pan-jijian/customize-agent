@@ -39,9 +39,10 @@
  * 形态覆盖与已知缺口（诚实记录，不静默）：
  *   · 覆盖：一问一答（同行内联/分段/编号均可）、一句多答（`答：需要，X不需要`）、
  *     答句内先因后果（`答：机动车地面停车位皆为植草砖，取消此划线`）、是非问确认、短答；
- *   · **不覆盖（显式缺口，见 unparsedAnswers）**：① 非问答形态的平铺技术陈述——如补疑
- *     「温馨提示」里的「本工程采用国家2000高程系统,建筑室内±0.000相当于绝对标高为8.00」，
- *     无问答结构也无变更动词，按判据不抽，由 `unparsedAnswers`/诊断上报为缺口；
+ *   · **不覆盖（显式缺口，见 unparsedAnswers / uncoveredStatements）**：① 非问答形态的平铺技术陈述——
+ *     如补疑「温馨提示」里的「本工程采用国家2000高程系统,建筑室内±0.000相当于绝对标高为8.00」，
+ *     无问答结构也无变更动词，按判据不抽，由 `uncoveredStatements`（count + measureShaped + 量值优先样本）
+ *     与 `console.warn('[clarification] 未覆盖平铺陈述…')` 上报为缺口，绝不静默；
  *     ② 答句为纯指向（`见下图`/`详S02说明`/`SW01第四章节`）时不产出修正——指向不是可写作内容；
  *     ③ 同段落内「问-答-问」连环（PDF 抽取后同行粘连）时，最后一个问句可能被截掉。
  */
@@ -94,8 +95,10 @@ export interface ClarificationAmendmentLedger {
   unparsedAnswers: Array<{ question: string; answer: string; source: string }>;
   /** 显式缺口：**非问答形态的平铺技术陈述**（携带量值 + 规范动词，却既无问答结构也无变更动词）——
    * 例：巢湖补疑「温馨提示」的「建筑室内±0.000相当于绝对标高为8.00」。判据不抽（可能误伤工程陈述），
-   * 但必须可见：诊断计数 + 样本（仅诊断，绝不注入提示词）。 */
-  uncoveredStatements: { count: number; samples: Array<{ text: string; source: string }> };
+   * 但必须可见：诊断计数 + 样本（仅诊断，绝不注入提示词）。
+   * `measureShaped` = 其中**含工程量值 token**（规格/量值/标高/配比）的条数——这批最像「漏抽的技术口径」
+   * （±0.000 高程即此类）；样本按「量值形态优先」排序，容量截断也不会把最该人工过目的对象挤掉。 */
+  uncoveredStatements: { count: number; measureShaped: number; samples: Array<{ text: string; source: string }> };
   /** 源文件数（诊断用） */
   sourceCount: number;
   /** 问答对总数（诊断用：抽取覆盖分母） */
@@ -105,6 +108,25 @@ export interface ClarificationAmendmentLedger {
 /** 平铺技术陈述的形态闸（诊断用，只做「值得人工看一眼」的筛选，不进提示词） */
 const DECLARATIVE_MEASURE_RE = /(?:\d|±)/u;
 const DECLARATIVE_NORM_RE = /(?:采用|按|执行|为准|不得|应|必须|相当于|统一|计入)/u;
+
+/** 「量值形态」闸（诊断排序首档，比 DECLARATIVE_MEASURE_RE 严）：标高符号（±0.000）、规格对（600*600 /
+ *  30*1.5mm）、配比（2:8）、带单位的量值（150mm / 7.5m / 380m3 / DN200）。**不含**汉语量词（个/座/处/项…）
+ *  与文号里的裸数字（合建监管[2026]1号）——那两类在商务条款里遍地都是，会把技术口径挤出上报窗口。
+ *  验收对象「建筑室内±0.000相当于绝对标高为8.00」正是本闸的典型命中：判据不抽，但必须人工可见。 */
+const UNCOVERED_MEASURE_SHAPE_RE = /±\s?\d|\d+\s*[*x×]\s*\d+|\d+\s*[:：]\s*\d+|\d+(?:\.\d+)?\s*(?:mm|cm|km|m2|m3|㎡|kg|t|mpa|kpa|kn|mw|kw|kva|kv|v|a|w|pa)|dn\d+/iu;
+
+function uncoveredMeasureShaped(text: string): boolean {
+  return UNCOVERED_MEASURE_SHAPE_RE.test(text);
+}
+
+/** 未覆盖陈述的样本排序键（0 最该看）：量值形态的技术口径 → 其他 → 商务条款。
+ *  量值形态**先于**商务判定：`本工程采用国家2000高程系统,建筑室内±0.000相当于绝对标高为8.00`
+ *  这类陈述尾部常带商务话术（投标人自行踏勘现场/不予调整），若商务优先就会被排到样本容量之外、
+ *  等于静默——而它正是「判据不抽但必须人工过目」的验收对象。 */
+function uncoveredSamplePriority(text: string): number {
+  if (uncoveredMeasureShaped(text)) return 0;
+  return NON_TECHNICAL_COMPLEMENT_RE.test(text) ? 2 : 1;
+}
 
 // ────────────────────────────── 文本切分（问答句对） ──────────────────────────────
 
@@ -453,6 +475,7 @@ export function extractClarificationAmendmentLedger(input: ExtractClarificationA
   let sourceCount = 0;
   let pairCount = 0;
   let uncoveredCount = 0;
+  let measureShapedCount = 0;
   const maxAmendments = input.maxAmendments ?? 80;
   for (const item of input.texts || []) {
     const text = String(item?.text || '');
@@ -488,14 +511,17 @@ export function extractClarificationAmendmentLedger(input: ExtractClarificationA
       if (clean.length < 8 || coveredParagraphs.has(clean)) continue;
       if (!DECLARATIVE_MEASURE_RE.test(clean) || !DECLARATIVE_NORM_RE.test(clean)) continue;
       uncoveredCount += 1;
+      if (uncoveredMeasureShaped(clean)) measureShapedCount += 1;
       uncoveredSamples.push({ text: clean.slice(0, 120), source });
     }
   }
-  // 诊断样本：技术性陈述优先（费用/报价/投标人条款属商务链，排在后面），只留前 20 条
+  // 诊断样本排序（容量截断不得把最该人工过目的对象挤掉）：含工程量值 token 的技术口径排最前
+  // （±0.000 高程这类正是「判据不抽但必须可见」的验收对象），商务条款（费用/报价/投标人）排最后，
+  // 同档保持原文顺序。
   const samples = [...uncoveredSamples]
-    .sort((left, right) => Number(NON_TECHNICAL_COMPLEMENT_RE.test(left.text)) - Number(NON_TECHNICAL_COMPLEMENT_RE.test(right.text)))
+    .sort((left, right) => uncoveredSamplePriority(left.text) - uncoveredSamplePriority(right.text))
     .slice(0, 20);
-  return { amendments, unparsedAnswers, uncoveredStatements: { count: uncoveredCount, samples }, sourceCount, pairCount };
+  return { amendments, unparsedAnswers, uncoveredStatements: { count: uncoveredCount, measureShaped: measureShapedCount, samples }, sourceCount, pairCount };
 }
 
 /** 抽取答疑技术性修正（账本主体；缺口见 extractClarificationAmendmentLedger） */

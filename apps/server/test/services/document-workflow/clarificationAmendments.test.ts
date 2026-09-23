@@ -145,6 +145,18 @@ describe('缺口显式化（never silent）', () => {
     // 判据不抽（无问答结构、无变更动词）：不得凭空造出修正条目
     expect(ledger.amendments.some(amendment => amendment.after.includes('绝对标高'))).toBe(false);
   });
+
+  it('±0.000 高程不得被样本容量挤掉：埋在大段商务陈述之后仍在「量值形态优先」窗口内', () => {
+    // 复现真实文件形态：50 条未覆盖陈述（大量带数字的商务条款）+ 尾部温馨提示里的高程口径
+    const 商务 = Array.from({ length: 30 }, (_, index) => `${index + 1}、本项目执行第${index + 2}号文，暂列金额为 ${index + 1} 万元，投标人自行踏勘现场，综合考虑报价，中标后量、价不予调整。`);
+    const 文本 = [...商务, '', '温馨提示', '', '1、本工程采用国家2000高程系统,建筑室内±0.000相当于绝对标高为8.00。清单对挖基础的深度，是按照现状自然地貌高程挖至设计图纸槽底高程考虑的，投标人自行踏勘现场，不予调整。'].join('\n');
+    const ledger = extractClarificationAmendmentLedger({ texts: [{ text: 文本, source: 补疑 }] });
+    expect(ledger.uncoveredStatements.count).toBeGreaterThan(30);
+    expect(ledger.uncoveredStatements.measureShaped).toBeGreaterThanOrEqual(1);
+    // console.warn 只打印前 5 条：技术口径必须落在这个窗口里，否则等于静默
+    const window = ledger.uncoveredStatements.samples.slice(0, 5);
+    expect(window.some(sample => sample.text.includes('±0.000'))).toBe(true);
+  });
 });
 
 describe('反例：不得误判', () => {

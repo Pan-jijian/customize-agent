@@ -92,7 +92,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
     // 缺口不静默（2-2 与验收「never silent」）：未解析短答 / 未覆盖平铺技术陈述逐条入日志，
     // 抽取失败（如无问答结构的平铺条款）必须可被人工复核，而不是悄悄消失
     const chaptered = clarificationAmendments.filter(item => item.chapterTitle).length;
-    console.warn(`[clarification] 答疑技术性修正账本：${clarificationAmendments.length} 条（按章归属 ${chaptered} / 全文适用 ${clarificationAmendments.length - chaptered}），源 ${clarificationAmendmentLedger.sourceCount} 份、问答对 ${clarificationAmendmentLedger.pairCount}；缺口：未解析短答 ${clarificationAmendmentLedger.unparsedAnswers.length} 条、未覆盖平铺技术陈述 ${clarificationAmendmentLedger.uncoveredStatements.count} 条`);
+    console.warn(`[clarification] 答疑技术性修正账本：${clarificationAmendments.length} 条（按章归属 ${chaptered} / 全文适用 ${clarificationAmendments.length - chaptered}），源 ${clarificationAmendmentLedger.sourceCount} 份、问答对 ${clarificationAmendmentLedger.pairCount}；缺口：未解析短答 ${clarificationAmendmentLedger.unparsedAnswers.length} 条、未覆盖平铺技术陈述 ${clarificationAmendmentLedger.uncoveredStatements.count} 条（其中量值形态 ${clarificationAmendmentLedger.uncoveredStatements.measureShaped} 条最像漏抽的技术口径，需人工过目）`);
     for (const gap of clarificationAmendmentLedger.unparsedAnswers.slice(0, 5)) console.warn(`[clarification] 未解析答句（人工复核）：Q「${gap.question}」→ A「${gap.answer}」`);
     for (const gap of clarificationAmendmentLedger.uncoveredStatements.samples.slice(0, 5)) console.warn(`[clarification] 未覆盖平铺陈述（无问答结构，判据不抽）：${gap.text}`);
   }
