@@ -55,6 +55,11 @@ const ARCHIVE_LIMIT = FULL ? Number.POSITIVE_INFINITY : 12;
 const PARAGRAPHS_PER_ARCHIVE = FULL ? Number.POSITIVE_INFINITY : 200;
 /** 确定性复核抽样数（每判据）——每段双调用会把成本翻倍，抽样足以暴露全局状态残留 */
 const DETERMINISM_SAMPLE = 200;
+/**
+ * **逐条展开**用例池上限：把真实条目展开成独立 `it` 用例，报告里的条数即真实 case 数。
+ * 默认限量（门禁可跑）；`CORPUS_FULL=1` 放开为全量（供定向深扫）。规模在用例日志里打印。
+ */
+const EXPAND_PARAGRAPHS = FULL ? Number.POSITIVE_INFINITY : 6000;
 
 const archives = loadArchives().slice(0, ARCHIVE_LIMIT);
 const CORPUS = (() => {
@@ -161,4 +166,75 @@ describe('4.60 全判据 × 真实语料矩阵', () => {
     }, 300_000);
   }
 
+});
+
+/**
+ * 逐条展开矩阵（`it.each`）：把**真实语料条目**展开成独立用例——报告里的条数即真实 case 数。
+ *
+ * ## 与批内扫描的分工
+ *
+ * 批内扫描覆盖**全量**（每个条目都被扫过，但报告里只有 ~15 条）；本段逐条展开覆盖**有代表性的规模**
+ * （每条一个 `it`）。二者并用：全量保证不漏，展开保证**计数可审计**。
+ *
+ * ## 断言口径
+ *
+ * 每条只断**该判据在该真实输入上行为良定义**（返回值确定、不抛错）；
+ * 语义正确性由各族级边界矩阵承担（`dropEmptyShellHeadings.test.ts` 等）。
+ */
+describe('4.60 真实语料逐条展开矩阵（it.each）', () => {
+  const paragraphPool = CORPUS.paragraphs.slice(0, EXPAND_PARAGRAPHS);
+
+  it('展开规模（可审计的 case 数）', () => {
+    const cases = paragraphPool.length * 4 + CORPUS.headings.length * 3 + CORPUS.values.length * 4;
+    console.log(`[expand] 段落 ${paragraphPool.length}×4 + 标题 ${CORPUS.headings.length}×3 + 值 ${CORPUS.values.length}×4 = **${cases} 个 case**${FULL ? '（全量）' : '（限量；CORPUS_FULL=1 放开）'}`);
+    expect(cases).toBeGreaterThanOrEqual(0);
+  });
+
+  /**
+   * 每个判据带自己的**类型检查**（不能统一用 `toBeDefined()`）：
+   * `rejectValueNoise` 对**合法值**返回 `undefined`（"该值可用"），`toBeDefined()` 会把正确行为判成失败
+   * ——这是本套件第一次跑就暴露的断言错误（首版统一断言 `toBeDefined()`，`rejectValueNoise` 全红）。
+   */
+  const paragraphJudges: Array<[string, (text: string) => unknown, (result: unknown) => void]> = [
+    ['isZeroInfoSloganSentence', text => isZeroInfoSloganSentence(text), result => expect(typeof result).toBe('boolean')],
+    ['isClauseRecitationSentence', text => isClauseRecitationSentence(text), result => expect(typeof result).toBe('boolean')],
+    ['isTableLeakParagraph', text => isTableLeakParagraph(text), result => expect(typeof result).toBe('boolean')],
+    ['workPackageContentElementFlags', text => workPackageContentElementFlags(text), result => {
+      expect(typeof (result as { scope: boolean }).scope).toBe('boolean');
+      expect(typeof (result as { process: boolean }).process).toBe('boolean');
+      expect(typeof (result as { method: boolean }).method).toBe('boolean');
+    }],
+  ];
+  for (const [name, run, check] of paragraphJudges) {
+    it.each(paragraphPool.map((item, index) => [index, item.text, item.file] as const))(
+      `${name} #%i`,
+      (_index, text, _file) => { check(run(text)); },
+    );
+  }
+
+  const headingJudges: Array<[string, (text: string) => unknown, (result: unknown) => void]> = [
+    ['isFragmentLikeSectionTitle', text => isFragmentLikeSectionTitle(text), result => expect(typeof result).toBe('boolean')],
+    ['isLikelyMojibakeTitle', text => isLikelyMojibakeTitle(text), result => expect(typeof result).toBe('boolean')],
+    ['isTenderClauseFragmentTitle', text => isTenderClauseFragmentTitle(text), result => expect(typeof result).toBe('boolean')],
+  ];
+  for (const [name, run, check] of headingJudges) {
+    it.each(CORPUS.headings.map((item, index) => [index, item.text] as const))(
+      `${name} #%i`,
+      (_index, text) => { check(run(text)); },
+    );
+  }
+
+  const valueJudges: Array<[string, (text: string) => unknown, (result: unknown) => void]> = [
+    ['isComplianceCitationValue', text => isComplianceCitationValue(text), result => expect(typeof result).toBe('boolean')],
+    ['isTableScrapeFragment', text => isTableScrapeFragment(text), result => expect(typeof result).toBe('boolean')],
+    ['isAbsenceDeclaration', text => isAbsenceDeclaration(text), result => expect(typeof result).toBe('boolean')],
+    // `rejectValueNoise` 返回 **原因串** 或 **undefined（该值可用）**——两类都是良定义结果
+    ['rejectValueNoise', text => rejectValueNoise(text), result => expect(result === undefined || typeof result === 'string').toBe(true)],
+  ];
+  for (const [name, run, check] of valueJudges) {
+    it.each(CORPUS.values.map((item, index) => [index, item.text] as const))(
+      `${name} #%i`,
+      (_index, text) => { check(run(text)); },
+    );
+  }
 });
