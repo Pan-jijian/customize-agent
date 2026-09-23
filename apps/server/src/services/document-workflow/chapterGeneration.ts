@@ -1381,6 +1381,9 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     /**
      * 4.60 I1 块级篇幅账记录（**无条件**——首轮直通者同样入账）。
      *
+     * `kinds` 在**通过点**传的是**上一轮失败类别**（`blockFailureKinds` 每轮质检失败即覆盖）：
+     * 不传则「重试后通过」的块在账上看不出原因，无法回答「为什么首轮没过」。
+     *
      * 必须有**无偏**分布才能定标块目标：4.59 用日志里的失败样本算出「中位数 0.70」，
      * 而干净通过的块不留日志行 → 该样本被失败样本拉低，据此定标等于自我实现。
      */
@@ -1965,11 +1968,12 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           if (chars < Math.floor(block.targetWords * 0.95)) {
             const topped = await continueUnderProducedBlock(withBlockShell, chars);
             if (topped) {
-              recordBlockLedger(attempt, documentTextLength(topped), true);
+              recordBlockLedger(attempt, documentTextLength(topped), true, attempt > 0 ? blockFailureKinds.get(index) : undefined);
               return topped;
             }
           }
-          recordBlockLedger(attempt, chars, true);
+          // attempt>0 时带上**上一轮失败类别**——否则只能看到"重试过"，看不到"为什么重试"
+          recordBlockLedger(attempt, chars, true, attempt > 0 ? blockFailureKinds.get(index) : undefined);
           return withBlockShell;
         }
         /**
