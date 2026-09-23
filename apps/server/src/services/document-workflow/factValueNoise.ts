@@ -88,6 +88,29 @@ export function foldHomoglyphVariants(value: string): string {
 }
 
 /**
+ * 行政区划简称折叠（4.56.6，**仅用于多值分组的比较键**，不改动展示值）。
+ *
+ * 实测 `建设地点`：`巢湖市居巢经济开发区` 与 `巢湖市居巢经开区义成路与南外环路交口北侧`
+ * 是同一地点的粗/细两级，但前者写全称、后者用简称，前缀关系因此断裂、无法吸收。
+ * 统一折到**简称形**（长 → 短）后前缀关系恢复。
+ *
+ * 只折叠长度明确、无歧义的开发区类全称；不做「安徽→省名可选」那类推断（需地理知识，超出形态判据）。
+ */
+const ADMIN_ABBREVIATION_FOLDS: ReadonlyArray<[RegExp, string]> = [
+  [/经济技术开发区/gu, '经开区'],
+  [/高新技术产业开发区/gu, '高新区'],
+  [/经济开发区/gu, '经开区'],
+  [/高新技术开发区/gu, '高新区'],
+  [/产业开发区/gu, '开发区'],
+];
+
+export function foldAdminNameAbbreviation(value: string): string {
+  let text = value;
+  for (const [pattern, replacement] of ADMIN_ABBREVIATION_FOLDS) text = text.replace(pattern, replacement);
+  return text;
+}
+
+/**
  * 时间值形态分桶（D-T4 ④ 槽位对齐；4.56.4 迁入单源模块供对账侧共用）。
  *
  * 「计划工期=330日历天」与「计划开工日期：2026年10月10日」在周期要求域归并后互比，

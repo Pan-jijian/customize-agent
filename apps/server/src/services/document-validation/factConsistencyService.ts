@@ -1,6 +1,6 @@
 import { DEFAULT_DOCUMENT_DOMAIN_PROFILE, factFieldForLabel, isDiagnosticFactValue, isForbiddenFactValue, type DocumentDomainProfile } from '../document-core/documentDomainProfileService';
 import { rejectValueNoise } from '../document-workflow/authoritativeValues';
-import { TEMPORAL_DATE_VALUE_RE, foldHomoglyphVariants, hasCorruptTextMarkers, isTableScrapeFragment, stripFactLabelPrefix, stripTrailingFormAnnotation, temporalValueKind, valueAfterChangeConnector } from '../document-workflow/factValueNoise';
+import { TEMPORAL_DATE_VALUE_RE, foldAdminNameAbbreviation, foldHomoglyphVariants, hasCorruptTextMarkers, isTableScrapeFragment, stripFactLabelPrefix, stripTrailingFormAnnotation, temporalValueKind, valueAfterChangeConnector } from '../document-workflow/factValueNoise';
 import type { DocumentFact, ValidationIssue } from '../document-workflow/types';
 import type { ProjectMaterialSummary } from '../document-core/projectMaterialService';
 
@@ -54,6 +54,28 @@ function comparableValue(value: string, profile: DocumentDomainProfile, label?: 
   // ② 项目名称类字段排除位置提示语（「项目所在地」）与清单条目名（「抱杆机箱」「检查井」类）。
   if (label && /招标人|建设单位|发包人|采购人|招标单位/u.test(label)) {
     if (!/局|公司|中心|政府|管委会|委员会|集团|院|大学|学校|街道|办事处|指挥部|项目部|办公室|厅|署|银行|医院/u.test(trimmed)) return '';
+  }
+  /**
+   * 4.56.6「标签当值」过滤（实测 `计划工期` 的第二个"值"是 `标段工程工期`）。
+   *
+   * 招标文件里工期常以**表格**呈现，「标段工程工期」是那张表的**行标题**；抽取器把它当成了取值。
+   * 它没有任何信息量，却因为形态为 plain 而**打掉了时长/日期的槽位分桶**（分桶要求组内值全部可判形态），
+   * 连带把「330日历天」与「开工日期」重新拉回全量互比 → 多值冲突。
+   *
+   * 判据（形态，不查名单）：**值不含数字、长度不超过标签+6 字、且以标签的尾部 2 字收尾** ⇒ 是标签而非取值。
+   * 反例自检：label「项目名称」/value「…建设项目」不以「名称」收尾；label「建设地点」/value 地址不以
+   * 「地点」收尾；label「质量标准」/value「合格」不以「标准」收尾——均不受影响。
+   */
+  if (label) {
+    const labelNormalized = normalize(label);
+    const valueNormalized = normalize(trimmed);
+    if (
+      labelNormalized.length >= 2
+      && valueNormalized.length > 0
+      && valueNormalized.length <= labelNormalized.length + 6
+      && valueNormalized.endsWith(labelNormalized.slice(-2))
+      && !/\d/u.test(trimmed)
+    ) return '';
   }
   if (label && NAME_LIKE_LABEL_RE.test(label)) {
     if (/所在地|地址|详见|见前附表|见招标/u.test(trimmed)) return '';
@@ -129,7 +151,7 @@ export function validateFactConsistency(input: { markdown: string; facts: Docume
       if (!comparable) continue;
       // 4.56.3 同形变体折叠（仅作用于**分组键**，展示值不变）：
       // 「…项目—东区…」与「…项目一东区…」是同一项目名的破折号/一字变体，判多值冲突是纯误报
-      const key = foldHomoglyphVariants(comparable);
+      const key = foldAdminNameAbbreviation(foldHomoglyphVariants(comparable));
       grouped.set(key, [...(grouped.get(key) || []), item]);
     }
     if (grouped.size > 1) {
@@ -154,8 +176,18 @@ export function validateFactConsistency(input: { markdown: string; facts: Docume
            * 为何安全：区划后缀 + 极短长度使「短值是独立实体」的可能性极低，
            * 而真冲突（如两个不同城市）不会构成前缀关系。
            */
-          const isGenericPrefix = short.length <= 6 && /[省市县区镇乡村]$/u.test(short) && long.startsWith(short);
-          if ((diff <= 3 || (short.endsWith('等') && diff <= 6) || isGenericPrefix) && long.startsWith(short)) {
+          /**
+           * 4.56.6 粒度吸收扩展之二（实测 `项目名称` / `建设地点`）：
+           * 短值是长值的**同一实体的粗粒度写法**，两种可判形态：
+           *  ① 行政区划简称：`巢湖市居巢经济开发区`（→折简称后 `巢湖市居巢经开区`）是
+           *     `巢湖市居巢经开区义成路与南外环路交口北侧` 的前缀——原规则限长 ≤6 字故未吸收；
+           *  ② 项目粗名：`巢湖市光电新能源产业园项目` 是 `…项目—东区标准化厂房二标段施工` 的前缀，
+           *     以 `项目/工程/标段` 收尾即为粗名形态（同项目在不同材料里的名称粒度不同）。
+           * 真冲突不会构成这种前缀关系（两个不同区划/两个不同项目名互为前缀的概率极低）。
+           */
+          const isGenericPrefix = short.length <= 12 && /(?:省|市|县|区|镇|乡|村|开发区|经开区|新区|高新区)$/u.test(short) && long.startsWith(short);
+          const isCoarseName = short.length <= 20 && /(?:项目|工程|标段)$/u.test(short) && long.startsWith(short);
+          if ((diff <= 3 || (short.endsWith('等') && diff <= 6) || isGenericPrefix || isCoarseName) && long.startsWith(short)) {
             grouped.set(long, [...(grouped.get(long) || []), ...(grouped.get(short) || [])]);
             absorbed.add(short);
             break;

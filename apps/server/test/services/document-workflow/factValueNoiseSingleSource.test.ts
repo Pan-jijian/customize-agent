@@ -60,6 +60,7 @@ describe('4.56.3 事实值噪声判据单源', () => {
       if (/function\s+temporalValueKind\s*\(/u.test(text)) offenders.push(`${relative}：重复定义 temporalValueKind`);
       if (/function\s+stripFactLabelPrefix\s*\(/u.test(text) || /function\s+stripFactLabelPrefix\s*\(value\s*:\s*string\)/u.test(text)) offenders.push(`${relative}：重复定义 stripFactLabelPrefix`);
       if (/function\s+stripTrailingFormAnnotation\s*\(/u.test(text)) offenders.push(`${relative}：重复定义 stripTrailingFormAnnotation`);
+      if (/function\s+foldAdminNameAbbreviation\s*\(/u.test(text)) offenders.push(`${relative}：重复定义 foldAdminNameAbbreviation`);
       // 手抄连接语正则（应 import valueAfterChangeConnector）
       if (/CHANGE_CONNECTORS\s*\}\s*\|\|/u.test(text) && /exec\(raw\)/u.test(text)) offenders.push(`${relative}：手抄变更连接语取值逻辑`);
     }

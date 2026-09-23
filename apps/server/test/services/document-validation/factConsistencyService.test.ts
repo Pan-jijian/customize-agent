@@ -454,3 +454,59 @@ describe('4.56.4 多值冲突残留族（真实数据回放）', () => {
     }
   });
 });
+
+/**
+ * 4.56.6 第三轮实测（`doc-1790166151755-4456e86c`）残留的 3 条多值冲突逐条回放。
+ * 三条都是「同一事实的不同粒度/形态被当成两个值」，且都含一个**没有信息量**的伪值。
+ */
+describe('4.56.6 多值冲突残留族（真实数据回放）', () => {
+  it('标签当值：`标段工程工期` 是工期表的行标题，不参与对账（否则打掉时长/日期分桶）', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '计划工期', value: '330日历天', sourceFile: '招标文件.pdf' }),
+      makeFact({ key: 'b', fieldName: '计划工期', value: '标段工程工期', sourceFile: '招标文件.pdf' }),
+      makeFact({ key: 'c', fieldName: '计划工期', value: '2026年10月10日（具体开工日期以招标人出具的书面开工通知为准）', sourceFile: '7招标答疑文件.pdf' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+
+  it('标签当值过滤不误伤真值（以标签尾字收尾但含数字/信息量的值不受影响）', () => {
+    // 「工期」标签下 `工期480日历天` 含数字 → 不是纯标签；`标准工期` 不含数字但长度/收尾同形 → 会被滤
+    // （合理：它是标签而非取值）。此处只锁「含数字者必须保留」
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '计划工期', value: '330日历天', sourceFile: 'A.pdf' }),
+      makeFact({ key: 'b', fieldName: '计划工期', value: '计划工期400日历天', sourceFile: 'B.pdf' }),
+    ]));
+    // 400 与 330 是真实冲突（都含数字、都是时长槽位）→ 必须报
+    expect(issues).toHaveLength(1);
+  });
+
+  it('项目粗名吸收：`…产业园项目` 是 `…产业园项目—东区…施工` 的粗粒度写法', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '项目名称', value: '巢湖市光电新能源产业园项目—东区标准化厂房二标段施工' }),
+      makeFact({ key: 'b', fieldName: '项目名称', value: '巢湖市光电新能源产业园项目' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+
+  it('区划简称折叠 + 前缀吸收：`巢湖市居巢经济开发区` ⊂ `巢湖市居巢经开区义成路…`', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '建设地点', value: '巢湖市居巢经开区义成路与南外环路交口北侧' }),
+      makeFact({ key: 'b', fieldName: '建设地点', value: '巢湖市居巢经济开发区' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+
+  it('**真冲突仍必须报**：两个不同项目名 / 两个不同区划', () => {
+    const nameConflict = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '项目名称', value: '巢湖市光电新能源产业园项目—东区标准化厂房二标段施工' }),
+      makeFact({ key: 'b', fieldName: '项目名称', value: '舒城县杭埠镇安置房建设项目' }),
+    ]));
+    expect(nameConflict).toHaveLength(1);
+
+    const placeConflict = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '建设地点', value: '巢湖市居巢经开区义成路与南外环路交口北侧' }),
+      makeFact({ key: 'b', fieldName: '建设地点', value: '合肥市高新区望江西路' }),
+    ]));
+    expect(placeConflict).toHaveLength(1);
+  });
+});
