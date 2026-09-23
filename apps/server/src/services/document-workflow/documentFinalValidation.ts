@@ -259,7 +259,8 @@ export async function buildStandardFinalValidationIssues(input: {
     ...det('duplicate-paragraph', () => duplicateParagraphIssues(input.markdown)),
     // §L3-5 段落级近似重复（同批量工程量/同一工序被两处重复叙述）：完全相等口径（上一条）之外，
     // 答疑原文粘贴 vs 正文归纳、同节详述 vs 汇总类重复逐字不同但骨架与数值指纹一致。
-    // 只报不删（无「原稿/副本」确定性判据，删除即信息丢失）——收敛=修复轮合并去重或人工复核
+    // 只报不删（无「原稿/副本」确定性判据，删除即信息丢失）——收敛=交付复核清单转人工
+    // （带 provenance，复核清单可追溯检测器身份；注册表 fixerDisposition='manual'）
     ...det('paragraph-near-duplicate', () => paragraphNearDuplicateIssues(input.markdown)),
     // 第十五版报告 A①：段落内句级复读（段尾复读剥离，跨位置整段重复的段内补充口径）
     ...det('paragraph-tail-repeat', () => paragraphTailRepeatIssues(input.markdown)),

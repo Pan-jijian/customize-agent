@@ -12,6 +12,7 @@ import { scanTableCaptionDefects, scanTableNumberingGaps, tableCaptionDefectIssu
 import { paragraphNearDuplicateIssues, scanParagraphNearDuplicates } from '@/services/document-workflow/integrity/detectors/detectors';
 import { sectionProcessChainMixingIssues } from '@/services/document-workflow/constructionOrgQualityRules';
 import { detectorEntry } from '@/services/document-workflow/detectorFixerRegistry';
+import { buildSuspensionChecklist } from '@/services/document-workflow/suspensionChecklist';
 import type { DocumentDraftChapter } from '@/services/document-workflow/types';
 
 const TABLE = ['| 序号 | 项目 | 标准 |', '| --- | --- | --- |', '| 1 | 平整场地 | 241.71m² |'].join('\n');
@@ -219,6 +220,16 @@ describe('§L3-5 段落级近似重复（已接入终检）', () => {
   it('注册表处置声明：无确定性修复器 → 显式 manual（收敛=人工复核载体）', () => {
     expect(detectorEntry('paragraph-near-duplicate')?.fixerDisposition).toBe('manual');
     expect(detectorEntry('paragraph-near-duplicate')?.fixerDispositionReason || '').not.toBe('');
+  });
+
+  it('收敛载体：issue 带 provenance.detectorId，交付复核清单逐条可追溯检测器身份', () => {
+    const issues = paragraphNearDuplicateIssues(doc(lineA, lineB));
+    expect(issues[0].provenance?.detectorId).toBe('paragraph-near-duplicate');
+    // 同一输入两次扫描指纹一致（幂等：复核清单归档可跨轮比对）
+    expect(paragraphNearDuplicateIssues(doc(lineA, lineB))[0].provenance?.fingerprint).toBe(issues[0].provenance?.fingerprint);
+    const checklist = buildSuspensionChecklist(issues, []);
+    expect(checklist.items[0].detectorId).toBe('paragraph-near-duplicate');
+    expect(checklist.items[0].repairPath).toContain('LLM 定向修复');
   });
 });
 

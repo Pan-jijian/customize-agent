@@ -236,14 +236,16 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   { id: 'duplicate-table', scope: 'full-document', category: 'table' },
   { id: 'duplicate-paragraph', scope: 'full-document', category: 'structure' },
   // §L3-5 段落级近似重复（同批量工程量被两处重复叙述）：补 duplicate-paragraph 的完全相等口径之外
-  // 的近似族（骨架一致 + 同对象集）。收敛=只报不删（近重复无「原稿/副本」确定性判据，删除即信息丢失），
-  // 由修复轮合并去重或经 manualDispositionIssues 转人工复核 —— 无确定性修复器，显式声明 manual。
+  // 的近似族（骨架一致 + 同对象集）。只报不删（近重复无「原稿/副本」确定性判据，删除即信息丢失），
+  // 无确定性修复器、无定向修复轮消费（issue 不带章锚点）→ 显式声明 manual：残留阻断进终门禁
+  // 阻断明细 + 交付复核清单（suspensionChecklist 按 provenance 展示检测器身份），人工照 suggestion
+  // 合并保留信息完整的一处。
   {
     id: 'paragraph-near-duplicate',
     scope: 'full-document',
     category: 'style',
     fixerDisposition: 'manual',
-    fixerDispositionReason: '近重复段落之间无从确定「哪份是原稿、哪份是副本」（重复处常含另一处缺失的信息），确定性删除即信息丢失；收敛路径=修复轮合并去重（保信息完整的一处）或显式人工复核（manualDispositionIssues 载体）',
+    fixerDispositionReason: '近重复段落之间无从确定「哪份是原稿、哪份是副本」（重复处常含另一处缺失的信息），确定性删除即信息丢失；无定向修复轮消费（不带章锚点）→ 交付前残留即转人工复核清单（provenance 可追溯检测器身份），人工合并去重（保信息完整的一处）后重生成',
   },
   { id: 'paragraph-tail-repeat', scope: 'full-document', category: 'style', deterministicSafe: true },
   { id: 'collision-numbered-heading', scope: 'full-document', category: 'structure', deterministicSafe: true },

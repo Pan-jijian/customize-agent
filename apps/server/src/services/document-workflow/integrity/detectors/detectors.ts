@@ -3899,7 +3899,8 @@ export function scanParagraphNearDuplicates(markdown: string): ParagraphNearDupl
 
 /** 段落级近似重复终检（id=`paragraph-near-duplicate`）：同一批对象/工程量被两处重复叙述即阻断。
  *  收敛：无确定性修复器（近重复不产出替代内容，删除哪一份须语义判断），只报不删——
- *  由修复轮合并去重或经 manualDispositionIssues 转人工复核（注册表 fixerDisposition='manual'）。 */
+ *  进终门禁阻断明细 + 交付复核清单（带 provenance.detectorId，复核清单可追溯「哪条检测器报的」），
+ *  由人工照 suggestion 合并（保信息完整的一处）；注册表 fixerDisposition='manual'，不配修复轮消费。 */
 export function paragraphNearDuplicateIssues(markdown: string): ValidationIssue[] {
   return scanParagraphNearDuplicates(markdown).slice(0, 3).map(hit => ({
     level: 'error' as const,
@@ -3909,6 +3910,7 @@ export function paragraphNearDuplicateIssues(markdown: string): ValidationIssue[
     repairability: 'llm_repairable' as const,
     message: `段落近似重复：第 ${hit.secondLine} 行与第 ${hit.firstLine} 行叙述同一批对象与工程量（骨架一致度 ${hit.skeletonJaccard}、数值一致度 ${hit.numberOverlap}）：“${hit.excerpt}…”`,
     suggestion: '两处仅保留信息完整的一处并合并差异（不得改写既有数值与工序事实）；重复段落后含原文粘贴来源的，以正文归纳口径为准。',
+    provenance: { detectorId: 'paragraph-near-duplicate', fingerprint: stableHash(`${hit.firstLine}|${hit.secondLine}|${hit.excerpt}`) },
   }));
 }
 

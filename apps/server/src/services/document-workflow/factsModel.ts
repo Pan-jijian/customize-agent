@@ -447,13 +447,26 @@ function conflictComparableFactValue(value: unknown, profile: DocumentDomainProf
   // 实测「工期关键节点 = 【资料未体现】」被判成与真值并列的"另一个值"（信息缺席不是信息）
   if (rejectValueNoise(bound)) return '';
   // 4.55.29 变更叙述：取连接语之后的生效值（连接语之前是旧值）
-  const raw = valueAfterChangeConnector(bound);
+  // 4.56 L6-C：值前缀的口径标签必须先剥离再判形态——实测「计划开工日期：2026年10月10日（具体开工日期…）」
+  // 因带标签前缀而**形态判为 plain**（日期形态正则锚定 ^20\d{2}），导致「时长 vs 日期」的槽位分桶
+  // 因 plain 混入而整体失效 → 同一个日期与工期值被判「多值冲突」（实测 2 条 blocker 的直接来源）。
+  const raw = stripFactLabelPrefix(valueAfterChangeConnector(bound));
   if (!raw || rejectValueNoise(raw)) return '';
   if (isDiagnosticFactValue(profile, raw) || isForbiddenFactValue(profile, raw)) return '';
   if (hasCorruptTextMarkers(raw)) return '';
   // 纯结构过滤（表格行分隔/标题标记/引用跳转/内部摘要标记）保留正则：属结构判定而非语义判断
   if (/\|/u.test(raw) || /^#+\s*/u.test(raw)) return '';
   if (/见(?:招标公告|投标人须知|前附表|本项目|补疑)|资料参数行摘要/u.test(raw)) return '';
+  /**
+   * 程序性里程碑日期不是**工期槽位**值（4.56 L6-C 槽位判别）。
+   *
+   * 实测（巢湖 doc-aaba7ba3）：`周期要求` 字段下把「投标文件递交的截止时间及开标时间现变更为：
+   * 2026年09月24日09:30」与真正的「开工日期 2026年10月10日」并列成"多值冲突"——两者**不是同一个槽位**
+   * （一个是投标程序时间、一个是工期起算）。同期别的时间（开标/递交截止/评标/公示/中标）本就不属于
+   * 工期口径，与工期值并存不构成冲突。
+   * 判据（机制）：值含**日期形态**且文本提到程序性时间语，直接排除；不带日期或纯工期语的值不受影响。
+   */
+  if (TEMPORAL_DATE_VALUE_RE.test(raw.replace(/\s+/gu, '')) && /投标|开标|递交|评标|公示|中标|截标/u.test(raw)) return '';
   const duration = raw.match(/\d+\s*日历天/u)?.[0]?.replace(/\s+/gu, '');
   if (duration && /工期|日历天|开工日期|竣工/u.test(raw)) return duration;
   const normalized = normalizedFactValue(raw);
@@ -550,7 +563,19 @@ export function normalizeOcrFactText(text: string) {
 /** 标签前缀剥离（C-T7：自 helpers/factCoverage 迁移单源）：「招标人：肥西县丰乐镇人民政府」类值
  *  前缀剥离后与纯值同口径——基本信息表行、占位修复取值与事实落位检测三处共用。 */
 export function stripFactLabelPrefix(value: string) {
-  return value.replace(/^(?:招标人|招标单位|建设单位|发包人|项目名称|工程名称|项目编号|招标项目编号|标段名称|建设地点|建设规模|招标范围|计划工期|合同工期|质量标准|质量目标)[：:]\s*/u, '');
+  const text = String(value || '');
+  const closed = text.replace(/^(?:招标人|招标单位|建设单位|发包人|项目名称|工程名称|项目编号|招标项目编号|标段名称|建设地点|建设规模|招标范围|计划工期|合同工期|质量标准|质量目标)[：:]\s*/u, '');
+  if (closed !== text) return closed;
+  /**
+   * 形态规则（4.56 L6-C）：**短中文标签 + 冒号 + 时间形态开头** → 该标签是口径名，剥掉再判值形态。
+   *
+   * 实测（巢湖 doc-a5d1a87f）：答疑抽取出的「计划开工日期：2026年10月10日（具体开工日期以招标人
+   * 出具的书面开工通知为准）」因带标签前缀而**形态判为 plain**（日期正则锚定 `^20\d{2}`），
+   * 使「时长 vs 日期」的**槽位分桶**因 plain 混入整体失效 → 同一个日期与工期值被判「多值冲突」。
+   * 闭集（上面的具名标签）覆盖不到「计划开工日期」这类组合标签，故用形态判定而非继续扩表。
+   * 边界收紧：仅当冒号后紧跟**时间形态**（`20XX年` / 数字+时长）时才剥——避免误伤普通句式值。
+   */
+  return text.replace(/^[\u4e00-\u9fa5]{2,10}[：:]\s*(?=(?:20\d{2}\s*年|\d+\s*(?:日历天|天|个月|月|年)))/u, '');
 }
 
 /** 名称+编号连读拆分（C-T7 #4 口径单源）：「项目名称」类值尾部粘连「2.2招标项目编号：2026AEEGZ50048」
