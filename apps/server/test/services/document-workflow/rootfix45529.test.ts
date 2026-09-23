@@ -240,8 +240,18 @@ describe('L0 口径链尾确定性回填', () => {
     expect(second.inserted).toHaveLength(0);
   });
 
-  it('正文未提起该属性名时不硬塞（不得插入无关段落）', () => {
-    const markdown = '第一章 施工部署\n按流水段组织施工。\n';
+  it('属性名全篇零次出现时回落到概况章（项目级口径的自然归宿）', () => {
+    // 实测：全篇 0 次「开工日期」——退回锚点①是空转，须落到「工程概况」章末尾
+    const markdown = ['## 第一章 工程概况', '本工程为标准化厂房，建筑面积72062.84平方米。', '', '## 第二章 施工部署', '按流水段组织施工。', ''].join('\n');
+    const result = backfillCaliberPlacements(markdown, [caliber('开工日期', '2026年10月10日')]);
+    expect(result.inserted).toEqual([{ attribute: '开工日期', value: '2026年10月10日' }]);
+    expect(result.markdown).toContain('开工日期为2026年10月10日。');
+    // 落在概况章内、不越到下一章
+    expect(result.markdown.indexOf('开工日期为')).toBeLessThan(result.markdown.indexOf('## 第二章'));
+  });
+
+  it('既无属性名又无概况章时不硬塞（不得插入无关段落）', () => {
+    const markdown = '## 第一章 施工部署\n按流水段组织施工。\n';
     const result = backfillCaliberPlacements(markdown, [caliber('开工日期', '2026年10月10日')]);
     expect(result.inserted).toHaveLength(0);
     expect(result.markdown).toBe(markdown);

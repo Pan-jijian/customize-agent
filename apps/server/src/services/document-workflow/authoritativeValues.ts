@@ -788,16 +788,30 @@ export function backfillCaliberPlacements(markdown: string, ledger: readonly Res
     if (!attribute || !value) continue;
     if (!CALIBER_PLACEABLE_SHAPES.has(classifyValueShape(value))) continue;
     if (normalized().includes(value.replace(/\s+/gu, ''))) continue;
-    // 属性名出现处：取第一处，插在所属句子之后（句读边界 = 。；;\n）
-    const index = output.indexOf(attribute);
-    if (index < 0) continue;
-    let sentenceEnd = index + attribute.length;
-    while (sentenceEnd < output.length && !/[。；;\n]/u.test(output[sentenceEnd]!)) sentenceEnd += 1;
-    if (sentenceEnd >= output.length) continue;
     const statement = `${attribute}为${value}。`;
-    // 幂等：该句已含该声明则跳过
-    if (output.slice(index, sentenceEnd).includes(value)) continue;
-    output = `${output.slice(0, sentenceEnd + 1)}${statement}${output.slice(sentenceEnd + 1)}`;
+    // 锚点①：属性名出现处——插在所属句子之后（句读边界 = 。；;\n）
+    const index = output.indexOf(attribute);
+    if (index >= 0) {
+      let sentenceEnd = index + attribute.length;
+      while (sentenceEnd < output.length && !/[。；;\n]/u.test(output[sentenceEnd]!)) sentenceEnd += 1;
+      if (sentenceEnd >= output.length) continue;
+      // 幂等：该句已含该声明则跳过
+      if (output.slice(index, sentenceEnd).includes(value)) continue;
+      output = `${output.slice(0, sentenceEnd + 1)}${statement}${output.slice(sentenceEnd + 1)}`;
+      inserted.push({ attribute, value });
+      continue;
+    }
+    // 锚点②：属性名在正文中**一次都没被提起**（实测：全篇 0 次「开工日期」）——项目级口径的自然归宿
+    // 是概况类章节（工程概况/项目概况/编制说明），插在该章末尾（下一个标题行之前）。找不到概况章则不插
+    //（仍然不硬塞进无关段落）。判据是标题语义，不是项目特有章节名。
+    const heading = /^#{2,3}\s*[^\n]*?(?:概况|概述|编制说明)[^\n]*$/mu.exec(output);
+    if (!heading) continue;
+    const sectionStart = heading.index + heading[0].length;
+    const nextHeading = /^#{2,3}\s/mu.exec(output.slice(sectionStart));
+    const sectionEnd = nextHeading ? sectionStart + nextHeading.index : output.length;
+    const insertAt = output.lastIndexOf('\n', sectionEnd - 1) + 1;
+    if (output.slice(sectionStart, sectionEnd).includes(value)) continue;
+    output = `${output.slice(0, insertAt)}${statement}\n${output.slice(insertAt)}`;
     inserted.push({ attribute, value });
   }
   return { markdown: output, inserted };

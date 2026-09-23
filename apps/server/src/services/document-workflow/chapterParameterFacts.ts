@@ -104,7 +104,14 @@ export function parameterPoolRejectionReason(fact: DocumentFact): string | undef
   // ⑥ OCR 数字粘连残片：`…交口北0000`/`…北 00 00 侧`（同一数字段复写）——不可逐字锚定
   if (/(?:\d)\s*(?:\d)(?:\s*\d){2,}/u.test(value) && /(?:北|南|东|西|侧|号|路|街|村|镇|区)\s*\d/u.test(value)) return 'OCR 数字复写残片';
   // ⑦ 单位/机构名不是工程参数（招标代理、监管部门等主体信息，技术标不落位）
-  if (PARAMETER_ORG_NAME_RE.test(value)) return '单位/机构名（非工程参数）';
+  if (PARAMETER_ORG_NAME_RE.test(value)) return '单位/机构名（非工程参数）';  // ⑧ 表格公式/口径残片：「=」是表格单元格里的算式或口径标注（实测
+  //    `商务文件评审标准评审汇总=商务文件评审标准不含72`），不是值。
+  if (/[=＝]/u.test(value)) return '表格公式/口径残片（非值）';
+  // ⑨ 整条规范引用：《名称》(编号) 属编制依据条目（其落位由编制依据对账承担），不是工程参数；
+  //    裸标准号（`GB50204-2015`）与规格代号仍按参数处理（PARAMETER_STANDARD_CODE_RE 分支在前）。
+  // 编号形态含行业前缀里的数字（`DB34/5076-2023`：DB + 34 + /5076-2023）
+  if (/^《[^》]{2,60}》\s*[（(]?[A-Z]{1,6}\d{0,4}\s*\/?\s*T?\s*[\d.]{3,}/u.test(value)) return '规范引用条目（属编制依据，非工程参数）';
+
   // ④ 清单/图签编码（标准编号与自带概念的规格代号除外）
   if (PARAMETER_LISTING_CODE_RE.test(value) && !PARAMETER_STANDARD_CODE_RE.test(value) && !PARAMETER_SPEC_CODE_RE.test(value)) return '清单/图签编码';
   return undefined;
