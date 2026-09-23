@@ -133,10 +133,26 @@ describe('4.59 A2 dropEmptyShellHeadings', () => {
     expect(dropEmptyShellHeadings(markdown).dropped).toEqual([]);
   });
 
-  it('边界-3：空标题紧邻另一个更高级标题（H4 空、下一个是 H3）→ 清除', () => {
+  it('边界-3：级联——空子项被删后父标题也成空壳，**迭代到不动点一并清除**', () => {
+    // 实测形态（`doc-1788729700062-ec006981` 施工总平面布置图章）：
+    //   ### 竣工清理、验收移交与保修   ← 靠下面的 H4 子节撑住，本不算空
+    //   #### 保修责任与回访安排        ← 空壳
+    //   ### 施工总平面布置原则与分区管理
+    // 删掉空 H4 后父 H3 与下一个 H3 之间再无内容 → **父标题变成新空壳**。
+    // 单趟实现因此留下残留（真实语料批量回放抓到），故本判据迭代至不动点。
     const markdown = ['### 1.1 概况', '#### 1.1.1 空子项', '### 1.2 下一节', '正文。'].join('\n');
     const result = dropEmptyShellHeadings(markdown);
+    // 1.1 自身无正文、唯一子节又是空的 ⇒ 它本身就是幻影标题，一并清除（正确级联）
+    expect(result.dropped).toEqual(['1.1.1 空子项', '1.1 概况']);
+    expect(result.markdown).toContain('### 1.2 下一节');
+  });
+
+  it('边界-4：级联**不得误伤**有正文的父标题（子节删除后父仍保留）', () => {
+    const markdown = ['### 1.1 概况', '本节说明工程概况与建设条件。', '#### 1.1.1 空子项', '### 1.2 下一节', '正文。'].join('\n');
+    const result = dropEmptyShellHeadings(markdown);
     expect(result.dropped).toEqual(['1.1.1 空子项']);
+    expect(result.markdown).toContain('### 1.1 概况');
+    expect(result.markdown).toContain('本节说明工程概况与建设条件。');
   });
 
   // ───────────────── ④ 不变（幂等与既有行为） ─────────────────

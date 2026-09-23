@@ -60,6 +60,18 @@ export interface DocumentGenerationDiagnostics {
     retrievedEvidenceUsed?: number;
     /** 模板 pinned 证据整文件注入未命中计数（包内相对路径解析后 KB 无此文件）：配置漂移可见化，不再静默丢弃 */
     pinnedEvidenceMissed?: number };
+  /**
+   * 4.60 I1 块级篇幅账（**度量先行**）：每个块的「目标 / 实际 / 轮次 / 是否首轮通过 / 失败类别」。
+   *
+   * ## 为什么必须采集（4.59 的一次方法论教训）
+   *
+   * 4.59 曾试图用日志里的「X 字 vs 块目标 Y 字」定标块篇幅显示系数，**但那是失败样本**——
+   * 只有被判欠产/超产的块才留该日志行，**干净通过的块不留痕**。据此算出的「中位数 0.70」
+   * 会被失败样本拉低，用它定标等于自我实现（把门线调到恰好一半块过不了）。
+   *
+   * **校准块目标必须用全部块的无偏分布**，故本账无条件记录每一个块（含首轮直通者）。
+   */
+  blockLedger?: Array<{ chapter: string; block: string; target: number; actual: number; attempt: number; passed: boolean; firstAttempt?: boolean; failureKinds?: string[] }>;
   quality: { blockingCount: number; importantCount: number; minorCount: number; repairedCount: number };
   /** 1.1 事实净化门计数（本地事实池出口脏值截断/丢弃/编号回源补全，进度页后台诊断展示） */
   factSanitize?: { truncated: number; dropped: number; repaired: number };

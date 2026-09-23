@@ -1361,6 +1361,26 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     const blockRoleContext = [factsHint, blockSkeletonPrompt, divisionContainerPrompt, divisionElementFusionPrompt, keySectionKind && !isDivisionChapterContainer ? flowRotationDirective(index) : '', block.subPoints.length > 0
       ? `本节是「${input.chapter.title}」章的一个主题小节，只写本节标题覆盖的内容，不得重复本章其他节内容；必须按以下清单逐点写出实施性正文，标题必须与给定标题完全一致，不得改名、合并或遗漏；每个要点必须覆盖其标注的全部评分细目内容，但不得为这些细目单独开设小节标题；清单标注的篇幅为该要点字数上限，按标注控制详略、不得超出：\n${coverageList}${forbiddenTitlesLine ? `\n${forbiddenTitlesLine}` : ''}`
       : `本节是「${input.chapter.title}」章的唯一小节（本章无细分小节规划）：正文在 H3 标题下直接展开为连贯的正式叙述，不使用四级标题；覆盖本节标题对应的全部实质内容，不得重复章外内容。`, '【防复读硬约束】本节内同一句话只允许出现一次：同一段落内不得复读任何已写出的句子，不同段落之间不得整句复制，同一工艺/措施只在一处完整表述、其余位置引用结论不重述原文；段落结尾不得复读段内前句（禁止“为此/综上/因此”后接照抄句）。', tableCaptionConstraint, clauseRecitationConstraint, sectionElementConstraint, numericSourceConstraint].filter(Boolean).join('\n\n');
+    /**
+     * 4.60 I1 块级篇幅账记录（**无条件**——首轮直通者同样入账）。
+     *
+     * 必须有**无偏**分布才能定标块目标：4.59 用日志里的失败样本算出「中位数 0.70」，
+     * 而干净通过的块不留日志行 → 该样本被失败样本拉低，据此定标等于自我实现。
+     */
+    const recordBlockLedger = (attempt: number, actualChars: number, passed: boolean, kinds?: string[]) => {
+      if (!input.diagnostics) return;
+      if (!input.diagnostics.blockLedger) input.diagnostics.blockLedger = [];
+      input.diagnostics.blockLedger.push({
+        chapter: input.chapter.title,
+        block: block.title,
+        target: block.targetWords,
+        actual: actualChars,
+        attempt,
+        passed,
+        firstAttempt: attempt === 0,
+        failureKinds: kinds,
+      });
+    };
     let lastMissing: string[] = [];
     let lastDuplicates: string[] = [];
     let lastExtraneous: string[] = [];
@@ -1927,8 +1947,12 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           // 在写作期就地补足，成本是一次续写调用，收益是修复链不再需要补这一块。
           if (chars < Math.floor(block.targetWords * 0.95)) {
             const topped = await continueUnderProducedBlock(withBlockShell, chars);
-            if (topped) return topped;
+            if (topped) {
+              recordBlockLedger(attempt, documentTextLength(topped), true);
+              return topped;
+            }
           }
+          recordBlockLedger(attempt, chars, true);
           return withBlockShell;
         }
         /**
@@ -1968,6 +1992,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           const mismatchCount = numericReconciliation.mismatched.length;
           console.warn(`[gen][block-qc] 块仅数值冲突，末轮接受该块并交数值修复链（冲突 ${mismatchCount} 处）: ${block.title}`);
           if (input.diagnostics) input.diagnostics.llm.lastInfo = `块仅数值冲突已接受（不丢弃整块）：${block.title}（冲突 ${mismatchCount} 处，交 numeric-verification / numericConflictArbiter 定向替换；未收敛由终检照常报出）`;
+          recordBlockLedger(attempt, chars, true, ['numeric']);
           return withBlockShell;
         }
         lastMissing = missing;
@@ -2088,6 +2113,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     // （原「自愈拆半 + salvage 逐点兜底」已删除：拆半在写作层之后改结构——半块重设预算使父块合同失效，
     //  与写作、检测、修复三方口径互相冲突；容量规划已在规划层一次成型保证块预算可写性。
     //  块两次尝试仍越出字数合同 → 块失败 → 上层隔离重试 → 仍失败即章阻断、文档显式失败：零降级，宁缺毋假）
+    recordBlockLedger(blockMaxAttempts - 1, lastChars, false, blockFailureKinds.get(index));
     return undefined;
   };
   const runBlock = async (block: (typeof blocks)[number], index: number): Promise<void> => {

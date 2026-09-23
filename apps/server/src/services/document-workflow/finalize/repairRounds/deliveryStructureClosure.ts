@@ -59,7 +59,7 @@ import type { FinalizeSession } from '../finalizeSession';
  * 即空），不另造第四套判据——本仓已有三套口径不一致的空节判据（见 `plan-4.59-complete.md` §二 A2），
  * 再造一套只会加深分裂。
  */
-export function dropEmptyShellHeadings(markdown: string): { markdown: string; dropped: string[] } {
+function dropEmptyShellHeadingsOnce(markdown: string): { markdown: string; dropped: string[] } {
   const lines = markdown.replace(/\r/gu, '').split('\n');
   const dropped: string[] = [];
   const keep: string[] = [];
@@ -78,6 +78,35 @@ export function dropEmptyShellHeadings(markdown: string): { markdown: string; dr
   }
   if (dropped.length === 0) return { markdown, dropped };
   return { markdown: keep.join('\n').replace(/\n{3,}/gu, '\n\n'), dropped };
+}
+
+/**
+ * 空壳标题清除的**不动点包装**（4.60 A2 修正）。
+ *
+ * ## 为什么必须迭代
+ *
+ * 删除一个空壳可能会**把它的父标题也变成空壳**。实测（`doc-1788729700062-ec006981` 施工总平面布置图章）：
+ * ```
+ * ### 竣工清理、验收移交与保修      ← 靠下面的 H4 子节撑住，本不算空
+ * #### 保修责任与回访安排           ← 空壳（无正文）
+ * ### 施工总平面布置原则与分区管理
+ * ```
+ * 删掉 `#### 保修责任与回访安排` 后，父 H3 与下一个 H3 之间再无内容 → **父标题变成新的空壳**。
+ * 单趟实现因此留下残留（真实语料批量回放抓到：清除后仍有 1 处空壳）。
+ *
+ * 故迭代至不动点：每趟至少删除一个标题，故必然收敛（上限 8 趟；极端不收敛时保留现状，
+ * 由「清除后不得有空壳」的验收断言暴露，不静默）。
+ */
+export function dropEmptyShellHeadings(markdown: string): { markdown: string; dropped: string[] } {
+  let current = markdown;
+  const dropped: string[] = [];
+  for (let pass = 0; pass < 8; pass += 1) {
+    const result = dropEmptyShellHeadingsOnce(current);
+    if (result.dropped.length === 0) break;
+    dropped.push(...result.dropped);
+    current = result.markdown;
+  }
+  return { markdown: current, dropped };
 }
 
 export async function stageDeliveryStructureClosure(session: FinalizeSession): Promise<void> {

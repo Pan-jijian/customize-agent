@@ -64,6 +64,28 @@ export async function stageFinalGate(session: FinalizeSession): Promise<void> {
   const factSanitizeMessage = session.generationDiagnostics.factSanitize
     ? `，事实净化 截断${session.generationDiagnostics.factSanitize.truncated}/丢弃${session.generationDiagnostics.factSanitize.dropped}/编号补全${session.generationDiagnostics.factSanitize.repaired}`
     : '';
+  /**
+   * 4.60 I1 块级篇幅账汇总（**无偏**：含首轮直通块）。
+   *
+   * 三个指标一次给出，供「上游做对」的度量倒置使用（见 `docs/plan-4.60-inversion.md`）：
+   * - **写作一次通过率**：首轮即通过的块占比（当前实测约 50%）——这是写作层健康度的主指标；
+   * - **块目标命中率**：产出落在 [0.85,1.15]×块目标 的块占比——块目标是否**可执行**的直接度量；
+   * - **实际/目标 中位数**：校准块目标区间（I2）的定标依据。
+   *
+   * 为何必须无条件记录：4.59 用**失败样本**（日志里只有被判欠产/超产的块留痕）算出中位数 0.70，
+   * 据此定标等于自我实现——干净通过的块不留痕会把分布拉低。
+   */
+  const blockLedger = session.generationDiagnostics.blockLedger || [];
+  const blockLengthSummary = (() => {
+    if (blockLedger.length === 0) return '';
+    const firstPass = blockLedger.filter(item => item.firstAttempt && item.passed).length;
+    const firstAttempts = blockLedger.filter(item => item.firstAttempt).length || 1;
+    const inWindow = blockLedger.filter(item => item.target > 0 && item.actual / item.target >= 0.85 && item.actual / item.target <= 1.15).length;
+    const ratios = blockLedger.filter(item => item.target > 0).map(item => item.actual / item.target).sort((left, right) => left - right);
+    const median = ratios.length > 0 ? ratios[Math.floor(ratios.length / 2)] : 0;
+    return `块级篇幅账：${blockLedger.length} 块，写作一次通过率 ${Math.round((firstPass / firstAttempts) * 100)}%（${firstPass}/${firstAttempts}），块目标命中率 ${Math.round((inWindow / blockLedger.length) * 100)}%，实际/目标 中位 ${median.toFixed(2)}`;
+  })();
+  session.finalStages.push(displayStage({ type: 'validation', roleId: 'document-block-length-ledger', status: 'success', message: blockLengthSummary || '块级篇幅账：无块记录（本次未走块写作通道）', details: blockLedger.slice(0, 40).map(item => `${item.chapter.slice(0, 10)}｜${item.block}｜目标 ${item.target} 实际 ${item.actual}（${(item.actual / Math.max(1, item.target)).toFixed(2)}×）attempt=${item.attempt}${item.passed ? ' 通过' : ' 失败'}${item.failureKinds?.length ? ` 【${item.failureKinds.join('、')}】` : ''}`) }, { subtitle: '块级篇幅账' }));
   session.finalStages.push(displayStage({ type: 'validation', roleId: 'document-diagnostics', status: 'success', message: `性能统计：LLM ${session.generationDiagnostics.llm.calls} 次，失败 ${session.generationDiagnostics.llm.failures} 次，瞬态重试 ${session.generationDiagnostics.llm.retries} 次，schema 校验失败 ${session.generationDiagnostics.llm.schemaFailures} 次，峰值并行 ${session.generationDiagnostics.llm.maxActive}，检索 ${session.generationDiagnostics.evidence.searchQueries} 次/${Math.round(session.generationDiagnostics.evidence.searchMs / 1000)} 秒，证据上下文 ${session.generationDiagnostics.evidence.contextChars} 字，噪声过滤 ${session.generationDiagnostics.evidence.filteredNoise} 条，预算裁剪 ${session.generationDiagnostics.evidence.budgetDropped} 条，质量问题 阻断${session.generationDiagnostics.quality.blockingCount}/重要${session.generationDiagnostics.quality.importantCount}/轻微${session.generationDiagnostics.quality.minorCount}${factSanitizeMessage}${retrievalFailureMessage}${pinnedMissedMessage}${slowMetrics ? `，Top耗时：${slowMetrics}` : ''}${callTopSummary ? `，调用输入Top5：${callTopSummary}` : ''}`, details: [...phaseWaterfallDetails(session.generationDiagnostics.metrics), ...callBreakdownTopDetails(session.generationDiagnostics.llm.callBreakdown)] }, { subtitle: '后台诊断' }));
 
   // C6 交付报告类（P5/D5）：三件套报告确定性落盘（评分/进度/下轮预估）——纯聚合既有产物（零新增
