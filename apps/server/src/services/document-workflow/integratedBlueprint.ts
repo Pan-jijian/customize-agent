@@ -44,7 +44,7 @@ export { renderBlueprintDataTextForBlock, AUTHORITY_DOMAIN_CHAPTER_ROUTES, rende
 export { blueprintDataForChapterInjection, filterBlueprintDataByAvailability } from './integratedBlueprint/validate';
 export { AUTHORITY_PLACEHOLDER_RE, fillAuthorityPlaceholders, renderAuthorityPlaceholderCatalog, renderAuthorityValue, type AuthorityPlaceholderFillResult } from './integratedBlueprint/authorityPlaceholders';
 export type { BlueprintBlockSliceOptions } from './integratedBlueprint/render';
-export { computeBlueprintAuthorityAvailability, chapterBlueprintAuthoritiesNeeded, chapterBlueprintAuthorityGaps, validateBlueprint } from './integratedBlueprint/validate';
+export { computeBlueprintAuthorityAvailability, chapterBlueprintAuthoritiesNeeded, chapterBlueprintAuthorityGaps, isBlueprintPlanShapedChapter, validateBlueprint } from './integratedBlueprint/validate';
 export { collectBlueprintCitationCandidates, blueprintCitationVerdict, blueprintCitationConsistencyIssues, rebaseCitationAnchorsForChapters } from './integratedBlueprint/citation';
 export type { QuantityConflictAnchor, BlueprintCitationCollection, BlueprintCitationAdjudicationSummary, BlueprintCitationOptions, BlueprintCitationVerdict } from './integratedBlueprint/citation';
 

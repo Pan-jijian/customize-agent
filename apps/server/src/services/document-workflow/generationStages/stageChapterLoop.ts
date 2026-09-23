@@ -115,6 +115,18 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       : chapterBlueprintAuthorityGaps(chapter.title, session.blueprint.integratedBlueprint?.validation, session.planning.chapterIntentClassifier);
     if (blueprintGaps.missing.length > 0) {
       const failedCheckText = blueprintGaps.failedChecks.length > 0 ? `蓝图校验项「${blueprintGaps.failedChecks.join('、')}」未通过` : '蓝图校验未通过或构建异常';
+      /**
+       * 4.56.3 N-5：把「为什么清单不可用」的**具体诊断**带到用户面前。
+       *
+       * 原实现只给「请检查清单解析与蓝图构建诊断后重试」——而 `resolveBillOfQuantities` 早已产出
+       * 精确原因（`绑定资料中未识别到工程量清单 .xls 文件（N 份资料）` / `项目知识库索引不存在：<path>`
+       * / `清单解析失败：<file>（解析出 0 条目）` / `绑定清单文件均为封面/目录类结构性文件…`），
+       * 只是写进了 `blueprint.diagnostics.warnings` 而**没有任何消费者**。远端用户因此只拿到
+       * 「章节阻断：4/7 + 请重试」——重试永远不会变好，且无从判断是资料缺失、索引未建还是解析失败。
+       */
+      const boqDiagnostics = (session.blueprint.integratedBlueprint?.diagnostics?.warnings ?? [])
+        .filter(warning => /清单|知识库索引|索引/u.test(warning))
+        .slice(0, 3);
       const blockMessage = `${displayChapterTitle(chapter.title)} 依赖蓝图权威 [${blueprintGaps.missing.join('、')}]，${failedCheckText}，已按节点级把关阻断生成`;
       // 阻断范围=本章，不再等于整篇：本闸原在 try 之外抛错，一章缺权威会把全部已完成章节连同 finalize 一起作废。
       // 与其它章级失败同口径处理（记录失败消息 + 标记该章 failed + 其余章节照常成稿），
@@ -125,7 +137,13 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
         roleId: 'chapter_generation',
         status: 'failed',
         message: blockMessage,
-        details: ['数值密集型章所需蓝图权威不可用时禁止无权威成稿', '请检查清单解析与蓝图构建诊断后重试'],
+        details: [
+          '数值密集型章所需蓝图权威不可用时禁止无权威成稿',
+          ...boqDiagnostics,
+          boqDiagnostics.length > 0
+            ? '以上为清单侧诊断：按提示补齐资料/重建索引后重试；若本项目确无工程量清单，请在模板资料需求中确认「工程量清单」为必需项'
+            : '请检查清单解析与蓝图构建诊断后重试',
+        ],
         progress: { current: chapterOrder + 1, total: session.planning.effectiveChapters.length, label: '章节阻断' },
       }, { subtitle: displayChapterTitle(chapter.title), order: chapterOrder });
       session.global.progressStages.push(blockStage);
@@ -679,6 +697,18 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
       : undefined;
     // 本章 must_cite 数值锚点清单（本章必须引用的计划类数值聚焦强约束，写作层抑制自编数值；章切片不再章级预渲染）
     const blueprintMustCiteHint = chapterBlueprintSlice && session.blueprint.integratedBlueprint ? renderBlueprintMustCiteValues(chapterBlueprintSlice, session.blueprint.integratedBlueprint.data) : '';
+    /**
+     * 4.56.3 N-4c：**缺权威章的写作侧兜底约束**（把「无权威」从阻断改成约束的前提）。
+     *
+     * N-4b 让非计划形态章不再被整章阻断，但「不阻断」必须配「不编数」——否则就是把 P0-6 关掉的
+     * 反方向（写作层拿不到权威值却以为齐备，正文数值由模型自产）。命中条件：本章**按原口径**属于
+     * 蓝图权威章（`chapterNeedsBlueprintAuthority`，含语义+正则 union），但**实际未注入章切片**
+     * （`chapterBlueprintSlice` 为空）——此时写手既无清单权威、又可能本能地补一个「合理」的工期/人数。
+     * 明确告知：计划类推导值一律不写；合同工期/开竣工日期属**项目级口径**，取自真值层，不得自行推导。
+     */
+    const noBlueprintAuthorityConstraint = !chapterBlueprintSlice && chapterNeedsBlueprintAuthority
+      ? `【计划类权威本次不可用】本章原属计划类章节，但工程量清单未解析出可用条目，蓝图计划权威（${blueprintGaps.missing.length > 0 ? blueprintGaps.missing.join('、') : '进度/劳动力/资源'}）本次不可用：**不得输出**里程碑日期、各阶段工期天数、总工期天数、劳动力峰值人数、机械台数、资源用量等由清单推导的计划性数值，也不得给出「约」「左右」等近似值变通。本章以管理措施、组织安排、工艺要求与质量/安全/工期保证体系表述。若必须引用合同工期、开竣工日期，一律照抄【真值层】给定口径，不得自行推导或改写。`
+      : '';
     const targetWords = targetPlan.roundTarget;
     // 长文模式：目标字数以提示词预算为准（roundTarget 已含完整章预算），不再被 structureTarget 二次压制；
     // 普通模式保留「结构承载量」上限，避免小节少时下达不切实际的整章目标
@@ -822,7 +852,7 @@ export async function stageChapterLoop(session: GenerationSession): Promise<void
           chapterTaskStage.message = `${chapterTaskResult.task.sections.filter(item => item.ready).length}/${chapterTaskResult.task.sections.length} 条细目任务就绪（已规划为 ${plannedStructure.blocks.length} 个主题块）`;
         }
         session.global.emitProgress(session.global.chapterDrafts);
-        const plannedBuildInput: PlannedChapterContentInput = { template: session.prepare.template, chapter, evidence, missingFacts, promptTexts: plannedPromptTexts, projectContext: session.planning.chapterScopedProjectContext(chapter), skeletonProjectContext: session.planning.projectContext, requirement: session.global.input.requirement, roleContext, targetWords: effectiveTargetWords, forbidDrawingImages, bidComposition: session.understanding.bidComposition, factCoverageContext, compactProjectContext: true, scopedProjectContext: true, // G 线 P1-5：蓝图数据**按域下发**——原为「validation.passed ? data : undefined」的全有全无：
+        const plannedBuildInput: PlannedChapterContentInput = { template: session.prepare.template, chapter, evidence, missingFacts, promptTexts: plannedPromptTexts, projectContext: session.planning.chapterScopedProjectContext(chapter), skeletonProjectContext: session.planning.projectContext, requirement: session.global.input.requirement, roleContext: [roleContext, noBlueprintAuthorityConstraint].filter(Boolean).join('\n'), targetWords: effectiveTargetWords, forbidDrawingImages, bidComposition: session.understanding.bidComposition, factCoverageContext, compactProjectContext: true, scopedProjectContext: true, // G 线 P1-5：蓝图数据**按域下发**——原为「validation.passed ? data : undefined」的全有全无：
           // 任一校验未过即整套蓝图都不注入，于是「劳动力不可用」会连带掐断进度/清单/图纸等
           // 完全可用的权威，章级损失被放大成篇级损失。现按 authorityAvailability 逐域过滤，
           // 不可用域清零、其余照常；整体 passed=false 时仍不注入（该校验失败含清单缺失等

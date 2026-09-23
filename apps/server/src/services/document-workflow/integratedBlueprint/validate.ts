@@ -217,8 +217,47 @@ export function filterBlueprintDataByAvailability(data: BlueprintData, availabil
   return next;
 }
 
+/**
+ * 4.56.3 N-4b：**阻断**判据的计划形态门（比注入判据更严）。
+ *
+ * ## 问题（远端用户实测，`别的项目` 直接生成不出文档）
+ *
+ * ```
+ * 针对工程项目整体理解 依赖蓝图权威 [schedule]，蓝图校验项「0. 清单源可用性、1. Schema 校验」未通过
+ * 确保工期与质量的保障体系与措施 依赖蓝图权威 [schedule]，…
+ * 章节阻断：1/7、4/7
+ * ```
+ *
+ * 该项目清单未解析出任何条目（`boq.entries.length === 0`）→ 三域权威一律不可用。此时
+ * **凡标题含「工期/进度」或语义近似「施工部署」的章全部整章阻断**——而模板里这类章恰恰最多：
+ * 施工组织设计的绝大多数章标题都带「工期」「设备」「资源」字样。用户拿到的是 3/7 篇的残文档，
+ * 且提示只有「请检查清单解析与蓝图构建诊断后重试」——重试永远不会变好。
+ *
+ * ## 判据（为什么「需要注入」≠「必须阻断」）
+ *
+ * `BlueprintAuthorityId` 的语义是**由清单推导的计划性数值**（进度里程碑/劳动力峰值/资源配置量）。
+ * 只有**交付物本身就是这些数值**的章（进度计划/劳动力计划/资源配置计划/机械设备表）缺权威时，
+ * 无条件成稿才会产出自编数值——这正是 P0-6 要防的（劳动力 625/42 三套口径）。
+ * 而「工期保证措施」「针对工程项目整体理解」这类章的交付物是**理解与措施**：其中的工期天数属
+ * **项目级口径**（走真值层 `authoritativeValues` 的合同工期通道），不是蓝图推导值；
+ * 阻断它们既不提升数值可信度，又直接毁掉文档。
+ *
+ * 故：**注入判据保持原封不动**（`chapterBlueprintAuthoritiesNeeded`，语义+正则 union，
+ * 不缩小任何已注入数据）；只在**阻断**这一破坏性动作上加计划形态门。
+ * 计划形态词取「计划/安排/规划/配置/部署/投入/需求/用量/数量/工程量/清单/表」——
+ * 覆盖 `施工进度计划`、`工期安排`、`劳动力配置计划`、`主要施工机械设备表`、`施工总部署` 等真实计划章。
+ */
+const BLUEPRINT_PLAN_SHAPE_RE = /计划|安排|规划|配置|部署|投入|需求|用量|数量|工程量|清单|表/u;
+
+/** 本章是否为「计划形态」章（阻断判据的计划形态门；导出供单测与该判据的其他消费点复用） */
+export function isBlueprintPlanShapedChapter(title: string): boolean {
+  return BLUEPRINT_PLAN_SHAPE_RE.test(title);
+}
+
 export function chapterBlueprintAuthorityGaps(title: string, validation?: BlueprintValidationReport, classifier?: ChapterIntentClassifier): { missing: BlueprintAuthorityId[]; failedChecks: string[] } {
-  const needed = chapterBlueprintAuthoritiesNeeded(title, classifier);
+  const needed = isBlueprintPlanShapedChapter(title)
+    ? chapterBlueprintAuthoritiesNeeded(title, classifier)
+    : [];
   const failedChecks = validation ? validation.checks.filter(check => !check.passed).map(check => check.name) : [];
   const availability = validation?.authorityAvailability;
   if (!availability) return { missing: needed, failedChecks };
