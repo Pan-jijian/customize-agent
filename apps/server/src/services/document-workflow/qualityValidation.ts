@@ -1225,6 +1225,51 @@ function tableDataRowCount(body: string) {
   return Math.max(0, rows.length - 1);
 }
 
+/**
+ * 剥离正文中「本属其它规划小节」的子树（4.59 A2）。
+ *
+ * 用途见 `collectSectionContentGaps` 调用点的注释：一个规划小节的内容**不含**另一个规划小节的子树
+ * （后者链尾会被层级提升为兄弟节）。不剥离会让本判据在草稿阶段误判「有内容」，补写轮因此看不到
+ * 那些终稿里必然变空的父标题。
+ *
+ * 边界：只剥离**严格深于**当前小节的标题子树（同级/更高级标题本就终止正文，不在此列）；
+ * 标题归属用 `normalizeSectionTitleForGap` 归一化比对（与 `sectionBodyForTitle` 同源）。
+ */
+function stripOtherPlannedSectionSubtrees(
+  body: string,
+  plannedSections: readonly string[],
+  currentSection: string,
+  currentLevel: 3 | 4,
+): string {
+  if (!body) return body;
+  const currentKey = normalizeSectionTitleForGap(currentSection);
+  const others = new Set(
+    plannedSections
+      .map(section => normalizeSectionTitleForGap(section))
+      .filter(key => key && key !== currentKey),
+  );
+  if (others.size === 0) return body;
+  const kept: string[] = [];
+  /** >0 表示正在跳过一个子树（值 = 该子树根标题的级别） */
+  let skipUntilLevel = 0;
+  for (const line of body.split('\n')) {
+    const heading = /^(#{1,6})\s+(\S.*)$/u.exec(line.trim());
+    if (heading) {
+      const level = heading[1]!.length;
+      if (skipUntilLevel > 0 && level > skipUntilLevel) continue;
+      skipUntilLevel = 0;
+      if (level > currentLevel && others.has(normalizeSectionTitleForGap(heading[2]!.trim()))) {
+        skipUntilLevel = level;
+        continue;
+      }
+    } else if (skipUntilLevel > 0) {
+      continue;
+    }
+    kept.push(line);
+  }
+  return kept.join('\n');
+}
+
 function gapForSection(chapterTitle: string, sectionTitle: string, level: 3 | 4, body: string, planned: boolean): MarkdownSectionContentGap | undefined {
   const bodyLength = sectionBodyTextLength(body);
   const hasTable = MARKDOWN_TABLE_ROW_RE.test(body) && body.split(LINE_SPLIT_RE).some(line => MARKDOWN_TABLE_DIVIDER_RE.test(line));
@@ -1268,7 +1313,34 @@ export function collectSectionContentGaps(markdown: string, chapters: Array<Pick
         seen.add(key);
         continue;
       }
-      const gap = gapForSection(chapter.title, section, found.level, found.body, true);
+      /**
+       * 4.59 A2：判某规划小节的正文时，**排除本属其它规划小节的子树**。
+       *
+       * ## 实测（`doc-1790178570374-cfb0a0da`，终端报 3 条「空小节」的真根因）
+       *
+       * 终稿里出现：
+       * ```
+       * ### 1.2 作业面勘察与条件核实      ← 空
+       * ### 1.3 现场踏勘                 ← 有正文
+       * ```
+       * 因果链：模型把「现场踏勘」的正文写成 `1.2` 的 **H4 子节** → 链尾
+       * `deliveryStructureClosure` 的**规划小节层级提升**把该 H4 提为 H3（**正确**——「现场踏勘」
+       * 也是规划小节，二者应同级）→ **父标题被掏空**。
+       *
+       * 而本判据在**章草稿**上跑（此时父标题下还有那个 H4 子节），`find` 到同级的边界内**非空**
+       * → 判「有内容」→ **不产出缺口** → 补写轮看不到它 → 终检照常报「空小节」。
+       *
+       * ## 口径
+       *
+       * 一个规划小节的内容 = **它自己直接写的正文 + 非规划小节的子节内容**；
+       * **属于另一个规划小节的子树不计入**（那些内容将由那个小节自己承载，层级提升后即成为兄弟节）。
+       * 排除后若直接正文为空/过短 → 如实报 `empty`/`too_short`，交补写轮就地补写。
+       *
+       * 判据单源：子树归属用 `normalizeSectionTitleForGap` 归一化比对，与 `sectionBodyForTitle`
+       * 同源口径，不另造第二套标题比对。
+       */
+      const bodyExcludingOtherPlanned = stripOtherPlannedSectionSubtrees(found.body, plannedSections, section, found.level);
+      const gap = gapForSection(chapter.title, section, found.level, bodyExcludingOtherPlanned, true);
       if (gap) gaps.push(gap);
       seen.add(key);
     }
