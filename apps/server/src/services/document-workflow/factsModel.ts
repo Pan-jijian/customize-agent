@@ -4,7 +4,7 @@ import * as XLSX from 'xlsx';
 import type { AutoDocumentSpecPackage } from '../document-core/autoDocumentSpecTypes';
 import { getProjectKbRoot, getProjectRoot } from '../knowledge/kbService';
 import { DEFAULT_DOCUMENT_DOMAIN_PROFILE, factFieldForLabel, isDiagnosticFactValue, isForbiddenFactValue, isLowConfidenceFactValue, type DocumentDomainProfile, type FactFieldProfile } from '../document-core/documentDomainProfileService';
-import { CHANGE_CONNECTORS } from './valueOverride';
+import { hasCorruptTextMarkers, valueAfterChangeConnector } from './factValueNoise';
 import { detectSmartTableHeader, locateTableColumns } from '@customize-agent/knowledge';
 import type { ChapterFactNeed, DocumentEvidence, DocumentExecutionStage, DocumentFact, DocumentFactsModel, DocumentGenerationDiagnostics, DocumentTemplate, DocumentTemplateChapter, ResolvedFactNeed, SpecAuthorityMap, StructuredTableFact } from './types';
 import { evidenceSatisfiesSpecField, specFactTargets } from './factMatching';
@@ -403,13 +403,9 @@ export function normalizedFactValue(value: unknown) {
   return normalizeEngineeringTextForFactMatch(stringifyFactValue(value));
 }
 
-function hasCorruptTextMarkers(text: string) {
-  const corruptMarks = text.match(/�|￿/gu)?.length || 0;
-  return corruptMarks >= 2 || Array.from(text).some(char => {
-    const code = char.charCodeAt(0);
-    return code === 0xfffd || (code < 32 && code !== 9 && code !== 10 && code !== 13);
-  });
-}
+/* hasCorruptTextMarkers / valueAfterChangeConnector 已于 4.56.3 迁至 ./factValueNoise
+ *（判据单源：对账终检侧 `document-validation/factConsistencyService` 需要同一份判据，
+ *  原先各写一份导致"真值层取 330、对账侧取 365"的相反结论） */
 
 /** 程序性短语语义原型（h5 事实候选过滤）：投标程序/行政手续类文本基准，bge 余弦 ≥ 阈值判定为程序性文本 */
 const PROCEDURAL_VALUE_PROTOTYPES = [
@@ -426,18 +422,6 @@ const PROCEDURAL_VALUE_PROTOTYPES = [
 const PROCEDURAL_LEXICAL_HINTS_RE = /签章|盖章|联系人|联系电话|电话|邮箱|解密方式|开标时间|开标地点|评标办法|评标委员会|投标保证金|保证金账户|电子交易系统|空白|填写|上传|下载|递交方式|递交截止|公共资源交易监督管理|监管部门|开评标程序|采购范围|是否|符合/u;
 const PROCEDURAL_VALUE_THRESHOLD = 0.6;
 
-/**
- * 变更叙述取值（4.55.29）：值含变更连接语时，**生效值在连接语之后**（连接语之前是旧值）。
- * 历史缺陷（最新真实生成实测 6 条「事实一致性冲突」blocker）：`计划工期` 的
- * 「365日历天，现变更修改为:330日历天」与另一来源的「330日历天」被判成多值冲突——
- * 冲突检测取 `\d+日历天` 的**首个**匹配（=连接语之前的旧值 365），而真值层裁决的正是连接语之后的 330。
- * 判据单源：连接语取自 `valueOverride.CHANGE_CONNECTORS`（值级覆盖与真值层共用同一份）。
- */
-function valueAfterChangeConnector(raw: string): string {
-  const match = new RegExp(`${CHANGE_CONNECTORS}\\s*[:：]?\\s*`, 'u').exec(raw);
-  if (!match) return raw;
-  return raw.slice((match.index ?? 0) + match[0].length).trim();
-}
 
 function conflictComparableFactValue(value: unknown, profile: DocumentDomainProfile, isProcedural?: (raw: string) => boolean) {
   // C-T7 #4 兜底：名称+编号连读值以拆分后形态参与多源对账（净化门未覆盖的通道脏值在此归一，

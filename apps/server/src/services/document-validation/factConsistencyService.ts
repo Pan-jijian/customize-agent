@@ -1,4 +1,6 @@
 import { DEFAULT_DOCUMENT_DOMAIN_PROFILE, factFieldForLabel, isDiagnosticFactValue, isForbiddenFactValue, type DocumentDomainProfile } from '../document-core/documentDomainProfileService';
+import { rejectValueNoise } from '../document-workflow/authoritativeValues';
+import { foldHomoglyphVariants, hasCorruptTextMarkers, isTableScrapeFragment, valueAfterChangeConnector } from '../document-workflow/factValueNoise';
 import type { DocumentFact, ValidationIssue } from '../document-workflow/types';
 import type { ProjectMaterialSummary } from '../document-core/projectMaterialService';
 
@@ -19,7 +21,26 @@ const NAME_LIKE_LABEL_RE = /项目名称|工程名称|招标人|建设单位|发
 const TABLE_DERIVED_ROLE_RE = /bill_of_quantities|drawing|table/iu;
 
 function comparableValue(value: string, profile: DocumentDomainProfile, label?: string) {
-  const trimmed = value.trim();
+  /**
+   * 4.56.3 判据单源化（本函数此前是 `factsModel.conflictComparableFactValue` 的**第二份实现**，
+   * 且缺了后者已具备的全部噪声判据）。实测代价：6 条「事实一致性冲突」blocker 全出自这一族，
+   * 事实维度触发归零悬崖（冲突数 ≥5 → 60% 分量归零），综合分被压到 85。
+   *
+   * 现与真值层共用同一批判据：
+   * - `rejectValueNoise`（缺席声明/占位/OCR 复写/段落冒充值/图签串格/超长）；
+   * - `hasCorruptTextMarkers`（损坏字符）；
+   * - `isTableScrapeFragment`（表头词连排的单元格抓取残片）；
+   * - `valueAfterChangeConnector`（**取变更连接语之后的生效值**——此前取正则首个匹配，
+   *   于是「365日历天，现变更修改为:330日历天」被判成与真值 330 并列的"另一个值"）。
+   */
+  const noise = rejectValueNoise(value.trim());
+  if (noise) return '';
+  if (hasCorruptTextMarkers(value) || isTableScrapeFragment(value)) return '';
+  // 指针条款（「见《专用合同条款数据表》」）是**引用**不是取值
+  if (/^(?:详|参见|见|依据)\s*[《【]/u.test(value.trim())) return '';
+  // 变更叙述：生效值在连接语之后（连接语之前是旧值）——必须在后续形态判定**之前**取
+  const trimmed = valueAfterChangeConnector(value.trim()).trim();
+  if (trimmed !== value.trim() && rejectValueNoise(trimmed)) return '';
   if (isDiagnosticFactValue(profile, trimmed) || isForbiddenFactValue(profile, trimmed)) return '';
   if (/签章|盖章|联系人|联系电话|电话|邮箱|解密|开标|评标|保证金|交易系统|空白|填写|上传|下载|递交|投标文件制作|电子服务系统|交易平台/u.test(trimmed)) return '';
   if (/\|/u.test(trimmed) || /^#+\s*/u.test(trimmed)) return '';
@@ -89,8 +110,11 @@ export function validateFactConsistency(input: { markdown: string; facts: Docume
   for (const [label, values] of factsByName) {
     const grouped = new Map<string, Array<{ value: string; source: string }>>();
     for (const item of values) {
-      const key = comparableValue(item.value, profile, label);
-      if (!key) continue;
+      const comparable = comparableValue(item.value, profile, label);
+      if (!comparable) continue;
+      // 4.56.3 同形变体折叠（仅作用于**分组键**，展示值不变）：
+      // 「…项目—东区…」与「…项目一东区…」是同一项目名的破折号/一字变体，判多值冲突是纯误报
+      const key = foldHomoglyphVariants(comparable);
       grouped.set(key, [...(grouped.get(key) || []), item]);
     }
     if (grouped.size > 1) {
@@ -106,7 +130,17 @@ export function validateFactConsistency(input: { markdown: string; facts: Docume
         for (let j = i + 1; j < ascending.length; j += 1) {
           const long = ascending[j]!;
           const diff = long.length - short.length;
-          if ((diff <= 3 || (short.endsWith('等') && diff <= 6)) && long.startsWith(short)) {
+          /**
+           * 4.56.3 粒度吸收扩展（实测 `建设地点`）：`巢湖市` 与
+           * `巢湖市居巢经开区义成路与南外环路交口北侧` 是同一地址的**粗/细两级**，
+           * 原规则要求长差 ≤3 字故未吸收，被判多值冲突。
+           * 追加规则：**短值 ≤6 字且以行政区划后缀收尾**（省/市/县/区/镇/乡/村/街道）
+           * 且为长值前缀时，视为粒度截断，并入长值。
+           * 为何安全：区划后缀 + 极短长度使「短值是独立实体」的可能性极低，
+           * 而真冲突（如两个不同城市）不会构成前缀关系。
+           */
+          const isGenericPrefix = short.length <= 6 && /[省市县区镇乡村]$/u.test(short) && long.startsWith(short);
+          if ((diff <= 3 || (short.endsWith('等') && diff <= 6) || isGenericPrefix) && long.startsWith(short)) {
             grouped.set(long, [...(grouped.get(long) || []), ...(grouped.get(short) || [])]);
             absorbed.add(short);
             break;

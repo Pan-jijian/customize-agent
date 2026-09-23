@@ -337,3 +337,70 @@ describe('r14 E1-E3（丰乐镇实测）', () => {
     expect(issues).toEqual([]);
   });
 });
+
+/**
+ * 4.56.3 判据单源化回放：`doc-1790156773687-0c18ca14`（综合 85/95）的 6 条 blocker 全部出自这一族。
+ * 本函数曾是 `factsModel.conflictComparableFactValue` 的**第二份实现**且缺其全部噪声判据，
+ * 于是「真值层取 330、对账侧取 365」→ 判多值 → 冲突数 ≥5 → 事实维度 60% 分量归零（40 分）。
+ * 下列用例逐字取自该轮真实数据，锁定「同一事实的噪声形态不再构成冲突」。
+ */
+describe('4.56.3 事实对账误报族（真实数据回放）', () => {
+  it('计划工期：变更叙述/表格抓取残片/缺省声明/指针条款 均不构成第二个值', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '计划工期', value: '330日历天', sourceFile: '招标文件.pdf' }),
+      // 变更叙述：生效值是连接语之后的 330，不是首个匹配的 365
+      makeFact({ key: 'b', fieldName: '计划工期', value: '365日历天，现变更修改为:330日历天', sourceFile: '1招标答疑文件.pdf' }),
+      // 表格/条款抓取残片（表头词连排）
+      makeFact({ key: 'c', fieldName: '计划工期', value: '现澄清为如下：条款号条款号条款名称条款名称编列内容编列内容1.3.2计划工期计划开工日期：2026年10月10日', sourceFile: '7招标答疑文件.pdf' }),
+      // 缺省声明（信息缺席不是信息）
+      makeFact({ key: 'd', fieldName: '计划工期', value: '【资料未体现】', sourceFile: '招标文件.pdf' }),
+      // 指针条款（引用不是取值）
+      makeFact({ key: 'e', fieldName: '计划工期', value: '见《专用合同条款数据表》', sourceFile: '招标文件.pdf' }),
+      makeFact({ key: 'f', fieldName: '计划工期', value: '未提供', sourceFile: '招标文件.pdf' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+
+  it('工期关键节点：四个"值"全是缺省声明 → 零真值，不得报多值冲突', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '工期关键节点', value: '【清单未体现】', sourceFile: '工程量清单.xls' }),
+      makeFact({ key: 'b', fieldName: '工期关键节点', value: '【资料未体现】', sourceFile: '招标文件.pdf' }),
+      makeFact({ key: 'c', fieldName: '工期关键节点', value: '未提供', sourceFile: '工程量清单.xls' }),
+      makeFact({ key: 'd', fieldName: '工期关键节点', value: '清单编制时间2026年07月22日，复核时间2026年09月01日', sourceFile: '工程量清单.xls' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+
+  it('项目名称：破折号/一字同形变体折叠为同一取值', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '项目名称', value: '巢湖市光电新能源产业园项目—东区标准化厂房二标段施工' }),
+      makeFact({ key: 'b', fieldName: '项目名称', value: '巢湖市光电新能源产业园项目一东区标准化厂房二标段施工' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+
+  it('建设地点：粗粒度行政区划是细粒度的前缀 → 吸收（不报冲突）', () => {
+    const issues = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '建设地点', value: '巢湖市居巢经开区义成路与南外环路交口北侧' }),
+      makeFact({ key: 'b', fieldName: '建设地点', value: '巢湖市' }),
+    ]));
+    expect(issues).toEqual([]);
+  });
+
+  it('**真冲突仍必须报**（防过滤过度）：两个真实不同的工期值 / 两个不同建设地点', () => {
+    const durationConflict = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '计划工期', value: '330日历天', sourceFile: '招标文件.pdf' }),
+      makeFact({ key: 'b', fieldName: '计划工期', value: '400日历天', sourceFile: '答疑文件.pdf' }),
+    ]));
+    expect(durationConflict).toHaveLength(1);
+    expect(durationConflict[0]!.message).toContain('存在多个值');
+
+    // 「巢湖市中科智城（中国科大英才创新创业基地）6号楼」与居巢经开区地址**不构成前缀关系**，
+    // 属真实多值（疑为开标/递交地点被标成建设地点），必须继续暴露给编制人
+    const placeConflict = validateFactConsistency(input([
+      makeFact({ key: 'a', fieldName: '建设地点', value: '巢湖市居巢经开区义成路与南外环路交口北侧' }),
+      makeFact({ key: 'b', fieldName: '建设地点', value: '巢湖市中科智城（中国科大英才创新创业基地）6号楼' }),
+    ]));
+    expect(placeConflict).toHaveLength(1);
+  });
+});

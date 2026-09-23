@@ -1562,6 +1562,16 @@ function normalizePercent(text: string): string {
  * normalizedMarkdown 保持不变（原文命中优先），变体 haystack 由调用方一次归一传入（性能单源）。 */
 function normalizeAnchorCompareText(text: string): string {
   return text
+    // 全角→半角**必须最先**（数字/字母/斜杠/破折号/星号）：否则 `＊`/`ｘ` 折不出，
+    // 后面的分隔符族归一对它们无效。编号与型号（`20S515／326`、`1．3．2`）折半角后可比。
+    .replace(/[！-～]/gu, ch => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
+    // 4.56.3 尺寸分隔符族归一（实测真缺陷）：条款原文用 `*`、正文写作习惯用 `×`——
+    // 「600*600mm方形钢筋混凝土户线检查井」与正文「600×600mm方形钢筋混凝土户线检查井」
+    // 因分隔符字形不同被判未落位（`600*600mm` 全文 0 次、`600×600mm` 有；该条是
+    // 「招标要求部分响应」11 条 blocker 的主要成分）。两侧同折为 `×` 后逐字可比，不产生假命中。
+    .replace(/[*✕╳xX×]/gu, '×')
+    // 破折号/连接号族归一（与 normalizeRegulationCode 同口径）
+    .replace(/[—–―─－〜～]/gu, '-')
     .replace(/[「」『』“”"'`《》]/gu, '')
     .replace(/[、，,]/gu, '')
     .replace(/[的为]/gu, '')
@@ -1621,7 +1631,13 @@ export function collectRequirementAnchors(
   // 数字参数：每个"数字+单位"组合都是独立锚点（纯数字不作锚点；单位词表限工程条款常用单位）。
   // 商务条款（保证金金额/付款时限/违约金利率）的数字参数不强制落位技术标正文，skipNumericAnchors 跳过
   if (!options?.skipNumericAnchors) {
-    for (const match of text.matchAll(/(?:\d+(?:\.\d+)?\s*(?:%|％|天|日|万元|亿元|元|米|m|M|mm|毫米|层|年|个|月|周|小时|分钟|项|处|台|套|辆|人|家|次|遍|道|吨|kPa|MPa))/giu)) {
+    /**
+     * 单位交替串**必须多字符在前**（4.56.3 修复 truncation）：原顺序 `…|米|m|M|mm|毫米|…`
+     * 把单字符 `m` 排在 `mm` 之前，`700mm` 被截成 `700m`（留下孤立 `m`）——锚点即残片，
+     * 正文写出完整的 `700×700mm` 也永远命不中，是「招标要求部分响应」假 blocker 的第二个来源。
+     * 与 `unitAliases.ts` 的 `MEASURE_UNIT_SOURCE` 同一条纪律（注释里已写明「多字符在前」）。
+     */
+    for (const match of text.matchAll(/(?:\d+(?:\.\d+)?\s*(?:%|％|万元|亿元|小时|分钟|毫米|MPa|kPa|mm|MPa|天|日|元|米|m|M|层|年|个|月|周|项|处|台|套|辆|人|家|次|遍|道|吨))/giu)) {
       const anchorText = normalizePercent(match[0].replace(/\s+/gu, ''));
       // M26 编号切片守卫：「N.N项」为「N.N项目/N.N项次」编号前缀被截断的产物（r28k「1.1项」←「1.1项目名称」、
       // 「2.10项」←「2.10项目类别」、「3.3项」←「第1.3.3项」实机），非真实数量参数——整数+项（3项）保留，小数+项丢弃
