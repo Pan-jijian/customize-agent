@@ -1431,16 +1431,19 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
      */
     const continueUnderProducedBlock = async (seeded: string, seedChars: number): Promise<string | undefined> => {
       const maxRounds = 2;
+      // R0-c：续写**瞄准块目标**（不是验收下限 0.85×）——验收下限管"能不能收"，
+      // 目标管"够不够章预算"。只瞄下限会让每块稳定停在 0.85~1.0，章完成率随之停在 ~0.9。
+      const aimChars = Math.max(charFloor, block.targetWords);
       let current = seeded;
       let currentChars = seedChars;
       let grew = 0;
       for (let contRound = 0; contRound < maxRounds; contRound += 1) {
         throwIfAborted(input.signal);
-        const gap = charFloor - currentChars;
+        const gap = aimChars - currentChars;
         if (gap <= 0) break;
         const continuationContext = [
           blockRoleContext,
-          `【本节欠产续写】本节已有正文如下（**不得重复、不得改写、不得重新输出**），请**只输出续写部分**，接着上文把未充分展开的要点继续写完。当前 ${currentChars} 字，篇幅下限 ${charFloor} 字，还缺约 ${gap} 字（上限 ${Math.ceil(block.targetWords * 1.15)} 字）。只输出新写的正文，不要重复已写内容、不要重写本节标题。`,
+          `【本节欠产续写】本节已有正文如下（**不得重复、不得改写、不得重新输出**），请**只输出续写部分**，接着上文把未充分展开的要点继续写完。当前 ${currentChars} 字，本节目标 ${block.targetWords} 字，还缺约 ${gap} 字（达 ${charFloor} 字即可收稿，上限 ${Math.ceil(block.targetWords * 1.15)} 字）。只输出新写的正文，不要重复已写内容、不要重写本节标题。`,
           '【已有正文开始】',
           current,
           '【已有正文结束】',
@@ -1469,9 +1472,19 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         const merged = seedTail && candidate.replace(/\s+/gu, '').includes(seedTail)
           ? candidate
           : `${current}\n\n${candidate}`;
-        const mergedChars = documentTextLength(merged);
+        // **归一链一致**（4.56 R0-c 实修）：续写返回的是模型**原始**输出，必须走与块成稿同一套归一
+        // （标题近似对齐 → 表题归一 → 结构确定性清理），否则"更长"的原始串会替换掉已归一的正文，
+        // 把对齐结果（如 气候→季候）改回模型写法——实测即由此把已对齐的 H4 变回变体标题。
+        let normalizedCandidate = merged;
+        const aligned = alignSimilarHeadingsToPlan(normalizedCandidate, sectionTitles);
+        if (aligned.aligned.length > 0) normalizedCandidate = aligned.markdown;
+        const titleNormalized = normalizeTableTitleInHeaders(normalizedCandidate, input.chapter.tablePlans);
+        if (titleNormalized.normalized > 0) normalizedCandidate = titleNormalized.markdown;
+        const structureCleaned = cleanStructureDefects(normalizedCandidate);
+        if (structureCleaned.cleaned.length > 0) normalizedCandidate = structureCleaned.markdown;
+        const mergedChars = documentTextLength(normalizedCandidate);
         if (mergedChars <= currentChars) break; // 未严格增长 → 停止（防空转）
-        current = merged;
+        current = normalizedCandidate;
         currentChars = mergedChars;
         grew += 1;
       }
@@ -1769,6 +1782,14 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           && extraneous.length === 0 && !numericBlocking && !flowFormBlocking && !fillerBlocking
           && !structureBlocking && !densityBlocking && !attributionBlocking && !formatBlocking;
         if (!underProduceBlocking && !overProduceBlocking && !criticalDepthBlocking && !elementBlocking && missing.length === 0 && duplicates.length === 0 && extraneous.length === 0 && !numericBlocking && !flowFormBlocking && !fillerBlocking && !structureBlocking && !densityBlocking && !attributionBlocking && !formatBlocking) {
+          // R0-c 章完成率补足：块**已通过验收**但低于目标 95% 时，再做一次有界续写（瞄块目标）。
+          // 动机（实测）：验收下限 0.85× 只管"能收稿"，块稳定停在 0.85~1.0 → 章完成率随之停在
+          // ~0.9，而章预算缺口随即被修复链以无上限追加的方式补上（终稿 +66% 的来源）。
+          // 在写作期就地补足，成本是一次续写调用，收益是修复链不再需要补这一块。
+          if (chars < Math.floor(block.targetWords * 0.95)) {
+            const topped = await continueUnderProducedBlock(withBlockShell, chars);
+            if (topped) return topped;
+          }
           return withBlockShell;
         }
         lastMissing = missing;
@@ -1872,7 +1893,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     }
     // C3 隔离重写反馈收集：质检判定出现过缺陷才携带（纯异常失败不套"质检未通过"话术）
     if (sawQcDefect) blockRetryFeedbacks.set(index, buildBlockDefectFeedback(false));
-    // R0-b：末轮"仅欠产"现场登记（供下方续写）
+    // R0-b/R0-c：末轮"仅欠产"现场登记（供下方续写）
     if (lastAttemptContent && lastAttemptOnlyUnderProduced) {
       const continued = await continueUnderProducedBlock(lastAttemptContent, documentTextLength(lastAttemptContent));
       if (continued) return continued;
