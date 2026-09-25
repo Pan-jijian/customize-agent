@@ -481,7 +481,10 @@ describe('B18 收尾阶段赶工暗示（句式18）', () => {
     const result = fixSelfUnderminingCandidates('收尾阶段安排10个日历天，项目经理组织各分组施工员进行内部预验收，预验收通过后组织竣工验收。');
     expect(result.fixedCount).toBe(1);
     expect(result.markdown).toContain('按总进度计划组织实施');
-    expect(result.markdown).toContain('复查销项后申请正式竣工验收');
+    // 4.60 I2-c：改写目标句尾去套语（原「限时整改、复查销项后申请正式竣工验收」——
+    // 固定式修复器把套语写进正文，是复读的又一个供给端），改为写实质动作
+    expect(result.markdown).toContain('逐项复验合格后申请正式竣工验收');
+    expect(result.markdown).not.toContain('复查销项');
   });
   it('B18 「亮化与」前缀变体命中', () => {
     expect(fixSelfUnderminingCandidates('亮化与收尾阶段安排10个日历天，项目经理组织各分组施工员进行内部预验收，预验收通过后组织竣工验收。').fixedCount).toBe(1);

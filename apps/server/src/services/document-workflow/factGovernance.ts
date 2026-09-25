@@ -5,6 +5,8 @@ import { cleanPdfHeadingNoise, normalizeOcrFactText, stripTrailingNameCodeBindin
 import { stableHash, stringifyFactValue } from './utils';
 import { recordArbitrationCases } from './workflowCaseLog';
 import { loadWorkflowRules, workflowRulesHash, type WorkflowRulesConfig } from './workflowRules';
+// 4.61 单一权威模型（knowledge 包单源）：三套载体优先级收敛到此处
+import { carrierStrength, domainForAttribute, sourcePriorityOf, type AuthorityCarrier } from '@customize-agent/knowledge';
 
 export type FactValueType = 'duration' | 'money' | 'location' | 'organization' | 'standard' | 'identifier' | 'scale' | 'count' | 'percentage' | 'award' | 'text';
 
@@ -426,23 +428,45 @@ function factSourceType(fact: DocumentFact): GovernedCanonicalFact['sourceType']
   return 'structured_fact';
 }
 
-function factPriority(sourceType: GovernedCanonicalFact['sourceType']) {
-  const priorities: Record<GovernedCanonicalFact['sourceType'], number> = {
-    user: 100,
-    addendum: 96,
-    contract: 90,
-    tender: 85,
-    boq: 75,
-    drawing: 70,
-    standard: 60,
-    evidence: 55,
-    structured_fact: 50,
-    projectGraph: 40,
-    generated_markdown: 30,
-    derived: 20,
-    unknown: 10,
-  };
-  return priorities[sourceType];
+/**
+ * 事实来源优先级（4.61 **委托单一权威模型**）。
+ *
+ * 旧实现是本仓**三套互不相容的载体优先级**之一——同一份资料在三处得到不同档位
+ * （答疑 96/96/95、招标 90/85/85、图纸 75/70/75），于是同一数据在不同链路被不同裁决。
+ * 现把「载体类来源」全部委托 `carrierStrength`，只有**非载体类来源**
+ *（user/evidence/structured_fact/projectGraph/generated_markdown/derived/unknown）
+ * 保留显式档位——它们不是资料载体，是系统内部来源，不参与载体权威格。
+ *
+ * `attribute` 给定时按语义域裁决（设计参数域图纸 > 清单、工程量域清单 > 图纸）；
+ * 缺省按契约口径域，与旧序一致（答疑 > 合同/招标 > 清单 > 图纸），保证既有调用点不漂移。
+ *
+ * 量纲：100 起、逐档 -10。旧阈值 `>= 80` 判 `locked` 的语义不变
+ *（新口径下 80 = evaluation-rule，即"答疑/招标正文/评标办法"三类仍为锁定来源）。
+ */
+const SOURCE_TYPE_CARRIER: Partial<Record<GovernedCanonicalFact['sourceType'], AuthorityCarrier>> = {
+  addendum: 'clarification',
+  contract: 'tender-clause',
+  tender: 'tender-clause',
+  boq: 'boq-quantity',
+  drawing: 'drawing-note',
+  standard: 'code',
+};
+
+/** 非载体类来源（系统内部来源，不参与权威格） */
+const SOURCE_TYPE_INTERNAL_PRIORITY: Partial<Record<GovernedCanonicalFact['sourceType'], number>> = {
+  user: 100,
+  evidence: 55,
+  structured_fact: 50,
+  projectGraph: 40,
+  generated_markdown: 30,
+  derived: 20,
+  unknown: 10,
+};
+
+function factPriority(sourceType: GovernedCanonicalFact['sourceType'], attribute?: string) {
+  const carrier = SOURCE_TYPE_CARRIER[sourceType];
+  if (carrier) return carrierStrength(domainForAttribute(attribute), carrier);
+  return SOURCE_TYPE_INTERNAL_PRIORITY[sourceType] ?? 10;
 }
 
 function governedFactFromCanonical(fact: CanonicalFact): GovernedCanonicalFact {
@@ -731,15 +755,16 @@ function extractNumericScopeEntries(text: string, kind: NumericScopeConflict['ki
   return entries;
 }
 
-function sourceFilePriority(sourceFile?: string, roleId?: string) {
+/**
+ * 来源文件优先级（4.61 **委托单一权威模型**，三套实现里的第三套）。
+ *
+ * 与 `sourcePriority`（authoritativeValues）同源同结论：由 `carrierOfSource` 定载体、
+ * 由 `carrierStrength(域, 载体)` 定强度。差异只在输入形态（本处拿得到 `roleId`，
+ * 但保留路径指纹回退以兼容历史调用）。
+ */
+function sourceFilePriority(sourceFile?: string, roleId?: string, attribute?: string) {
   const source = `${sourceFile || ''} ${roleId || ''}`;
-  // 补疑/答疑/澄清/更正类文件是对招标文件的正式修正，裁决优先级最高
-  if (/补疑|答疑|澄清|补充|更正|修改/u.test(source)) return 95;
-  if (/合同/u.test(source)) return 90;
-  if (/招标文件|招标公告|前附表|投标人须知|需求书/u.test(source)) return 85;
-  if (/清单|工程量|BOQ|编制说明/u.test(source)) return 75;
-  if (/图纸|设计/u.test(source)) return 70;
-  return 50;
+  return sourcePriorityOf(source, attribute);
 }
 
 export function detectNumericScopeConflicts(facts: DocumentFact[], rules: WorkflowRulesConfig = loadWorkflowRules()): NumericScopeConflict[] {

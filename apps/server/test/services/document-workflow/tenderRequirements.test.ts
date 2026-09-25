@@ -100,6 +100,57 @@ describe('splitTenderClauses 条款化（确定性结构切分，不预筛不剔
     expect(clauses[1].text).toBe('3.2 绿色建筑等级要求：达到国标二星级。');
   });
 
+  // ── 4.61 载体闸：收件人不是投标人的资料**不产生条款单元** ──
+
+  it('图纸证据（roleId=drawing）不产生条款单元——设计说明的收件人是施工方，不是投标文件', () => {
+    const clauses = splitTenderClauses([{
+      chapterId: 'tender-requirements',
+      filePath: '0928 工大项目/抗震支架电答疑修改0722/【电施】电气学院地上平面图0722_t3.dwg',
+      sectionTitle: '消火栓起泵按钮',
+      score: 1,
+      // 实测残片形态：配电系统图标注（尺寸数字 + 设备名 + 图层名交错）
+      content: '8.13 消防设备配电箱应有明显标志\n8300 B 1 A 消火栓起泵按钮 500 7300 500 1% 强电 1020 L01 xx A C3435',
+      roleId: 'drawing',
+    }]);
+    expect(clauses, '图纸标注没有收件人=投标人的条款，不得进入要求池').toEqual([]);
+  });
+
+  it('清单证据（roleId=bill_of_quantities）不产生条款单元——清单是计价文件，规格走权威层', () => {
+    const clauses = splitTenderClauses([{
+      chapterId: 'tender-requirements',
+      filePath: '1#厂房土建工程.xls',
+      sectionTitle: '分部分项工程量清单',
+      score: 1,
+      content: '1 平整场地 1．土壤类别：现场现状土 2．其他要求：推平碾压',
+      roleId: 'bill_of_quantities',
+    }]);
+    expect(clauses).toEqual([]);
+  });
+
+  it('招标正文/答疑/评标办法照常产生，且单元带载体（招标正文与评标办法可区分）', () => {
+    const clauses = splitTenderClauses([
+      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '第二章投标人须知', score: 1, content: '3.1 投标人应提供施工组织设计。', roleId: 'tender_document' },
+      { chapterId: 'tender-requirements', filePath: '答疑.pdf', sectionTitle: '答疑澄清', score: 1, content: '1.1 关于工期，以开工令为准。', roleId: 'addendum' },
+      { chapterId: 'tender-requirements', filePath: '招标文件.pdf', sectionTitle: '第三章评标办法', score: 1, content: '2.1 评分因素：施工组织设计完整性。', roleId: 'tender_document' },
+    ]);
+    expect(clauses.length).toBeGreaterThanOrEqual(3);
+    expect(clauses.find(clause => clause.text.includes('施工组织设计。'))?.carrier).toBe('tender-clause');
+    expect(clauses.find(clause => clause.text.includes('开工令'))?.carrier).toBe('clarification');
+    // 评标办法在招标正文载体上按小节标题再分（评分依据与正文条款的效力不同）
+    expect(clauses.find(clause => clause.text.includes('评分因素'))?.carrier).toBe('evaluation-rule');
+  });
+
+  it('未识别类型（roleId 缺失）保守判为条款——宁可多判，不把义务静默降级', () => {
+    const clauses = splitTenderClauses([{
+      chapterId: 'tender-requirements',
+      filePath: '未知资料.txt',
+      score: 1,
+      content: '5.1 承包人应按合同约定组织施工。',
+    }]);
+    expect(clauses).toHaveLength(1);
+    expect(clauses[0]!.carrier).toBe('tender-clause');
+  });
+
   it('短「名：值」行独立成单元（表格行不做整表合并）', () => {
     const clauses = splitTenderClauses([{
       chapterId: 'tender-requirements',
@@ -1401,10 +1452,13 @@ describe('M14a 判定口径指纹（缓存失效自动防线：口径变更不�
     expect(tenderRequirementsJudgeFingerprint([/a/u])).not.toBe(tenderRequirementsJudgeFingerprint([/b/u]));
   });
 
-  it('缓存 key 接线（源码守护）：v10 版本 + judgeFingerprint 入 key（防版本漏递增/指纹漏接线回归）', () => {
+  it('缓存 key 接线（源码守护）：版本号 + judgeFingerprint + 载体输入入 key（防版本漏递增/指纹漏接线回归）', () => {
     const source = fs.readFileSync(SRC, 'utf8');
-    expect(source).toContain("const TENDER_REQUIREMENTS_CACHE_VERSION = 'tender-requirements-extraction-v10'");
+    // 4.61：版本由 v10 递增到 v11（载体闸改变了进池集合 = 判定输入变更，必须失效旧池）
+    expect(source).toContain("const TENDER_REQUIREMENTS_CACHE_VERSION = 'tender-requirements-extraction-v11'");
     expect(source).toContain('judgeFingerprint: tenderRequirementsJudgeFingerprint()');
+    // 载体输入必须进指纹：只改 roleId（文件重分类）而不改内容时，旧池若被复用则载体闸等于没生效
+    expect(source, 'evidenceContentFingerprint 必须纳入 roleId').toContain("roleId: item.roleId || ''");
   });
 
   it('判据调用守护：judgeTenderClauses 内判据调用全部入指纹源清单（新增判据漏加即红）', () => {

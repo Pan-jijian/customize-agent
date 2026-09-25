@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import type { TextChunk } from '../chunking/text-chunker.js';
 import type { FileCategory, IndexStateRecord } from '../types.js';
 import { materialRootOf, materialRootSqlExpression } from './material-pack.js';
+import type { StructuredExtraction } from '../extraction/content-extractor.js';
 
 /** 资料包列回填完成标记（kb_metadata key），存在即跳过整段迁移 */
 const MATERIAL_ROOT_BACKFILL_KEY = 'material_root_backfill_v1';
@@ -297,15 +298,51 @@ export class IndexStateStore {
    * @param chunks 文本切片列表
    * @param file 文件分类信息
    */
+  /**
+   * 结构化实体写入（4.61）：**一实体一行**。
+   *
+   * 为什么不塞进 `kb_chunks.metadata_json`：明细表的行数可达数万（实测单个图纸 DXF 的
+   * 文字实体上限 30000），塞进 metadata 会让每次切片读取都反序列化整份实体图；
+   * 且切片与实体是**不同生命周期**（切片可重切、实体只随文件变）。
+   */
+  private insertStructuredEntities(relativePath: string, structured: StructuredExtraction, materialRoot: string, now: number): void {
+    const insert = this.db.prepare(
+      'INSERT INTO kb_material_entities (relative_path, entity_kind, entity_key, payload_json, material_root, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    );
+    for (const entity of structured.cad?.entities ?? []) {
+      insert.run(relativePath, 'cad-entity', entity.entityType, JSON.stringify(entity), materialRoot, now);
+    }
+    for (const sheet of structured.cad?.sheets ?? []) {
+      insert.run(relativePath, 'cad-sheet', sheet.name, JSON.stringify(sheet), materialRoot, now);
+    }
+  }
+
+  /** 结构化实体读取（按文件 + 类型；`limit` 防御超大图纸一次拉全） */
+  loadMaterialEntities(relativePath: string, entityKind?: string, limit = 60000): Array<{ entityKind: string; entityKey?: string; payload: unknown }> {
+    const rows = entityKind
+      ? this.db.prepare('SELECT entity_kind, entity_key, payload_json FROM kb_material_entities WHERE relative_path = ? AND entity_kind = ? LIMIT ?').all(relativePath, entityKind, limit)
+      : this.db.prepare('SELECT entity_kind, entity_key, payload_json FROM kb_material_entities WHERE relative_path = ? LIMIT ?').all(relativePath, limit);
+    return (rows as Array<Record<string, unknown>>).map(row => ({
+      entityKind: String(row.entity_kind ?? ''),
+      entityKey: row.entity_key === null || row.entity_key === undefined ? undefined : String(row.entity_key),
+      payload: JSON.parse(String(row.payload_json ?? '{}')),
+    }));
+  }
+
   replaceChunks(
     relativePath: string,
     chunks: TextChunk[],
     file: { category: FileCategory; format: string; collectionName: string },
+    /** 4.61 结构化产出（CAD 实体图等）：与切片同事务落库，保证"渲染与源数据"原子一致——
+     * 分两次写会出现"切片更新了、实体还是旧的"这种最难查的漂移 */
+    structured?: StructuredExtraction,
   ): void {
     const now = Date.now();
     const materialRoot = materialRootOf(relativePath);
     const transaction = this.db.transaction(() => {
       this.db.prepare('DELETE FROM kb_chunks WHERE relative_path = ?').run(relativePath);
+      this.db.prepare('DELETE FROM kb_material_entities WHERE relative_path = ?').run(relativePath);
+      if (structured) this.insertStructuredEntities(relativePath, structured, materialRoot, now);
       this.db.prepare('DELETE FROM kb_parent_chunks WHERE relative_path = ?').run(relativePath);
       this.db.prepare('DELETE FROM kb_document_chunks WHERE relative_path = ?').run(relativePath);
       if (this.ftsEnabled) this.db.prepare('DELETE FROM kb_chunks_fts WHERE relative_path = ?').run(relativePath);
@@ -1021,6 +1058,23 @@ export class IndexStateStore {
       CREATE INDEX IF NOT EXISTS idx_kb_chunks_collection ON kb_chunks(collection_name);
       CREATE INDEX IF NOT EXISTS idx_kb_chunks_parent ON kb_chunks(relative_path, parent_id);
       CREATE INDEX IF NOT EXISTS idx_kb_chunks_kind ON kb_chunks(chunk_kind);
+
+      -- 4.61 结构化实体表（**结构保真的落点**）：
+      -- kb_chunks.content 是**渲染**（供检索/嵌入），本表才是**源数据**。
+      -- 旧链路的病根是"只有渲染、没有源数据"——下游只能对拍平文本做结构恢复式正则
+      --（实测：factGovernance 靠「上一行是不是纯数字」猜基坑深度），于是必然出错。
+      -- 一条实体一行（而非整文件一个 blob）：可按键查询、可增量更新、单实体损坏不牵连整文件。
+      CREATE TABLE IF NOT EXISTS kb_material_entities (
+        rowid          INTEGER PRIMARY KEY AUTOINCREMENT,
+        relative_path  TEXT NOT NULL,
+        entity_kind    TEXT NOT NULL,
+        entity_key     TEXT,
+        payload_json   TEXT NOT NULL,
+        material_root  TEXT,
+        created_at     INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_kb_entities_path ON kb_material_entities(relative_path);
+      CREATE INDEX IF NOT EXISTS idx_kb_entities_kind ON kb_material_entities(entity_kind);
       CREATE INDEX IF NOT EXISTS idx_kb_chunks_title_path ON kb_chunks(title_path);
 
       CREATE TABLE IF NOT EXISTS kb_parent_chunks (

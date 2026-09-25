@@ -8,6 +8,7 @@ import type {
   TenderRequirementExclusion,
   TenderRequirementModel,
   TenderRequirementPolicy,
+  TenderRequirementCarrier,
   TenderStructureForm,
   TenderStructureRequirement,
   ValidationIssue,
@@ -20,6 +21,8 @@ import type { SemanticSimilarityFn } from './semanticSimilarity';
 // 扬尘六个百分百词表/拆迁豁免判定单源（检测器侧定义）：本文件的词面兜底与检测器必须同一口径
 import { sixHundredPercentLexicalHitCount } from './integrity/detectors/detectors';
 import { isBidDisciplineSentence, isBidEvaluationRuleText, stableHash, systemConstraintLine } from './utils';
+// 4.61 载体模型（单一权威定义在 knowledge 包；此处只消费）
+import { resolveCarrier, refineEvaluationCarrier, type AuthorityCarrier } from '@customize-agent/knowledge';
 import { isBidderQualificationText, isContractProcedureClause } from './evidenceContentSafety';
 import { classifyTenderContent, isCreditScoringContent } from './technicalBidAdmission';
 import { docSystemPrefix } from './markdownComposer';
@@ -98,6 +101,17 @@ export interface TenderClauseUnit {
   section?: string;
   clauseNo?: string;
   text: string;
+  /**
+   * 4.61 载体角色（**收件人判据的承载字段**）。
+   *
+   * 由证据的 `roleId`（`inferMaterialKind` 按资料类型判定）与文件内位置共同确定，
+   * 在**切分层**就固定下来，随单元与条目一路带到验收与评分。
+   *
+   * 为什么必须带到底：要求池的历史缺陷是「图纸设计说明（收件人=施工方）混入编制要求
+   * （收件人=投标人）」——合工大 1076 条要求里 262 条永不可响应，其中 69% 是图纸标注残片。
+   * 判据不是"义务性"（设计说明也全是「应」「不应」），而是**收件人**；载体是它的唯一载体字段。
+   */
+  carrier?: TenderRequirementCarrier;
 }
 
 /** 编号行识别（行首编号形态）：第X条/第X章、（一）/（1）、一、、1、5.1.1、10.9 等。
@@ -109,6 +123,9 @@ const CLAUSE_NUMBER_PATTERNS: RegExp[] = [
   /^\d{1,2}(?:[.．]\d{1,2}){1,3}(?:[、.．]|\s)/u,
   /^\d{1,2}[、.．]\s*(?![\d%])/u,
 ];
+
+/** 义务载体（收件人是投标人/投标文件的三类来源）——只有这三类产生要求锚点 */
+const OBLIGATION_CARRIERS: ReadonlySet<AuthorityCarrier> = new Set<AuthorityCarrier>(['tender-clause', 'clarification', 'evaluation-rule']);
 
 function extractClauseNumber(line: string): string | undefined {
   for (const pattern of CLAUSE_NUMBER_PATTERNS) {
@@ -201,6 +218,23 @@ export function splitTenderClauses(evidence: DocumentEvidence[]): TenderClauseUn
   for (const item of evidence) {
     const content = item.content || '';
     if (!content.trim()) continue;
+    /**
+     * 4.61 载体闸（**收件人判据的第二道闸**，与 stageUnderstanding 的证据闸同源）：
+     * 收件人不是投标人的资料**不产生条款单元**。
+     *
+     * 第一道闸（证据组装）按 `roleId` 选文件；本闸按同一个 `roleId` 定载体角色，
+     * 两者共用 `resolveCarrier` 单源——防「闸门口径漂移」（选进来的文件又被这里判掉）。
+     * 图纸设计说明（`drawing-note`）的收件人是施工方，它的约束值走 `DesignFact` 权威层，
+     * 不进要求池：那不是「投标文件要写什么」，是「工程要怎么做」。
+     */
+    const carrier = refineEvaluationCarrier(
+      resolveCarrier({ kind: item.roleId || 'other', section: item.sectionTitle }),
+      item.sectionTitle ?? '',
+      content.slice(0, 200),
+    );
+    if (!OBLIGATION_CARRIERS.has(carrier)) continue;
+    // 闸门之后 carrier 必在义务子集内（类型上显式收窄，不在下游再判一次）
+    const obligationCarrier: TenderRequirementCarrier = carrier as TenderRequirementCarrier;
     const file = item.filePath || undefined;
     let section = item.sectionTitle?.trim() || undefined;
     let clauseNo: string | undefined;
@@ -215,6 +249,7 @@ export function splitTenderClauses(evidence: DocumentEvidence[]): TenderClauseUn
           section,
           clauseNo: no ? (units.length > 1 ? `${no}-${unitIndex + 1}` : no) : undefined,
           text: unit,
+          carrier: obligationCarrier,
         });
       });
     };
@@ -938,6 +973,11 @@ export async function judgeTenderClauses(
         category: cleanCategory(judgment.category),
         policy,
         global: policy === 'comply' && GLOBAL_COMPLY_RE.test(clause.text) ? true : undefined,
+        // 4.61 载体与条款编号随条目落库：验收侧据此判「该要求是否可响应」，
+        // 审计侧据此回答「哪类载体贡献了多少条目/多少误判」（旧实现只剩一个渲染好的
+        // location 字符串，无法做任何结构化判断）
+        carrier: clause.carrier,
+        clauseNo: clause.clauseNo,
       });
     });
   });
@@ -1029,7 +1069,18 @@ export async function extractTenderRequirements(
  * 这两类是「部分响应/零命中」误报的主要成分，实机两份真实文档各 1 条空锚点 blocker 实录）；
  * 提示词是判定输入的一部分（锚点集由 coreTerms 生成），故属判定口径变更 → 旧提取池失效重算。
  */
-const TENDER_REQUIREMENTS_CACHE_VERSION = 'tender-requirements-extraction-v10';
+/**
+ * v11（4.61）：**载体闸**——只有收件人为投标人/投标文件的资料（招标正文 / 答疑澄清 / 评标办法）
+ * 产生要求条款；图纸设计说明、清单、规范在切分层即被挡在池外（其约束值走 `DesignFact` 权威层）。
+ *
+ * 这是**判定输入**变更（进池集合变了），故必须失效旧池。实测缺陷（合工大）：`stageUnderstanding`
+ * 用路径子串选文件，把「抗震支架电答疑修改0722/」这个**图纸目录**（目录名含"答疑"）下的整批
+ * CAD 文本当成答疑条款，1076 条要求里 262 条永不可响应（其中 69% 是图纸标注残片）。
+ *
+ * 同步变更：`evidenceContentFingerprint` 纳入 `roleId`（载体输入必须进指纹，否则只改分类
+ * 不改内容时旧池被静默复用，本闸等于没生效）。
+ */
+const TENDER_REQUIREMENTS_CACHE_VERSION = 'tender-requirements-extraction-v11';
 
 // 商务域条款排除词表（4.40.0 零商务句根治，取代旧「定性响应句」通道）：丰乐镇与舒城实测均出现
 // 商务条款原文/商务声明句被写入技术标正文——商务与造价条款（金额/利率/时限/计价规则）在判定层
@@ -1114,7 +1165,15 @@ function tenderRequirementsCacheRoot(projectRoot?: string) {
 /** 证据集合指纹：全内容哈希（非 head/tail 抽样）——专业文档条件/证据/数据必须精准，抽样哈希存在漏判变更风险 */
 function evidenceContentFingerprint(evidence: DocumentEvidence[]) {
   return evidence
-    .map(item => ({ filePath: item.filePath || '', sectionTitle: item.sectionTitle || '', contentHash: stableHash(item.content || '') }))
+    .map(item => ({
+      filePath: item.filePath || '',
+      sectionTitle: item.sectionTitle || '',
+      contentHash: stableHash(item.content || ''),
+      // 4.61 载体输入必须进指纹：`roleId` 决定该证据能否产生条款（载体闸），
+      // 而它不在内容哈希里——只改文件分类（roleId 修正、重分类）而内容不变时，
+      // 旧池会被静默复用，载体闸等于没生效。实测教训见 v10 注释同款「口径变更须失效缓存」。
+      roleId: item.roleId || '',
+    }))
     .sort((a, b) => `${a.filePath}|${a.sectionTitle}`.localeCompare(`${b.filePath}|${b.sectionTitle}`));
 }
 

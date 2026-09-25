@@ -2355,7 +2355,9 @@ export async function closedLoopDensityIssues(markdown: string): Promise<Validat
   const { closedLoopBlocks } = await fiveElementBlockStats(markdown);
   const target = Math.max(6, Math.ceil(documentTextLength(markdown) / 1500));
   if (closedLoopBlocks >= target) return [];
-  return [{ level: 'warning', message: `可落地性闭环句式密度不足：全文 ${closedLoopBlocks} 段完整闭环句式，未达每 1500 字 1 段（目标 ${target} 段）`, suggestion: '在措施类段落中补齐“责任岗位 + 检查频次 + 整改闭环”三要素齐全的闭环表述：同一自然段内同时出现岗位（如项目经理/质检员/安全员）、频次（每日/每周/不少于X次）与闭环（整改/复查/销项）；三要素分散融入叙述，不得以固定句模复读。' }];
+  // 4.60 I2-c 断源：本 detector 的 suggestion 是修复轮的输入——旧文案直接列出「整改/复查/销项」三词，
+  // 等于指示修复轮把套语写回去（检测端成了复读的供给端）。现改为要求补实质动作，不列词面。
+  return [{ level: 'warning', message: `可落地性闭环句式密度不足：全文 ${closedLoopBlocks} 段完整闭环句式，未达每 1500 字 1 段（目标 ${target} 段）`, suggestion: '在措施类段落中补写可核查的管控过程：写清执行主体（谁做）、检查频次（多久一次）、达标标准，以及发现问题后的处置与验证做法（复测、送检、旁站、检验批验收、资料归档等）与留存记录；不要用“复查销项”“整改销项”一类零信息尾词收句，同一收尾表达全文不得超过 4 次。' }];
 }
 
 export function managementMeasureNumberIssues(chapters: Array<Pick<DocumentDraftChapter, 'title' | 'content'>>, analyses?: Map<string, ProfessionalDepthAnalysis>): ValidationIssue[] {

@@ -96,12 +96,12 @@ describe('envRegistry 泄漏防护', () => {
     }
   });
 
-  it('注册表覆盖 64 项且无重名（19 removed + 23 merged + 22 managed；s1-slim 随全维度评审删除移除 QINGTIAN_REVIEW_ROUNDS）', () => {
+  it('注册表覆盖 65 项且无重名（19 removed + 23 merged + 23 managed；4.61 新增 DOCUMENT_TRUTH_CALIBER_DIAG 输入诊断）', () => {
     const names = DOCUMENT_ENV_REGISTRY.map(entry => entry.name);
     expect(new Set(names).size).toBe(names.length);
-    expect(DOCUMENT_ENV_REGISTRY).toHaveLength(64);
+    expect(DOCUMENT_ENV_REGISTRY).toHaveLength(65);
     expect(DOCUMENT_ENV_REGISTRY.filter(entry => entry.status === 'removed')).toHaveLength(19);
     expect(DOCUMENT_ENV_REGISTRY.filter(entry => entry.status === 'merged')).toHaveLength(23);
-    expect(DOCUMENT_ENV_REGISTRY.filter(entry => entry.status === 'managed')).toHaveLength(22);
+    expect(DOCUMENT_ENV_REGISTRY.filter(entry => entry.status === 'managed')).toHaveLength(23);
   });
 });

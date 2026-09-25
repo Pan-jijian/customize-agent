@@ -23,7 +23,7 @@ import { difficultyCountermeasureReport, fillerDensityReport, scanTemplatePrefix
 import { missingWorkPackageSkeletonTitles, stripEmptyWorkPackageHeadings, stripTablesInSection, workPackageSkeletonTitles } from './chapterPostProcessing';
 import { DIVISION_SECTION_RE } from './writingSpec';
 import { majorContentGovernanceIssues, perPackageContentElementIssues } from './constructionOrgQualityRules';
-import { flowFormRepairTargets, isStructuralLabelTitle, sentencePatternRepairTargets, skeletonFingerprintRepairTargets, titleRepairTargets } from './templatingGovernance';
+import { flowFormRepairTargets, isStructuralLabelTitle, sentencePatternRepairTargets, sentenceTailRepairTargets, skeletonFingerprintRepairTargets, titleRepairTargets } from './templatingGovernance';
 import { bodyTableDismantleIssue, isBodyFigureForbidden, isBodyTableForbidden, unplannedBodyTableIssue, type BidCompositionSpec } from './bidComposition';
 import { countMarkdownTables, extractGeneratedSections, extractMarkdownTableTextBlocks } from './markdownComposer';
 import { normalizeGeneratedChapterTitle } from './outline';
@@ -431,7 +431,9 @@ export async function repairTemplatingIssues(input: {
     const flowTargets = flowFormRepairTargets(fullMarkdown);
     // C4 D3 句模聚类复读目标：同模式句超量（顺序词链/完成即转入/验收衔接/资料闭环式）逐句差异改写
     // （检测端 sentencePatternRepeatIssues 同源判定——历史缺陷：句模复读无修复目标，裸奔直坠终检）
-    const patternTargets = sentencePatternRepairTargets(fullMarkdown);
+    // 4.60 I2-c 句尾复读目标并入同一通道（检测端 sentenceTailRepeatIssues 同源判定）：
+    // 同一收尾短语超量即逐句定向改写——闭集骨架表（skeletonTargets）无法覆盖未能枚举的复读
+    const patternTargets = [...sentencePatternRepairTargets(fullMarkdown), ...sentenceTailRepairTargets(fullMarkdown)];
     const titleTargets = titleRepairTargets(fullMarkdown);
     // D-T7 ①：模板化前缀句（「本节/本章将…」元话语导语）修复目标——检测端 formalStyleIssues
     // 同源判定（scanTemplatePrefixSentences 句池 + isTemplatePrefixSentence 词首词表）
@@ -587,7 +589,7 @@ export async function repairTemplatingIssues(input: {
       recheck: async (content) => {
         const recheckFiller = await fillerDensityReport(content);
         const recheckDifficulty = await difficultyCountermeasureReport(content);
-        return [recheckFiller.ratio, recheckDifficulty.ratio, skeletonFingerprintRepairTargets(content).length, flowFormRepairTargets(content).length, titleRepairTargets(content).length, scanTemplatePrefixSentences(content).length, sentencePatternRepairTargets(content).length];
+        return [recheckFiller.ratio, recheckDifficulty.ratio, skeletonFingerprintRepairTargets(content).length, flowFormRepairTargets(content).length, titleRepairTargets(content).length, scanTemplatePrefixSentences(content).length, sentencePatternRepairTargets(content).length, sentenceTailRepairTargets(content).length];
       },
       // F2 双指标抵偿 + 治理指标不回退：套话占比上升 >1% 且重难点双达标未提升 >1% → 回滚；
       // 骨架指纹/工序形式/标题缺陷/模板化前缀计数总数上升 → 回滚（改写引入新模板化残留不可接受，前后同口径计数）
@@ -618,13 +620,17 @@ export async function repairTemplatingIssues(input: {
     const finalSkeletons = skeletonFingerprintRepairTargets(finalMarkdown);
     const finalFlows = flowFormRepairTargets(finalMarkdown);
     const finalPatterns = sentencePatternRepairTargets(finalMarkdown);
+    // 4.60 I2-c 句尾复读残留（开集判据）与句模复读同口径复扫——历史缺陷：新增检测器未接入收口复扫，
+    // 修复结果在收口报告里不可见（"改了没有、改净没有"不可答）
+    const finalTails = sentenceTailRepairTargets(finalMarkdown);
     const finalTitles = titleRepairTargets(finalMarkdown);
     const finalPrefixes = scanTemplatePrefixSentences(finalMarkdown);
-    const converged = finalFiller.ratio < 0.1 && (!finalDifficulty.heavyTemplated || finalDifficulty.countermeasures === 0) && finalSkeletons.length === 0 && finalFlows.length === 0 && finalPatterns.length === 0 && finalTitles.length === 0 && finalPrefixes.length === 0;
+    const converged = finalFiller.ratio < 0.1 && (!finalDifficulty.heavyTemplated || finalDifficulty.countermeasures === 0) && finalSkeletons.length === 0 && finalFlows.length === 0 && finalPatterns.length === 0 && finalTails.length === 0 && finalTitles.length === 0 && finalPrefixes.length === 0;
     const templateResidue = [
       finalSkeletons.length > 0 ? `骨架指纹 ${[...new Set(finalSkeletons.map(item => `${item.fingerprintLabel}×${item.totalCount}`))].join('、')}` : '',
       finalFlows.length > 0 ? `工序形式相邻重复 ${finalFlows.length} 处` : '',
       finalPatterns.length > 0 ? `句模复读 ${[...new Set(finalPatterns.map(item => `${item.patternLabel}×${item.totalCount}`))].join('、')}` : '',
+      finalTails.length > 0 ? `句尾复读 ${[...new Set(finalTails.map(item => `${item.patternLabel}×${item.totalCount}`))].join('、')}` : '',
       finalTitles.length > 0 ? `标题缺陷 ${finalTitles.length} 处` : '',
       finalPrefixes.length > 0 ? `模板化前缀句 ${finalPrefixes.length} 处` : '',
     ].filter(Boolean).join('；');

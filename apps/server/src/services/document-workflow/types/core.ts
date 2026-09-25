@@ -425,7 +425,22 @@ export interface TenderRequirementEntry {
   policy: TenderRequirementPolicy;
   /** 全文档性约束（如「以开工令为准」的禁编日期）：除章节分配外同时进入全局写作口径区 */
   global?: boolean;
+  /**
+   * 4.61 载体角色（来源文档在「收件人」维度上的身份）。
+   *
+   * 只可能是 `tender-clause` / `clarification` / `evaluation-rule` 三者之一——
+   * 非义务载体（图纸设计说明、清单、规范）在切分层就被挡在池外，其约束值走权威层。
+   * 保留该字段是为了**审计可回答**「哪类载体贡献了多少条目」，以及写作注入时按载体分级
+   *（答疑 > 澄清 > 招标正文）。
+   */
+  carrier?: TenderRequirementCarrier;
+  /** 条款编号（文档自身编号体系）：**可响应性判定的前置**——无编号体系不产生义务 */
+  clauseNo?: string;
 }
+
+/** 义务载体枚举（与 knowledge 包 `AuthorityCarrier` 的义务子集一一对应，此处独立声明
+ * 以免 apps/server 的类型面直接依赖包内联合类型的细分；两侧由 resolveCarrier 单源产出） */
+export type TenderRequirementCarrier = 'tender-clause' | 'clarification' | 'evaluation-rule';
 
 /** 被排除条款记录（reason：non_requirement=目录/导语/说明；out_of_scope=投标程序/资格/评标规则/纪律；
  * no_value=条款值为「无」；duplicate=重复文本合并；commercial_scope=商务与造价条款（付款/保证金/结算/

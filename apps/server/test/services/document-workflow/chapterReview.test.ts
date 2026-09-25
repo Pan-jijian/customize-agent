@@ -12,9 +12,13 @@ vi.mock('@/services/document-workflow/llmClient', async (importOriginal) => {
   return { ...actual, callDocumentLlm: callDocumentLlmMock, callDocumentLlmJson: callDocumentLlmJsonMock };
 });
 
-vi.mock('@customize-agent/knowledge', () => {
+vi.mock('@customize-agent/knowledge', async (importOriginal) => {
+  // 4.61：本包新增了权威模型导出（carrierStrength/sourcePriorityOf 等），
+  // 全量替换式 mock 会让这些导出变 undefined 并炸在消费端。改为**透传真实实现**、
+  // 只覆盖需要替身的嵌入 provider —— 后续包内新增导出不再需要逐个补 mock。
+  const actual = await importOriginal<typeof import('@customize-agent/knowledge')>();
   class LocalTransformersEmbeddingProvider {}
-  return { LocalTransformersEmbeddingProvider };
+  return { ...actual, LocalTransformersEmbeddingProvider };
 });
 
 /** 商务行语义 gate 注入的确定性嵌入：商务变体词面（材料价格/商务报价）→ [1,0]；允许事实词面（合同估算价/最高投标限价）→ [0,1] */

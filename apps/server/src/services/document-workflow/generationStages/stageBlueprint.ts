@@ -3,6 +3,7 @@
  * P1 六阶段拆分（方案 5.1）：由 documentGenerator.generateDocumentDraft 阶段 3 代码块机械搬迁而来，
  * 变量读写经 session 子对象显式化，业务生成语义与原巨型函数逐字一致（行为保持）。
  */
+import type { CadEntity } from '@customize-agent/knowledge';
 import type { GenerationSession } from './generationSession';
 import { buildIntegratedBlueprint, estimateChapterMinFeasibleWords, findBlueprintChapter, renderBasicFactsForBlueprint, resolveBillOfQuantities, saveBlueprintAsset } from '../integratedBlueprint';
 import { reanchorChapterTargetsByFeasibility } from '../budget';
@@ -136,6 +137,22 @@ export async function stageBlueprint(session: GenerationSession): Promise<void> 
     session.blueprint.drawingFactLock = buildDrawingFactLock({
       evidence: session.understanding.allEvidence,
       fileProcessingByPath: session.understanding.fileProcessingByPath,
+      /**
+       * 4.61 结构化实体接入：图纸事实**优先**从 CAD 实体图推导（对象-属性-值-单位绑定
+       * 来自尺寸实体的被标注两点 + 图层语义 + 就近文字），而不是对拍平文本做结构恢复式正则。
+       *
+       * 旧链路实测代价（`factGovernance.extractDrawingAnnotationFacts`）：基坑深度靠
+       * 「找离标签最近的数 + 回看上一行是不是纯数字」来猜——因为尺寸实体在落库前就被拍平了。
+       * 实体图现在存在 `kb_material_entities`（解析时写入），这里直接读。
+       * 旧库（未重索引）读不到实体时自动回退行级提取，行为不变。
+       */
+      loadCadEntities: (filePath: string) => {
+        const project = session.understanding.project as unknown as {
+          loadMaterialEntities?: (p: string, kind?: string) => Array<{ payload: unknown }>;
+        };
+        const rows = project.loadMaterialEntities?.(filePath, 'cad-entity') ?? [];
+        return rows.map(row => row.payload as CadEntity);
+      },
     });
     const drawingLock = session.blueprint.drawingFactLock;
     if (drawingLock && drawingLock.usableDrawings > 0) {

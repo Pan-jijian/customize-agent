@@ -58,28 +58,44 @@ describe('Y1 constructionOrgChapterRulePrompt / BlueprintRuleLines', () => {
     expect(lines[2]).toContain('每句措施要能回答');
   });
 
-  it('质量语境 → 注入质量闭环提示词', () => {
-    expect(constructionOrgChapterRulePrompt(tplChapter('质量管理'))).toContain('自检—互检—交接检');
+  // 4.60 I2-c 断源：闭环提示词由**固定链条字面**（「自检—互检—交接检…」）改为**语义描述**。
+  // 旧文案把整条链逐字交给模型，模型忠实照写 ⇒ 全文同一串套语（实测 832 句中 42 句以「复查销项」收尾）。
+  // 现断言改为锁「语义要求仍在」而非「词面仍在」——提示词必须仍然要求各环节，但不得再给出成串模板。
+  it('质量语境 → 注入质量闭环提示词（语义要求，非固定链条）', () => {
+    const prompt = constructionOrgChapterRulePrompt(tplChapter('质量管理'));
+    expect(prompt).toContain('质量类内容须写清');
+    expect(prompt).toContain('不要把环节名称罗列成串');
+    expect(prompt, '固定链条文案已删除（示例即模板化源头）').not.toContain('自检—互检—交接检');
   });
 
-  it('安全语境 → 注入安全闭环提示词', () => {
-    expect(constructionOrgChapterRulePrompt(tplChapter('安全管理'))).toContain('风险辨识—专项交底');
+  it('安全语境 → 注入安全闭环提示词（语义要求，非固定链条）', () => {
+    const prompt = constructionOrgChapterRulePrompt(tplChapter('安全管理'));
+    expect(prompt).toContain('安全类内容须写清');
+    expect(prompt).not.toContain('风险辨识—专项交底');
   });
 
-  it('进度语境 → 注入进度闭环提示词', () => {
-    expect(constructionOrgChapterRulePrompt(tplChapter('施工组织设计', ['施工进度计划']))).toContain('计划分解—日/周检查');
+  it('进度语境 → 注入进度闭环提示词（语义要求，非固定链条）', () => {
+    const prompt = constructionOrgChapterRulePrompt(tplChapter('施工组织设计', ['施工进度计划']));
+    expect(prompt).toContain('进度类内容须写清');
+    expect(prompt).not.toContain('计划分解—日/周检查');
   });
 
-  it('文明语境 → 注入环保闭环提示词', () => {
-    expect(constructionOrgChapterRulePrompt(tplChapter('文明施工'))).toContain('监测—预警—联动处置');
+  it('文明语境 → 注入环保闭环提示词（语义要求，非固定链条）', () => {
+    const prompt = constructionOrgChapterRulePrompt(tplChapter('文明施工'));
+    expect(prompt).toContain('文明环保类内容须写清');
+    expect(prompt).not.toContain('监测—预警—联动处置');
   });
 
-  it('劳务语境 → 注入工资闭环提示词', () => {
-    expect(constructionOrgChapterRulePrompt(tplChapter('施工组织设计', ['劳务实名制']))).toContain('实名登记—考勤');
+  it('劳务语境 → 注入工资闭环提示词（语义要求，非固定链条）', () => {
+    const prompt = constructionOrgChapterRulePrompt(tplChapter('施工组织设计', ['劳务实名制']));
+    expect(prompt).toContain('工资保障类内容须写清');
+    expect(prompt).not.toContain('实名登记—考勤');
   });
 
-  it('应急语境 → 注入应急闭环提示词', () => {
-    expect(constructionOrgChapterRulePrompt(tplChapter('施工组织设计', ['应急预案']))).toContain('发现险情—警戒疏散');
+  it('应急语境 → 注入应急闭环提示词（语义要求，非固定链条）', () => {
+    const prompt = constructionOrgChapterRulePrompt(tplChapter('施工组织设计', ['应急预案']));
+    expect(prompt).toContain('应急类内容须写清');
+    expect(prompt).not.toContain('发现险情—警戒疏散');
   });
 
   it('sections 参与语境判定（标题无语境词、sections 命中）', () => {
@@ -201,9 +217,10 @@ describe('Y3 constructionOrgGenericLanguageIssues', () => {
     expect(issues).toHaveLength(2);
   });
 
-  it('suggestion 指向「责任岗位+执行动作」重写', async () => {
+  it('suggestion 指向「谁来做+做什么」五问重写', async () => {
     const issues = await constructionOrgGenericLanguageIssues([draftChapter('施工组织设计', '我们精心组织施工确保项目顺利推进。')], embedMock);
-    expect(issues[0].suggestion).toContain('责任岗位');
+    // 4.60 I2-c：suggestion 去固定字词表（原「责任岗位+执行动作+量化标准+检查频次+整改时限+复查销项」）
+    expect(issues[0].suggestion).toContain('谁来做');
   });
 
   it('空 content → 无 issue', async () => {
@@ -225,24 +242,32 @@ describe('Y4 constructionOrgControlLoopIssues', () => {
     expect(issues[0].level).toBe('warning');
   });
 
-  it('质量闭环缺 3 词 → 报（全要素判定，message 列缺失清单）', () => {
+  it('质量闭环缺 3 环节 → 报（全要素判定，message 列缺失环节**概念名**）', () => {
     const issues = constructionOrgControlLoopIssues([draftChapter('质量管理', '已完成自检互检交接检。')]);
     expect(issues).toHaveLength(1);
-    expect(issues[0].message).toContain('整改');
-    expect(issues[0].message).toContain('复查');
-    expect(issues[0].message).toContain('归档');
+    // 4.60 I2-c：缺失清单由**词面**改为**概念名**（原为 整改 / 复查 / 归档 三个字面）
+    expect(issues[0].message).toContain('问题整改');
+    expect(issues[0].message).toContain('整改验证');
+    expect(issues[0].message).toContain('资料归档');
   });
 
-  it('质量闭环缺 1 词 → 报（D-T2 主责章全要素判定：缺任一即不成链）', () => {
+  it('质量闭环缺 1 环节 → 报（D-T2 主责章全要素判定：缺任一即不成链）', () => {
     const issues = constructionOrgControlLoopIssues([draftChapter('质量管理', '自检互检交接检完成，问题整改后归档。')]);
     expect(issues).toHaveLength(1);
-    expect(issues[0].message).toContain('复查');
+    expect(issues[0].message).toContain('整改验证');
   });
 
-  it('安全闭环缺 6 词 → warning（含提示词）', () => {
+  it('质量闭环环节按**近义**判定：写「复测合格」亦成链（旧实现只认字面「复查」）', () => {
+    // 断源的对侧保证：不再要求模型写回固定字词，写实质同样通过
+    const content = '各班组完成自检，工序间互检并办理交接检，发现问题当日返工，复测合格后由资料员归档。';
+    expect(constructionOrgControlLoopIssues([draftChapter('质量管理', content)])).toEqual([]);
+  });
+
+  it('安全闭环缺环节 → warning（suggestion 为语义描述，非固定链条）', () => {
     const issues = constructionOrgControlLoopIssues([draftChapter('安全管理', '正文')]);
     expect(issues[0].message).toContain('安全闭环');
-    expect(issues[0].suggestion).toContain('风险辨识');
+    expect(issues[0].suggestion).toContain('风险识别');
+    expect(issues[0].suggestion).not.toContain('复查销项');
   });
 
   it('进度闭环缺 4 词 → 报（全要素判定）', () => {
@@ -251,11 +276,11 @@ describe('Y4 constructionOrgControlLoopIssues', () => {
     expect(issues[0].message).toContain('进度闭环');
   });
 
-  it('进度闭环缺 2 词 → 报（D-T2 全要素判定）', () => {
+  it('进度闭环缺 2 环节 → 报（D-T2 全要素判定）', () => {
     const issues = constructionOrgControlLoopIssues([draftChapter('进度管理', '按计划定期检查进度，发现滞后及时纠偏。')]);
     expect(issues).toHaveLength(1);
-    expect(issues[0].message).toContain('偏差');
-    expect(issues[0].message).toContain('复核');
+    expect(issues[0].message).toContain('计划分解');
+    expect(issues[0].message).toContain('节点复核');
   });
 
   it('环保闭环缺 2 词 → 报（4 词 ceil=2）', () => {
@@ -272,8 +297,12 @@ describe('Y4 constructionOrgControlLoopIssues', () => {
     expect(constructionOrgControlLoopIssues([draftChapter('劳务管理', '正文')])[0].message).toContain('工资闭环');
   });
 
-  it('应急闭环缺词 → warning', () => {
-    const issues = constructionOrgControlLoopIssues([draftChapter('应急管理', '发现险情后立即警戒处置。')]);
+  it('应急闭环：概念组粒度下「发现险情后立即警戒处置」= 5 环节缺 2（救援上报 / 复盘整改），未达半数线不报', () => {
+    // 4.60 I2-c 行为变更：旧口径 6 个**词面**缺 3（疏散/上报/复盘）≥ ceil(6/2)=3 即报；
+    // 概念组把「警戒」与「疏散」并为「警戒疏散」一个环节后缺 2 < ceil(5/2)=3 → 不报。
+    // 这是有意收窄（宽松链本不消费修复轮），不是漏判：缺 3 个及以上环节仍报。
+    expect(constructionOrgControlLoopIssues([draftChapter('应急管理', '发现险情后立即警戒处置。')])).toEqual([]);
+    const issues = constructionOrgControlLoopIssues([draftChapter('应急管理', '已编制应急预案。')]);
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('应急闭环');
   });
@@ -332,12 +361,14 @@ describe('Y4 constructionOrgControlLoopIssues', () => {
     expect(constructionOrgControlLoopIssues([draftChapter('质量安全管理', '')])).toHaveLength(2);
   });
 
-  it('content 含 token 检查用 includes（缺 3 词报出缺失清单）', () => {
+  it('content 按**概念组正则**判定（缺 3 环节报出缺失清单）', () => {
+    // 4.60 I2-c：由 `content.includes(词面)` 改为概念组正则——本用例原锁 includes 语义，
+    // 现锁概念名清单（「复查」→「整改验证」、「归档」→「资料归档」）
     const issues = constructionOrgControlLoopIssues([draftChapter('质量管理', '执行自检互检，问题整改。')]);
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain('交接检');
-    expect(issues[0].message).toContain('复查');
-    expect(issues[0].message).toContain('归档');
+    expect(issues[0].message).toContain('整改验证');
+    expect(issues[0].message).toContain('资料归档');
   });
 });
 

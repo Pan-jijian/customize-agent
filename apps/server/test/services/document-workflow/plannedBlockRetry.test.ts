@@ -214,18 +214,26 @@ describe('buildPlannedChapterContent（块字数分层验收 + 结构硬门 + �
     expect(result?.allSucceeded).toBe(true);
     expect(result?.failedBlocks).toEqual([]);
     expect(llmMock).toHaveBeenCalledTimes(2);
-    // 首轮仍走压缩阻断路径（容差不提前到首轮）
+    // 首轮仍走压缩阻断路径（该例为**超产线之上、容差线之内**的边界样本）
     expect(llmMock.mock.calls[1][1]).toContain('【上一轮篇幅超限】');
   });
 
-  it('4.51 容差不提前：首轮即微超合同线（1.15~1.2×）→ 仍压缩阻断重写，二轮容差放行', async () => {
-    // 581 字（1.16×）两轮不变：首轮不因末轮容差而放行（仍携压缩指令重写）；二轮同一产出落在
-    // 容差线内 → 接受成稿（不判块失败、不进隔离重写）
+  /**
+   * 4.60 I2-c 口径变更（**用户实测指出**）：*「我写好了，但是我写多了，就报错了」*——这是设计缺陷。
+   *
+   * 旧口径「容差不提前」＝ 首轮微超（1.15~1.2×）也退回重写：实测块产出比 `p75 = 1.17` 而首轮
+   * 超产线 `1.15` → 约 1/4 的块**因为「写多了」被重写**；生产轮次的重试原因分布中超产占 3/26。
+   * 而**超产本是章/文档级问题**（章预算账 + 篇幅压缩轮已覆盖），块级退回重写的代价是白烧一次
+   * 调用、内容还可能变差，收益为零。这与 R0-a 已确立的「丢内容严格劣于内容有缺陷」同一方向。
+   *
+   * 现：容差线**首轮起即生效**（1.4×）→ 1.16× 首轮直接成稿，**不再重写**。
+   */
+  it('4.60 I2-c 容差首轮即生效：首轮微超（1.16×）直接成稿，不因「写多了」重写', async () => {
     llmMock.mockResolvedValue(passingContent([H4A, H4B, H4C, H4D], 130));
     const result = await buildPlannedChapterContent(makeInput(), makeStructure());
     expect(result?.allSucceeded).toBe(true);
-    expect(llmMock).toHaveBeenCalledTimes(2);
-    expect(llmMock.mock.calls[1][1]).toContain('【上一轮篇幅超限】');
+    expect(llmMock, '首轮微超不得触发重写').toHaveBeenCalledTimes(1);
+    expect(result?.markdown).toContain(H4D);
   });
 
   it('4.56 容差放宽到 1.4×：末轮 1.21× 放行（超产是章/文档级问题，不在块级丢正文）', async () => {

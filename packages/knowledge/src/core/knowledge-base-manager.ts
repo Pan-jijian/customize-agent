@@ -388,7 +388,7 @@ export class KnowledgeBaseManager {
         category: file.category,
         format: file.format,
         collectionName,
-      });
+      }, extraction.structured); // 4.61：结构化实体与切片同事务落库（渲染与源数据原子一致）
       this.noteCollectionName(collectionName);
       vectorRelativePaths.push(file.relativePath);
       changedCollectionNames.add(collectionName);
@@ -627,6 +627,26 @@ export class KnowledgeBaseManager {
       relationships: this.store.listRelationships(normalized),
       tags: this.store.listTags(normalized),
     };
+  }
+
+  /**
+   * 结构化实体读取（4.61）：**下游要结构就读这里，不要对切片文本做结构恢复式正则**。
+   *
+   * 旧链路的代价实测（`factGovernance.extractDrawingAnnotationFacts`）：基坑深度靠
+   * "找离标签最近的数 + 回看上一行是不是纯数字"来猜——因为解析出的尺寸实体（值 + 被标注两点）
+   * 在落库前就被拍平了。现在实体图在 `kb_material_entities` 里，直接读即可。
+   *
+   * 返回 `CadEntity[]`（按类型过滤）；无该文件或无实体返回空数组（不抛，调用侧不必防御）。
+   */
+  loadMaterialEntities(relativePath: string, entityKind?: string, limit?: number): Array<{ entityKind: string; entityKey?: string; payload: unknown }> {
+    const normalized = this.normalizeRelativePath(relativePath);
+    try {
+      return this.store.loadMaterialEntities(normalized, entityKind, limit);
+    } catch (error) {
+      // 旧库尚无该表时不阻断（表由 initTables 建；此处只防跨版本读）
+      console.error('[kb] loadMaterialEntities 失败', error);
+      return [];
+    }
   }
 
   async reindexFile(relativePath: string, options: { onProgress?: (progress: KnowledgeIndexProgress) => void; vectorMode?: 'sync' | 'defer' } = {}): Promise<DiffResult> {

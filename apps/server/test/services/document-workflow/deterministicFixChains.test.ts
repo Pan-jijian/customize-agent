@@ -119,6 +119,8 @@ describe('SURFACE_FIX_STEPS 链顺序锁死（P10 单源）', () => {
       // 4.36.2 复查修正：图集引用清洗补接 round-2 链（stage5 后 LLM 补写轮可再引入）
       'atlas-reference',
       'tertiary-h4-dedupe',
+      // 4.60 I2-c 标准引用残缺确定性兜底（编制依据长列举自吞噬；只插字符不改语义，置于骨架/工序/标题三器之前）
+      'standard-citation-truncation',
       'internal-term-heading',
       // WS4 骨架指纹确定性兜底（round-2 链末尾、终检前最后一道）
       'skeleton-fingerprint-variants',

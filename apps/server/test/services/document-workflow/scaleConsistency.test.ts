@@ -18,9 +18,13 @@ import { buildCanonicalFactModel, detectNumericScopeConflicts } from '@/services
 import { applyDeterministicConsistencyFixesToMarkdown, crossChapterConsistencyIssues } from '@/services/document-workflow/qualityValidation';
 import type { CanonicalFact, DocumentFact } from '@/services/document-workflow/types';
 
-vi.mock('@customize-agent/knowledge', () => {
+vi.mock('@customize-agent/knowledge', async (importOriginal) => {
+  // 4.61：本包新增了权威模型导出（carrierStrength/sourcePriorityOf 等），
+  // 全量替换式 mock 会让这些导出变 undefined 并炸在消费端。改为**透传真实实现**、
+  // 只覆盖需要替身的嵌入 provider —— 后续包内新增导出不再需要逐个补 mock。
+  const actual = await importOriginal<typeof import('@customize-agent/knowledge')>();
   class LocalTransformersEmbeddingProvider {}
-  return { LocalTransformersEmbeddingProvider };
+  return { ...actual, LocalTransformersEmbeddingProvider };
 });
 
 const MIXED_SCALE = '项目总占地面积约10970平方米，单体建筑面积28570.36平方米（其中地上24783.39平方米、地下3786.97平方米）';

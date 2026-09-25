@@ -11,6 +11,20 @@ export { ContentExtractor, type ExtractionResult } from './extraction/content-ex
 export { detectSmartTableHeader, locateTableColumns, scoreTableHeaderRow, type SmartTableHeader } from './extraction/table-header-detect.js';
 export { CommandExternalExtractor, ExternalExtractorRegistry, type CommandExternalExtractorOptions, type ExternalExtractionResult, type ExternalExtractor, type ExternalExtractorCapability } from './extraction/external-extractor.js';
 
+// 4.61 资料知识层：结构化对象一等公民（见 materials/types.ts 的三条第一性原理）
+export type { FactDomain, AuthorityCarrier, FactRelation, SourceAnchor, DesignFact, BidObligation } from './materials/types.js';
+export { AUTHORITY_LATTICE, authorityRank } from './materials/types.js';
+export type { CadEntity, CadEntityType, CadDimensionGeometry, CadBindingQuality, CadPoint } from './materials/cad-entities.js';
+export { assignCadSheets, buildCadEntities, cadBindingQuality, parseDxfPairEntities } from './materials/cad-entities.js';
+export type { TableBlock, TableRow, TableColumnRoles } from './materials/table-model.js';
+export { detectHeaderRows, expandColumnSpans, flattenHeaderPath, normalizeTableBlock, parseFeatureCell, resolveTableColumnRoles } from './materials/table-model.js';
+export type { ClauseBlock, ClauseNumberingKind } from './materials/clause-model.js';
+export { matchClauseNumber, renderClauseText, splitClauseBlocks } from './materials/clause-model.js';
+export type { NormalizeResult, BindingFailure, ParsedValue } from './materials/normalize.js';
+export { parseClauseFacts, clauseToObjects, dimensionFacts, annotationFacts, tableToFacts, factKey } from './materials/normalize.js';
+export type { MaterialKindLike } from './materials/authority.js';
+export { carrierOfSource, carrierStrength, compareAuthority, compareCarrierStrength, describeLattice, domainForAttribute, domainOfAttribute, legacyPriorityOf, refineEvaluationCarrier, resolveCarrier, sourcePriorityOf } from './materials/authority.js';
+
 export { ChangeTracker } from './core/change-tracker.js';
 export { loadBetterSqlite3, type SqliteDatabase } from './core/sqlite-loader.js';
 export { KnowledgeFileScanner, type DiskFileStat } from './core/file-scanner.js';

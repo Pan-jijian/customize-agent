@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 
-vi.mock('@customize-agent/knowledge', () => {
+vi.mock('@customize-agent/knowledge', async (importOriginal) => {
+  // 4.61：本包新增了权威模型导出（carrierStrength/sourcePriorityOf 等），
+  // 全量替换式 mock 会让这些导出变 undefined 并炸在消费端。改为**透传真实实现**、
+  // 只覆盖需要替身的嵌入 provider —— 后续包内新增导出不再需要逐个补 mock。
+  const actual = await importOriginal<typeof import('@customize-agent/knowledge')>();
   class LocalTransformersEmbeddingProvider {}
-  return { LocalTransformersEmbeddingProvider };
+  return { ...actual, LocalTransformersEmbeddingProvider };
 });
 
 import { constructionOrgProfessionalAuditIssues, duplicateParagraphIssues, fillerParagraphIssues, fillerSentenceTargets, processParameterDensityIssues, sectionCardStructureIssues, stripZeroInfoSloganSentences, tableCompletenessIssues } from '@/services/document-workflow/constructionOrgAudit';

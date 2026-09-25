@@ -1047,6 +1047,129 @@ export function sentencePatternRepairTargets(markdown: string): SentencePatternR
 }
 
 /**
+ * 4.60 I2-c 句尾复读——**开集判据**（不看词表，只数形状）。
+ *
+ * ## 为什么必须有它
+ *
+ * 用户实测指出：正文里「复查销项」出现 130 处、几乎每节一次。查证时发现**所有既有复读检测器
+ * 都报"通过"**：
+ * - 套话句占比 0.1%（达标线 ≤10%）——语义原型不含此族；
+ * - 句级复读核对通过——130 句**逐字各不相同**（对象、岗位、频次都换了）；
+ * - 模板化链尾通过——只覆盖「先…再…随后…最后」顺序词链与零信息前缀句。
+ *
+ * 唯一在做同类事的 `skeletonFingerprintIssues` 用的是**闭集词表** `SKELETON_FINGERPRINTS`
+ *（手工枚举 5 条骨架）——「复查销项」不在表里，130 次照过。**闭集必然漏判**：
+ * 能枚举的复读不是问题，能复读的枚举不完。
+ *
+ * 开集判据选**句尾**作为观测面，理由是可测的：复读句每次换的是内容（对象/岗位/频次），
+ * 唯一不变的是**收尾那个短语**——它是"闭环"概念的套话外壳，自身不含信息。实测该口径在
+ * `doc-1790192978315-5e3bbdd6` 上：832 句中 42 句以「复查销项」收尾、18 句「不予调整」、
+ * 15 句「复验销项」（同文档独立方法互证）。
+ *
+ * ## 阈值标定（149 份归档语料，未干预样本）
+ *
+ * ```
+ * 句尾 4 字最高复读次数：p50=20 p75=33 p90=50 p95=74 max=117
+ * ```
+ *
+ * 复读最严重的 6 份，头号句尾**全都是**「复查销项」（117/111/108/99/87/86 次）。
+ * 即语料的**中位数**文档都有某个 4 字句尾重复 20 次——这不是"偶发"，是系统性形态。
+ * 故容忍线不取语料分位（取 p50 等于承认病态为常态），而取**正常写作的期望值 4 次**
+ *（同一收尾短语在全文中出现 5 次以上，任何人工写作都不会如此），并与写作侧禁令同值
+ *（`TENDER_BID_WRITING_RULES`「同一收尾表达全文不得超过 4 次」）——写作口径与检测口径同源，
+ * 避免重演历史自锁：写作要求"写得越合规"、检测判定"越合规越模板化"。
+ */
+export const SENTENCE_TAIL_LENGTH = 4;
+
+/** 同一句尾全篇允许次数（写作侧禁令同值）；超出且 >SENTENCE_TAIL_BLOCKER_COUNT 即阻断导出 */
+export const SENTENCE_TAIL_CAP = 4;
+
+/** 阻断线：超过此数说明复读已成型（语料 p50 为 20，本线留出 3 倍余量再阻断） */
+export const SENTENCE_TAIL_BLOCKER_COUNT = 12;
+
+/** 句尾提取：仅取「汉字串 + 可选句末标点」结尾的句子——以数字/单位/英文收尾的句子是参数句，
+ * 不属套语尾巴（否则「压实度不低于95%」会被算成"不低于"×N 的伪复读）。 */
+function sentenceTailOf(sentence: string): string | undefined {
+  const match = new RegExp(`([\\u4e00-\\u9fa5]{${SENTENCE_TAIL_LENGTH}})[。！？；]?$`, 'u').exec(sentence);
+  return match?.[1];
+}
+
+export interface SentenceTailRepeatHit {
+  /** 复读的收尾短语（4 个汉字） */
+  tail: string;
+  /** 全篇出现次数 */
+  count: number;
+  /** 命中句（按出现顺序，供修复锚点定位） */
+  sentences: string[];
+}
+
+/** 句尾复读全量统计（检测 / 修复目标 / 报告同源）；按次数降序，仅返回超容忍线者。 */
+export function sentenceTailRepeatHits(markdown: string): SentenceTailRepeatHit[] {
+  const byTail = new Map<string, string[]>();
+  for (const sentence of sentencePoolOf(markdown)) {
+    const tail = sentenceTailOf(sentence);
+    if (!tail) continue;
+    const list = byTail.get(tail);
+    if (list) list.push(sentence);
+    else byTail.set(tail, [sentence]);
+  }
+  return [...byTail.entries()]
+    .filter(([, sentences]) => sentences.length > SENTENCE_TAIL_CAP)
+    .map(([tail, sentences]) => ({ tail, count: sentences.length, sentences }))
+    .sort((a, b) => b.count - a.count);
+}
+
+/**
+ * 句尾复读检测（终检注册）：同一 4 字句尾全篇 > 容忍线即命中。
+ *
+ * 分级：> `SENTENCE_TAIL_BLOCKER_COUNT` 为 error/blocker（复读已成型，实测语料中位数即 20 次）；
+ * 容忍线之上、阻断线之下为 warning（由修复轮定向改写，不阻断导出——避免长文个别自然重复
+ * 造成"永远过不了"的死锁）。
+ */
+export function sentenceTailRepeatIssues(markdown: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  for (const hit of sentenceTailRepeatHits(markdown)) {
+    const blocker = hit.count > SENTENCE_TAIL_BLOCKER_COUNT;
+    issues.push({
+      level: blocker ? 'error' : 'warning',
+      severity: blocker ? 'blocker' : 'warning',
+      category: 'style',
+      owner: 'llm',
+      repairability: 'llm_repairable',
+      message: `句尾复读：「${hit.tail}」全篇出现 ${hit.count} 处（容忍线 ${SENTENCE_TAIL_CAP} 处）——同一收尾短语被反复用作句尾，属模板化套语尾巴`,
+      suggestion: `保留全文最先出现的 ${SENTENCE_TAIL_CAP} 处，其余 ${hit.count - SENTENCE_TAIL_CAP} 处逐句改写：把该收尾短语替换为**具体动作或结论**（谁在何时做了什么、依据什么判定、留下什么记录），各句改写方向须彼此不同；改写保留原句全部事实（岗位、数值、频次、结论不得丢失），不得换成另一个固定套语。`,
+    });
+  }
+  return issues;
+}
+
+/** 句尾复读修复目标（repairTemplatingIssues 消费；与 sentencePatternRepairTargets 同形，直接并入 patternTargets） */
+export function sentenceTailRepairTargets(markdown: string): SentencePatternRepairTarget[] {
+  const targets: SentencePatternRepairTarget[] = [];
+  const chapters = chapterSlices(markdown);
+  for (const hit of sentenceTailRepeatHits(markdown).slice(0, 8)) {
+    let keepQuota = SENTENCE_TAIL_CAP;
+    for (const chapter of chapters) {
+      if (!chapter.body) continue;
+      const inChapter = sentencePoolOf(chapter.body).filter(sentence => hit.sentences.includes(sentence));
+      const overflow = inChapter.slice(keepQuota).slice(0, 4);
+      keepQuota = Math.max(0, keepQuota - inChapter.length);
+      if (overflow.length > 0) {
+        targets.push({
+          chapterTitle: chapter.title,
+          patternId: `tail-repeat:${hit.tail}`,
+          patternLabel: `句尾复读（"${hit.tail}"×${hit.count}）`,
+          totalCount: hit.count,
+          cap: SENTENCE_TAIL_CAP,
+          sentences: overflow,
+        });
+      }
+    }
+  }
+  return targets.slice(0, 16);
+}
+
+/**
  * 句模宣告引导句确定性剥离（C8 S3①：链尾 markdown-only 收口区消费，零 LLM）——判定与句池
  * form-announcement 族单源（检测定位=修复定位）：行内最后一句命中该族且以「：」结尾
  *（「施工按以下顺序组织：」+ 列表的引导语；列表自承载全部信息，删除无损——s28m' 终稿

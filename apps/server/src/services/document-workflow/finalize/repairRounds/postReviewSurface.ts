@@ -3,7 +3,7 @@
  * table-deterministic-repair / post-review-surface / terminology-strip / regulation-number-typo / toc-consistency）。
  * P2 拆分（方案 5.2）：由 finalizeGeneration 代码块机械搬迁而来，业务语义逐字一致（行为保持）。
  */
-import { applySpanReplacements, applyNumericConsistencyDeterministicFixes, collapseRepeatedWords, stripCommercialDataBodyLines, fixTocFromBody, fixRegulationNumberTypos, fixTruncatedSentenceArtifacts, fixZeroLengthDayRanges, runDeterministicChainUntilConverged, scanSpecLocationMismatchHits } from '../../documentIntegrityChecks';
+import { applySpanReplacements, applyNumericConsistencyDeterministicFixes, collapseRepeatedWords, stripCommercialDataBodyLines, fixTocFromBody, fixFabricatedScheduleDates, fixRegulationNumberTypos, fixCancelledPracticeResidue, fixTruncatedStandardCitations, fixTruncatedSentenceArtifacts, fixZeroLengthDayRanges, runDeterministicChainUntilConverged, scanSpecLocationMismatchHits } from '../../documentIntegrityChecks';
 import { applyDeterministicConsistencyFixesToMarkdown } from '../../qualityValidation';
 import { enforceBoqDivisionCoverageInMethodChapters } from '../../documentFactTrace';
 import { blueprintCitationVerdict } from '../../integratedBlueprint';
@@ -12,11 +12,13 @@ import { repairTableBlocksInMarkdownDeterministically } from '../../tableRepairH
 import { stripInternalTerminologySentences } from '../../internalTerminologyAnchors';
 import { fixUnsupportedTotalClaims, fixUnsourcedNameBindings, fixMislocatedNameBindings } from '../../factReconciliation';
 import { fixWorkInjuryInsuranceStatement } from '../../utils';
-import { fixPreliminaryActionTimingDeterministically, fixEquipmentEntryTimingDeterministically } from '../../integrity/detectors/detectors';
+import { fixPreliminaryActionTimingDeterministically, fixEquipmentEntryTimingDeterministically, knownCalendarDates, materialCalendarDates } from '../../integrity/detectors/detectors';
 import { fixListingJargonInCriticalPackageSections } from '../../constructionOrgQualityRules';
 import { finalizeTableCaptions, recoverTitlelessTableTitlesFromDrafts } from '../../constructionOrgTablePlan';
 import { cleanFormalSourcePhrases, normalizeInlineListBreaks } from '../../markdownComposer';
 import { isBodyTableForbidden } from '../../bidComposition';
+// 4.61：量词表**单源引用**（仓库守卫 unitAliasSingleSource 强制：手抄量词交替串新增即红）
+import { MEASURE_UNIT_SOURCE } from '../../unitAliases';
 import { enforcePlannedSectionCompleteness, mergeNearDuplicateSectionHeadings } from '../../globalQualityGates';
 import { SURFACE_FIX_STEPS } from '../../deterministicFixChains';
 import { displayStage, upsertProgressStage } from '../../progress';
@@ -234,7 +236,160 @@ export async function replayStage5FactsModelNumericFixes(session: FinalizeSessio
  * 重拼成稿会再次回退本组清洗（gate 报 13 条阻断与落盘 markdown 脏内容一致）——由调用方
  * 在最后一次净变更点之后、终门禁之前重放本函数，保证「终门禁所检 = 交付所存 = 清洗后成稿」。
  */
+/**
+ * 真值层口径的确定性落位（4.61）——**必须在每次重建后重放**。
+ *
+ * 为什么不能内联调用一次：这两个修复改的是 `session.finalMarkdown`，而其后的任何
+ * `rebuildFinalMarkdown()`（LLM 修复轮改章草稿后重拼成稿）都会把结果整个回退。
+ * 实测（4.61 首轮）：「氯化橡胶面漆两道」被删除后又被重建带回来，终检照报
+ * 「被取代形态残留」——**修了等于没修**。放进 `runSurfaceDeterministicCleans`
+ * 即随每次重放重新生效（两个修复器都是幂等的，重放零成本）。
+ */
+export async function applyTruthCaliberCleans(session: FinalizeSession): Promise<void> {
+  // 编造开/竣工日期确定性收口（4.60 I2-c）：写作期禁令（FORMAL_WRITING_RULES「禁止编造具体日期」）
+  // 漏网的绝对日期此前只有 patchGuard 预防式预检、无存量修复 → 必落终检 fact_consistency blocker。
+  // 口径与检测端同源（可溯源集合 = 事实抽取表 ∪ 绑定资料原文），资料里真有的日期一律不动。
+  const traceableDates = new Set<string>([...knownCalendarDates(session.factsModel), ...materialCalendarDates(session.allEvidence)]);
+  // 真值层生效口径（有则**落位权威值**而不是改成相对表述——相对表述会命中 caliber-consistency）
+  const truthStartDate = (session.truthValues || []).find(item => /开工日期/.test(item.attribute))?.value;
+  const truthCompletionDate = (session.truthValues || []).find(item => /竣工日期/.test(item.attribute))?.value;
+  const scheduleDateFix = fixFabricatedScheduleDates(session.finalMarkdown, traceableDates, { startDate: truthStartDate, completionDate: truthCompletionDate });
+  if (scheduleDateFix.fixedCount > 0) {
+    recordRepairActions(session.generationDiagnostics, scheduleDateFix.fixedCount);
+    session.finalMarkdown = scheduleDateFix.markdown;
+    await session.recomputeFinalValidationBundle();
+    const scheduleDateStage = displayStage({ type: 'validation', roleId: 'fabricated-schedule-date', status: 'success', message: `编造开/竣工日期确定性收口：${scheduleDateFix.fixedCount} 处（${scheduleDateFix.details.slice(0, 3).join('、')}）` }, { subtitle: '评审后兜底' });
+    upsertProgressStage(session.progressStages, scheduleDateStage);
+    upsertProgressStage(session.finalGateRepairStages, scheduleDateStage);
+  }
+  // 被取消项残留确定性清除（4.61）：答疑把某做法改为「不需要」，正文仍以现行工艺陈述它。
+  // 通用替换器（applyOverridesToText）处理的是**值替换**（365→330 日历天）；
+  // 取消项的生效值是「不需要」，替换进句子会产出「…喷涂不需要…」病句——
+  // 取消的语义是「该做法不再存在」，正确动作是删除承载它的句子/列表项。
+  const truthEntries = session.truthValues || [];
+  /**
+   * 答疑修正清单（**这才是「被取代形态残留」的真实数据源**）。
+   *
+   * 4.61 实测教训：该 blocker 出自 `clarificationAmendments.ts:769`（读 `amendment.object/after/before`），
+   * **不走** `truthValues` 的 value/superseded。我原先只从 truthValues 取取消项，诊断显示
+   * 「取消类候选 0 项」——修复器连续两轮零命中、而单元与集成测试全绿，差别正在输入源。
+   * 教训：接修复器之前先确认**检测端读的是哪份数据**，同源是硬要求（否则"修了"与"没修"不可分）。
+   */
+  const amendments = session.clarificationAmendments?.amendments ?? [];
+  const CANCELLATION_RE = /不需要|取消|不再(?:需要|实施|使用)|不实施|不做|不设/u;
+  const amendmentCancelledItems = amendments
+    .filter(amendment => CANCELLATION_RE.test(String(amendment.after || '')))
+    .flatMap(amendment => (amendment.before || []).map(before => before.text))
+    .filter(Boolean);
+  /**
+   * 输入形态诊断（**恒显**，不加 fixedCount>0 门）。
+   *
+   * 为什么必须恒显：4.61 实测「取消项残留」连续两轮未消，而单元与集成测试全绿——差别只在
+   * **真实输入的形态**（真值层条目的 value/superseded 实际长什么样、truthValues 是否已就绪）。
+   * 修复器零命中时若不记账，"没修"与"无需修"在进度里完全一样（最坏的一种不可观测）。
+   */
+  if (process.env.DOCUMENT_TRUTH_CALIBER_DIAG !== '0') {
+    const diagStage = displayStage({
+      type: 'validation',
+      roleId: 'truth-caliber-diagnostic',
+      status: 'success',
+      message: `真值层口径修复输入：受管条目 ${truthEntries.length} 项｜取消类候选 ${truthEntries.filter(item => /不需要|取消|不再(?:需要|实施|使用)|不实施|不做|不设/u.test(String(item.value || ''))).length} 项｜被取代值合计 ${truthEntries.flatMap(item => item.superseded || []).length} 个｜答疑修正 ${amendments.length} 条（取消类 ${amendmentCancelledItems.length}、替换类 ${amendments.length - amendments.filter(a => CANCELLATION_RE.test(String(a.after || ''))).length}）`,
+      details: truthEntries.slice(0, 12).map(item => `${item.attribute}=${String(item.value).slice(0, 20)}${item.superseded?.length ? `（取代 ${item.superseded.slice(0, 2).join('/')}）` : ''}`),
+    }, { subtitle: '评审后兜底' });
+    upsertProgressStage(session.progressStages, diagStage);
+    upsertProgressStage(session.finalGateRepairStages, diagStage);
+  }
+  // 取消类：生效值表达「该项不存在」。判据用**包含**而非全等——实测生效值可能带标点或后续说明
+  //（「不需要。」「取消该项」），全等匹配会漏掉，于是取消项清单为空、修复器判定"无需修复"。
+  const cancelledItems = [
+    ...truthEntries
+      .filter(item => /不需要|(?:^|[，,。；;])\s*取消|不再(?:需要|实施|使用)|不实施|不做|不设/u.test(String(item.value || '')))
+      .flatMap(item => item.superseded || []),
+    ...amendmentCancelledItems,
+  ];
+  // 替换类：生效值是**另一套做法**（如「180°中粗砂基础。并外设土工布」替换「120°素混凝土管基」）——
+  // 与取消类不同，正确动作是把旧做法**改写为新做法**（通用替换器 applyOverridesToText 同口径），
+  // 而不是删除承载句。实测该形态此前无链尾消费点：旧做法以现行工艺留在正文，终检报「被取代形态残留」。
+  // 替换类同样**两个源都要取**：真值层 superseded + 答疑修正清单的 before→after。
+  // 实测（4.61 三轮）：只取真值层时，「120°素混凝土管基 → 180°中粗砂基础。并外设土工布」
+  // 这条（出自答疑修正）零命中——与取消类同型的"读错数据源"缺陷，一并补齐。
+  const replacementPairs = [
+    ...truthEntries
+      .filter(item => !/不需要|(?:^|[，,。；;])\s*取消|不再(?:需要|实施|使用)|不实施|不做|不设/u.test(String(item.value || '')))
+      .flatMap(item => (item.superseded || []).map(superseded => ({ superseded, effective: String(item.value || ''), subject: String(item.attribute || '') }))),
+    ...amendments
+      .filter(amendment => !CANCELLATION_RE.test(String(amendment.after || '')))
+      .flatMap(amendment => (amendment.before || []).map(before => ({ superseded: before.text, effective: String(amendment.after || ''), subject: String(amendment.object || '') }))),
+  ].filter(pair => pair.superseded.length >= 4 && pair.effective.length >= 2)
+    /**
+     * **值形态必须同类**——不同类的"替换"是误配，替换即制造错误。
+     *
+     * 实机事故（合工大首轮）：真值层「竣工日期=2026年10月8日」的 superseded 里含
+     * 「540日历天」「480日历天」，无闸替换把**工期**改成了**日期**：
+     * 「540日历天→2026年10月8日」——文档被改错，而且进度事件记 success。
+     * 工期(时长) 与 日期 是不同槽位（本仓 `temporalValueKind` 早已确立该分类）。
+     */
+    .filter(pair => valueShapeOf(pair.superseded) === valueShapeOf(pair.effective));
+  if (replacementPairs.length > 0) {
+    let replaced = 0;
+    const details: string[] = [];
+    for (const pair of replacementPairs) {
+      const before = session.finalMarkdown;
+      // 只替换「以现行工艺陈述」的出现：句子含旧做法且无变更叙述
+      /**
+       * **主语闸**（4.61 实机事故二）：同形态还不够，被替换的那一处必须**属于同一主语**。
+       *
+       * 实测（合工大）：答疑把**总工期** 540→480，替换器把正文里任意「90日历天」
+       * （那是某个**节点工期**）也改成了 480——数值形态相同（都是时长），但主语不同。
+       * 判据：承载该数值的句子必须提到主语关键词（总工期/工期…；主语词从属性名切分），
+       * 否则不改。这与「对象作用域」是同一条原则：**只有同一对象的口径才可改写**。
+       */
+      // 属性名常带**类别后缀**（「管道基础做法」「防水层规格」），而正文只写核心名词（「管道基础」）——
+      // 不剥后缀会把同主语的合法替换一并挡掉（首版即如此，两条既有用例立刻失败）。
+      const subjectTokens = String(pair.subject || '')
+        .split(/[\s、,，/]/u)
+        .map(token => token.trim().replace(/(?:做法|规格|要求|参数|标准|情况|说明|值|内容|方案)$/u, ''))
+        .filter(token => token.length >= 2);
+      // 双向匹配：属性名可能**很长**（「设计图纸雨、污水管及雨水口连接管道基础」）而正文只写核心词
+      //（「管道基础」）——单向 includes 会挡掉合法替换。改用最长公共汉字子串（阈值 4）：
+      // 「总工期」×「主体结构节点90日历天」公共子串仅「日历天」=3 → 不同主语 ✓ 不替换；
+      // 「…连接管道基础」×「管道基础采用…」公共子串「管道基础」=4 → 同主语 ✓ 替换。
+      const belongsToSubject = (sentence: string) =>
+        subjectTokens.length === 0
+        || subjectTokens.some(token => sentence.includes(token))
+        || longestCommonHanSubstring(String(pair.subject || ''), sentence) >= 4;
+      const next = before.replace(new RegExp(`[^。；;\n]{0,60}${escapeForRegExp(pair.superseded)}[^。；;\n]{0,60}`, 'gu'), sentence =>
+        /原为|原设计|变更为|调整为|取消|不再|替代/u.test(sentence) || !belongsToSubject(sentence)
+          ? sentence
+          : sentence.replace(pair.superseded, pair.effective));
+      if (next !== before) {
+        session.finalMarkdown = next;
+        replaced += 1;
+        details.push(`被取代做法落位现行口径：${pair.superseded}→${pair.effective.slice(0, 20)}`);
+      }
+    }
+    if (replaced > 0) {
+      recordRepairActions(session.generationDiagnostics, replaced);
+      await session.recomputeFinalValidationBundle();
+      const replacementStage = displayStage({ type: 'validation', roleId: 'superseded-practice-replacement', status: 'success', message: `被取代做法确定性替换：${replaced} 处（${details.slice(0, 3).join('、')}）` }, { subtitle: '评审后兜底' });
+      upsertProgressStage(session.progressStages, replacementStage);
+      upsertProgressStage(session.finalGateRepairStages, replacementStage);
+    }
+  }
+  const cancelledFix = fixCancelledPracticeResidue(session.finalMarkdown, cancelledItems);
+  if (cancelledFix.fixedCount > 0) {
+    recordRepairActions(session.generationDiagnostics, cancelledFix.fixedCount);
+    session.finalMarkdown = cancelledFix.markdown;
+    await session.recomputeFinalValidationBundle();
+    const cancelledStage = displayStage({ type: 'validation', roleId: 'cancelled-practice-residue', status: 'success', message: `取消项残留确定性清除：${cancelledFix.fixedCount} 处（${cancelledFix.details.slice(0, 3).join('、')}）` }, { subtitle: '评审后兜底' });
+    upsertProgressStage(session.progressStages, cancelledStage);
+    upsertProgressStage(session.finalGateRepairStages, cancelledStage);
+  }
+}
+
 export async function runSurfaceDeterministicCleans(session: FinalizeSession): Promise<void> {
+  // 真值层口径确定性落位（幂等，随每次重放重新生效——见 applyTruthCaliberCleans 注释）
+  await applyTruthCaliberCleans(session);
   // 商务条款数据交付前兜底清洗（round-18 E9）：blocker 修复循环结束后的 LLM patch（全维度评审轮修复等）
   // 可能引入商务句（暂列金额/综合单价等，徽光阁实测“暂列金额60万元计入其他项目清单”在修复循环后进入正文），
   // 门禁已升级硬阻断（CRITICAL_BLOCK_RE 含“商务条款”）；交付前用与检测器同口径的行级安全清洗兜底
@@ -413,6 +568,18 @@ export async function runSurfaceDeterministicCleans(session: FinalizeSession): P
     const regulationNumberStage = displayStage({ type: 'validation', roleId: 'regulation-number-typo', status: 'success', message: `法规文号残缺确定性收口：${regulationNumberFix.fixedCount} 处（${regulationNumberFix.details.slice(0, 4).join('、')}）` }, { subtitle: '评审后兜底' });
     upsertProgressStage(session.progressStages, regulationNumberStage);
     upsertProgressStage(session.finalGateRepairStages, regulationNumberStage);
+  }
+  // 标准规范引用残缺确定性收口（4.60 I2-c）：编制依据段长列举的自吞噬退化
+  //（《建筑给水排水及采暖工程施工质量验收规范》（GB 50242-2002）→《建筑给水排水及采暖50242-2002））——
+  // 与上一条同族（同为"自吞噬残余"），且同样由修复轮修不动（quotation-balance-repair 两轮实测"模型未产生有效修改"）
+  const citationFix = fixTruncatedStandardCitations(session.finalMarkdown);
+  if (citationFix.fixedCount > 0) {
+    recordRepairActions(session.generationDiagnostics, citationFix.fixedCount);
+    session.finalMarkdown = citationFix.markdown;
+    await session.recomputeFinalValidationBundle();
+    const citationStage = displayStage({ type: 'validation', roleId: 'standard-citation-truncation', status: 'success', message: `标准引用残缺确定性收口：${citationFix.fixedCount} 处（${citationFix.details.slice(0, 4).join('、')}）` }, { subtitle: '评审后兜底' });
+    upsertProgressStage(session.progressStages, citationStage);
+    upsertProgressStage(session.finalGateRepairStages, citationStage);
   }
   // 规格错位清单权威确定性收口（r7 实机归因，r6 #4）：A2 数值裁决器在跨章一致性轮之前执行，
   // 其后 LLM 修复轮（数值核对/要求补写/引文补全）重写句段可再度写错规格部位（实测「块料踢脚线
@@ -597,4 +764,41 @@ export async function replaySurfacePunctuationClosure(session: FinalizeSession):
   const stage = displayStage({ type: 'validation', roleId: 'surface-punctuation-closure', status: 'success', message: `链尾表面终局收口：${applied.join('；')}` }, { subtitle: '评审后兜底' });
   upsertProgressStage(session.progressStages, stage);
   upsertProgressStage(session.finalGateRepairStages, stage);
+}
+
+/** 正则字面量转义（本文件内联替换用；不引入外部依赖以免循环引用） */
+function escapeForRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+/**
+ * 值形态分类（时长 / 日期 / 数值+单位 / 词面）——**只用于"替换是否同类"的闸**，
+ * 与真值层的 `temporalValueKind` 同向（时长与日期是不同槽位，不可互替）。
+ */
+function valueShapeOf(value: string): string {
+  const text = String(value || '').replace(/\s+/gu, '');
+  if (/^\d+个?(?:日历天|天|个月|月|周|年|小时|分钟)$/u.test(text)) return 'duration';
+  if (/^(?:19|20)\d{2}年/u.test(text)) return 'date';
+  if (new RegExp(`^\\d+(?:\\.\\d+)?(?:${MEASURE_UNIT_SOURCE}|座|台|套|个|根|处|樘|组|项)`).test(text)) return 'measure';
+  if (/^\d+(?:\.\d+)?$/u.test(text)) return 'number';
+  return 'text';
+}
+
+/** 最长公共汉字子串长度（同主语判定用；与 qualityValidation 同口径的朴素实现，仅用于本文件内联判定） */
+function longestCommonHanSubstring(left: string, right: string): number {
+  const a = left.replace(/[^\u4e00-\u9fa5]/gu, '');
+  const b = right.replace(/[^\u4e00-\u9fa5]/gu, '');
+  if (!a || !b) return 0;
+  let best = 0;
+  const previous = new Array(b.length + 1).fill(0);
+  for (let i = 1; i <= a.length; i += 1) {
+    let diagonal = 0;
+    for (let j = 1; j <= b.length; j += 1) {
+      const saved = previous[j]!;
+      previous[j] = a[i - 1] === b[j - 1] ? diagonal + 1 : 0;
+      diagonal = saved;
+      if (previous[j]! > best) best = previous[j]!;
+    }
+  }
+  return best;
 }

@@ -60,13 +60,14 @@ describe('constructionOrgChapterRulePrompt（章节级专项写作规则）', ()
 
   it('质量类章节注入质量闭环提示', () => {
     const prompt = constructionOrgChapterRulePrompt(templateChapter('质量管理体系'));
-    expect(prompt).toContain('质量类内容必须形成');
-    expect(prompt).toContain('自检—互检—交接检—整改—复查—资料归档');
+    // 4.60 I2-c：闭环提示词改为**语义描述**（去固定链条字面），语义要求仍在、模板不再下发
+    expect(prompt).toContain('质量类内容须写清');
+    expect(prompt).toContain('不要把环节名称罗列成串');
   });
 
   it('安全类章节注入安全闭环提示', () => {
     const prompt = constructionOrgChapterRulePrompt(templateChapter('安全管理措施'));
-    expect(prompt).toContain('安全类内容必须形成');
+    expect(prompt).toContain('安全类内容须写清');
   });
 });
 

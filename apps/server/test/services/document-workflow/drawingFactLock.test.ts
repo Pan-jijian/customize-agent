@@ -286,3 +286,55 @@ describe('C3-6-3 三段式渲染覆盖（深段 + 相关性段 + 旋转覆盖段
     expect(normalizeDrawingMatchText('配合比 1：2\n水泥砂浆 C30')).toBe('配合比1:2水泥砂浆c30');
   });
 });
+
+/**
+ * 4.61 结构化实体接入：有实体图时，图纸事实从**实体绑定**推导而不是从拍平文本猜。
+ *
+ * 与旧路径的本质差别是绑定来源——尺寸实体的值取自组码 42/1，对象取自被标注两点 + 就近文字 + 图层。
+ * 旧链路要靠「找离标签最近的数 + 回看上一行是不是纯数字」恢复，那是结构化信息被拍平的代价。
+ */
+describe('4.61 buildDrawingFactLock 结构化实体优先', () => {
+  const evidenceItem = (filePath: string, content: string) => ({
+    chapterId: 'c1', filePath, score: 1, content, processingType: 'drawing',
+  });
+  const anchorOf = (entity: { sheet?: string; layer?: string; entityType: string; position: { x?: number; y?: number } }) => ({
+    filePath: '图纸/结构.dwg',
+    carrier: 'drawing-annotation' as const,
+    sheet: entity.sheet,
+    layer: entity.layer,
+    entityType: entity.entityType,
+    position: entity.position,
+  });
+
+  it('有实体图时按实体绑定出事实行（含尺寸的对象绑定），不再依赖行级正则', () => {
+    const entities = [
+      { text: 'KZ1', entityType: 'TEXT' as const, layer: '柱编号', position: { x: 100, y: 100 } },
+      { text: '', entityType: 'DIMENSION' as const, layer: '尺寸标注', position: { x: 102, y: 100 }, dimension: { measurement: 3600, origin1: { x: 0, y: 0 }, origin2: { x: 3600, y: 0 } } },
+      { text: '防水层保护层不小于30mm', entityType: 'TEXT' as const, layer: '设计说明', position: { x: 300, y: 300 } },
+    ];
+    const lock = buildDrawingFactLock({
+      evidence: [evidenceItem('图纸/结构.dwg', '与实体无关的拍平文本：CAD DXF 图层: PUB_DIM, 标注')],
+      loadCadEntities: () => entities,
+    });
+    expect(lock).toBeDefined();
+    const lines = lock!.groups[0]!.factLines;
+    expect(lines.some(line => line.includes('KZ1') && line.includes('3600')), '尺寸值必须绑定到就近文字实体').toBe(true);
+    expect(lines.some(line => line.includes('保护层') && line.includes('30')), '约束句解析出属性-关系-值').toBe(true);
+  });
+
+  it('无实体（旧库未重索引）时回退行级提取，行为不变', () => {
+    const lock = buildDrawingFactLock({
+      evidence: [evidenceItem('图纸/结构.dwg', 'CAD DXF 图层: PUB_DIM\n混凝土强度等级 C30，保护层厚度不小于30mm')],
+      loadCadEntities: () => [],
+    });
+    expect(lock).toBeDefined();
+    expect(lock!.groups[0]!.factLines.join(' ')).toContain('C30');
+  });
+
+  it('未提供 loadCadEntities 时同样回退（调用方零改动兼容）', () => {
+    const lock = buildDrawingFactLock({
+      evidence: [evidenceItem('图纸/结构.dwg', '混凝土强度等级 C30，保护层厚度不小于30mm')],
+    });
+    expect(lock!.groups[0]!.factLines.join(' ')).toContain('C30');
+  });
+});

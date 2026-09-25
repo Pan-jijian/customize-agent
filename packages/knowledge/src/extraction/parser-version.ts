@@ -16,4 +16,13 @@
  * 这是有意为之（否则本仓前几轮解析修复永远无法自动生效），但要有心理预期：
  * 升级后第一次索引扫描的耗时与一次全量重建相当。
  */
-export const PARSER_VERSION = 'kb-parser-2026.09.21';
+/**
+ * 4.61 递增：本版含三项**影响解析/清洗产出内容**的改动，必须靠版本戳传播到存量库——
+ * 1. 切分器末级分隔符 `/\s+/` → `/\n/`（`text-chunker.ts`）：修复"切开再拼回"不保真导致的
+ *    **CAD 键值行空格变换行**（实测落库 chunk 690 字符 / 79 换行 / 0 空格，图层/块/实体类型
+ *    三组结构在存储层被拆散）；
+ * 2. 删除不可达的第二份 DXF 实现（`content-extractor.ts`，口径与主力路径不一致）；
+ * 3. 要求提取的载体闸（`stageUnderstanding`）——该项影响的是**下游提取**而非入库文本，
+ *    由 `tenderRequirementsCacheKey` 的证据指纹覆盖，不依赖本戳，但一并记在此处备查。
+ */
+export const PARSER_VERSION = 'kb-parser-2026.09.24-structure';

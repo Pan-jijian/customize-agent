@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assignChapterFactsToBlocks, BLOCK_LENGTH_DISPLAY_SCALE, buildChapterFactCoverageContext, buildSectionBudgetInstruction, capFactCoverageContext, CHAPTER_OVER_PRODUCE_ACCEPTANCE_MAX_RATIO, CHAPTER_OVER_PRODUCE_ACCEPTANCE_MIN_RATIO, displayWordCap, extractEngineeringObjectNames, renderLengthContractLine, salvageChapterByOverProduceAcceptance, sectionTargets } from '@/services/document-workflow/chapterGeneration';
+import { assignChapterFactsToBlocks, buildChapterFactCoverageContext, buildSectionBudgetInstruction, capFactCoverageContext, CHAPTER_OVER_PRODUCE_ACCEPTANCE_MAX_RATIO, CHAPTER_OVER_PRODUCE_ACCEPTANCE_MIN_RATIO, extractEngineeringObjectNames, renderLengthContractLine, salvageChapterByOverProduceAcceptance, sectionTargets } from '@/services/document-workflow/chapterGeneration';
 import { buildChapterStructureFromBlueprint } from '@/services/document-workflow/integratedBlueprint';
 import type { DocumentEvidence, DocumentTemplateChapter, SpecAuthorityMap } from '@/services/document-workflow/types';
 
@@ -206,20 +206,21 @@ describe('4.42 小节篇幅计划守恒配额（520 固定地板移除回归）'
     expect(buildSectionBudgetInstruction(chapterOf([]), 1800)).toBe('');
   });
 
-  it('篇幅指令渲染（4.43 上限语义 + 显示校准）：逐点「不超过 N 字」，N=配额×0.75；无下限强化', () => {
+  it('篇幅指令渲染（4.60 I2-b 目标语义）：逐点「约 N 字」，N=配额真实值；无下限强化', () => {
     const text = buildSectionBudgetInstruction(chapterOf(TITLES_4), 1800, [
       { title: '到货节奏安排', words: 620 },
       { title: '动态调整机制', words: 480 },
       { title: '分区堆放组织', words: 420 },
       { title: '现场存量控制', words: 280 },
     ]);
-    expect(text).toContain('本节小节篇幅上限');
-    // 显示值由校准系数导出（4.60 I2 重标定 0.75→0.9）——**从常数推导**而非硬编码，防再次重标定时碎
-    expect(text).toContain(`- 到货节奏安排：不超过 ${displayWordCap(620)} 字`);
+    expect(text).toContain('本节小节篇幅计划');
+    // 4.60 I2-b：**真实配额直接下达**（目标语义），不再经显示校准系数折算——系数已整体废除
+    expect(text).toContain('- 到货节奏安排：约 620 字');
     expect(text).not.toContain('至少达到');
     expect(text).not.toContain('520');
     expect(text).not.toContain('尽量一次达成');
-    expect(text).not.toContain('篇幅计划');
+    // 逐点行不得再出现上限语义（「不超过 N 字」）——旧上限语义系统性欠产（A/B 实测 0.53~0.59×）
+    expect(text).not.toMatch(/：不超过\s*\d+\s*字/u);
   });
 
   it('组合链：规划层守恒配额直连写作层篇幅计划（Σ=块预算；无 520 固定地板残留）', () => {
@@ -238,37 +239,34 @@ describe('4.42 小节篇幅计划守恒配额（520 固定地板移除回归）'
     const chapter: DocumentTemplateChapter = { id: 'c1', title: block.title, purpose: '', queries: [], requiredFacts: [], sections: block.subPoints.map(point => point.title) };
     const quotas = block.subPoints.map(point => ({ title: point.title, words: point.quotaWords || 0 }));
     const text = buildSectionBudgetInstruction(chapter, block.targetWords, quotas);
-    const rendered = [...text.matchAll(/不超过 (\d+) 字/gu)].map(match => Number(match[1]));
-    // 4.43 显示校准：渲染值 = 配额 × 系数（写作指令用校准值，质检用真实值）
-    const expectedQuotas = block.subPoints.filter(point => point.title !== block.title).map(point => displayWordCap(point.quotaWords || 0));
+    const rendered = [...text.matchAll(/约 (\d+) 字/gu)].map(match => Number(match[1]));
+    // 4.60 I2-b 目标语义：渲染值 = 配额**真实值**（写作指令值与质检口径同一数字，双口径已废除）
+    const expectedQuotas = block.subPoints.filter(point => point.title !== block.title).map(point => point.quotaWords || 0);
     expect(rendered).toEqual(expectedQuotas);
-    // 合计不超块预算（旧固定 520 地板下 4 要点必超上限 2070）
+    // 渲染行合计不超块预算（同名点由 H3 外壳承担、不渲染 H4 行，故渲染合计 ≤ 块预算；
+    // 旧固定 520 地板下 4 要点必超上限 2070）
     expect(rendered.reduce((sum, value) => sum + value, 0)).toBeLessThanOrEqual(block.targetWords);
     expect(text).not.toContain('至少达到');
     expect(text).not.toContain('520');
   });
 });
 
-describe('4.43 篇幅上限语义 + 显示校准（根治字数控不住）', () => {
-  it('合同行渲染：上限语义（不超过）、显示值=真实目标×校准系数、不得超限；旧目标语义措辞已删', () => {
+describe('4.60 I2-b 篇幅合同（目标语义、零系数）', () => {
+  it('合同行渲染：目标语义（约 N 字 ±10%）为主、1.4× 上限仅作极端保护；上限语义与校准系数已废除', () => {
     /**
-     * 4.60 I2 重标定：系数由 0.75 提到 0.9（无偏块级篇幅账实测产出中位 0.85×T，
-     * 正好压在达标区下沿；反解得 s≈0.885）。
+     * 4.60 I2-b：**系数整体废除**（`BLOCK_LENGTH_DISPLAY_SCALE` / `displayWordCap` 已从导出面删除）。
      *
-     * 本用例**从常数推导**期望值而非硬编码——上一次重标定（v13 定 0.75）就是靠硬编码锁死的，
-     * 结果常数一改用例即碎，而"用例碎"与"常数错"是两件不同的事，硬编码会让二者不可分。
+     * 为什么废除：系数补偿的是"模型没按指令写"，而不是"指令没说清"——它是**模型特定**的魔数，
+     * 换模型即失效（用户实测质疑）。A/B 实测（n=12 × 两个量级）给出了正解：目标语义即准
+     *（目标 1200 时窗内 12/12），上限语义必然欠产（0.57~0.59×）。
      */
-    expect(BLOCK_LENGTH_DISPLAY_SCALE).toBeGreaterThan(0.75);
-    expect(displayWordCap(1500)).toBe(Math.round(1500 * BLOCK_LENGTH_DISPLAY_SCALE));
-    expect(displayWordCap(1800)).toBe(Math.round(1800 * BLOCK_LENGTH_DISPLAY_SCALE));
-    expect(displayWordCap(1)).toBe(1);
     const line = renderLengthContractLine(1500);
-    const cap1500 = displayWordCap(1500);
-    expect(line).toContain(`本节正文总字数不超过 ${cap1500} 字`);
-    expect(line).toContain(`（控制在 ${Math.round(cap1500 * 0.85)}~${cap1500} 字之间）`);
-    expect(line).toContain('超出即不合格');
-    expect(line).not.toContain('篇幅目标');
-    expect(line).not.toContain('1500');
+    expect(line, '目标语义必须下达真实目标（不折算）').toContain('约 1500 字');
+    expect(line).toMatch(/±\s*10%/u);
+    // 不写上限：宽松上限给出漂移空间（实测块产出比被推高到 1.27×），只声明真实目标与合格区间
+    expect(line).not.toMatch(/不超过\s*\d+/u);
+    expect(line, '旧窄窗措辞（下限即上限）已删').not.toMatch(/控制在\s*\d+\s*~\s*\d+\s*字之间/u);
+    expect(line).toContain('保留章节标题');
   });
 });
 

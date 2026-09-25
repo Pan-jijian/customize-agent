@@ -44,7 +44,9 @@ export function materialCalendarDates(evidence: readonly { content?: string }[])
   return dates;
 }
 
-function knownCalendarDates(factsModel: DocumentFactsModel): Set<string> {
+/** 事实抽取表内出现的日历日期（检测端与**确定性修复端**共用：修复必须以同一口径判"可溯源"，
+ * 否则修复器会改写检测器认为合法的日期——检测定位≠修复定位） */
+export function knownCalendarDates(factsModel: DocumentFactsModel): Set<string> {
   const dates = new Set<string>();
   const texts = [
     ...factsModel.project,
@@ -2135,17 +2137,45 @@ const LOCATION_ENTITY_QUALIFIER_RE = /项目部|总协调|工人生活|施工办
 function qualifyLocationHit(locationHit: string, sourceText: string, hitIndex: number): string {
   const before = sourceText.slice(Math.max(0, hitIndex - 8), hitIndex);
   const qualifierMatch = before.match(LOCATION_ENTITY_QUALIFIER_RE);
-  if (!qualifierMatch || qualifierMatch.index === undefined) return locationHit;
-  // 限定词与部位词相邻（中间只允许“的/施工/区域”等弱连接字），远离则不组合
-  const gap = before.slice((qualifierMatch.index ?? 0) + qualifierMatch[0].length);
-  if (/^[的施工区域现场]{0,3}$/u.test(gap)) return `${qualifierMatch[0]}${locationHit}`;
+  if (qualifierMatch && qualifierMatch.index !== undefined) {
+    // 限定词与部位词相邻（中间只允许“的/施工/区域”等弱连接字），远离则不组合
+    const gap = before.slice((qualifierMatch.index ?? 0) + qualifierMatch[0].length);
+    if (/^[的施工区域现场]{0,3}$/u.test(gap)) return `${qualifierMatch[0]}${locationHit}`;
+  }
+  /**
+   * 4.61 **并列构件限定语**（实测最大对象作用域缺口）。
+   *
+   * `LOCATION_WORD_SOURCE` 同时含「基础」与「垫层」，而本函数上方只组合**实体**限定词
+   *（项目部/办公/标段），构件类别限定语被丢掉 → `locationGroupForMatch` 取窗口内**最后一个**
+   * 部位词（「复合词取尾词」）→「基础垫层」与「地坪垫层」并成同一池「垫层」。
+   *
+   * 实机后果（巢湖）：正文「基础垫层C20」（1.2）与「基础垫层C15」（1.5）被判成
+   * 「垫层 C20/C15/C25 三套口径」——真实矛盾被埋在一堆假同池值里，既定位不准、也无法修复
+   *（修复需要**唯一**权威值，而权威按裸词「垫层」取到的是别的部位的值）。
+   *
+   * 判据：部位词**紧邻**另一个部位词时，二者构成更具体的部位（基础垫层）；容器/范围词
+   *（主体/结构/工程/项目）不作限定——「主体结构外墙」仍归「外墙」，与既有注释的意图一致。
+   */
+  const preceding = sourceText.slice(Math.max(0, hitIndex - 6), hitIndex);
+  const locationBefore = new RegExp(`(${LOCATION_WORD_SOURCE})$`, 'u').exec(preceding);
+  if (locationBefore && !LOCATION_CONTAINER_WORDS.test(locationBefore[1]!)) {
+    return `${locationBefore[1]}${locationHit}`;
+  }
   return locationHit;
 }
+
+/** 容器/范围词：作限定语时**不**参与部位分池（它们是范围而非并列构件）。
+ * 与 `LOCATION_WORD_SOURCE` 里的构件词（基础/地坪/屋面…）语义不同——后者并列时构成更具体部位。 */
+const LOCATION_CONTAINER_WORDS = /^(?:主体|结构|工程|项目|整体|全|本|该)$/u;
 
 /** 从匹配窗口提取部位组：窗口从最近分隔符（，、，;；。|）后截断（防跨句串染：
  *  「外墙…A5.0。内墙…A3.5」的内墙匹配窗口不得吞入前句「外墙」），并先剥离「XX阶段」
  *  阶段限定语境（「主体结构阶段配置施工电梯2台」的阶段词不是部位，不参与部位分组）；
  *  无部位词则归入默认组（''） */
+
+/** 建筑单体形态（通用，非词表）：`1#厂房`/`2号门卫`/`3#楼`/`A栋`/`B座` —— 编号 + 单体量词。
+ * 用于对象主体分池：同一清单条目在不同单体下各有自己的口径，不互斥。 */
+const BUILDING_ENTITY_RE = /(?:\d{1,2}\s*[#号]?\s*(?:厂房|门卫|楼|栋|座|馆|站|中心|车间|仓库|宿舍|综合楼)|[A-Z]\s*[#号]?\s*(?:楼|栋|座|厂房|馆))/gu;
 
 export function locationGroupForMatch(markdown: string, matchIndex: number, raw: string, lineStart: number): string {
   // A14 表格行：整行都是部位语境（“| 灭火器 | 干粉4kg | 12具 | 材料库、配电箱旁 |”
@@ -2163,6 +2193,23 @@ export function locationGroupForMatch(markdown: string, matchIndex: number, raw:
   const cut = Math.max(before.lastIndexOf('，'), before.lastIndexOf('、'), before.lastIndexOf(','), before.lastIndexOf(';'), before.lastIndexOf('；'), before.lastIndexOf('。'));
   const effectiveStart = cut >= 0 ? windowStart + cut + 1 : windowStart;
   const window = markdown.slice(effectiveStart, matchIndex + raw.length);
+  /**
+   * 4.61 **对象主体分池**（结构性补口，不是又一条例外）：
+   *
+   * `LOCATION_WORD_SOURCE` 是**部位词**表（基础/垫层/屋面…），而本仓真实冲突里有大量
+   * **单体/单位工程**口径：同一清单条目名在 1#厂房、2#门卫、3#门卫、室外附属工程下各有自己的
+   * 工程量——「挖沟槽土方」实测 9926.65 / 27.72 / 1900.8 / 879.41 四个值被判「跨章一致性冲突」，
+   * 而它们**本就该是四个值**（分属四个单体）。
+   *
+   * 旧实现只有部位词分池，单体名不在词表里 → 四个值全落进空池互比 → 必然误报。
+   * 判据用**形态**而非词表：`1#厂房`/`2号门卫`/`3#楼` 这类「编号 + 建筑单体量词」是通用形态。
+   * 窗口取 40 字（比部位词的 16 字宽）——单体名常在句首而非紧邻数值。
+   */
+  const entityWindow = markdown.slice(Math.max(lineStart, matchIndex - 40), matchIndex);
+  const entityHits = [...entityWindow.matchAll(BUILDING_ENTITY_RE)];
+  const entityHit = entityHits[entityHits.length - 1];
+  // 单体名存在时以其为池键：不同单体的同名条目值不再互比（同一单体多值仍互比）
+  if (entityHit) return entityHit[0].replace(/\s+/gu, '');
   const stageStripped = window.replace(/[\u4e00-\u9fa5]{2,6}阶段/gu, '');
   // A14 每台X配备形态：取窗口内最后一个“每台X”实体作为部位组（比词表更精确）
   const perUnit = [...stageStripped.matchAll(PER_UNIT_LOCATION_RE)];
@@ -2368,6 +2415,31 @@ export function crossSectionNumericConflictIssues(markdown: string): ValidationI
       rawsByGroup.set(targetKey, targetRaws);
       valuesByGroup.delete(unlabeledKey);
       rawsByGroup.delete(unlabeledKey);
+    }
+    /**
+     * 4.61 **父级合并**（与上条同源原则：只在无歧义时归并）。
+     *
+     * 「垫层」是「基础垫层」「地坪垫层」的**父级部位**。裸父级值在**恰有一个子级**时按该子级
+     * 参与互查——「垫层混凝土采用C15。基础垫层采用C20」两处指同一对象，是真矛盾
+     *（实测：不合并会漏报，documentIntegrityChecks 既有用例立刻失败）。
+     * 有**多个**子级时裸父级是歧义的（可能是第三种垫层），保持独立——巢湖实测
+     * 「基础垫层C15 / 地坪垫层C20」正因此不再被误判为同一口径。
+     *
+     * 用**后缀**匹配（子级以父级结尾），与上条用前缀匹配的「词面｜部位」分池键不同键形，互不干扰。
+     */
+    for (const parentKey of [...valuesByGroup.keys()]) {
+      if (parentKey === '' || parentKey.includes('｜')) continue;
+      const values = valuesByGroup.get(parentKey);
+      if (!values || values.size === 0) continue;
+      const children = [...valuesByGroup.keys()].filter(key => key !== parentKey && key.length > parentKey.length && key.endsWith(parentKey));
+      if (children.length !== 1) continue;
+      const childKey = children[0]!;
+      const child = valuesByGroup.get(childKey);
+      if (!child) continue;
+      for (const value of values) child.add(value);
+      rawsByGroup.set(childKey, [...(rawsByGroup.get(childKey) || []), ...(rawsByGroup.get(parentKey) || [])]);
+      valuesByGroup.delete(parentKey);
+      rawsByGroup.delete(parentKey);
     }
     for (const [groupKey, values] of valuesByGroup) {
       if (values.size < 2) continue;
@@ -2627,6 +2699,21 @@ export function scanSpecLocationMismatchHits(markdown: string, specAuthorityMap?
         // F14e 后置语境豁免（丰乐镇第三轮实测）：「两侧各200mm工作宽度」的 200mm 是作业空间
         // 尺寸；「200mm、150mm」顿号紧随的后续数值是多部位枚举——均非本部位单一规格错位
         if (/(?:工作宽度|作业宽度|操作空间|工作面)/u.test(afterFound) || /^、\s*\d/u.test(afterFound)) continue;
+        /**
+         * 4.61 **单位量纲闸**：`mm²`（截面积）与 `mm`（长度）不是同一属性维度，不可互比。
+         *
+         * 实机误报（巢湖）：「接地跨接线采用不小于 **4mm²** 铜芯软线」被绑到清单「接地 **16mm**」
+         * （接地极直径）上判「规格错位」。既有跨量级闸（5 倍）拦不住——4 vs 16 只有 4 倍；
+         * 且 `MM_SIZE_TOKEN_RE` 要求以 `mm` 结尾，而此处是 `mm²`，量级闸根本没启用。
+         * 判据：命中 token 后紧跟 `²/³/2/3`（面积/体积上标）时，其量纲与长度类 token 不同 →
+         * 不参与该维度互比。紧贴判定（afterFound 是命中后的紧邻窗口），不误伤真规格句。
+         */
+        if (/^\s*[²³]/u.test(afterFound)) continue;
+        // F14h 标高偏移豁免（4.60 I2-c 巢湖实测）：窗口内数值是**相对标高/开挖控制的偏移量**而非
+        // 部位规格——「机械开挖至桩承台垫层底标高以上200mm」的 200mm 是预留人工清底厚度，
+        // 与该部位清单权威 100mm 属不同概念（同 A15「范围内」豁免族，只是参照物是标高而非范围）。
+        // 判据锚定「标高」二字：真正的规格句写「垫层厚度200mm」「垫层C15」，不会经标高引出数值。
+        if (/(?:底|顶|设计|垫层|基础)?标高[^，。；;\n|]{0,8}?(?:以上|以下)/u.test(match[0])) continue;
         // F14g 板材/构造层自身厚度豁免（丰乐镇复测实测）：「栏板模板采用15mm厚覆膜木胶合板」的 15mm
         // 与「厚+板材名」构词衔接（板材厚度规格），非模板构件部位规格错位；4.31 扩围：
         // 「块料踢脚线构造为：15mm 厚 1:3 水泥砂浆打底…」的 15mm 是构造层厚度（厚+数字配比），

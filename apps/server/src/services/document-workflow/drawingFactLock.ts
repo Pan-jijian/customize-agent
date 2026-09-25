@@ -17,6 +17,8 @@
 import { extractKeyFactLines } from './evidence';
 import { chapterRelevanceTokens, extractSpecTokens } from './billFactLock';
 import { stableHash } from './utils';
+// 4.61 结构化实体：图纸事实的来源从「拍平文本」升级为「实体绑定」
+import { annotationFacts, dimensionFacts, type CadEntity, type SourceAnchor } from '@customize-agent/knowledge';
 import type { DocumentEvidence } from './types';
 
 export interface DrawingFactLockGroup {
@@ -131,29 +133,52 @@ function isSemanticFactLine(line: string): boolean {
 export function buildDrawingFactLock(input: {
   evidence: DocumentEvidence[];
   fileProcessingByPath?: Map<string, string>;
+  /**
+   * 4.61 结构化实体读取（**有则优先**）：返回该文件的 CAD 实体图。
+   *
+   * 提供时，图纸事实从**结构化实体**推导（对象-属性-值-单位的绑定来自尺寸实体的被标注两点、
+   * 图层语义、就近文字），而不是对拍平文本做结构恢复式正则。
+   * 未提供或无实体时回退既有行级提取（行为不变，兼容旧库）。
+   */
+  loadCadEntities?: (filePath: string) => CadEntity[];
 }): DrawingFactLock | undefined {
   const contentByFile = new Map<string, string[]>();
+  const drawingFiles = new Set<string>();
   for (const item of input.evidence || []) {
     if (!item?.content || !isDrawingEvidence(item, input.fileProcessingByPath)) continue;
+    drawingFiles.add(item.filePath);
     const list = contentByFile.get(item.filePath);
     if (list) list.push(item.content);
     else contentByFile.set(item.filePath, [item.content]);
   }
-  if (contentByFile.size === 0) return undefined;
+  if (drawingFiles.size === 0) return undefined;
   const groups: DrawingFactLockGroup[] = [];
   let unusableDrawings = 0;
-  for (const [sourceFile, contents] of contentByFile) {
+  for (const sourceFile of drawingFiles) {
     const seen = new Set<string>();
     const factLines: string[] = [];
-    // 文件内多切片合并后整体提取：切片单独看上下文残缺（页眉/跨页行），合并后 extractKeyFactLines 行级筛选更稳
-    for (const line of extractKeyFactLines(contents.join('\n')).split('\n')) {
-      const trimmed = line.trim();
-      if (trimmed.length < FACT_LINE_MIN_CHARS || trimmed.length > FACT_LINE_MAX_CHARS) continue;
-      if (!isSemanticFactLine(trimmed)) continue;
-      if (seen.has(trimmed)) continue;
-      seen.add(trimmed);
-      factLines.push(trimmed);
-      if (factLines.length >= PER_DRAWING_MAX_LINES) break;
+    const structuredLines = structuredFactLines(sourceFile, input.loadCadEntities);
+    if (structuredLines.length > 0) {
+      // 结构化路径：事实行由实体绑定直接给出（含尺寸的对象绑定），无需再猜
+      for (const line of structuredLines) {
+        if (line.length < FACT_LINE_MIN_CHARS || line.length > FACT_LINE_MAX_CHARS) continue;
+        if (seen.has(line)) continue;
+        seen.add(line);
+        factLines.push(line);
+        if (factLines.length >= PER_DRAWING_MAX_LINES) break;
+      }
+    } else {
+      const contents = contentByFile.get(sourceFile) ?? [];
+      // 文件内多切片合并后整体提取：切片单独看上下文残缺（页眉/跨页行），合并后 extractKeyFactLines 行级筛选更稳
+      for (const line of extractKeyFactLines(contents.join('\n')).split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed.length < FACT_LINE_MIN_CHARS || trimmed.length > FACT_LINE_MAX_CHARS) continue;
+        if (!isSemanticFactLine(trimmed)) continue;
+        if (seen.has(trimmed)) continue;
+        seen.add(trimmed);
+        factLines.push(trimmed);
+        if (factLines.length >= PER_DRAWING_MAX_LINES) break;
+      }
     }
     const tokens = [...new Set(factLines.flatMap(line => extractDrawingFactTokens(line)))];
     if (tokens.length === 0) {
@@ -168,6 +193,45 @@ export function buildDrawingFactLock(input: {
     unusableDrawings,
     totalFacts: groups.reduce((sum, group) => sum + group.factLines.length, 0),
   };
+}
+
+/**
+ * 结构化事实行（4.61）：从 CAD 实体图推导「对象 属性 值 单位」。
+ *
+ * 与旧路径的本质差别是**绑定来源**：
+ * - 尺寸实体：值取自组码 42/1，对象取自**被标注两点 + 就近文字实体 + 图层语义**（结构可判定）
+ * - 文字实体：属性/值/关系由 `parseClauseFacts` 从**该实体自身的文本**解析（不跨实体串值）
+ *
+ * 渲染成行是为了复用既有的注入与验收通道（`renderDrawingFactLockText` / `drawingFactPlacement`）；
+ * 渲染是消费层的事，**源数据仍是实体的对象绑定**。
+ */
+function structuredFactLines(sourceFile: string, loadCadEntities?: (filePath: string) => CadEntity[]): string[] {
+  if (!loadCadEntities) return [];
+  let entities: CadEntity[];
+  try {
+    entities = loadCadEntities(sourceFile) ?? [];
+  } catch {
+    return [];
+  }
+  if (entities.length === 0) return [];
+  const anchorOf = (entity: CadEntity): SourceAnchor => ({
+    filePath: sourceFile,
+    carrier: entity.layer && /说明|总说明/u.test(entity.layer) ? 'drawing-note' : 'drawing-annotation',
+    sheet: entity.sheet,
+    layer: entity.layer,
+    entityType: entity.entityType,
+    position: entity.position,
+  });
+  const lines: string[] = [];
+  for (const { facts } of [annotationFacts({ entities, anchorOf }), dimensionFacts({ entities, anchorOf })]) {
+    for (const fact of facts) {
+      const relation = fact.relation === '>=' ? '不小于' : fact.relation === '<=' ? '不大于' : fact.relation === 'range' ? '' : '';
+      const value = fact.unit ? `${fact.value}${fact.unit}` : fact.value;
+      const line = `${fact.subject} ${fact.attribute}${relation ? ` ${relation}` : ' '} ${value}`.replace(/\s+/gu, ' ').trim();
+      if (line.length >= FACT_LINE_MIN_CHARS) lines.push(line);
+    }
+  }
+  return lines;
 }
 
 /** 事实行与章节的相关性分：行命中章节 token（标题/小节切词）越多越相关 */

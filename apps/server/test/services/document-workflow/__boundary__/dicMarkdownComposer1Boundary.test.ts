@@ -1012,9 +1012,12 @@ describe('M23 规则常量与 system 前缀', () => {
     expect(MARKDOWN_TABLE_FORMAT_RULES).toContain('空单元格');
   });
 
-  it('TENDER_BID_WRITING_RULES 含五要素与闭环句式', () => {
+  it('TENDER_BID_WRITING_RULES 含五要素与闭环实质要求', () => {
     expect(TENDER_BID_WRITING_RULES).toContain('内容落地五要素');
-    expect(TENDER_BID_WRITING_RULES).toContain('闭环句式密度硬约束');
+    // 4.60 I2-c 断源：「闭环句式密度硬约束 + 5 条句式模板」已删除（模板即复读源头），
+    // 改为「闭环要有实质，不得以套语收句」——只给要求，不给句式、不给词表、不设密度配额
+    expect(TENDER_BID_WRITING_RULES).toContain('闭环要有实质');
+    expect(TENDER_BID_WRITING_RULES).not.toContain('闭环句式变体池');
   });
 
   it('FORMAL_WRITING_RULES 首行自限声明', () => {

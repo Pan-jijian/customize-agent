@@ -1339,6 +1339,237 @@ export function fixRegulationNumberTypos(markdown: string): { markdown: string; 
   return { markdown: next, fixedCount, details };
 }
 
+/**
+ * 编造开/竣工日期确定性修复（**写作期禁令漏网**；`fabricated-start-date` 此前只有
+ * patchGuard 预防式预检、无存量修复，故残留必落终检 blocker）。
+ *
+ * ## 为什么必须是"定点改写"而不是"删除日期"
+ *
+ * 日期所在的句子是**进度叙述的起点**（「开工日期为2026年10月10日。工期330日历天……」），
+ * 整句删除会带走后续叙述锚点。而招标文件本身已给出权威口径（「以开工令时间为准」），
+ * 故正解是把**编造的绝对日期**换成**招标口径的相对表述**——信息不丢失、与资料一致。
+ *
+ * ## 判据（与检测端同源）
+ *
+ * 只改「开/竣工日期」语境（`开工日期为X` / `计划开工日期：X` / `合同竣工日期为X`），
+ * 且该日期**不在可溯源日期集合**（事实抽取表 ∪ 绑定资料原文）内——资料里真有的日期一律不动
+ *（4.59 巢湖实测：答疑文件落款 `2026年08月05日` 曾被误判编造，口径已并入资料日期）。
+ *
+ * 招/竣工口径替换值取自招标文件通用口径（开工令/验收），非项目专属事实，属公共表述。
+ */
+export function fixFabricatedScheduleDates(
+  markdown: string,
+  traceableDates: ReadonlySet<string>,
+  /** 真值层生效口径（`ResolvedValue`）：有权威值时**落位权威值**而不是改成相对表述——
+   * 相对表述会命中 `caliber-consistency` 的「生效值未在正文落位」blocker（实测：编造日期 2 条
+   * 被修掉，却新生成 1 条「开工日期 真值层生效值未落位」）。有权威值即以权威值收口，两个检测器同时满足。 */
+  authority?: { startDate?: string; completionDate?: string },
+): { markdown: string; fixedCount: number; details: string[] } {
+  let fixedCount = 0;
+  const details: string[] = [];
+  /**
+   * 两种形态都要处理：
+   *
+   * ① `<开|竣工>日期为<某个日期>` —— 日期写错/编造（原有的编造日期族）；
+   * ② `<开|竣工>日期为<非日期内容>` —— **日期位置写了别的东西**。实机缺陷：
+   *    「计划开工日期为330日历天」把**工期**当成了开工日期（写手把工期口径填进了日期槽位），
+   *    句子本身就不成立；而权威口径（真值层裁决值）必须落位。
+   *    旧实现只匹配 ①，于是这条既没被改写、也没落位权威值 → 终检「口径不一致」blocker。
+   *
+   * 分隔符 `为|是|：` 是**必需**的：`开工日期以招标人书面通知为准` 这类合法表述不能命中
+   *（否则会把正确的相对表述改坏）。
+   */
+  const dateSlotRe = /(开工|竣工)日期\s*(?:(?:为|是|[:：])\s*([^。；;，,\n|]{1,24})|(\d[^。；;，,\n|]{0,20}))/gu;
+  const next = markdown.replace(dateSlotRe, (full, kind: string, withSeparator: string | undefined, digitLed: string | undefined) => {
+    // 两种形态：①「日期为/是/：<值>」；②「日期<数字开头>」——无分隔符但后随数字。
+    // 形态②的来源：实测「计划开工日期330日历天」把**工期**填进了日期槽位（无「为/是/：」），
+    // 旧实现要求分隔符必需 → 此形态既不落位权威值、也不被判为编造，静默穿过所有修复轮，
+    // 终检照报「口径不一致」。合法性由"后随数字"保证：`开工日期以招标人…为准` 后随「以」，
+    // 不是数字，不会命中（该形态是合法的相对表述，见下条断言）。
+    const raw = withSeparator ?? digitLed ?? '';
+    const authoritative = kind === '开工' ? authority?.startDate : authority?.completionDate;
+    const loose = raw.replace(/\s+/gu, '');
+    const isDate = /^(?:19|20)\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日$/u.test(raw.trim());
+    if (authoritative) {
+      const authorityLoose = authoritative.replace(/\s+/gu, '');
+      if (loose.includes(authorityLoose)) return full; // 已是权威值（幂等）
+      fixedCount += 1;
+      details.push(`${kind}日期落位权威口径：${loose.slice(0, 16)}→${authoritative}`);
+      return `${kind}日期为${authoritative}`;
+    }
+    if (!isDate) return full; // 无权威值时只处理"日期槽位写了日期"的编造形态
+    const normalized = raw.replace(/\s+/gu, '').replace(/年(\d)月/u, '年0$1月').replace(/月(\d)日/u, '月0$1日');
+    if (traceableDates.has(loose) || traceableDates.has(normalized)) return full;
+    fixedCount += 1;
+    const replacement = kind === '开工' ? '开工日期以开工令载明时间为准' : '竣工日期以合同约定并经竣工验收确认的时间为准';
+    details.push(`${kind}日期编造：${loose}→（改为招标口径相对表述）`);
+    return replacement;
+  });
+  return { markdown: next, fixedCount, details };
+}
+
+/**
+ * 被取消项的残留清除（4.61）。
+ *
+ * ## 缺陷形态（实机）
+ *
+ * 答疑把「氯化橡胶面漆两道」改为**不需要**，正文却仍写：
+ * 「面漆施工：防火涂料表面喷涂氯化橡胶面漆两道，漆膜厚度80μm…」——把已取消的做法
+ * 当作现行工艺陈述。终检 `caliber-consistency` 的「被取代形态残留」判 blocker。
+ *
+ * ## 为什么是删除而不是替换
+ *
+ * 通用替换器（`applyOverridesToText`）把旧值换成新值——那对「365→330 日历天」这类
+ * **值替换**成立；但取消项的生效值是「不需要」，替换进句子会产出「…喷涂不需要…」这种
+ * 病句。取消的语义是**该做法不再存在**，正确动作是把承载它的那一句/那一项整体去掉。
+ *
+ * ## 边界
+ *
+ * - 只删**陈述该做法为现行**的句子；含变更叙述（原为/变更为/取消/不再实施）的句子保留
+ *  （把取消过程说清楚是合法的，甚至是必要的）。
+ * - 删除编号列表项时**同步重排该连续段的编号**，否则会引入「有序列表编号不连续」缺陷。
+ * - 删除后若整个列表只剩编号、无内容，则不动（防把列表删空）。
+ */
+export function fixCancelledPracticeResidue(
+  markdown: string,
+  cancelledItems: readonly string[],
+): { markdown: string; fixedCount: number; details: string[] } {
+  const targets = [...new Set(cancelledItems.map(item => item.trim()).filter(item => item.length >= 4))];
+  if (targets.length === 0) return { markdown, fixedCount: 0, details: [] };
+  const CHANGE_NARRATIVE_RE = /原(?:为|值|做法|设计)|变更为|调整为|取消|不再(?:需要|实施|使用)|替代/u;
+  const details: string[] = [];
+  let fixedCount = 0;
+  const lines = markdown.split('\n');
+  const kept: string[] = [];
+  const droppedIndexes = new Set<number>();
+  lines.forEach((line, index) => {
+    if (/^\s*(?:#{1,6}\s|\||>)/u.test(line)) { kept.push(line); return; }
+    if (!targets.some(target => line.includes(target))) { kept.push(line); return; }
+    /**
+     * 变更叙述判定必须**逐句**，不能整行判定。
+     *
+     * 实测缺陷（4.61 二轮）：钢构涂装那段是一个长行，其中别的句子含「取消」字样，
+     * 整行 `CHANGE_NARRATIVE_RE.test(line)` 命中 → 整行被跳过 → 「氯化橡胶面漆两道」
+     * 以现行工艺留在正文里，终检照报「被取代形态残留」，而修复器判定为"无需修复"。
+     * 长段落里一句变更叙述不该豁免其它句的残留。
+     */
+    const clauses = line.split(/(?<=[。；;！？])/u);
+    const offending = clauses.filter(clause => targets.some(target => clause.includes(target)) && !CHANGE_NARRATIVE_RE.test(clause));
+    if (offending.length === 0) { kept.push(line); return; }
+    // 行内含目标做法且无变更叙述 → 该行承载的内容已被取消
+    const numbered = /^\s*\d{1,3}\s*[.、．)]\s*/u.test(line);
+    if (numbered) {
+      // 编号列表项：整项删除并记账（编号在下方统一重排）
+      droppedIndexes.add(index);
+      fixedCount += 1;
+      details.push(`取消项残留删除：${line.trim().slice(0, 40)}`);
+      kept.push('');
+      return;
+    }
+    // 普通段落：整句删除（复用上面已切好的 clauses，口径同源）
+    const survivors = clauses.filter(clause => !offending.includes(clause));
+    if (survivors.length === 0) {
+      // 整行都是被取消的做法（独立成句/独立成行）→ **整行删除**。
+      // 首版此处 `kept.push(line); return;` 是"保留以防误删"——方向写反了：
+      // 它把「整行即被取消做法」这一**最该删**的形态原样保留（实测独立句用例因此零命中）。
+      fixedCount += 1;
+      details.push(`取消项残留删除（整行）：${offending[0]!.trim().slice(0, 40)}`);
+      kept.push('');
+      return;
+    }
+    const rebuilt = survivors.join('');
+    if (rebuilt !== line) {
+      fixedCount += 1;
+      details.push(`取消项残留删除：${offending[0]!.trim().slice(0, 40)}`);
+    }
+    kept.push(rebuilt);
+  });
+  if (droppedIndexes.size > 0) {
+    // 编号段重排：连续的编号块内按出现序重排为 1..n（与 structure-integrity 重排器同口径）
+    const ORDERED_RE = /^(\s*)(\d{1,3})(\s*[.、．)]\s*)(.*)$/u;
+    let runStart = -1;
+    const renumber = (start: number, end: number) => {
+      let counter = 1;
+      for (let index = start; index <= end; index += 1) {
+        const match = ORDERED_RE.exec(kept[index] ?? '');
+        if (!match) continue;
+        kept[index] = `${match[1]}${counter}${match[3]}${match[4]}`;
+        counter += 1;
+      }
+    };
+    for (let index = 0; index <= kept.length; index += 1) {
+      const line = index < kept.length ? kept[index]! : undefined;
+      const isItem = line !== undefined && ORDERED_RE.test(line);
+      // 空行（被删除项留下）不打断编号段。越界的哨兵位置（index === kept.length）
+      // **必须当作"段结束"而不是空行**——否则 `continue` 掉最后一次收口，整个重排永不执行
+      //（实测症状：项删掉了、编号却仍从 4 开始，反而新增"编号不连续"缺陷）
+      const isGap = line !== undefined && line.trim() === '' && runStart >= 0;
+      if (isItem || isGap) { if (runStart < 0) runStart = index; continue; }
+      if (runStart >= 0) { renumber(runStart, index - 1); runStart = -1; }
+    }
+  }
+  return { markdown: kept.join('\n'), fixedCount, details };
+}
+
+/**
+ * 标准规范引用残缺确定性修复（**语料实测的系统性生成退化**）。
+ *
+ * ## 缺陷形态
+ *
+ * ```
+ * 《建筑给水排水及采暖工程施工质量验收规范》（GB 50242-2002）
+ *   → 《建筑给水排水及采暖50242-2002）        ← 中间段被"自吞噬"
+ * ```
+ * 被吞掉的恒为「标题余部 + 》（GB 」——即书名号**未闭合**、括号**未开启**。
+ *
+ * ## 实测规模（263 份归档语料）
+ *
+ * 13 份命中（4.9%），且**集中在同一批国标**（50242 / 50303 / 50203 / 50201…），
+ * 说明这不是随机笔误而是**长列举句的生成退化**：编制依据段一次列 20+ 条高度同形的
+ * 「《X工程施工质量验收规范》（GB NNNNN-YYYY）」，模型在该形态上跳字（同形重复串的
+ * 注意力复制失败），跳的正好是每条都相同的中段。
+ *
+ * ## 为什么必须确定性修（不能只交给修复轮）
+ *
+ * 该残留会命中终检 `punctuationArtifactIssues` / `scanPunctuationBalance` 的
+ * 「全角括号/书名号不闭合」**blocker**（成对性破坏 = 内容丢失信号），而链尾的
+ * `stageQuotationBalanceRepair` LLM 轮在实机中修不动它（上一版巢湖实测：两轮均报
+ * 「模型未产生有效修改；残留 2 对不配对」——要求 LLM 重写一整条 20 引用的长句，
+ * 它只会把同形残缺再产一遍）。残缺形态是**确定性的**，确定性修复可靠且零漂移。
+ *
+ * ## 修法（**只插字符，不改字符**）
+ *
+ * `《<片段><编号>）` → `《<片段>》（<编号>）`：在编号前插入 `》（`。原文字符一个不丢，
+ * 编号（识别标准的关键信息）完整保留；被吞掉的标题余部无法凭据恢复，**不猜**（不查表、
+ * 不补名、不加「GB」前缀——宁可显式保留残缺痕迹，也不构造看似正确的错误引用）。
+ */
+export function fixTruncatedStandardCitations(markdown: string): { markdown: string; fixedCount: number; details: string[] } {
+  let fixedCount = 0;
+  const details: string[] = [];
+  // 《 未闭合即遇「编号-年份）」：片段限定不含任何括号/书名号；编号含可选标准族前缀
+  //（GB / GB/T / JGJ / JGJ/T / DB34/T / CJJ / JTG …）+ 4~5 位流水号 + 年份
+  const next = markdown.replace(/《([^《》（》）\n]{2,40}?)((?:[A-Z]{2,4}\s*(?:\d{2,4})?(?:\/T)?\s*)?\d{4,5}(?:\/T)?\s*-\s*\d{4})）/gu, (_full, fragment: string, code: string) => {
+    fixedCount += 1;
+    details.push(`标准引用残缺：${fragment}${code}）→《${fragment}》（${code}）`);
+    return `《${fragment}》（${code}）`;
+  });
+  /**
+   * **成对性复检（不通过即整体回滚）**——与 `fixResourceBreakdownNumbers` 同一范式。
+   *
+   * 为什么必需：本修复器的前提是「匹配到的 `《` 未闭合」，而正则只能证明**匹配区间内**没有 `》`，
+   * 不能证明该 `《` 在全文范围内未被别的 `》` 配走。真实语料矩阵（270 份归档 × 31,215 段落）
+   * 实测到反例：段落 #1135 的书名号原本 **26《/26》完全成对**，却被插入 2 个 `》` 变成 26/28——
+   * **把好的改坏**，比不改严重得多。
+   *
+   * 复检口径：`|《 - 》|` 不得增大。增大即说明本次插入引入了新的不配对，整体回滚并记账。
+   */
+  const bookDeviation = (text: string) => Math.abs(text.split('《').length - text.split('》').length);
+  if (fixedCount > 0 && bookDeviation(next) > bookDeviation(markdown)) {
+    return { markdown, fixedCount: 0, details: [`成对性复检未通过，已整体回滚（${details.length} 处拟修复会使书名号更不配对）`] };
+  }
+  return { markdown: next, fixedCount, details };
+}
+
 /** V5 P4：修复权威统一从 AuthorityIndex 全量派生（替代 blueprintPlanAuthorities 人工映射白名单）。
  * 1. 跨节数值锚点：CROSS_SECTION_ANCHOR_ENTITY_RE 实体词 × equipment/quantity 域自动对接——
  *    挖掘机等任意新增设备入蓝图即自动获得权威（原 7 类 key 白名单是「挖掘机 1 vs 5 无修复通道」根因）；
@@ -1743,7 +1974,9 @@ export function fixSelfUnderminingCandidates(markdown: string): { markdown: stri
       // 的赶工暗示均命中改写，工序细节用通配捕获（跨项目通用，to 句不含任何项目特定词）；
       // 句尾「竣工验收」锚点必选（否则 。? 可空匹配导致替换在句中提前结束、句尾内容残留）
       from: /(?:亮化与)?收尾阶段安排\s*\d+\s*个日历天[^。\n]{0,60}?项目经理组织各分组施工员进行内部预验收[^。\n]{0,80}?竣工验收。?/gu,
-      to: '收尾阶段按总进度计划组织实施，项目经理组织内部预验收，预验收问题清单当日下发、限时整改、复查销项后申请正式竣工验收',
+      // 4.60 I2-c：改写目标句尾原为「限时整改、复查销项」——固定式修复器把套语**写进**正文，
+      // 是「复查销项」的又一个源头（修复器自身成了复读源）。改为写实质动作，不含零信息尾词。
+      to: '收尾阶段按总进度计划组织实施，项目经理组织内部预验收，预验收问题清单当日下发、限时整改并由技术负责人逐项复验合格后申请正式竣工验收',
       detail: '「收尾阶段安排N个日历天」赶工暗示改写为按计划组织正向表述',
     },
   ];

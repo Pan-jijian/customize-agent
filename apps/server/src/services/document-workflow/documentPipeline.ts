@@ -19,6 +19,7 @@ import { stageTableRepair } from './finalize/repairRounds/tableRepair';
 import { stageSemanticChoice } from './finalize/repairRounds/semanticChoice';
 import { stageDeterministicStage5 } from './finalize/repairRounds/deterministicStage5';
 import { stagePostReviewSurface, runSurfaceDeterministicCleans, replayBlueprintCitationNumericFixes, replayStage5FactsModelNumericFixes, replaySurfacePunctuationClosure } from './finalize/repairRounds/postReviewSurface';
+import { applyTruthCaliberCleans } from './finalize/repairRounds/postReviewSurface';
 import { backfillUsedNotDeclared, replayTailStrippedBasisCitations } from './finalize/repairRounds/basisRegulationsCrossRepair';
 import { stageFactDistribution } from './finalize/repairRounds/factDistribution';
 import { stageNumericVerification } from './finalize/repairRounds/numericVerification';
@@ -253,6 +254,13 @@ export async function finalizeGeneration(p: FinalizeGenerationInput): Promise<Ge
   // 追加块（补写/删除类）仍可能带回标点叠用残留（「。。」句段拼接、「、、」并列删除），
   // round-2 链无二次消费点直坠终门禁——同源修复器在终门禁前最后收口（终门禁所检 = 交付所存）
   await replaySurfacePunctuationClosure(session);
+  // 4.61 真值层口径**链尾终局重放**（本仓同型缺陷第三次复现）：`fabricated-schedule-date` /
+  // `cancelled-practice-residue` 两个确定性修复改的是 finalMarkdown，而在 post-review-surface
+  // 之后还有 12 个阶段会 `rebuildFinalMarkdown()`——实测 STAGE 记录 success（"开工日期落位权威口径
+  // 2026年08月31日→2026年10月10日"）、终稿里该日期却仍在，终检照报「口径错误」。本节与上方
+  // basisRegulationsTailReplay 同因同解：**确定性修复必须排在最后一次重建之后**，否则等于没修
+  //（最坏的一种失败：进度事件说成功）。两个修复器均幂等，重放零成本。
+  await applyTruthCaliberCleans(session);
   // 4.55.31 链尾编制依据引用小句回补重放（巢湖实机归因：修复轮成果被链尾清洗确定性删除）：
   // basis-regulations-cross-repair 的 Phase B 把「声明未用」条目以「…按《X》（编号）控制…」形态
   // 补进章草稿（阶段记录 success、缺口 29→1），其后的 runSurfaceDeterministicCleans →

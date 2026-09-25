@@ -15,6 +15,8 @@
  * 与真项目名并列成"冲突"）：图签/OCR 残片/指向值/截断值/清单内部口径词在入图前剔除。
  */
 import { CHANGE_CONNECTORS, classifyValueShape, type ValueOverride } from './valueOverride';
+// 4.61 单一权威模型（knowledge 包单源）：载体优先级三套实现收敛到此处
+import { sourcePriorityOf } from '@customize-agent/knowledge';
 import { classifyPoolNoiseText } from './poolNoise';
 
 export interface TruthCandidate {
@@ -61,15 +63,26 @@ export interface AuthoritativeValueAudit {
 /** 澄清/变更载体的来源指纹（答疑 / 澄清 / 补疑 / 补遗 / 问答） */
 const CLARIFY_SOURCE_RE = /补遗|补疑|答疑|澄清|question/i;
 
-/** 载体优先级（按来源串判定；不依赖字段） */
-export function sourcePriority(source: string): number {
-  const text = String(source || '');
-  if (CLARIFY_SOURCE_RE.test(text)) return 96;
-  if (/招标|投标须知|招标公告/.test(text)) return 90;
-  if (/清单|bill|boq|xls/i.test(text)) return 80;
-  if (/图纸|dwg|施工图|设计说明/i.test(text)) return 75;
-  if (/企业|公司|管理手册/.test(text)) return 60;
-  return 70;
+/**
+ * 载体优先级（4.61 **委托单一权威模型**）。
+ *
+ * 旧实现是本仓**三套互不相容的载体优先级**之一（另两套在 `factGovernance`）：
+ * 同一份资料在三处得到不同档位（答疑 96/96/95、招标 90/85/85、图纸 75/70/75），
+ * 于是同一数据在不同链路被不同裁决。现统一委托 `sourcePriorityOf`（knowledge 包单源）。
+ *
+ * ## 域参数
+ *
+ * `attribute` 给定时按**语义域**裁决（图纸在设计参数域 > 清单、清单在工程量域 > 图纸）；
+ * 不给定时按**契约口径域**——这是一个兼容默认，与旧行为顺序一致（答疑 > 招标 > 清单 > 图纸），
+ * 保证既有调用点不发生非预期漂移。新调用点应尽量传 `attribute`。
+ *
+ * ## 量纲变更（重要）
+ *
+ * 返回值不再是 96/90/80 这类"档位"，而是 **100 起、逐档 -10** 的强度。
+ * **任何以旧阈值判定的调用点必须重标定**（如 `<= 80` 判"实体资料" → 新口径 `<= 70`）。
+ */
+export function sourcePriority(source: string, attribute?: string): number {
+  return sourcePriorityOf(source, attribute);
 }
 
 /** 来源内的"发布时序"指纹：答疑编号（"7招标答疑文件" → 7）/ 文件日期（2026.6.20 / 2026年6月20日） */
@@ -353,7 +366,7 @@ function clarifiedPreference(candidate: TruthCandidate): boolean {
   return CLARIFY_SOURCE_RE.test(candidate.source) && CHANGE_CONNECTOR_RE.test(candidate.value);
 }
 
-function arbitrate(candidates: TruthCandidate[], overrides: ValueOverride[]): { winner: TruthCandidate; rule: string; superseded: string[] } | undefined {
+function arbitrate(candidates: TruthCandidate[], overrides: ValueOverride[], attribute = ''): { winner: TruthCandidate; rule: string; superseded: string[] } | undefined {
   if (candidates.length === 0) return undefined;
   const supersededSet = new Set<string>();
   const promoted: TruthCandidate[] = [];
@@ -372,7 +385,7 @@ function arbitrate(candidates: TruthCandidate[], overrides: ValueOverride[]): { 
       attribute: candidates[0]!.attribute,
       value: override.effective,
       source: evidenceSource,
-      priority: sourcePriority(evidenceSource),
+      priority: sourcePriority(evidenceSource, attribute),
       order: sourceOrder(evidenceSource) * 1000 + 900,
       clarified: true,
     });
@@ -439,12 +452,16 @@ function arbitrate(candidates: TruthCandidate[], overrides: ValueOverride[]): { 
   }
   const shape = classifyValueShape(narrowed[0]!.value);
   if (shape === 'measure' || shape === 'spec') {
-    const entityFirst = narrowed.filter(candidate => sourcePriority(candidate.source) <= 80);
+    // 4.61 量纲重标定：强度制为「100 起、逐档 -10」，旧阈值 `<= 80`（清单/图纸/企业/其他）
+    // 对应新口径 `<= 70`（boq-feature 及以下）。传入属性后按**语义域**裁决——
+    // 规格类属性落 material/geometry 域，此时图纸说明(100) 强于清单特征(70)，与设计真理一致。
+    const entityFirst = narrowed.filter(candidate => sourcePriority(candidate.source, attribute) <= 70);
     if (entityFirst.length === 1) return { winner: entityFirst[0]!, rule: 'R5', superseded: [...supersededSet] };
     if (entityFirst.length > 1) narrowed = entityFirst;
   }
   if (shape === 'money') {
-    const tenderFirst = narrowed.filter(candidate => sourcePriority(candidate.source) >= 90);
+    // 金额是契约口径：答疑(100)/招标正文(90) 为招标方口径，阈值 90 在新旧量纲下同义
+    const tenderFirst = narrowed.filter(candidate => sourcePriority(candidate.source, attribute) >= 90);
     if (tenderFirst.length === 1) return { winner: tenderFirst[0]!, rule: 'R5', superseded: [...supersededSet] };
     if (tenderFirst.length > 1) narrowed = tenderFirst;
   }
@@ -682,7 +699,7 @@ export function buildAuthoritativeValues(input: {
   isolateMaterialPackages(byAttribute, noiseRejected);
   const resolved: ResolvedValue[] = [];
   for (const [attribute, candidates] of byAttribute) {
-    const result = arbitrate(candidates, overrides);
+    const result = arbitrate(candidates, overrides, attribute);
     if (!result) continue;
     // 4.55.20：落选候选登记为被取代值（非文本形态）——同一口径的旧值必须被禁止再出现在正文
     //（实测：1/5 号答疑各有最高投标限价，正文不得再用作废的 22303.66万元/172460314.52元）。

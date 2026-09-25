@@ -271,14 +271,10 @@ export async function buildLlmChapterContent(template: DocumentTemplate, chapter
     bidCompositionWritingRules(options.bidComposition),
     // A5a 前缀缓存：可变 promptTexts 已移入 user 首部，system 保持恒定（跨章共享 prefix cache）
   ].filter(Boolean).join('\n\n');
-  // 4.43 篇幅上限语义 + 显示校准系数（根治字数控不住）：
-  // 实验链实证（R/V8~V13 共 80+ 次直连调用）——① 模型对绝对字数无计数能力：最简指令
-  //「请写约 1500 字」实测 2434 字（1.62x，R 组 15 次调用）；② 目标语义（「约 N 字」/「篇幅目标 N」）
-  // 零咬合：全信号缩放 0.85 后产出不变（V11 实测）；③ 上限语义（「不超过 N」）有效咬合
-  //（X2 单小节 1.21x vs 目标语义 1.64x）；④ 块级/点位/骨架全信号一致缩放 0.75 后（V13 定标 22 样本）：
-  // 产出落到 0.81~1.25x 块目标、82% 直通质检窗（缩放 0.70 则 100% 直通但文档总量偏低）。
-  // 取 0.75：文档总量 ≈0.97x 用户目标（贴合要求字数），欠产侧尾距 0.7 阻断线远、
-  // 超产侧 ~18% 由二轮压缩反馈收敛。
+  // 4.60 I2-b 篇幅合同（目标语义、零系数）——4.43 的「上限语义 + 显示校准系数」实验链
+  //（R/V8~V13，当年结论：目标语义零咬合、上限语义唯一有效）**已被现场复测推翻**：模型长度
+  // 行为随版本漂移（当年目标语义实测 1.64x 超产，本次实测 0.90x 即准），而系数只是对旧模型
+  // 偏差的补偿，换模型即失效（用户实测质疑）。现真实目标直接下达，见 renderLengthContractLine。
   const writingTarget = options.targetWords || options.minWords || 1000;
   const lengthContractLine = renderLengthContractLine(writingTarget);
   const prompt = [
@@ -428,47 +424,67 @@ export function sectionTargets(chapter: DocumentTemplateChapter, targetWords: nu
 }
 
 /**
- * 4.43 块级篇幅显示校准系数：渲染给模型的字数 = 真实目标 × 本系数。
+ * 4.60 I2-b 篇幅合同：**目标语义下达 + 零系数**——「上限语义 + 显示校准系数」整体废除。
  *
- * 模型对被展示数字的**执行偏差约 1.13x**（对绝对字数无计数能力，只对上限有反应，见 4.43 实验链）。
+ * ## 为什么要废除系数（用户质疑，实测支持）
  *
- * ## 4.60 I2 重标定（**用无偏数据**，v13 的 0.75 已被实测证伪）
+ * > 「如果我换别的模型的话，是不是这个系数也会失效的可能，因为每个模型都不一样。」
  *
- * 实测（`doc-1790188130107-5e94ff6e`，**块级篇幅账**全量记录 32 块，含首轮直通者）：
- * ```
- * 实际/目标 中位 0.85；块目标命中率 34%；首轮通过率 34%
- * ```
- * 即 s=0.75 时产出中位 **0.85×真实目标**——**正好压在达标区 [0.85,1.15] 的下沿**，
- * 于是约 2/3 的块落在窗外必然重试（首轮通过率仅 34%，与「写作一次通过率 ~50%」的观测同族）。
+ * 会。系数是**某个模型在某个 prompt 形态下的偏差补偿**，换模型（deepseek-v4-pro / gemini / gpt）
+ * 或换模型版本即失效——它补偿的是「模型没按指令写」，而不是「指令没说清」。
  *
- * 反解：产出 ≈ 1.13 × cap = 1.13 × s × T；要落在窗中心（1.0×T）需 s ≈ 0.885，取 **0.9**。
+ * ## A/B 实测（`.dbg/length-ab.mjs`，直连 API，n=12 × 两个量级）
  *
- * **为何 v13 的 0.75 不再适用**：那组定标用的是**失败样本**（日志里只有被判欠产/超产的块留痕，
- * 干净通过的块不留痕），中位被拉低到 0.70 从而"证明"了 0.75 合适——**这是自我实现**。
- * 本仓现在有 `blockLedger`（**无条件**记录每一块），故本次定标基于无偏分布。
+ * | 指令形态 | 目标 600 | 目标 1200 |
+ * |---|---|---|
+ * | upper（不超过 N 字，**废除前生产路线**） | 0.59×｜窗内 0/12 | 0.57×｜窗内 0/12 |
+ * | **target（篇幅约 N 字）** | 0.81×｜4/12 | **0.90×｜窗内 12/12** |
+ * | target+upper（目标+上限） | 0.75× | 0.78× |
+ *
+ * 三条结论：
+ * 1. **上限语义系统性欠产**（0.53~0.59×）——旧的 0.9 系数不过是在补偿它自己造成的欠产；
+ * 2. **目标语义即准**（0.81~0.90×），**不需要任何系数**——「说清要求」跨模型成立；
+ * 3. **加上限反而压制产出**（target+upper 0.75× < target 0.90×）→ 上限只能作极端保护，不能与目标并列下达。
+ *
+ * 生产侧佐证（`doc-1790192978315-5e3bbdd6` 重试原因分布）：欠产 ×6 是最大重试原因，
+ * 与「上限语义 → 腰斩 → 欠产」的预测完全吻合。
+ *
+ * **为何 4.43「目标语义零咬合、上限语义唯一有效」不再成立**：那是旧模型/旧 prompt 形态下的结论
+ * （当年实测目标语义 1.64× **超产**），模型长度行为已漂移；本次现场复测直接推翻。
  */
-export const BLOCK_LENGTH_DISPLAY_SCALE = 0.9;
 
-/** 显示字数换算：真实目标 × 校准系数（下限 1 字防止 0 渲染）。 */
-export function displayWordCap(words: number) {
-  return Math.max(1, Math.round(words * BLOCK_LENGTH_DISPLAY_SCALE));
-}
+/** 目标语义的容差（±10%）：与块质检达标区 [0.85,1.15] 同源，作为「说清要求」的一部分下达。 */
+export const LENGTH_TARGET_TOLERANCE = 0.1;
 
-/** 块级字数合同行（4.43 上限语义）：目标语义措辞零咬合（V8~V11 实测），上限语义为唯一
- * 有效字数指令（X2/V13 实证）；显示值经校准系数折算，实际产出回落到合同窗内。 */
+/**
+ * 块级字数合同行（4.60 I2-b 目标语义）：真实目标直接下达，**不再经任何系数折算**。
+ *
+ * ## 为什么**不写下限之外的上限**
+ *
+ * 目标语义即准（A/B：目标语义 0.81~0.90×、上限语义 0.53~0.59×），而「目标 + 上限」的组合
+ * 反而**把产出推高**：实机实测（本版首轮）块产出比中位 **1.27×**、块目标命中率 25%，
+ * 文档超目标 55%——因为「不超过 1.4×」给出了 40% 的合法漂移空间，模型把它当成了余量。
+ * A/B 里「target 单独用」才是 0.90×，多加一个宽松上限只会引入漂移。
+ *
+ * 系统仍判 >1.4× 为块失败（极端超产是真实信号），但**不把该阈值写进指令**：
+ * 告诉模型"最多可以到 1.4 倍"与"目标是 T"是两个互相抵消的信号。
+ *
+ * 因此指令只声明**真实目标与真实合格区间**——不说假话（"超出即重写"已不成立：
+ * 4.60 I2-c 起 1.4× 以内的超产不再触发重写），也不留下漂移空间。
+ */
 export function renderLengthContractLine(targetWords: number) {
-  const cap = displayWordCap(targetWords);
-  return `- 保留章节标题；本节正文总字数不超过 ${cap} 字（控制在 ${Math.round(cap * 0.85)}~${cap} 字之间），超出即不合格。`;
+  const tolerancePercent = Math.round(LENGTH_TARGET_TOLERANCE * 100);
+  return `- 保留章节标题；本节正文篇幅约 ${targetWords} 字（±${tolerancePercent}%）。`;
 }
 
-/** 小节篇幅上限指令（4.43 上限语义 + 显示校准）：逐点上限控制；
+/** 小节篇幅计划指令（4.60 I2-b 目标语义）：逐点目标篇幅；
  * 旧文案「首轮生成应尽量一次达成，避免后续补写」为篇幅向上诱导句（dump 法证 25/25 在案），已删除。 */
 export function buildSectionBudgetInstruction(chapter: DocumentTemplateChapter, targetWords: number, quotas?: SectionQuotaItem[]) {
   const targets = sectionTargets(chapter, targetWords, quotas);
   if (targets.length === 0) return '';
   return [
-    '本节小节篇幅上限（逐点控制、不得超出；在各自上限内按材料深度展开）：',
-    ...targets.map(item => `- ${item.title}：不超过 ${displayWordCap(item.targetWords)} 字，并写入与该小节相关的材料事实、适用边界和必要说明。`),
+    '本节小节篇幅计划（逐点控制；按下列目标篇幅组织详略，偏差不超过 ±10%）：',
+    ...targets.map(item => `- ${item.title}：约 ${item.targetWords} 字，并写入与该小节相关的材料事实、适用边界和必要说明。`),
   ].join('\n');
 }
 
@@ -681,7 +697,7 @@ export async function buildSectionFactCard(sectionTitle: string, evidence: Docum
 小节：${sectionTitle}
 必须优先落位的资料事实：
 ${lines.join('\n')}
-成稿要求：1）至少自然写入其中 2 条资料事实；2）如存在数字、规格、标准编号、数量、工期，必须至少原样写入 1 条；3）本节必须**完整包含**下列要素（终检逐项判定，缺项即打回）：① 作业对象与工程量——写出具体部位/单体并引用清单数量（数量照抄资料/清单原文，不得改写或换算）；② 工序顺序——编号步骤、箭头链、表格均可，但**不得全篇复用「先…再…随后…最后」同一句式**；③ 施工方法——含不少于 4 个工艺参数（材料牌号/强度等级/厚度/间距/偏差/试验压力等）；④ 检查验收与闭环——责任岗位 + 检查频次 + 整改销项；不得写成"结合实际、按规范执行"的泛化空话；4）不得改写、换算或编造资料未提供的参数；5）量化参数落位硬性要求：本节正文每千字不少于 2 个不同量化参数（优先使用上方清单参数与资料原文参数），同一参数不得反复堆砌凑数；当本节资料可落位参数不足 2 个/千字时，以全部可落位参数写入为准，不得虚构参数凑数——「参数不足」仅在资料中仍有未落位参数时构成打回理由；6）**本节出现的每一个数值都必须来自上方资料事实、量化参数清单或蓝图锁定值**，不得出现清单外的数值，也不得用「约/左右/若干」变通；涉及危险性较大的分部分项工程时，必须写「本项目实际参数 + 判定阈值对照 + 结论」，禁止只抄规范阈值；7）${TABLE_CAPTION_MECHANICAL_RULE}${CLAUSE_RECITATION_CONSTRAINT_RULE}` : '';
+成稿要求：1）至少自然写入其中 2 条资料事实；2）如存在数字、规格、标准编号、数量、工期，必须至少原样写入 1 条；3）本节必须**完整包含**下列要素（终检逐项判定，缺项即打回）：① 作业对象与工程量——写出具体部位/单体并引用清单数量（数量照抄资料/清单原文，不得改写或换算）；② 工序顺序——编号步骤、箭头链、表格均可，但**不得全篇复用「先…再…随后…最后」同一句式**；③ 施工方法——含不少于 4 个工艺参数（材料牌号/强度等级/厚度/间距/偏差/试验压力等）；④ 检查与验收——写清由谁、以何频次、检查什么、发现问题如何处置、处置结果由谁验证认可并留下什么记录（**不要**用“复查销项”“整改销项”一类无信息尾词收句）；不得写成"结合实际、按规范执行"的泛化空话；4）不得改写、换算或编造资料未提供的参数；5）量化参数落位硬性要求：本节正文每千字不少于 2 个不同量化参数（优先使用上方清单参数与资料原文参数），同一参数不得反复堆砌凑数；当本节资料可落位参数不足 2 个/千字时，以全部可落位参数写入为准，不得虚构参数凑数——「参数不足」仅在资料中仍有未落位参数时构成打回理由；6）**本节出现的每一个数值都必须来自上方资料事实、量化参数清单或蓝图锁定值**，不得出现清单外的数值，也不得用「约/左右/若干」变通；涉及危险性较大的分部分项工程时，必须写「本项目实际参数 + 判定阈值对照 + 结论」，禁止只抄规范阈值；7）${TABLE_CAPTION_MECHANICAL_RULE}${CLAUSE_RECITATION_CONSTRAINT_RULE}` : '';
   // 4.1 量化参数落位清单（两步生成第一步，零 LLM）：复用 extractChapterPreciseTokens 纯本地提取，
   // 在任务卡事实行（句粒度）之外单列精炼参数清单（词粒度），直接引导 LLM 逐参数落位，
   // 弥补「事实行被整行跳过时量化参数一并丢失」的规划缺位。（原 DOCUMENT_SECTION_QUANT_PLAN 回退已固化删除：注入恒开）
@@ -1328,8 +1344,8 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
     // 容量规划配额随清单下发（指令层：告诉模型每个要点写多深）——块质检只查块总字数区间，
     // 不逐点核对配额，写作口径与检测口径同源
     const coverageList = block.subPoints.map(point => {
-      // 4.43 上限语义 + 显示校准：点位配额同样按系数折算（点位目标语义零咬合，V13 全信号上限化后落窗）
-      const quota = point.quotaWords && point.quotaWords > 0 ? `篇幅不超过 ${displayWordCap(point.quotaWords)} 字` : '';
+      // 4.60 I2-b 目标语义：点位配额同样直接下达真实值（4.43 的「上限语义 + 系数折算」已废除）
+      const quota = point.quotaWords && point.quotaWords > 0 ? `篇幅约 ${point.quotaWords} 字` : '';
       return normalizeSubsectionTitleForDedup(point.title) === normalizedBlockTitle
         ? `- ### ${block.title}（本节标题，覆盖评分细目：${point.sources.join('、')}；正文直接展开，无需四级标题；如按细目分节，仅可使用上述细目标题作为四级标题${quota ? `；${quota}` : ''}）`
         : (point.sources.length > 1
@@ -1373,7 +1389,7 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
      * 两条约束在此**逐字重申**，与 `taskCardPrompt` 共用同一措辞来源（`SECTION_ELEMENT_REQUIREMENTS`
      * / `NUMERIC_SOURCE_REQUIREMENT`），避免两处漂移。
      */
-    const sectionElementConstraint = `【要素完整性】本节必须**完整包含**下列要素（终检逐项判定，缺项即打回）：① 作业对象与工程量——写出具体部位/单体并引用清单数量（数量照抄资料/清单原文，不得改写或换算）；② 工序顺序——编号步骤、箭头链、表格均可，但**不得全篇复用「先…再…随后…最后」同一句式**；③ 施工方法——含不少于 4 个工艺参数（材料牌号/强度等级/厚度/间距/偏差/试验压力等）；④ 检查验收与闭环——责任岗位 + 检查频次 + 整改销项。`;
+    const sectionElementConstraint = `【要素完整性】本节必须**完整包含**下列要素（终检逐项判定，缺项即打回）：① 作业对象与工程量——写出具体部位/单体并引用清单数量（数量照抄资料/清单原文，不得改写或换算）；② 工序顺序——编号步骤、箭头链、表格均可，但**不得全篇复用「先…再…随后…最后」同一句式**；③ 施工方法——含不少于 4 个工艺参数（材料牌号/强度等级/厚度/间距/偏差/试验压力等）；④ 检查与验收——写清由谁、以何频次、检查什么、发现问题如何处置、处置结果由谁验证认可并留下什么记录（**不要**用“复查销项”“整改销项”一类无信息尾词收句）。`;
     const numericSourceConstraint = `【数值来源】本节出现的**每一个数值**都必须来自上方资料事实、量化参数清单或蓝图锁定值；不得出现清单外的数值，也不得用「约/左右/若干」变通；涉及危险性较大的分部分项工程时，必须写「本项目实际参数 + 判定阈值对照 + 结论」，禁止只抄规范阈值。`;
     const blockRoleContext = [factsHint, blockSkeletonPrompt, divisionContainerPrompt, divisionElementFusionPrompt, keySectionKind && !isDivisionChapterContainer ? flowRotationDirective(index) : '', block.subPoints.length > 0
       ? `本节是「${input.chapter.title}」章的一个主题小节，只写本节标题覆盖的内容，不得重复本章其他节内容；必须按以下清单逐点写出实施性正文，标题必须与给定标题完全一致，不得改名、合并或遗漏；每个要点必须覆盖其标注的全部评分细目内容，但不得为这些细目单独开设小节标题；清单标注的篇幅为该要点字数上限，按标注控制详略、不得超出：\n${coverageList}${forbiddenTitlesLine ? `\n${forbiddenTitlesLine}` : ''}`
@@ -1637,9 +1653,9 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
           scopedProjectContext: input.scopedProjectContext,
           // F9：章级角色上下文上移 L2 共享段（同章各块完全相同 → prefix cache 共享命中）
           chapterLevelContext: input.roleContext || '',
-          // 4.43 字数合同（单通道）：minWords/targetWords = 块目标真实值（质检口径），展示给模型的
-          // 合同行经显示校准系数下达（上限语义）——真实值与展示值分离：质检用真实值、写作指令用
-          // 校准值，两者经 V13 定标对齐（产出回落到真实窗口内）；maxWords 旧参数保持删除
+          // 4.60 I2-b 字数合同（单通道、零系数）：minWords/targetWords = 块目标真实值，且**该真实值
+          // 即下达给模型的数字**（目标语义）——「质检用真实值 / 写作指令用校准值」的双口径已废除，
+          // 故不存在两口径漂移的可能；maxWords 旧参数保持删除
           minWords: block.targetWords,
           targetWords: block.targetWords,
           sectionQuotas: blockSectionQuotas,
@@ -1913,6 +1929,24 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         //    C7 补链：隔离重写耗尽后，失守块全部仅篇幅超产且章总量 ∈[0.85,1.2]×块预算合计时，
         //    由 stageChapterLoop 章级对冲接纳（salvageChapterByOverProduceAcceptance）——块容差吸收
         //    末轮抖动、章级接纳吸收累计抖动、文档级观测兜底，三层链闭合。
+        /**
+         * 4.60 I2-c：**超产不再触发重试**（首轮与末轮同口径）。
+         *
+         * ## 用户实测指出的设计缺陷
+         *
+         * > 「我写好了，但是我写多了，就报错了」——**这是有问题的**。
+         *
+         * 数据支持该判断：块产出比 `p75 = 1.17` 而首轮超产线 `1.15` → 约 1/4 的块
+         * **因为「写多了」被退回重写**；`doc-1790192978315-5e3bbdd6` 的重试原因分布亦显示
+         * 超产占 3/26。
+         *
+         * **超产本是章/文档级问题**：章预算账（4.56 改造 2-b）与篇幅压缩轮（`length-compression-repair`）
+         * 已覆盖；在**块级**用「退回重写」处理超产，代价是白烧一次调用、内容还可能变差，
+         * 而收益为零（章级照样要压缩）。这与 R0-a 已确立的「丢内容严格劣于内容有缺陷」同一方向。
+         *
+         * 现：首轮起即采用 1.4× 容差线（原仅末轮），**只有 >1.4× 的严重超产才判块失败**——
+         * 严重超产仍是真实信号（可能是模型跑题或重复），保留。
+         */
         const overProduceLine = Math.ceil(block.targetWords * 1.15);
         /**
          * 末轮容差线（4.51 起为 1.2×；4.56 **放宽到 1.4×**）：
@@ -1922,7 +1956,8 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
          * 不该在块级以丢弃正文的方式处理；1.4× 之外仍判定失败（严重超产是真实信号）。
          */
         const overProduceToleranceLine = Math.ceil(block.targetWords * 1.4);
-        const effectiveOverLine = attempt === blockMaxAttempts - 1 ? overProduceToleranceLine : overProduceLine;
+        // 4.60 I2-c：容差线**首轮起即生效**（原 `attempt === blockMaxAttempts - 1 ? tolerance : line`）
+        const effectiveOverLine = overProduceToleranceLine;
         // 欠产硬门线 = 比例线（0.7×块目标）与关键小节绝对深度门槛的严格者（4.55.22：绝对门槛并行追加）
         /**
      * 欠产门（4.56 R0-a **再修正**）：**仅首轮**阻断，末轮一律放行。
@@ -1945,9 +1980,10 @@ export async function buildPlannedChapterContent(input: PlannedChapterContentInp
         if (underProduceBlocking || overProduceBlocking) {
           console.error(`[gen][block-qc] 篇幅失守阻断 attempt=${attempt}（${chars} 字 vs 块目标 ${block.targetWords} 字，欠产线 <${underProduceLine}${criticalDepthFloor > 0 ? `（含关键小节深度门槛 ${criticalDepthFloor}）` : ''} / 超产线 >${effectiveOverLine}）${attempt > 0 && overProduceBlocking ? '［二轮仍超产 → 块失败］' : ''}: ${block.title}`);
         } else if (chars > overProduceLine) {
-          // 4.51 末轮容差放行观测（仅末轮可达：前轮超合同线即入上方阻断分支）
-          console.error(`[gen][block-qc] 篇幅超产末轮容差放行（${chars} 字 vs 块目标 ${block.targetWords} 字，合同超产线 ${overProduceLine} / 容差线 ${overProduceToleranceLine}）: ${block.title}`);
-          if (input.diagnostics) input.diagnostics.llm.lastInfo = `块篇幅超产末轮容差放行：${block.title}（${chars} 字，合同超产线 ${overProduceLine} / 容差线 ${overProduceToleranceLine}）`;
+          // 4.60 I2-c：**任意轮次**都可达（原仅末轮——前轮超 1.15× 即入上方阻断分支，被退回重写）。
+          // 文案随口径修正：不再叫「末轮容差放行」，而是「超产容差放行（不重写）」
+          console.error(`[gen][block-qc] 篇幅超产容差放行（${chars} 字 vs 块目标 ${block.targetWords} 字，超产线 ${overProduceLine} / 容差线 ${overProduceToleranceLine}，不重写）: ${block.title}`);
+          if (input.diagnostics) input.diagnostics.llm.lastInfo = `块篇幅超产容差放行：${block.title}（${chars} 字，超产线 ${overProduceLine} / 容差线 ${overProduceToleranceLine}，不重写）`;
         } else if (chars < Math.floor(block.targetWords * 0.85)) {
           console.error(`[gen][block-qc] 篇幅欠产接受区放行（${chars} 字 vs 块目标 ${block.targetWords} 字，达标区 ${Math.floor(block.targetWords * 0.85)}~${Math.ceil(block.targetWords * 1.15)}）: ${block.title}`);
         }

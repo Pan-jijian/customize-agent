@@ -155,7 +155,10 @@ describe('buildWritingTaskBrief', () => {
     expect(brief.globalWritingFocus).toHaveLength(23);
     expect(brief.globalWritingFocus.some(item => item.includes('禁止指向型表述与缺资料搪塞'))).toBe(true);
     expect(brief.globalWritingFocus[0]).toContain('模板化空话');
-    expect(brief.globalWritingFocus[2]).toContain('五要素链');
+    // 4.60 I2-c：第 3 条由「措施类段落必须落位完整五要素链…五要素词面每 1500 字至少 1 段完整覆盖」
+    // 改为「按业务实质写清、**不要求出现特定字词**」——词面配额是复读的直接驱动
+    expect(brief.globalWritingFocus[2]).toContain('完整要素链');
+    expect(brief.globalWritingFocus[2]).toContain('不要求出现特定字词');
     expect(brief.globalWritingFocus[3]).toContain('规范术语显性落位');
     expect(brief.globalWritingFocus[7]).toContain('属地创优目标');
     expect(brief.globalWritingFocus[8]).toContain('表格数据一致性');

@@ -17,9 +17,13 @@ import { crossChapterConsistencyIssues } from '@/services/document-workflow/qual
 import type { DocumentDraftChapter, DocumentFactsModel } from '@/services/document-workflow/types';
 
 vi.mock('@/services/document-workflow/semanticSimilarity', () => ({ buildSemanticSimilarity: vi.fn(), SEMANTIC_COVERAGE_THRESHOLD: 0.6 }));
-vi.mock('@customize-agent/knowledge', () => {
+vi.mock('@customize-agent/knowledge', async (importOriginal) => {
+  // 4.61：本包新增了权威模型导出（carrierStrength/sourcePriorityOf 等），
+  // 全量替换式 mock 会让这些导出变 undefined 并炸在消费端。改为**透传真实实现**、
+  // 只覆盖需要替身的嵌入 provider —— 后续包内新增导出不再需要逐个补 mock。
+  const actual = await importOriginal<typeof import('@customize-agent/knowledge')>();
   class LocalTransformersEmbeddingProvider {}
-  return { LocalTransformersEmbeddingProvider };
+  return { ...actual, LocalTransformersEmbeddingProvider };
 });
 
 /** 深度主表事实卡 mock（canonical 简写，仅新检查器消费的槽位） */

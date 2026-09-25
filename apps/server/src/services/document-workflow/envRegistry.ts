@@ -70,6 +70,7 @@ export const DOCUMENT_ENV_REGISTRY: readonly DocumentEnvEntry[] = [
   { name: 'DOCUMENT_EMBED_CACHE', status: 'managed', default: '1', note: 'bge 嵌入全局 LRU 缓存开关' },
   { name: 'DOCUMENT_EMBED_CACHE_SIZE', status: 'managed', default: '40000', note: 'bge 嵌入缓存容量（检索侧/报告侧默认口径 2000/40000，均为展示口径）' },
   { name: 'DOCUMENT_EXTRACTION_CACHE', status: 'managed', default: '1', note: '事实提取缓存开关' },
+  { name: 'DOCUMENT_TRUTH_CALIBER_DIAG', status: 'managed', default: '1', note: '真值层口径修复输入诊断恒显（4.61：修复器零命中时必须可观测，防「没修」与「无需修」不可分）' },
   { name: 'DOCUMENT_LLM_RETRY_BACKOFF', status: 'managed', default: '1', note: 'LLM 过载退避开关' },
   { name: 'DOCUMENT_PREFIX_WARMUP', status: 'managed', default: '1', note: 'prefix cache 预热开关' },
   { name: 'DOCUMENT_PREFIX_SCHEDULE_WINDOW_MS', status: 'managed', default: '300000', note: 'prefix 预热调度窗口' },

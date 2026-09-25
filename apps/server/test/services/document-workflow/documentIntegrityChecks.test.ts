@@ -374,7 +374,11 @@ describe('crossSectionNumericConflictIssues（h13 跨节数值口径冲突）', 
   it('垫层混凝土 C15 vs C20（标号类直接互斥）→ 报参数矛盾', () => {
     const markdown = '垫层混凝土采用C15。基础垫层采用C20混凝土浇筑。';
     const issues = crossSectionNumericConflictIssues(markdown);
-    expect(issues.some(issue => /垫层混凝土强度等级/u.test(issue.message) && /C15C标号 与 C20C标号/u.test(issue.message))).toBe(true);
+    // 4.61：分池由「裸词垫层」细化为「基础垫层」后，同池值的**入池顺序**变了（父级并入子级在前），
+    // 冲突本身不变——断言改为顺序无关。同时断言定位是复合部位（裸父级与单个子级合并的实证）。
+    expect(issues.some(issue => /垫层混凝土强度等级/u.test(issue.message)
+      && issue.message.includes('C15C标号') && issue.message.includes('C20C标号')
+      && /部位「基础垫层」/u.test(issue.message))).toBe(true);
   });
 
   it('并列枚举（50mm/70mm 多规格）→ 豁免不报', () => {

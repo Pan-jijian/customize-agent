@@ -362,9 +362,30 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
       // 提取失败/无绑定资料时返回空模型，章级验收自动跳过。
       // 证据来源：招标/补疑/答疑/评标文件直读全文（绕开检索与事实过滤，条款完整进入提取输入——
       // 历史缺陷：allEvidence 仅含基础事实切片，评标办法正文被整体过滤）；无直读内容时回退检索预算通道。
+      /**
+       * 4.61 载体闸：**按资料类型选文件，不按路径子串**。
+       *
+       * 旧判据 `if (!/招标|补疑|答疑|评标/u.test(relativePath)) continue` 是路径**子串**匹配，
+       * 实测（合工大）把「抗震支架电答疑修改0722/」这个**图纸目录**（目录名里带"答疑"）
+       * 下的整批 CAD 文本当成了答疑条款——1076 条要求里大量不可响应条目的直接来源：
+       * 那些"条目"是配电系统图的标注残片（`8300 B 1 A 消火栓起泵按钮 500 7300 500 1%`），
+       * 永远不可能被施工组织设计"响应"。
+       *
+       * 资料类型枚举本来就在同一个对象上（`fileRoleByPath`，由 `inferMaterialKind` 按文件名判定），
+       * 只是此前没被使用。**收件人判据的第一道闸就是这里**：只有对投标人提要求的载体才产生要求锚点。
+       */
+      const REQUIREMENT_SOURCE_KINDS: ReadonlySet<string> = new Set(['tender_document', 'addendum', 'contract', 'technical_specification']);
       const tenderFileEvidence: DocumentEvidence[] = [];
       for (const relativePath of [...session.understanding.evidenceScopePaths].sort()) {
-        if (!/招标|补疑|答疑|评标/u.test(relativePath)) continue;
+        const roleId = session.understanding.fileRoleByPath.get(relativePath);
+        // 已判定类型时按类型闸；类型缺失（未识别资料）时才回退路径子串，且仅在**非图纸类**路径上生效
+        const kindAccepted = roleId ? REQUIREMENT_SOURCE_KINDS.has(roleId) : false;
+        // 类型缺失时的回退：仍用路径子串，但**先排除图纸类路径**（图纸目录名常常带「答疑」，
+        // 见上文实测）——判据只认图纸标识词，不含「建筑/结构/电气」这类会误伤招标文件名的项目词
+        const fallbackAccepted = !roleId
+          && /招标|补疑|答疑|评标/u.test(relativePath)
+          && !/图纸|dwg|dxf|cad|平面图|系统图|立面图|剖面图|大样|详图|幕墙/iu.test(relativePath);
+        if (!kindAccepted && !fallbackAccepted) continue;
         const detail = session.understanding.getCachedFileDetail(relativePath);
         if (!detail?.chunks?.length) continue;
         for (const chunk of detail.chunks as Array<{ content: string; sectionTitle?: string }>) {
@@ -382,12 +403,18 @@ export async function stageUnderstanding(session: GenerationSession): Promise<vo
       }
       // 提取输入=直读全量切片（条款化层全文穷举切分，不预筛不剔除——预筛剔除即提取缺失）；
       // 无直读内容时回退检索预算通道（要求层文件优先）
+      // 4.61 载体闸（回退通道同口径）：**已判定非要求类来源的证据一律不进回退池**。
+      // 旧实现把「技术标准/技术要求」命中项全部前插、其余后置——后者等于把图纸/清单/表格
+      // 全部塞进要求提取输入，正是残片型"要求"（69% 未响应项）的第二个来源。
+      const requirementEligible = session.understanding.allEvidence.filter(item => {
+        const roleId = item.roleId;
+        if (roleId) return REQUIREMENT_SOURCE_KINDS.has(roleId);
+        return /招标|评标|投标须知|专用合同|合同条款/u.test(`${item.filePath || ''}${item.sectionTitle || ''}`)
+          && !/图纸|dwg|dxf|cad|平面图|系统图|立面图|剖面图|大样|详图|幕墙|清单|boq|xls/iu.test(`${item.filePath || ''}`);
+      });
       const extractionEvidence = tenderFileEvidence.length > 0
         ? tenderFileEvidence
-        : selectEvidenceByBudget(
-          [...session.understanding.allEvidence.filter(item => /招标|评标|投标须知|专用合同|合同条款|技术标准|技术要求/u.test(`${item.filePath || ''}${item.sectionTitle || ''}`)), ...session.understanding.allEvidence.filter(item => !/招标|评标|投标须知|专用合同|合同条款|技术标准|技术要求/u.test(`${item.filePath || ''}${item.sectionTitle || ''}`))],
-          { preservePinned: true },
-        );
+        : selectEvidenceByBudget(requirementEligible, { preservePinned: true });
       // 提取结果磁盘缓存 v4（对账闭合门禁 + 全内容指纹哈希）——同一项目资料未变化时跳过判定 LLM，
       // 命中时显性标注「复用上次提取」；env DOCUMENT_EXTRACTION_CACHE=0 显式关闭
       const extractionCacheEnabled = process.env.DOCUMENT_EXTRACTION_CACHE !== '0';

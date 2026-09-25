@@ -31,7 +31,7 @@ import type { BlueprintData } from './integratedBlueprint';
 import { blueprintEquipmentAuthorities, blueprintLaborPeakAuthority, blueprintPhaseLaborAuthorities, blueprintQuantityGroupAuthorities } from './authorityIndex';
 import { det, detSafe } from './detectorFixerRegistry';
 import { structureIntegrityIssues, truncatedSentenceIssues } from './structureIntegrityRules';
-import { flowFormRepeatIssues, sentencePatternRepeatIssues, skeletonFingerprintIssues, templatedLabelIssues, titleIntegrityIssues } from './templatingGovernance';
+import { flowFormRepeatIssues, sentencePatternRepeatIssues, sentenceTailRepeatIssues, skeletonFingerprintIssues, templatedLabelIssues, titleIntegrityIssues } from './templatingGovernance';
 import { factReconciliationIssues } from './factReconciliation';
 import { basisRegulationsCrossIssues } from './basisRegulationsCross';
 import type { DocumentDraftChapter, DocumentFactsModel, DocumentTemplate, DocumentTemplateChapter, NumericScopeConflict, PromptBinding, PromptDocumentRuleSet, TenderRequirementModel, ValidationIssue } from './types';
@@ -287,6 +287,9 @@ export async function buildStandardFinalValidationIssues(input: {
     // 资料闭环式/形式宣告式），语义套话原型不覆盖的结构句式复读改由本通道判定；修复轮 repairTemplatingIssues
     // 消费同源句模修复目标（检测定位=修复定位）
     ...det('sentence-pattern-repeat', () => sentencePatternRepeatIssues(input.markdown)),
+    // 4.60 I2-c 句尾复读（开集判据，**不看词表**）：同一 4 字句尾全篇 >4 次即命中——闭集词表
+    // （skeleton-fingerprint）必然漏判未能枚举的骨架，本通道按形状数，覆盖未知复读
+    ...det('sentence-tail-repeat', () => sentenceTailRepeatIssues(input.markdown)),
     // Q8 叠词重复表述（L1 封闭结构提取 + 确定性去重）
     ...det('repeated-word', () => repeatedWordIssues(input.markdown)),
     // Q3 商务条款数据入正文（商务词封闭集确定性 + 变体弱词语义复核，徽光阁实测暂列金额 60 万入正文）

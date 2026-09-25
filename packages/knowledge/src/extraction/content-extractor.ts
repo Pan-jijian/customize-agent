@@ -19,6 +19,28 @@ export interface ExtractionResult {
   metadata: Record<string, unknown>;
   warnings: string[];
   extractionTimeMs: number;
+  /**
+   * 4.61 结构化出口（**结构保真的落点**）。
+   *
+   * `text` 是**渲染**（供检索与向量嵌入），本字段才是**源数据**。
+   * 旧实现的病根是"只有渲染、没有源数据"：`CadAnnotation` 抽出了 `layer`/`x`/`y`/`entityType`，
+   * 随后被 `layoutCadAnnotations(): string[]` 一次性丢掉，下游只能靠形状猜（于是出现
+   * 「尺寸绑不上」「无主数值」「图纸参数与清单冲突无法裁决」）。
+   *
+   * 不变式 2（无降级）：下游**不得**再对 `text` 做结构恢复式正则；要结构就读本字段。
+   */
+  structured?: StructuredExtraction;
+}
+
+/** 结构化产出（按资料类型给对应分支；未实现的类型留空，不伪造） */
+export interface StructuredExtraction {
+  /** CAD 实体图（含尺寸的测量值与被标注两点、图层语义、图框归属、绑定质量） */
+  cad?: {
+    entities: CadEntity[];
+    sheets: Array<{ name: string; entityCount: number }>;
+    unassigned: number;
+    quality: CadBindingQuality;
+  };
 }
 
 type SpreadsheetCell = { v?: unknown; w?: string; f?: string; t?: string };
@@ -27,6 +49,8 @@ type SpreadsheetSheet = Record<string, SpreadsheetCell | unknown> & { '!ref'?: s
 type PdfTextItem = { str: string; x: number; y: number; width: number; height: number; fontName?: string };
 /** CAD 标注实体（DXF TEXT/MTEXT/DIMENSION/LEADER/ATTRIB 提取产物，含 10/20 组码坐标） */
 export type CadAnnotation = { text: string; x?: number; y?: number; layer?: string; block?: string; entityType?: string };
+import type { CadBindingQuality, CadEntity } from '../materials/cad-entities.js';
+import { assignCadSheets, buildCadEntities, cadBindingQuality, parseDxfPairEntities } from '../materials/cad-entities.js';
 
 /**
  * CAD 标注布局重建（与 PDF layoutPdfTextItems 同构）：DXF 中总说明等长文本
@@ -403,6 +427,8 @@ export class ContentExtractor {
     const start = Date.now();
     const warnings: string[] = [];
     let text: string;
+    // 4.61 结构化产出（当前只有 CAD 分支填；其余类型留空，不伪造）
+    let structured: StructuredExtraction | undefined;
     const metadata: Record<string, unknown> = {
       mimeType: file.mimeType,
       category: file.category,
@@ -414,6 +440,8 @@ export class ContentExtractor {
       text = result.text;
       Object.assign(metadata, result.metadata);
       warnings.push(...result.warnings);
+      // 4.61 结构保真：CAD 实体图随结果返回（text 只是渲染，本字段才是源数据）
+      structured = result.structured;
     } else if (file.category === 'data') {
       const result = this.extractData(file);
       text = result.text;
@@ -480,6 +508,7 @@ export class ContentExtractor {
       metadata,
       warnings,
       extractionTimeMs: Date.now() - start,
+      ...(structured ? { structured } : {}),
     };
   }
 
@@ -696,7 +725,7 @@ export class ContentExtractor {
     return (fragments.join('').match(/[\p{Script=Han}\p{L}\p{N}]/gu) ?? []).length;
   }
 
-  private async extractCad(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
+  private async extractCad(file: ClassifiedFile): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[]; structured?: StructuredExtraction }> {
     const metadata: Record<string, unknown> = { extractionMode: 'builtin_cad_structural', vectorizable: true, preferredExtractionMode: 'dwg_to_dxf_semantic' };
     const warnings: string[] = [];
     const ext = path.extname(file.absolutePath).toLowerCase();
@@ -720,47 +749,10 @@ export class ContentExtractor {
       }
     }
 
-    if (file.format === 'autocad' && ext === '.dxf') {
-      const raw = decodeTextBuffer(fs.readFileSync(file.absolutePath)).text;
-      const layers = this.matchAll(raw, /\n\s*8\s*\n([^\n]+)/gu).filter(value => this.isUsableCadName(value)).slice(0, 300);
-      const textEntities = this.extractDxfTextAnnotations(raw).slice(0, 500);
-      const blocks = this.matchAll(raw, /\n\s*2\s*\n([^\n]+)/gu).filter(value => this.isUsableCadName(value)).slice(0, 300);
-      const entityTypes = this.matchAll(raw, /\n\s*0\s*\n([A-Z][A-Z0-9_]+)/gu).slice(0, 1000);
-      const uniqueLayers = Array.from(new Set(layers));
-      const uniqueBlocks = Array.from(new Set(blocks));
-      const uniqueEntityTypes = Array.from(new Set(entityTypes));
-      metadata.layerCount = uniqueLayers.length;
-      metadata.layerNames = uniqueLayers.slice(0, 80);
-      metadata.textEntityCount = textEntities.length;
-      metadata.blockCount = uniqueBlocks.length;
-      metadata.blockNames = uniqueBlocks.slice(0, 80);
-      metadata.entityTypeCount = uniqueEntityTypes.length;
-      metadata.entityTypes = uniqueEntityTypes.slice(0, 80);
-      // 判空口径只统计标注文本：图层/块名是 CAD 内部结构信息，图纸「空数据」= 无文字标注。
-      // 把图层/块名计入字符数会让空图纸（仅图层结构、无任何标注）错误入库
-      const characterDataCount = this.countCadCharacterData(textEntities.map(annotation => annotation.text));
-      if (characterDataCount < MIN_CAD_CHARACTER_DATA) {
-        // 图纸无字符数据（无文字标注），不入库——空数据图纸直接过滤，仅元数据可查
-        metadata.contentCoverage = 'cad_no_extractable_text';
-        metadata.characterDataCount = characterDataCount;
-        warnings.push(`${file.format} DXF 未提取到字符数据（仅 ${characterDataCount} 个可读字符），图纸内容未入库`);
-        return { text: this.metadataOnlyText(file), metadata, warnings };
-      }
-      metadata.contentCoverage = 'dxf_semantic_layer_block_annotations';
-      metadata.characterDataCount = characterDataCount;
-      const semanticNodes = this.buildCadSemanticNodes(file, textEntities);
-      return {
-        text: [
-          `CAD DXF 图层: ${uniqueLayers.join(', ')}`,
-          `CAD DXF 块/符号: ${uniqueBlocks.join(', ')}`,
-          `CAD DXF 实体类型: ${uniqueEntityTypes.join(', ')}`,
-          'CAD 语义标注文本:',
-          ...semanticNodes,
-        ].join('\n'),
-        metadata,
-        warnings,
-      };
-    }
+    // 4.61 删除不可达的第二份 DXF 实现（原 :723-763）。
+    // `if (ext === '.dxf') return await this.extractDxf(...)`（:704）已无条件返回，
+    // 该分支恒不可达；且其口径与主力路径不一致（未做 GBK 还原、实体上限 500 vs 30000），
+    // 留着只会让"看起来在跑其实不在跑"的路径长期存在（勘查实测确认）。
 
     if (file.format === 'step') {
       const raw = decodeTextBuffer(fs.readFileSync(file.absolutePath)).text;
@@ -863,7 +855,7 @@ export class ContentExtractor {
     };
   }
 
-  private async extractDxf(file: ClassifiedFile, raw: string, metadata: Record<string, unknown>): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[] }> {
+  private async extractDxf(file: ClassifiedFile, raw: string, metadata: Record<string, unknown>): Promise<{ text: string; metadata: Record<string, unknown>; warnings: string[]; structured?: StructuredExtraction }> {
     const warnings: string[] = [];
     let parsed: unknown;
     // dxf-parser 对缺少坐标组码的残缺实体（无 10/20 的 LINE/CIRCLE/POLYLINE）存在解析
@@ -921,6 +913,22 @@ export class ContentExtractor {
     metadata.contentCoverage = 'dxf_semantic_layer_block_annotations';
     metadata.characterDataCount = characterDataCount;
     const semanticNodes = this.buildCadSemanticNodes(file, textEntities);
+    /**
+     * 4.61 结构保真出口：**同一份 DXF 解析两遍，但第二遍保留全部结构**。
+     *
+     * 第一遍（既有 `extractDxfTextAnnotations`）为检索产出渲染文本；第二遍走
+     * `parseDxfPairEntities` + `buildCadEntities`，把旧路径**读都懒得读**的组码带出来：
+     * - `DIMENSION` 组码 42（测量值）、13/23/14/24（被标注两点）→ 尺寸可绑定到对象
+     * - `LEADER` 顶点序列 → 引线两端（文字 ↔ 被注释图形）
+     * - `ATTRIB` 的组码 2（列名）与 1（值）**分开保留**（旧路径空格拼成「型号 M1021」）
+     * - 图层名作为**分类语义**逐条挂到实体上（旧路径只留一份 80 条的 metadata 清单）
+     * - 组码 3 在 DIMENSION 上是**标注样式名**，不再混进尺寸文字
+     */
+    const cadEntities = buildCadEntities(parseDxfPairEntities(raw));
+    const sheetAssignment = assignCadSheets(cadEntities);
+    const cadQuality = cadBindingQuality(cadEntities);
+    metadata.cadEntityCount = cadEntities.length;
+    metadata.cadBindingQuality = cadQuality;
     return {
       text: [
         `CAD DXF 图层: ${uniqueLayers.join(', ')}`,
@@ -931,6 +939,14 @@ export class ContentExtractor {
       ].join('\n'),
       metadata,
       warnings,
+      structured: {
+        cad: {
+          entities: cadEntities,
+          sheets: sheetAssignment.sheets,
+          unassigned: sheetAssignment.unassigned,
+          quality: cadQuality,
+        },
+      },
     };
   }
 

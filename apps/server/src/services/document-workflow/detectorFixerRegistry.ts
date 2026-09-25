@@ -305,6 +305,11 @@ export const DETECTOR_WRITING_TIME_DISPOSITIONS: Readonly<Record<string, Writing
   'section-numbering': { kind: 'terminal-only', reason: '章节编号连续性依赖全文标题序列（后续章未写时无法判定编号是否断档）' },
   'self-undermining-candidate': { kind: 'self-check', stage: '块成稿后' },
   'sentence-pattern-repeat': { kind: 'self-check', stage: '块成稿后' },
+  // 4.60 I2-c 句尾复读（**开集判据**，与 sentence-pattern-repeat 的闭集族表正交）：
+  // 写作期落点是**全局约束**——TENDER_BID_WRITING_RULES 的「闭环要有实质，不得以套语收句」条已明写
+  // 「同一收尾表达全文不得超过 4 次」（与本检测器容忍线**同值**，写作口径=检测口径），
+  // 随 writerSystemPrefix 注入每一次写作调用；修复由 templating-repair 轮按 patternTargets 消费。
+  'sentence-tail-repeat': { kind: 'constraint', channel: '全局约束' },
   'six-hundred-percent-coverage': { kind: 'constraint', channel: '块任务卡' },
   'skeleton-fingerprint': { kind: 'terminal-only', reason: '骨架指纹是跨段/跨章相似度度量' },
   'source-enumeration': { kind: 'self-check', stage: '块成稿后' },
@@ -537,6 +542,10 @@ export const STANDARD_FINAL_DETECTORS: readonly DetectorEntry[] = [
   // 说明：这 4 轮走的是 globalQualityGates 内的**内联检查**（fillerDensityReport / 工作包骨架 / collectSectionContentGaps /
   // crossChapterConsistencyIssues），本身不产 ValidationIssue，故改锚标的是「同族检测器」而非「同源检测器」。
   { id: 'sentence-pattern-repeat', scope: 'full-document', category: 'style' },
+  // 4.60 I2-c 句尾复读（sentenceTailRepeatIssues）：**开集**判据——同一 4 字句尾全篇 >4 次即命中
+  //（>12 次为 blocker）。skeleton-fingerprint 是闭集词表（枚举 5 条骨架，必然漏判），本通道按形状
+  // 计数，覆盖未知复读族；修复轮与 sentence-pattern-repeat 同通道消费（patternTargets 并入）。
+  { id: 'sentence-tail-repeat', scope: 'full-document', category: 'style' },
   { id: 'repeated-word', scope: 'full-document', category: 'style', deterministicSafe: true },
   { id: 'commercial-data-in-body', scope: 'full-document', category: 'scope', fixerDisposition: 'fixed', fixerDispositionReason: 'stripCommercialDataBodyLines（postReviewSurface.ts:209），与检测同口径' },
   { id: 'overview-recap', scope: 'full-document', category: 'style' },
@@ -762,6 +771,9 @@ export const DETERMINISTIC_FIXER_ANCHORS: readonly FixerEntry[] = [
   // 历史错锚 drawing-reference（图纸引用率）致锚定校验名不符实
   { id: 'atlas-reference', kind: 'deterministic', anchoredTo: 'atlas-reference-phrase', giveUpOnFailure: true },
   { id: 'tertiary-h4-dedupe', kind: 'deterministic', anchoredTo: 'tertiary-heading', giveUpOnFailure: true },
+  // 4.60 I2-c 标准引用残缺收口（编制依据长列举自吞噬：《X<编号>）→《X》（<编号>），只插字符不改语义）：
+  // 服务的检测器是结构完整性（全角括号/书名号不闭合 blocker），锚定同一条
+  { id: 'standard-citation-truncation', kind: 'deterministic', anchoredTo: 'structure-integrity', giveUpOnFailure: true },
   { id: 'internal-term-heading', kind: 'deterministic', anchoredTo: 'internal-terminology-anchor', giveUpOnFailure: true },
   // WS4 骨架指纹确定性兜底（round-2 链末尾 / 终检前最后一道：基准字形 + 变体形态按形态池负载均衡同构改写清零）
   { id: 'skeleton-fingerprint-variants', kind: 'deterministic', anchoredTo: 'skeleton-fingerprint', giveUpOnFailure: true },
@@ -896,7 +908,9 @@ export const LLM_PATCH_REPAIR_ROUNDS: readonly FixerEntry[] = [
   // 同判据（countMarkdownTables + extractMarkdownTableTextBlocks），接线 documentGenerator.ts:107 与 tableRepair.ts:21。
   { id: 'table-execution-repair', kind: 'llm-patch', anchoredTo: 'bid-composition-body-table', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
   // C4 扩展锚定：sentence-pattern-repeat（句模聚类复读修复目标与套话句同轮承载——检测定位=修复定位）
-  { id: 'templating-repair', kind: 'llm-patch', anchoredTo: 'construction-org-generic-language', alsoAnchoredTo: ['sentence-pattern-repeat'], patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
+  // C4 扩展锚定：sentence-tail-repeat（句尾复读修复目标与句模复读同轮承载——检测定位=修复定位；
+  // 4.60 I2-c 新增：开集判据的修复目标经 sentenceTailRepairTargets 并入同一 patternTargets）
+  { id: 'templating-repair', kind: 'llm-patch', anchoredTo: 'construction-org-generic-language', alsoAnchoredTo: ['sentence-pattern-repeat', 'sentence-tail-repeat'], patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
   { id: 'workpackage-skeleton-repair', kind: 'llm-patch', anchoredTo: 'construction-org-division-section', patchGuard: { detectors: [...PATCH_GUARD_DETECTOR_IDS] }, giveUpOnFailure: true },
   // G 线 P2-3 扩展锚定：writer-missing-section 报的「含标记小节」由本轮 enforcePlannedSectionCompleteness
   // 按 collectSectionContentGaps 的 reason='empty' 定位重写（globalQualityGates.ts:1160→:1181），同源已接线。

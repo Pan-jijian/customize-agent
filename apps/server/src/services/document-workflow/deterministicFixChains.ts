@@ -28,6 +28,7 @@ import {
   fixSelfUnderminingCandidates,
   fixSlotDepthValue,
   fixTruncatedSentenceArtifacts,
+  fixTruncatedStandardCitations,
   fixZeroLengthDayRanges,
   mergeTableLineResidues,
   stripDuplicateTables,
@@ -174,6 +175,9 @@ export const SURFACE_FIX_STEPS: readonly SurfaceFixStep[] = [
   // stripAtlasReferencePhrases 窄正则/标题表格豁免/短语级零丢失/幂等，补接零风险（其后的 toc-consistency 轮重同步目录）
   { key: 'atlas-reference', stage5: true, round2: true, fix: markdown => { const r = stripAtlasReferencePhrases(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   { key: 'tertiary-h4-dedupe', stage5: false, round2: true, fix: markdown => dedupeTertiaryH4Titles(markdown) },
+  // 4.60 I2-c 标准引用残缺确定性兜底（编制依据长列举自吞噬，语料 13/263 命中）：在骨架/工序/标题
+  // 三器之前收口——本器只插字符（《X<编号>）→《X》（<编号>）），不改变任何正文语义，越早收敛越省
+  { key: 'standard-citation-truncation', stage5: false, round2: true, fix: markdown => { const r = fixTruncatedStandardCitations(markdown); return { markdown: r.markdown, fixedCount: r.fixedCount }; } },
   // 4.31 内部术语替换扩展至表格行（丰乐镇 v6 #66/#88：「作业面落位」表头行 blocker 死区），
   // stage5 逐章链同样启用：替换为确定性词面安全替换，越早收敛越好
   { key: 'internal-term-heading', stage5: true, round2: true, fix: markdown => fixInternalTermHeadingPhrases(markdown) },

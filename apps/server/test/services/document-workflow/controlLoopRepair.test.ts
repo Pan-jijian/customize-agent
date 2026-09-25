@@ -98,7 +98,9 @@ describe('controlLoopChainScan 单源判定（检测=修复=复检契约）', ()
     expect(scans).toHaveLength(1);
     expect(scans[0].chapter.id).toBe('ch-q');
     expect(scans[0].deficit.label).toBe('质量闭环');
-    expect(scans[0].deficit.missing).toContain('互检');
+    // 4.60 I2-c：缺失项由**词面**（'互检'）改为**概念名**（'工序互检'）——判定从 includes 字面
+    // 改为概念组正则，近义表述同样成链（旧实现只认字面，是正文被写回固定套语的执行端之一）
+    expect(scans[0].deficit.missing).toContain('工序互检');
     // 进度链主责章已成链不返回；机械设备计划章（含「计划」）非主责章不返回
     expect(scans.some(item => item.chapter.id === 'ch-eq')).toBe(false);
     expect(scans.some(item => item.deficit.label === '进度闭环')).toBe(false);
@@ -127,8 +129,12 @@ describe('control-loop-repair 行为矩阵', () => {
     expect(repairMock).toHaveBeenCalledTimes(1);
     const call = repairMock.mock.calls[0][0] as unknown as { promptTexts: string; issues: string[] };
     expect(call.promptTexts).toContain('【评审关注闭环链定向补写】');
-    expect(call.promptTexts).toContain('整改、复查、归档');
-    expect(call.promptTexts).toContain('标准词面');
+    // 4.60 I2-c 断源：缺失环节按**概念名**列示（原为固定词面「整改、复查、归档」）
+    expect(call.promptTexts).toContain('问题整改、整改验证、资料归档');
+    // 且不得再要求「出现缺失要素的**标准词面**」——旧口径把"补环节"退化成"补字符串"，
+    // 是正文被反复写回同一串套语的执行端；现要求按实质补，并明确禁止套语收尾
+    expect(call.promptTexts).toContain('不是环节的名称');
+    expect(call.promptTexts).not.toContain('标准词面');
     expect(call.issues.join('\n')).toContain('质量闭环未成链');
     expect(session.finalChapterDrafts[0].content).toBe(QUALITY_FULL);
     expect(session.rebuildFinalMarkdown).toHaveBeenCalled();

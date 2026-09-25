@@ -73,13 +73,73 @@ async function buildGenericPhraseGate(embedDocuments?: (texts: string[]) => Prom
  *   而真实主责章（确保工期的技术组织措施/劳动力安排计划）反而不报——主责章定位根治该误报族。
  * - ownerRe 缺省（安全/环保/应急链）= 通用宽松判定（pattern 命中章、缺半数才报，warning 无修复消费）。
  */
-const CONTROL_LOOP_RULES: Array<{ pattern: RegExp; label: string; required: string[]; prompt: string; ownerRe?: RegExp }> = [
-  { pattern: /质量|验收|隐蔽|样板|通病/u, label: '质量闭环', required: ['自检', '互检', '交接检', '整改', '复查', '归档'], prompt: '质量类内容必须形成“自检—互检—交接检—整改—复查—资料归档”闭环。', ownerRe: /质量/u },
-  { pattern: /安全|风险|危大|临电|消防|吊装|高处/u, label: '安全闭环', required: ['辨识', '交底', '检查', '整改', '复查', '销项'], prompt: '安全类内容必须形成“风险辨识—专项交底—现场检查—隐患整改—复查销项”闭环。' },
-  { pattern: /进度|工期|节点|计划/u, label: '进度闭环', required: ['计划', '检查', '偏差', '纠偏', '复核'], prompt: '进度类内容必须形成“计划分解—日/周检查—偏差识别—资源纠偏—节点复核”闭环。', ownerRe: /进度|工期/u },
-  { pattern: /文明|扬尘|噪声|绿色|环保|垃圾/u, label: '环保闭环', required: ['监测', '预警', '处置', '台账'], prompt: '文明环保类内容必须形成“监测—预警—联动处置—台账记录”闭环。' },
-  { pattern: /工资|劳务|实名/u, label: '工资闭环', required: ['实名', '考勤', '核算', '公示', '代发', '归档'], prompt: '工资保障类内容必须形成“实名登记—考勤—核算—公示—银行代发—归档”闭环。', ownerRe: /劳务|工资|劳动力|实名|用工/u },
-  { pattern: /应急|预案|救援|事故/u, label: '应急闭环', required: ['发现', '警戒', '疏散', '处置', '上报', '复盘'], prompt: '应急类内容必须形成“发现险情—警戒疏散—初期处置—救援上报—复盘整改”闭环。' },
+/**
+ * 闭环链要素（4.60 I2-c 断源）：**概念组**（一组等价说法，命中任一即认定该环节存在），
+ * 而非原先的**固定词面数组**。
+ *
+ * ## 为什么必须换
+ *
+ * 旧实现三处同向施压，把「闭环」逼成了一套固定字符串：
+ * 1. 判定端 `owner.content.includes('销项')` —— 字面匹配，不认近义；
+ * 2. 发文端 `prompt: '安全类内容必须形成“风险辨识—专项交底—现场检查—隐患整改—复查销项”闭环'`
+ *    —— 把整条链**逐字**给模型；
+ * 3. 修复端 `必须出现缺失要素的标准词面…不得以近义改述代替` —— 缺哪个字就补哪个字。
+ *
+ * 三者叠加 ⇒ 模型只能在正文里反复写回同一串套语（实测：832 句中 42 句以「复查销项」收尾）。
+ * 概念组让「把过程写清楚」与「通过检测」变成同一件事：写「复测合格后由质检员签字确认」
+ * 同样满足「整改验证」环节，不必凑那几个字。
+ */
+interface ControlLoopConcept {
+  /** 环节名（issue 文案 / 修复指令共用，替代原先直接展示词面） */
+  label: string;
+  /** 等价说法（命中任一即认定环节存在） */
+  any: RegExp;
+}
+
+const CONTROL_LOOP_RULES: Array<{ pattern: RegExp; label: string; concepts: ControlLoopConcept[]; prompt: string; ownerRe?: RegExp }> = [
+  { pattern: /质量|验收|隐蔽|样板|通病/u, label: '质量闭环', concepts: [
+    { label: '班组自检', any: /自检|自查|自验/u },
+    { label: '工序互检', any: /互检/u },
+    { label: '交接检', any: /交接检|工序交接|交接验收/u },
+    { label: '问题整改', any: /整改|返工|返修|纠正|消缺/u },
+    { label: '整改验证', any: /复查|复验|复核|复测|验证|销项|销号/u },
+    { label: '资料归档', any: /归档|台账|资料留存|记录留存|签认/u },
+  ], prompt: '质量类内容须写清质量问题的发现、处置与验证过程：谁检查、发现问题怎么处置、处置结果由谁验证认可、留下什么记录；各环节落到具体工序与岗位，不要把环节名称罗列成串。', ownerRe: /质量/u },
+  { pattern: /安全|风险|危大|临电|消防|吊装|高处/u, label: '安全闭环', concepts: [
+    { label: '风险辨识', any: /辨识|识别|危险源/u },
+    { label: '安全交底', any: /交底/u },
+    { label: '现场检查', any: /检查|巡查|排查|验收/u },
+    { label: '隐患整改', any: /整改|处置|消除|纠正|返工/u },
+    { label: '整改验证', any: /复查|复核|复验|验证|销项|销号|闭合/u },
+  ], prompt: '安全类内容须写清风险识别、交底、现场检查、隐患处置与处置后验证的完整过程：每步落到具体岗位、频次与记录，不要把环节名称罗列成串。' },
+  { pattern: /进度|工期|节点|计划/u, label: '进度闭环', concepts: [
+    { label: '计划分解', any: /计划分解|总进度计划|月计划|周计划|节点计划/u },
+    { label: '过程检查', any: /检查|核查|统计|对比/u },
+    { label: '偏差识别', any: /偏差|滞后|延误|差距/u },
+    { label: '资源纠偏', any: /纠偏|调整|增派|调配|赶工/u },
+    { label: '节点复核', any: /复核|核对|确认|校准/u },
+  ], prompt: '进度类内容须写清计划分解、过程检查、偏差识别、资源纠偏与节点复核：每步落到具体岗位、周期与记录。', ownerRe: /进度|工期/u },
+  { pattern: /文明|扬尘|噪声|绿色|环保|垃圾/u, label: '环保闭环', concepts: [
+    { label: '监测', any: /监测|检测|观测|测定/u },
+    { label: '预警', any: /预警|报警|阈值|超标/u },
+    { label: '联动处置', any: /处置|整改|停工|覆盖|洒水|降尘/u },
+    { label: '台账记录', any: /台账|记录|归档|留存/u },
+  ], prompt: '文明环保类内容须写清监测、预警、联动处置与台账记录：监测点位、频次、阈值与处置动作落到具体岗位。' },
+  { pattern: /工资|劳务|实名/u, label: '工资闭环', concepts: [
+    { label: '实名登记', any: /实名|进场登记|用工登记/u },
+    { label: '考勤', any: /考勤|打卡|出勤/u },
+    { label: '工资核算', any: /核算|计量|结算|工资表/u },
+    { label: '公示', any: /公示|公开|张榜/u },
+    { label: '银行代发', any: /代发|银行发放|专用账户/u },
+    { label: '资料归档', any: /归档|留存|备查|台账/u },
+  ], prompt: '工资保障类内容须写清实名登记、考勤、工资核算、公示、银行代发与资料归档：每步落到具体岗位、周期与留存凭证。', ownerRe: /劳务|工资|劳动力|实名|用工/u },
+  { pattern: /应急|预案|救援|事故/u, label: '应急闭环', concepts: [
+    { label: '险情发现', any: /发现|报告|报警|监测/u },
+    { label: '警戒疏散', any: /警戒|疏散|隔离|撤离/u },
+    { label: '初期处置', any: /处置|抢救|救护|抢险/u },
+    { label: '救援上报', any: /上报|报告|请求救援|拨打/u },
+    { label: '复盘整改', any: /复盘|总结|整改|改进/u },
+  ], prompt: '应急类内容须写清险情发现、警戒疏散、初期处置、救援上报与事后复盘：每步落到具体岗位与时限。' },
 ];
 
 const PROCESS_CHAINS: Record<Exclude<ConstructionOrgProjectType, 'general'>, { label: string; chain: string[]; forbidden: string[]; prompt: string }> = {
@@ -116,7 +176,7 @@ const BONUS_MODULES = [
   { title: '变更签证管理', pattern: /改造|市政|工期紧|变更|签证/u, prompt: '改造、市政或工期紧项目应补充变更识别、技术核定、签证资料和影响跟踪。' },
   { title: '危险品专项管理', pattern: /装修|装饰|动火|油漆|稀释剂|氧气|乙炔/u, prompt: '涉及动火、油漆、稀释剂、氧气乙炔时应补充危险品分区存放与动火审批。' },
   { title: '材料损耗与周转控制', pattern: /钢筋|模板|周转|材料|大体量/u, prompt: '体量大或材料占比高时应补充钢筋翻样、模板周转、余料回收和限额领料。' },
-  { title: '分户验收', pattern: /住宅|住户|交付|分户/u, prompt: '住宅项目应补充分户实测、问题清单、整改销项和交付资料。' },
+  { title: '分户验收', pattern: /住宅|住户|交付|分户/u, prompt: '住宅项目应补充分户实测实量、问题清单、整改与复验记录、交付资料。' },
 ];
 
 function normalize(text: string) {
@@ -313,7 +373,7 @@ export function constructionOrgChapterRulePrompt(chapter: DocumentTemplateChapte
   const bonus = BONUS_MODULES.filter(bonusModule => bonusModule.pattern.test(title)).map(bonusModule => `- 高分补充：${bonusModule.prompt}`);
   return [
     '【施工组织设计专项写作规则】',
-    '- 禁止空话套话：不要只写“加强管理、严格控制、确保质量、精心组织、科学管理、周密部署、狠抓落实、统筹兼顾”等零信息口号（全文质检会按语义原型拦截并要求重写），必须写成“责任岗位+执行动作+量化标准+检查频次+整改时限+复查销项”。',
+    '- 禁止空话套话：不要只写“加强管理、严格控制、确保质量、精心组织、科学管理、周密部署、狠抓落实、统筹兼顾”等零信息口号（全文质检会按语义原型拦截并要求重写），每条措施要能回答“谁来做、做什么、什么标准、多久一次、不达标怎么处置”——按这五问写成句子，不要套用固定字词表或固定收尾。',
     '- 落地措施范例：“由质检员每周不少于1次对级配碎石层压实度抽检，不足95%的当日返工复验”——每句措施要能回答“谁、做什么、什么标准、多久一次、不达标怎么办”；项目特有数据必须来自资料或图谱。',
     ...loops,
     ...bonus,
@@ -358,7 +418,7 @@ export async function constructionOrgGenericLanguageIssues(
       issues.push({
         level: 'warning',
         message: `${chapter.title} 存在施工组织设计空泛套话：${[...hits].slice(0, 8).join('、')}`,
-        suggestion: '请按“责任岗位+执行动作+量化标准+检查频次+整改时限+复查销项”重写相关措施。',
+        suggestion: '请按“谁来做+做什么+什么标准+多久一次+不达标怎么处置”重写相关措施（写清执行主体、时限与记录，不要套用固定收尾）。',
       });
     }
   }
@@ -369,9 +429,9 @@ export async function constructionOrgGenericLanguageIssues(
 export interface ControlLoopChainDeficit {
   /** 链名（与检测端 issue label 同源） */
   label: string;
-  /** 链条全要素（修复指令展示「A—B—C」成链形态） */
-  required: string[];
-  /** 当前缺失要素 */
+  /** 链条全环节（**概念名**，4.60 I2-c 起不再持有固定词面——修复指令按概念描述，见 controlLoopRepair） */
+  concepts: string[];
+  /** 当前缺失环节（概念名） */
   missing: string[];
   /** 链条语义描述（写作用 prompt 同源） */
   prompt: string;
@@ -387,9 +447,9 @@ export function controlLoopChainScan(chapters: DocumentDraftChapter[]): Array<{ 
     if (!rule.ownerRe) continue;
     const owner = chapters.find(chapter => rule.ownerRe!.test(chapter.title));
     if (!owner) continue;
-    const missing = rule.required.filter(token => !owner.content.includes(token));
+    const missing = rule.concepts.filter(concept => !concept.any.test(owner.content)).map(concept => concept.label);
     if (missing.length === 0) continue;
-    results.push({ chapter: owner, deficit: { label: rule.label, required: [...rule.required], missing, prompt: rule.prompt } });
+    results.push({ chapter: owner, deficit: { label: rule.label, concepts: rule.concepts.map(concept => concept.label), missing, prompt: rule.prompt } });
   }
   return results;
 }
@@ -415,8 +475,8 @@ export function constructionOrgControlLoopIssues(chapters: DocumentDraftChapter[
     for (const chapter of chapters) {
       const scope = `${chapter.title} ${(chapter.sections || []).join(' ')}`;
       if (!rule.pattern.test(scope)) continue;
-      const missing = rule.required.filter(token => !chapter.content.includes(token));
-      if (missing.length >= Math.ceil(rule.required.length / 2)) {
+      const missing = rule.concepts.filter(concept => !concept.any.test(chapter.content)).map(concept => concept.label);
+      if (missing.length >= Math.ceil(rule.concepts.length / 2)) {
         issues.push({ level: 'warning', message: `${chapter.title} 缺少${rule.label}关键链条：${missing.join('、')}`, suggestion: rule.prompt });
       }
     }
